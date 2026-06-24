@@ -3198,6 +3198,21 @@ def _pane_busy(name):
     _, o, _ = sh([TMUX, "capture-pane", "-t", name, "-p"])
     return "esc to interrupt" in o.lower()
 
+def session_bar():
+    """Lightweight feed for the global desktop sessions taskbar: every project session + its live busy state
+    (busy = Claude is mid-turn). The frontend watches for busy->idle transitions to flash a tile gold ('done').
+    Busy is computed in parallel so a dozen sessions don't serialize a dozen capture-pane calls."""
+    sess = tmux_sessions()
+    busy = {}
+    def chk(n):
+        try: busy[n] = _pane_busy(n)
+        except Exception: busy[n] = False
+    ts = [threading.Thread(target=chk, args=(s["name"],)) for s in sess]
+    for t in ts: t.start()
+    for t in ts: t.join()
+    return {"sessions": [{"name": s["name"], "label": s["label"], "busy": busy.get(s["name"], False),
+                          "chief": s.get("chief", False), "attached": s.get("attached", False)} for s in sess]}
+
 def _wait_idle(name, timeout, settle=3):
     start = time.time(); calm = 0
     while time.time() - start < timeout:
@@ -4713,6 +4728,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/google/gmail":    return self._s(200, json.dumps(gmail_list(q.get("view", ["inbox"])[0], q.get("q", [""])[0], q.get("max", ["25"])[0])))
         if u.path == "/api/google/gmail-msg":return self._s(200, json.dumps(gmail_get(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-unread": return self._s(200, json.dumps(gmail_unread()))
+        if u.path == "/api/session-bar":   return self._s(200, json.dumps(session_bar()))
         if u.path == "/api/google/gmail-thread":  return self._s(200, json.dumps(gmail_thread(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-labels":  return self._s(200, json.dumps(gmail_labels()))
         if u.path == "/api/google/calendar":
@@ -5370,6 +5386,31 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 @keyframes cfshine{0%{background-position:165% 0}100%{background-position:-70% 0}}
 @keyframes cfhint{to{opacity:.65}}
 @media(prefers-reduced-motion:reduce){#splash .cfwrap,#splash .cfshine,#splash .cfhint{animation:none}#splash .cfhint{opacity:.65}}
+/* ===== Global sessions taskbar (desktop) -- Windows-style dock of all project sessions, gold-flash on done ===== */
+#app{height:calc(100vh - 38px)}            /* reserve room for the fixed taskbar */
+#sessbar{position:fixed;left:0;right:0;bottom:0;height:38px;display:flex;align-items:center;gap:6px;
+  padding:0 10px;background:#0c0c12;border-top:1px solid var(--line);z-index:60;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+#sessbar::-webkit-scrollbar{height:5px}#sessbar::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+#sessbar .sb-title{flex:0 0 auto;font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);margin-right:4px}
+#sessbar .sb-empty{color:var(--dim);font-size:11px}
+.sb-tile{display:flex;align-items:center;gap:7px;flex:0 0 auto;max-width:210px;height:26px;padding:0 10px;border-radius:7px;
+  background:var(--card);border:1px solid var(--line);color:var(--mut);cursor:pointer;font-size:12px;font-weight:600;white-space:nowrap}
+.sb-tile:hover{color:var(--ink);border-color:var(--accent);background:var(--card2)}
+.sb-tile .sb-lbl{overflow:hidden;text-overflow:ellipsis}
+.sb-tile .sb-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:#3a3a4a;transition:background .2s}
+.sb-tile.busy .sb-dot{background:var(--accent);box-shadow:0 0 7px var(--accent);animation:sbblink 1s ease-in-out infinite}
+.sb-tile.chief .sb-lbl{color:var(--accent-light)}
+.sb-tile.done{border-color:var(--accent);color:var(--ink);animation:sbpulse 1.15s ease-in-out infinite}
+.sb-tile.done .sb-dot{background:var(--accent)}
+@keyframes sbblink{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes sbpulse{0%,100%{box-shadow:0 0 0 0 rgba(var(--accent-rgb),0);background:var(--card)}50%{box-shadow:0 0 16px 2px rgba(var(--accent-rgb),.6);background:rgba(var(--accent-rgb),.18)}}
+#sessprev{position:fixed;z-index:61;display:none;background:var(--card);border:1px solid var(--accent);border-radius:11px;
+  box-shadow:0 10px 36px #000b;padding:9px 10px;width:min(620px,82vw)}
+#sessprev .sb-pvh{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+#sessprev .sb-pvh b{font-size:13px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#sessprev .sb-pvbusy{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:6px}
+#sessprev pre{margin:0;max-height:300px;overflow:auto;font:11px/1.45 ui-monospace,Menlo,Monaco,monospace;color:#cfd3dc;white-space:pre-wrap;word-break:break-word;background:#07070b;border-radius:8px;padding:9px}
+@media(max-width:900px){#sessbar,#sessprev{display:none!important}#app{height:auto}}
 /* ========================================================================
    SHARED SHELL + DESIGN SYSTEM  (cmdk-* / shell-*)  -- append inside <style>
    Design tokens go on :root (alias --acc, stepped surfaces, hairlines, z-stack).
@@ -5902,6 +5943,8 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 </div>
 <div class="modal-bg" id="mbg"><div class="modal" id="mbox"></div></div>
 <div class="toast" id="toast"></div>
+<div id="sessbar"></div>
+<div id="sessprev"></div>
 <script>
 let D={machines:[],components:[],routines:[],ralph:[],jobs:[]},ST={},LENS="sessions";
 let AGENT_SLUGS=new Set();
@@ -9148,6 +9191,61 @@ function navSeedGoogle(){   // one-time: tuck the live Google lenses into a "Goo
   s._gseed=true;s.mode="manual";navSave(s);renderNav();
 }
 setupNavDnD();renderNav();navSeedGoogle();
+// ===== Global sessions taskbar (desktop): live dock of ALL project sessions + gold "done" pulse + hover preview =====
+var SB={prev:{},done:{},hover:null,popHover:false,pvTimer:null,baseTitle:document.title};
+function sbDesktop(){return window.matchMedia('(min-width:901px)').matches;}
+async function sbPoll(){
+  var bar=document.getElementById('sessbar'); if(!bar)return;
+  if(!sbDesktop()){bar.innerHTML='';return;}
+  var r; try{ r=await(await fetch('/api/session-bar')).json(); }catch(e){ return; }
+  var list=r.sessions||[], names={};
+  list.forEach(function(s){ names[s.name]=1;
+    if(SB.prev[s.name]===true && s.busy===false){ SB.done[s.name]=true; }   // busy -> idle = just finished
+    SB.prev[s.name]=s.busy;
+  });
+  Object.keys(SB.done).forEach(function(n){ if(!names[n]) delete SB.done[n]; });
+  Object.keys(SB.prev).forEach(function(n){ if(!names[n]) delete SB.prev[n]; });
+  sbRender(list);
+}
+function sbRender(list){
+  var bar=document.getElementById('sessbar'); if(!bar)return;
+  var doneCount=list.filter(function(s){return SB.done[s.name];}).length;
+  var h='<span class="sb-title">Sessions</span>';
+  h+= list.length ? list.map(function(s){
+    var cls='sb-tile'+(s.busy?' busy':'')+(SB.done[s.name]?' done':'')+(s.chief?' chief':'');
+    return '<div class="'+cls+'" data-n="'+e2(s.name)+'" onmouseenter="sbHover(\''+esc(s.name)+'\',this)" onmouseleave="sbLeave()" onclick="sbClick(\''+esc(s.name)+'\')" title="'+e2(s.label||s.name)+'">'
+      +'<span class="sb-dot"></span><span class="sb-lbl">'+e2(s.label||s.name)+'</span></div>';
+  }).join('') : '<span class="sb-empty">no sessions</span>';
+  bar.innerHTML=h;
+  document.title=(doneCount? '\u{1F7E1} '+doneCount+' done · ':'')+SB.baseTitle;   // cue even when in another browser tab
+}
+function sbAck(name){ if(SB.done[name]){ delete SB.done[name]; var sel='.sb-tile[data-n="'+((window.CSS&&CSS.escape)?CSS.escape(name):name)+'"]'; var t=document.querySelector(sel); if(t)t.classList.remove('done'); } }
+function sbHover(name,el){ SB.hover=name; sbAck(name); sbShowPreview(name,el); }
+function sbLeave(){ SB.hover=null; setTimeout(function(){ if(!SB.hover && !SB.popHover){ var p=document.getElementById('sessprev'); if(p)p.style.display='none'; clearInterval(SB.pvTimer); } },200); }
+function sbShowPreview(name,anchor){
+  var p=document.getElementById('sessprev'); if(!p)return;
+  var r=anchor.getBoundingClientRect(), w=Math.min(620,window.innerWidth*0.82);
+  p.style.display='block';
+  p.style.left=Math.max(8,Math.min(r.left,window.innerWidth-w-8))+'px';
+  p.style.bottom=(window.innerHeight-r.top+8)+'px';
+  p.onmouseenter=function(){SB.popHover=true;}; p.onmouseleave=function(){SB.popHover=false;sbLeave();};
+  p.innerHTML='<div class="sb-pvh"><b>'+e2(name)+'</b><span class="sb-pvbusy" id="sbPvBusy"></span>'
+    +'<span style="margin-left:auto"><button class="mini go" onclick="sbOpen(\''+esc(name)+'\')">Open ↗</button></span></div>'
+    +'<pre id="sbPvBody">loading…</pre>';
+  sbRefreshPreview(name);
+  clearInterval(SB.pvTimer);
+  SB.pvTimer=setInterval(function(){ if(SB.hover===name||SB.popHover) sbRefreshPreview(name); else clearInterval(SB.pvTimer); },1500);
+}
+async function sbRefreshPreview(name){
+  try{ var r=await(await fetch('/api/term-snapshot?name='+encodeURIComponent(name)+'&lines=44')).json();
+    var b=document.getElementById('sbPvBody'); if(b) b.textContent=(r.text||'(no output)').slice(-4000);
+    var bz=document.getElementById('sbPvBusy'); if(bz){ var busy=SB.prev[name]; bz.textContent=busy?'working':'idle';
+      bz.style.background=busy?'rgba(var(--accent-rgb),.2)':'#0008'; bz.style.color=busy?'var(--accent)':'var(--dim)'; }
+  }catch(e){}
+}
+function sbClick(name){ sbAck(name); sbOpen(name); }
+function sbOpen(name){ sbAck(name); var p=document.getElementById('sessprev'); if(p)p.style.display='none'; if(typeof openInSessions==='function') openInSessions(name); }
+sbPoll(); setInterval(sbPoll,4000);
 Shell.init();              // shared shell: command palette + keyboard router + quick look
 load();
 if(!restoreFromHash())syncHash(false);   // restore exact place on refresh; else stamp the landing lens as the back-stack baseline (so the first Back lands here, not the overseer)

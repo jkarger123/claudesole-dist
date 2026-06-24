@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.16.0 -- 2026-06-24
+- NEW (global sessions taskbar -- desktop): a Windows-style dock pinned to the bottom of EVERY lens showing
+  ALL project sessions. Each tile shows a live state dot (gold blinking = Claude is working). Hover a tile to
+  pop a live terminal preview (auto-refreshing) with an "Open" button that jumps to the full Sessions terminal.
+  The killer bit: when a session FINISHES (busy->idle, detected via the "esc to interrupt" indicator), its tile
+  PULSES GOLD until you acknowledge it (hover/click) -- so if you're off in Gmail or another tab you get pulled
+  back the moment an agent is done; the browser TAB TITLE also shows a "(N done)" cue when the CC is backgrounded.
+  Present across the whole console + all tabs/extensions. New endpoint /api/session-bar (busy computed in
+  parallel across sessions). Desktop only (hidden on mobile). Built on the existing _pane_busy detector,
+  term-snapshot previews, and openInSessions().
+
 ## 0.15.2 -- 2026-06-24
 - FIX (Gmail rail): the Labels section is now a COLLAPSIBLE group (collapsed by default, chevron + count)
   so a long label list no longer floods the rail. Account email is separated from the Inbox lane (border +
