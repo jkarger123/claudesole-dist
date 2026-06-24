@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.14 -- 2026-06-24
+- ADD (sessions name themselves): every launched session now gets a system-prompt instruction
+  (`--append-system-prompt`) to emit, once it understands its job, a line `[[CC_TITLE: <2-6 word title>]]`.
+  The session-watch loop detects that line and renames the session's dashboard label (persisted in
+  state/_session_titles.json, survives restart). So instead of "7th ave 2 / 7th ave 3", Sarah sees
+  "7th Ave bounce-list fix", "7th Ave Q3 pitch", etc. Detection is anchored to its own line and rejects the
+  placeholder + inline mentions; system sessions (Chief, services) keep their canonical names. Applied to
+  the generic launch, resume/fork, Chief, and team/agent launches. Verified end-to-end.
+
 ## 0.21.13 -- 2026-06-24
 - FIX (download "site wasn't available"): the blocking iCloud materialize (up to ~30s) was timing out the
   proxy/browser. Now the wait is bounded (~6s) and only happens when the bytes aren't already local, so the

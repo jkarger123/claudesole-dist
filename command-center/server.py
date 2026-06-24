@@ -1363,9 +1363,35 @@ def _protected(name):
 _FRIENDLY = {"chief": "Chief of Staff", "hptuner-brain": "Orchestration Brain",
              "t2tbridge": "Live bridge", "t2tcrons": "Bridge crons"}
 _SESSLABEL = {}
+
+# Agent-declared session titles: an agent emits `[[CC_TITLE: short task name]]` once it understands its job;
+# the session-watch loop records it here so the dashboard shows "7th Ave -- bounce-list fix" instead of
+# "7th ave 2 / 7th ave 3". Persisted so it survives a CC restart. The instruction is appended to every
+# launched session's system prompt (CC_TITLE_FLAG) so EVERY session can self-name.
+import shlex as _shlex
+_AGENT_TITLES_FILE = os.path.join(STATE_DIR, "_session_titles.json")
+def _load_agent_titles():
+    try: return json.load(open(_AGENT_TITLES_FILE))
+    except Exception: return {}
+_AGENT_TITLES = _load_agent_titles()
+def _set_agent_title(name, title):
+    title = re.sub(r"\s+", " ", (title or "").strip()).strip("\"'[]").strip()[:48]
+    if not title or _AGENT_TITLES.get(name) == title: return False
+    _AGENT_TITLES[name] = title
+    try: json.dump(_AGENT_TITLES, open(_AGENT_TITLES_FILE, "w"))
+    except Exception: pass
+    return True
+TITLE_INSTRUCTION = (
+    "SESSION NAMING: As soon as you understand what this session is working on (usually after the first "
+    "message or two), output ON ITS OWN LINE exactly: [[CC_TITLE: <a 2-6 word task title>]] -- e.g. "
+    "[[CC_TITLE: 7th Ave bounce-list fix]]. This renames the session in the operator's dashboard so they can "
+    "tell multiple sessions apart. Emit it once; re-emit a new one only if the focus clearly changes.")
+CC_TITLE_FLAG = "--append-system-prompt " + _shlex.quote(TITLE_INSTRUCTION)
+
 def _session_label(name):
-    """A descriptive title instead of a code like hp-r-767755d1 -- derived from the conversation it was
-    resumed/forked from (its opening message), or the launch name."""
+    """A descriptive title instead of a code like hp-r-767755d1 -- agent-declared title wins, else derived
+    from the conversation it was resumed/forked from (its opening message), or the launch name."""
+    if name in _AGENT_TITLES: return _AGENT_TITLES[name]   # the agent named this session itself
     if name in _FRIENDLY: return _FRIENDLY[name]
     if name in _SESSLABEL: return _SESSLABEL[name]
     if name.startswith("ralph-"): return "Ralph: " + name[6:]
@@ -2070,7 +2096,7 @@ def launch(target, name, cid=None, rel=None):
     # so it must work even on a deployment with no machines registered (the record is a per-deployment
     # preserve-path that fresh installs lack). Only remote targets need a registered machine (for the ssh alias).
     if target != "studio" and not m: return {"ok": False, "error": "unknown target: " + str(target)}
-    cl = 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions'
+    cl = 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG
     if target == "studio":
         try: wd = projpath(rel) if rel else (comp_dir(cid) if cid else PROJECT)
         except Exception: wd = PROJECT
@@ -2134,8 +2160,8 @@ def chief_open():
               "({text} alone = all peers); GET /api/peers lists them. All visible in your Comms lens. %s"
               % (brief, roster_text()))
     cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; export MESH_CC="http://localhost:%d"; '
-          "claude --dangerously-skip-permissions --settings %s %s"
-          % (PORT, shlex.quote(settings_file), shlex.quote(prompt)))
+          "claude --dangerously-skip-permissions %s --settings %s %s"
+          % (PORT, CC_TITLE_FLAG, shlex.quote(settings_file), shlex.quote(prompt)))
     rc = sh([TMUX, "new-session", "-d", "-s", CHIEF, "-c", PROJECT, cl])[0]
     if rc != 0 and sh([TMUX, "has-session", "-t", CHIEF])[0] == 0:
         return {"ok": True, "session": CHIEF, "term": "/term?name=" + CHIEF, "note": "already-running (singleton)"}
@@ -2241,7 +2267,7 @@ def agent_open(slug):
     sess = "agt-" + slug
     if sh([TMUX, "has-session", "-t", sess])[0] == 0:
         return {"ok": True, "term": "/term?name=" + sess, "note": "resumed"}
-    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions '
+    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
           "'You are the %s agent. Read CLAUDE.md in this folder -- it is your charter (your job, tools, and "
           "hard boundaries). Then give me a one-line status and stand by. "
           "For sudo/interactive commands you can't run (no TTY): pre-type them into the project Admin "
@@ -2489,7 +2515,7 @@ def extension_setup(eid):
     sess = "ext-" + eid
     if sh([TMUX, "has-session", "-t", sess])[0] == 0:
         return {"ok": True, "term": "/term?name=" + sess, "note": "resumed"}
-    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions '
+    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
           "'You are the SETUP GUIDE for the %s ClaudeFather extension. Read SETUP.md in this folder -- it is "
           "your script. Walk me through setup ONE step at a time, wait at each step, help me create any "
           "accounts/API keys, store secrets ONLY in the gitignored deployment env (never echo or commit "
@@ -2702,7 +2728,7 @@ def skill_open(scope, slug):
     if not base or not os.path.isdir(d): return {"ok": False, "error": "no such skill"}
     sess = "skill-" + re.sub(r"[^a-z0-9]+", "-", (PROJECT_NAME + "-" + slug).lower()).strip("-")
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions '
+        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
               "'You are authoring the Agent Skill in this folder (SKILL.md). Read it, then help me write/improve "
               "it per the best practices in the ClaudeFather docs/MEMORY_SKILLS_AGENTS.md (esp: the description "
               "is the trigger; keep it lean; lock side-effect skills to manual). One-line status, then stand by.'")
@@ -2937,7 +2963,7 @@ def team_run(slug):
     try: os.makedirs(TEAM_RUNS_DIR, exist_ok=True)
     except Exception: pass
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions '
+        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
               "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
     return {"ok": True, "slug": real, "name": t.get("name") or real, "session": sess,
@@ -3012,7 +3038,7 @@ def team_session(members, assignment=""):
     )).strip().replace("'", "")   # single-quote-free: the brief is wrapped in '...' in the shell launcher
     sess = ("team-" + re.sub(r"[^a-z0-9]+", "-", (PROJECT_NAME + "-" + "-".join(p["slug"] for p in picked)).lower()).strip("-"))[:60]
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + "'" + brief + "'")
+        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' ' + "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
         def _trust():
             for _ in range(10):
@@ -3323,7 +3349,7 @@ def audit_run(block, slug):
     try: os.makedirs(AUDIT_RUNS_DIR, exist_ok=True)
     except Exception: pass
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions '
+        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
               "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
     return {"ok": True, "block": block, "name": real, "session": sess,
@@ -3613,7 +3639,7 @@ def resume_session(machine, sid, cwd, fork=False, label=""):
     if machine == "studio":
         wd = cwd if (cwd and os.path.isdir(cwd)) else PROJECT
         sh([TMUX, "new-session", "-d", "-s", name, "-c", wd,
-            'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --resume %s%s --dangerously-skip-permissions' % (sid, fk)])
+            'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --resume %s%s --dangerously-skip-permissions %s' % (sid, fk, CC_TITLE_FLAG)])
     else:
         alias = mm.get("alias") or mm["ssh"]
         wd = cwd if (cwd and re.match(r"^[A-Za-z]:[\\/][\w\\/ .:-]*$", cwd)) else "C:\\hptuners"
@@ -11190,7 +11216,7 @@ function sbRender(list){
   var doneCount=list.filter(function(s){return SB.done[s.name];}).length;
   // Rebuild the DOM ONLY when the SET of tiles changes -- not every poll -- so the tile under your cursor is
   // not destroyed mid-hover (that's what made them "move around"/hard to use). State is applied in place below.
-  var sig=list.map(function(s){return s.name;}).join('|');
+  var sig=list.map(function(s){return s.name+':'+(s.label||'');}).join('|');   // label in sig so a self-named session refreshes its tile
   if(sig!==SB._sig){
     var h='<span class="sb-title">Sessions</span>';
     h+= list.length ? list.map(function(s){
@@ -11399,12 +11425,19 @@ def _autoapprove_scan():
     (preferring 'Yes, and don't ask again' to cut repeats). Every accept is logged for audit. These are the
     deployment's own trusted agents on its own box -- the same intent as the skip-permissions launch flag.
     Kill-switch: set cc.config auto_accept_prompts=false."""
-    if CC.get("auto_accept_prompts") is False: return
     rc, out, _ = sh([TMUX, "list-sessions", "-F", "#{session_name}"])
     if rc != 0 or not out: return
     for name in out.split():
         try:
             _, pane, _ = sh([TMUX, "capture-pane", "-t", name, "-p"])
+            # agent-declared session title: rename the session label (e.g. "7th Ave bounce-list fix"). Anchored
+            # to its OWN line (not an inline mention in code/chat), placeholder rejected, system sessions skipped.
+            try:
+                if name not in _FRIENDLY and name != globals().get("CHIEF"):
+                    tl = re.findall(r"(?m)^\s*\[\[\s*CC_TITLE:\s*([^\]\n<>]+?)\s*\]\]\s*$", pane)
+                    if tl: _set_agent_title(name, tl[-1])
+            except Exception: pass
+            if CC.get("auto_accept_prompts") is False: continue
             low = pane.lower()
             if "esc to interrupt" in low: continue            # busy/working -> not actually waiting on input
             if "do you want to proceed?" not in low: continue # the tool-permission menu (not chat prose)
