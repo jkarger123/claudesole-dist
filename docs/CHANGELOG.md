@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.22 -- 2026-06-24
+- RELIABILITY (access recovery / break-glass): new `cc-recover.sh` — run in any terminal to print every node's
+  login PIN (auth_token), port, tailnet URL, and recent credential-change log, even when the web UI is down.
+  You can always get back in. Plus a boot **credential watch**: any change to auth_token/mesh_token since last
+  boot is logged loudly to the console + ~/.cc-credential-changes.log (hashes only) so a silent rotation can
+  never quietly lock you out. Recovery checklist (Tailscale-first, since off-Tailscale looks like a lockout)
+  in docs/ACCESS_RECOVERY.md.
+
 ## 0.21.21 -- 2026-06-24
 - NEW (Claude Accounts lens — remote login wallet): authorize each Claude subscription account ONCE via
   `claude setup-token` driven from the dashboard (click the link → authorize in your browser → paste the code

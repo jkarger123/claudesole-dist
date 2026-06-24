@@ -11826,6 +11826,29 @@ if __name__ == "__main__":
         try:
             if os.path.isfile(_p): os.chmod(_p, 0o600)
         except Exception: pass
+    # Credential watch: surface ANY change to login-critical secrets (auth_token / mesh_token) since last boot,
+    # loudly + to ~/.cc-credential-changes.log -- so a silent rotation (by me, another agent, anything) can
+    # never quietly lock the operator out. Stores only HASHES (the fingerprint file is not itself a secret).
+    try:
+        import hashlib as _hl
+        _fp = os.path.join(STATE_DIR, "_cred_fingerprint.json")
+        _cur = {"auth": _hl.sha256((AUTH_TOKEN or "").encode()).hexdigest()[:16],
+                "mesh": _hl.sha256((MESH_TOKEN or "").encode()).hexdigest()[:16]}
+        _prev = {}
+        try: _prev = json.load(open(_fp))
+        except Exception: pass
+        _chg = [k for k in _cur if _prev.get(k) and _prev[k] != _cur[k]]
+        if _chg:
+            _m = "%s ⚠ CREDENTIAL CHANGED on %s: %s changed since last boot -- run cc-recover.sh to see the current value" % (
+                time.strftime("%Y-%m-%d %H:%M:%S"), INSTANCE_ID, ", ".join(_chg))
+            print(_m)
+            try:
+                with open(os.path.expanduser("~/.cc-credential-changes.log"), "a") as _f: _f.write(_m + "\n")
+            except Exception: pass
+        try:
+            _fd = os.open(_fp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(_fd, json.dumps(_cur).encode()); os.close(_fd)
+        except Exception: pass
+    except Exception: pass
     # Heavy boot housekeeping (whole-tree walk + iCloud file ops) MUST NOT gate the HTTP server. On an
     # iCloud-backed node (e.g. AFP) regen_treemap()/icloud_age_off() can block on slow iCloud I/O for
     # minutes -- which printed the banner but never reached serve_forever(), so the server "came up" yet
