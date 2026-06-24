@@ -638,6 +638,34 @@ def _gmail_attachments(payload):
     walk(payload or {})
     return out
 
+def gmail_attachment_bytes(mid, att_id):
+    # Fetch the raw bytes of ONE attachment (or inline image) for a message.
+    # Gmail returns base64url-encoded data in {size,data}; we decode to real bytes.
+    # Returns (bytes, None) on success or (None, errstr) on failure.
+    import base64 as _b64
+    if not mid or not att_id:
+        return None, "missing id"
+    r = _g_api("GET", GMAIL_BASE + "/messages/" + mid + "/attachments/" + att_id)
+    if not isinstance(r, dict) or "error" in r:
+        return None, (r.get("error") if isinstance(r, dict) else "fetch failed")
+    data = r.get("data")
+    if not data:
+        return None, "no data"
+    try:
+        s = data.replace("-", "+").replace("_", "/")
+        s += "=" * (-len(s) % 4)
+        return _b64.b64decode(s), None
+    except Exception as e:
+        return None, str(e)[:120]
+
+
+def _gmail_att_ctype(filename, declared):
+    declared = (declared or "")
+    if declared and "/" in declared and declared != "application/octet-stream":
+        return declared
+    import mimetypes
+    return mimetypes.guess_type(filename or "")[0] or "application/octet-stream"
+
 def gmail_snooze_label():
     # ensure & return the snooze lane label id (CC/Snoozed). client snoozes by
     # adding this label + removing INBOX; a routine can later resurface them.
@@ -669,25 +697,84 @@ def gmail_thread(tid):
     return {"id": tid, "subject": subj, "messages": msgs, "count": len(msgs),
             "email": _GOOGLE_TOK.get("email")}
 
-def gmail_send(to, subject, body, cc="", bcc="", thread_id=None, html="", in_reply_to="", references=""):
-    # REPLACES the original gmail_send: HTML support + proper RFC reply headers
-    # (In-Reply-To / References) so replies thread natively in every mail client.
+# plain-text fallback derived from the HTML body
+def _html_to_text(h):
+    import html as _html
+    h = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", "", h or "")
+    h = re.sub(r"(?is)<br\s*/?>", "\n", h)
+    h = re.sub(r"(?is)</(p|div|li|tr|h[1-6]|blockquote)\s*>", "\n", h)
+    h = re.sub(r"(?is)<li[^>]*>", "• ", h)
+    h = re.sub(r"(?s)<[^>]+>", "", h)
+    h = _html.unescape(h)
+    h = re.sub(r"[ \t]+\n", "\n", h)
+    h = re.sub(r"\n{3,}", "\n\n", h)
+    return h.strip()
+
+# REBUILT gmail_send: stdlib email.* assembles multipart/mixed > related > alternative.
+def gmail_send(to, subject, body, cc="", bcc="", thread_id=None, html="",
+               in_reply_to="", references="", attachments=None, inline=None):
     import base64 as _b64
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.mime.image import MIMEImage
+    from email.mime.base import MIMEBase
+    from email import encoders as _enc
+    from email.utils import make_msgid
+    attachments = attachments or []; inline = inline or []
+    def _bytes(d):
+        try: return _b64.b64decode((d or "").split(",", 1)[-1])
+        except Exception: return b""
     is_html = bool(html)
-    content = html if is_html else body
-    headers = ["To: " + to]
-    if cc:  headers.append("Cc: " + cc)
-    if bcc: headers.append("Bcc: " + bcc)
-    headers.append("Subject: " + subject)
+    text_part = body if body else (_html_to_text(html) if is_html else "")
+    if is_html:
+        html_body = html; cid_real = {}
+        for img in inline:
+            key = img.get("id") or img.get("cid") or ""
+            real = make_msgid()[1:-1]; cid_real[key] = real
+            if key: html_body = html_body.replace("cid:" + key, "cid:" + real)
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(text_part or " ", "plain", "utf-8"))
+        alt.attach(MIMEText(html_body, "html", "utf-8"))
+        if inline:
+            related = MIMEMultipart("related"); related.attach(alt)
+            for img in inline:
+                raw = _bytes(img.get("data"))
+                if not raw: continue
+                sub = (img.get("mime") or "image/png").split("/")[-1]
+                part = MIMEImage(raw, _subtype=sub)
+                key = img.get("id") or img.get("cid") or ""
+                part.add_header("Content-ID", "<%s>" % cid_real.get(key, key))
+                part.add_header("Content-Disposition", "inline",
+                                filename=(img.get("filename") or (key or "image") + "." + sub))
+                related.attach(part)
+            content_root = related
+        else:
+            content_root = alt
+    else:
+        content_root = MIMEText(text_part, "plain", "utf-8")
+    if attachments:
+        root = MIMEMultipart("mixed"); root.attach(content_root)
+        for a in attachments:
+            raw = _bytes(a.get("data"))
+            mime = (a.get("mime") or "application/octet-stream")
+            maintype, _, subtype = mime.partition("/")
+            if not subtype: maintype, subtype = "application", "octet-stream"
+            part = MIMEBase(maintype, subtype); part.set_payload(raw)
+            _enc.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment", filename=a.get("filename") or "attachment")
+            root.attach(part)
+    else:
+        root = content_root
+    root["To"] = to
+    if cc:  root["Cc"] = cc
+    if bcc: root["Bcc"] = bcc
+    root["Subject"] = subject
     if in_reply_to:
-        headers.append("In-Reply-To: " + in_reply_to)
-        headers.append("References: " + (references or in_reply_to))
+        root["In-Reply-To"] = in_reply_to
+        root["References"] = references or in_reply_to
     elif references:
-        headers.append("References: " + references)
-    headers.append("MIME-Version: 1.0")
-    headers.append("Content-Type: text/%s; charset=utf-8" % ("html" if is_html else "plain"))
-    raw_msg = "\r\n".join(headers) + "\r\n\r\n" + content
-    raw = _b64.urlsafe_b64encode(raw_msg.encode("utf-8")).decode()
+        root["References"] = references
+    raw = _b64.urlsafe_b64encode(root.as_bytes()).decode()
     payload = {"raw": raw}
     if thread_id: payload["threadId"] = thread_id
     return _g_api("POST", GMAIL_BASE + "/messages/send", body=payload)
@@ -718,14 +805,46 @@ def calendar_events(days=7, tmin=None, tmax=None):
                     "hangout": e.get("hangoutLink", ""), "colorId": e.get("colorId", ""),
                     "status": e.get("status", "confirmed"),
                     "recurring": bool(e.get("recurringEventId")),
+                    "recurrence": e.get("recurrence", []),
+                    "recurringEventId": e.get("recurringEventId", ""),
                     "organizer": (e.get("organizer") or {}).get("email", ""),
+                    "creator": (e.get("creator") or {}).get("email", ""),
+                    "reminders": ((e.get("reminders") or {}).get("overrides", [])
+                                  if not (e.get("reminders") or {}).get("useDefault", True) else "default"),
                     "attendees": [{"email": a.get("email", ""),
+                                   "name": a.get("displayName", ""),
+                                   "organizer": bool(a.get("organizer")),
+                                   "optional": bool(a.get("optional")),
+                                   "self": bool(a.get("self")),
                                    "status": a.get("responseStatus", "")}
-                                  for a in e.get("attendees", [])][:20]})
+                                  for a in e.get("attendees", [])][:50]})
     return {"events": evs, "tmin": tmin, "tmax": tmax, "days": int(days or 7),
             "tz": _GOOGLE_TOK.get("tz") or "", "email": _GOOGLE_TOK.get("email")}
 
-def calendar_create(summary, start, end, desc="", location="", tz=None, all_day=False, color=""):
+def _cal_attendees(arr):
+    out = []
+    for a in (arr or []):
+        if isinstance(a, str):
+            em = a.strip()
+            if em: out.append({"email": em})
+        elif isinstance(a, dict) and a.get("email"):
+            d = {"email": a["email"].strip()}
+            if a.get("optional"): d["optional"] = True
+            out.append(d)
+    return out
+
+def _cal_reminders(rem):
+    if rem == "default" or rem is None:
+        return {"useDefault": True}
+    ov = []
+    for r in (rem or []):
+        try: ov.append({"method": r.get("method", "popup"), "minutes": int(r.get("minutes", 10))})
+        except Exception: pass
+    return {"useDefault": False, "overrides": ov[:5]}
+
+def calendar_create(summary, start, end, desc="", location="", tz=None, all_day=False,
+                    color="", attendees=None, recurrence=None, reminders=None,
+                    meet=False, send_updates="none"):
     if all_day:
         s = {"date": start}; en = {"date": end}
     else:
@@ -733,17 +852,33 @@ def calendar_create(summary, start, end, desc="", location="", tz=None, all_day=
         if tz: s["timeZone"] = tz; en["timeZone"] = tz
     body = {"summary": summary, "description": desc, "location": location, "start": s, "end": en}
     if color: body["colorId"] = str(color)
-    return _g_api("POST", CAL_BASE, body=body)
+    att = _cal_attendees(attendees)
+    if att: body["attendees"] = att
+    if recurrence: body["recurrence"] = recurrence if isinstance(recurrence, list) else [recurrence]
+    if reminders is not None: body["reminders"] = _cal_reminders(reminders)
+    params = {}
+    if att or send_updates != "none": params["sendUpdates"] = send_updates or "all"
+    if meet:
+        import uuid as _uuid
+        body["conferenceData"] = {"createRequest": {"requestId": _uuid.uuid4().hex,
+                                  "conferenceSolutionKey": {"type": "hangoutsMeet"}}}
+        params["conferenceDataVersion"] = "1"
+    return _g_api("POST", CAL_BASE, params=(params or None), body=body)
 
 def calendar_update(eid, summary=None, start=None, end=None, desc=None,
-                    location=None, tz=None, all_day=None, color=None):
-    """events.patch — only sends the fields provided (drag/resize sends just start/end)."""
+                    location=None, tz=None, all_day=None, color=None,
+                    attendees=None, recurrence=None, reminders=None, meet=None,
+                    send_updates="none", scope="single"):
     if not eid: return {"error": "missing event id"}
     body = {}
     if summary is not None:  body["summary"] = summary
     if desc is not None:     body["description"] = desc
     if location is not None: body["location"] = location
     if color is not None:    body["colorId"] = str(color)
+    if attendees is not None: body["attendees"] = _cal_attendees(attendees)
+    if recurrence is not None: body["recurrence"] = (recurrence if isinstance(recurrence, list)
+                                                     else ([recurrence] if recurrence else []))
+    if reminders is not None: body["reminders"] = _cal_reminders(reminders)
     if start is not None or end is not None:
         if all_day:
             if start is not None: body["start"] = {"date": start}
@@ -756,9 +891,30 @@ def calendar_update(eid, summary=None, start=None, end=None, desc=None,
                 body["end"] = {"dateTime": end}
                 if tz: body["end"]["timeZone"] = tz
     if not body: return {"error": "nothing to update"}
-    r = _g_api("PATCH", CAL_BASE + "/" + eid, body=body)
+    params = {}
+    if attendees is not None or send_updates != "none":
+        params["sendUpdates"] = send_updates or "all"
+    pq = "?" + urllib.parse.urlencode(params) if params else ""
+    r = _g_api("PATCH", CAL_BASE + "/" + eid + pq, body=body)
     return {"ok": "error" not in r, "id": r.get("id", eid),
             **({"error": r["error"]} if isinstance(r, dict) and "error" in r else {})}
+
+def calendar_rsvp(eid, response, send_updates="none"):
+    if not eid: return {"error": "missing event id"}
+    cur = _g_api("GET", CAL_BASE + "/" + eid)
+    if isinstance(cur, dict) and "error" in cur: return cur
+    me = _GOOGLE_TOK.get("email")
+    atts = cur.get("attendees", [])
+    found = False
+    for a in atts:
+        if a.get("self") or a.get("email") == me:
+            a["responseStatus"] = response; found = True
+    if not found:
+        atts.append({"email": me, "responseStatus": response, "self": True})
+    params = {"sendUpdates": send_updates or "none"}
+    pq = "?" + urllib.parse.urlencode(params)
+    r = _g_api("PATCH", CAL_BASE + "/" + eid + pq, body={"attendees": atts})
+    return {"ok": "error" not in r, **({"error": r["error"]} if isinstance(r, dict) and "error" in r else {})}
 
 def calendar_delete(eid):
     if not eid: return {"error": "missing event id"}
@@ -3211,7 +3367,8 @@ def session_bar():
     for t in ts: t.start()
     for t in ts: t.join()
     return {"sessions": [{"name": s["name"], "label": s["label"], "busy": busy.get(s["name"], False),
-                          "chief": s.get("chief", False), "attached": s.get("attached", False)} for s in sess]}
+                          "chief": s.get("chief", False), "attached": s.get("attached", False),
+                          "protected": bool(s.get("protected", False))} for s in sess]}
 
 def _wait_idle(name, timeout, settle=3):
     start = time.time(); calm = 0
@@ -4730,6 +4887,16 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/google/gmail-unread": return self._s(200, json.dumps(gmail_unread()))
         if u.path == "/api/session-bar":   return self._s(200, json.dumps(session_bar()))
         if u.path == "/api/google/gmail-thread":  return self._s(200, json.dumps(gmail_thread(q.get("id", [""])[0])))
+        if u.path == "/api/google/gmail-att":
+            b, err = gmail_attachment_bytes(q.get("id", [""])[0], q.get("att", [""])[0])
+            if err or b is None: return self._s(404, err or "not found")
+            fn = (q.get("name", ["attachment"])[0] or "attachment").replace('"', '').replace("\r", "").replace("\n", "")
+            ct = _gmail_att_ctype(fn, q.get("mime", [""])[0])
+            disp = "attachment" if q.get("dl", [""])[0] == "1" else "inline"
+            self.send_response(200); self.send_header("Content-Type", ct)
+            self.send_header("Content-Disposition", '%s; filename="%s"' % (disp, fn))
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
         if u.path == "/api/google/gmail-labels":  return self._s(200, json.dumps(gmail_labels()))
         if u.path == "/api/google/calendar":
             return self._s(200, json.dumps(calendar_events(
@@ -4842,7 +5009,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(gmail_send(
                 body.get("to", ""), body.get("subject", ""), body.get("body", ""),
                 body.get("cc", ""), body.get("bcc", ""), body.get("threadId"),
-                body.get("html", ""), body.get("inReplyTo", ""), body.get("references", ""))))
+                body.get("html", ""), body.get("inReplyTo", ""), body.get("references", ""),
+                body.get("attachments") or [], body.get("inline") or [])))
         if u.path == "/api/google/gmail-modify":
             return self._s(200, json.dumps(gmail_modify(body.get("id", ""), body.get("action", ""))))
         if u.path == "/api/google/gmail-label":
@@ -4853,13 +5021,21 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(calendar_create(
                 body.get("summary", ""), body.get("start", ""), body.get("end", ""),
                 body.get("desc", ""), body.get("location", ""), body.get("tz"),
-                bool(body.get("allDay")), body.get("color", ""))))
+                bool(body.get("allDay")), body.get("color", ""),
+                body.get("attendees"), body.get("recurrence"), body.get("reminders"),
+                bool(body.get("meet")), body.get("sendUpdates", "none"))))
         if u.path == "/api/google/calendar-update":
             return self._s(200, json.dumps(calendar_update(
                 body.get("id", ""),
                 body.get("summary"), body.get("start"), body.get("end"),
                 body.get("desc"), body.get("location"), body.get("tz"),
-                body.get("allDay"), body.get("color"))))
+                body.get("allDay"), body.get("color"),
+                body.get("attendees"), body.get("recurrence"), body.get("reminders"),
+                body.get("meet"), body.get("sendUpdates", "none"), body.get("scope", "single"))))
+        if u.path == "/api/google/calendar-rsvp":
+            return self._s(200, json.dumps(calendar_rsvp(
+                body.get("id", ""), body.get("response", "accepted"),
+                body.get("sendUpdates", "none"))))
         if u.path == "/api/google/calendar-delete":
             return self._s(200, json.dumps(calendar_delete(body.get("id", ""))))
         if u.path == "/api/google/drive-modify":
@@ -5404,13 +5580,27 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .sb-tile.done .sb-dot{background:var(--accent)}
 @keyframes sbblink{0%,100%{opacity:1}50%{opacity:.35}}
 @keyframes sbpulse{0%,100%{box-shadow:0 0 0 0 rgba(var(--accent-rgb),0);background:var(--card)}50%{box-shadow:0 0 16px 2px rgba(var(--accent-rgb),.6);background:rgba(var(--accent-rgb),.18)}}
-#sessprev{position:fixed;z-index:61;display:none;background:var(--card);border:1px solid var(--accent);border-radius:11px;
-  box-shadow:0 10px 36px #000b;padding:9px 10px;width:min(620px,82vw)}
-#sessprev .sb-pvh{display:flex;align-items:center;gap:8px;margin-bottom:7px}
-#sessprev .sb-pvh b{font-size:13px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#sessprev .sb-pvbusy{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:6px}
-#sessprev pre{margin:0;max-height:300px;overflow:auto;font:11px/1.45 ui-monospace,Menlo,Monaco,monospace;color:#cfd3dc;white-space:pre-wrap;word-break:break-word;background:#07070b;border-radius:8px;padding:9px}
+/* ===== Sessions taskbar blow-up hover panel (sb-*) — live interactive terminal + actions ===== */
+#sessprev{position:fixed;z-index:61;display:none;flex-direction:column;
+  background:var(--card);border:1px solid var(--accent);border-radius:12px;
+  box-shadow:0 22px 64px rgba(0,0,0,.62),var(--glow);overflow:hidden;
+  width:min(880px,86vw);height:min(560px,64vh)}
+#sessprev .sb-pvh{display:flex;align-items:center;gap:9px;padding:8px 11px;flex:0 0 auto;
+  background:var(--card2);border-bottom:1px solid var(--line)}
+#sessprev .sb-pvh b{font-size:13px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+#sessprev .sb-pvbusy{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:6px;flex:0 0 auto}
+#sessprev .sb-acts{display:flex;gap:5px;margin-left:auto;flex:0 0 auto}
+#sessprev .sb-acts .mini{padding:3px 9px;font-size:12px}
+#sessprev .sb-acts .mini.sb-kill{color:#f85149}
+#sessprev .sb-acts .mini.sb-exit{color:#d29922}
+#sessprev .sb-pvframe{flex:1;min-height:0;width:100%;border:0;display:block;background:#0a0a0f}
 @media(max-width:900px){#sessbar,#sessprev{display:none!important}#app{height:auto}}
+/* Sessions LENS: focus = ONLY the big terminal (littles removed); in-flow column, never floats over usage. */
+.focusonly{grid-column:1/-1;display:flex;flex-direction:column;
+  height:calc(100vh - 232px);min-height:440px}
+.focusonly .bigsess{flex:1;min-height:0}
+.focusonly .bigsess .stframe{flex:1;min-height:0}
+@media(max-width:820px){.focusonly{height:auto}.focusonly .bigsess{height:calc(100dvh - 200px);min-height:380px}}
 /* ========================================================================
    SHARED SHELL + DESIGN SYSTEM  (cmdk-* / shell-*)  -- append inside <style>
    Design tokens go on :root (alias --acc, stepped surfaces, hairlines, z-stack).
@@ -5892,6 +6082,118 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
   .dr-qlov{padding:0}
   .dr-ql{max-height:100vh;border-radius:0}
 }
+/* ============ GMAIL READER v3 (b0) -- resizer + attachments (gm-* namespaced) ============ */
+.gm-app{grid-template-columns:200px var(--gm-listw,minmax(320px,1fr)) 6px minmax(0,1.25fr) !important}
+.gm-grip{position:relative;cursor:col-resize;background:var(--line);transition:background .12s}
+.gm-grip:hover,.gm-grip.gm-dragging{background:var(--accent)}
+.gm-grip:before{content:"";position:absolute;left:-4px;right:-4px;top:0;bottom:0}
+.gm-grip:after{content:"";position:absolute;left:2px;top:50%;width:2px;height:26px;margin-top:-13px;border-radius:2px;background:rgba(255,255,255,.25)}
+body.gm-resizing{cursor:col-resize !important;user-select:none !important}
+body.gm-resizing iframe{pointer-events:none}
+.gm-att{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;padding-top:11px;border-top:1px dashed var(--line)}
+.gm-attlabel{flex:0 0 100%;font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);margin-bottom:2px}
+.gm-attcard{display:flex;flex-direction:column;width:150px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--card);transition:border-color .12s,transform .12s}
+.gm-attcard:hover{border-color:var(--accent);transform:translateY(-1px)}
+.gm-attthumb{height:92px;background:#0a0a10 center/cover no-repeat;display:flex;align-items:center;justify-content:center;font-size:30px;color:var(--dim);cursor:pointer;position:relative}
+.gm-attthumb.gm-img{cursor:zoom-in}
+.gm-attthumb .gm-ext{font-size:11px;font-weight:800;letter-spacing:.5px;color:var(--mut);position:absolute;bottom:6px;background:#000a;padding:1px 6px;border-radius:5px}
+.gm-attmeta{padding:7px 8px 5px;min-width:0}
+.gm-attname{font-size:11.5px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.gm-attsize{font-size:10px;color:var(--dim);margin-top:1px}
+.gm-attbar{display:flex;border-top:1px solid var(--line)}
+.gm-attbar a,.gm-attbar button{flex:1;border:0;background:transparent;color:var(--mut);font-size:11px;font-weight:600;padding:6px 0;cursor:pointer;text-align:center;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:4px}
+.gm-attbar a:hover,.gm-attbar button:hover{background:rgba(var(--accent-rgb),.14);color:var(--ink)}
+.gm-attbar a+button,.gm-attbar a+a{border-left:1px solid var(--line)}
+.gm-ql{position:fixed;inset:0;z-index:9000;background:rgba(6,6,10,.9);backdrop-filter:blur(4px);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:34px}
+.gm-ql-bar{position:absolute;top:0;left:0;right:0;height:46px;display:flex;align-items:center;gap:12px;padding:0 16px;color:var(--ink);font-size:13px;font-weight:600;background:rgba(0,0,0,.35)}
+.gm-ql-bar .gm-ql-sp{margin-left:auto}
+.gm-ql-bar a,.gm-ql-bar button{color:var(--ink);background:rgba(255,255,255,.08);border:1px solid var(--line);border-radius:8px;padding:5px 11px;font-size:12px;font-weight:600;cursor:pointer;text-decoration:none}
+.gm-ql-bar a:hover,.gm-ql-bar button:hover{background:rgba(var(--accent-rgb),.25)}
+.gm-ql-body{max-width:92vw;max-height:82vh;display:flex;align-items:center;justify-content:center}
+.gm-ql-body img{max-width:92vw;max-height:82vh;border-radius:8px;box-shadow:0 12px 50px #000a;object-fit:contain}
+.gm-ql-body iframe{width:86vw;height:82vh;border:0;border-radius:8px;background:#fff}
+.gm-ql-fallback{color:var(--mut);text-align:center;display:flex;flex-direction:column;gap:10px;align-items:center}
+.gm-ql-fallback .gm-big{font-size:54px;opacity:.5}
+/* ============ GMAIL COMPOSER (b1) -- gmc-* WYSIWYG ============ */
+.gmc{display:flex;flex-direction:column;min-height:0}
+.gmc *{box-sizing:border-box}
+.gmc-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.gmc-title{font-size:16px;font-weight:700}
+.gmc-draftnote{font-size:11px;color:var(--dim);font-weight:600}
+.gmc-draftnote a{color:var(--accent);text-decoration:none}
+.gmc-x{margin-left:auto;background:none;border:none;color:var(--mut);font-size:16px;cursor:pointer;line-height:1;padding:2px 6px;border-radius:6px}
+.gmc-x:hover{background:var(--card);color:var(--ink)}
+.gmc-flds{border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:9px;background:var(--bg)}
+.gmc-fld{display:flex;align-items:center;gap:8px;padding:7px 11px;border-bottom:1px solid var(--line);position:relative}
+.gmc-fld:last-child{border-bottom:none}
+.gmc-fld label{flex:0 0 52px;font-size:12px;color:var(--mut);font-weight:600}
+.gmc-fld input{flex:1;background:transparent;border:none;color:var(--ink);font-size:13px;outline:none;padding:2px 0;width:auto}
+.gmc-ccbtn{flex:0 0 auto;font-size:11px;color:var(--accent);cursor:pointer;font-weight:600}
+.gmc-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:6px 7px;border:1px solid var(--line);border-bottom:none;border-radius:10px 10px 0 0;background:var(--card)}
+.gmc-tb{min-width:30px;height:30px;padding:0 7px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--ink);cursor:pointer;font-size:13px;line-height:1;display:inline-flex;align-items:center;justify-content:center;position:relative}
+.gmc-tb:hover{background:var(--bg2);border-color:var(--line)}
+.gmc-tb:active{background:rgba(var(--accent-rgb),.18)}
+.gmc-tbsel{height:30px;border:1px solid var(--line);border-radius:7px;background:var(--bg2);color:var(--ink);font-size:12px;padding:0 6px;cursor:pointer;margin-right:3px;width:auto}
+.gmc-tbsep{width:1px;height:18px;background:var(--line);margin:0 4px}
+.gmc-color{position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer}
+.gmc-body{border:1px solid var(--line);border-radius:0 0 10px 10px;background:#fff;color:#161616;min-height:240px;max-height:46vh;overflow:auto;padding:14px 16px;font:14px/1.55 -apple-system,Segoe UI,Roboto,sans-serif;outline:none}
+.gmc-body.gmc-drag{box-shadow:inset 0 0 0 2px var(--accent)}
+.gmc-body:focus{box-shadow:0 0 0 1px rgba(var(--accent-rgb),.45)}
+.gmc-body img{max-width:100%;height:auto}
+.gmc-body a{color:#1a56db}
+.gmc-body blockquote{margin:0 0 0 12px;padding:6px 0 6px 14px;border-left:3px solid #c7c7c7;color:#555}
+.gmc-body pre{background:#f4f4f6;border:1px solid #e1e1e6;border-radius:6px;padding:10px;font:13px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;overflow:auto}
+.gmc-sig{color:#666;border-top:1px solid #e3e3e3;padding-top:6px;margin-top:4px}
+.gmc-atts{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
+.gmc-att{display:inline-flex;align-items:center;gap:7px;font-size:12px;padding:5px 8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);max-width:240px}
+.gmc-att .gmc-attn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gmc-att .gmc-atts2{color:var(--dim);flex:0 0 auto}
+.gmc-att .gmc-attx{cursor:pointer;color:var(--mut);flex:0 0 auto;font-size:11px}
+.gmc-att .gmc-attx:hover{color:#e25}
+.gmc-foot{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}
+.gmc-send{background:var(--grad);color:#15120a;border:none;font-weight:700;font-size:13px;padding:9px 18px;border-radius:9px;cursor:pointer;display:inline-flex;align-items:center;gap:7px}
+.gmc-send:hover{filter:brightness(1.06)}
+.gmc-sendk{font-size:11px;opacity:.7;font-weight:600}
+.gmc-tool{background:var(--card);border:1px solid var(--line);color:var(--ink);font-size:13px;padding:8px 11px;border-radius:9px;cursor:pointer;font-weight:600}
+.gmc-tool:hover{border-color:var(--accent)}
+.gmc-later{background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:6px 9px;font-size:12px;width:auto}
+.gmc-spacer{margin-left:auto}
+.gmc-sigedit .gmc-sigbody{border:1px solid var(--line);border-radius:10px;background:#fff;color:#161616;min-height:140px;padding:12px 14px;font:14px/1.55 -apple-system,sans-serif;outline:none;margin-bottom:12px}
+.modal:has(.gmc){width:min(820px,96vw)}
+@media(max-width:600px){.gmc-toolbar{gap:1px}.gmc-tb{min-width:28px;height:28px}}
+/* ============ CALENDAR (b2) -- richer form + drag + rsvp ============ */
+.cal-cd:hover{transform:scale(1.12)}
+.cal-ev .rz.top{top:0;bottom:auto}
+.cal-mev[draggable]{cursor:grab}
+.cal-mev[draggable]:active{cursor:grabbing}
+.cal-mcell.dragover{background:rgba(var(--accent-rgb),.14);box-shadow:inset 0 0 0 2px var(--accent)}
+.cal-bigtitle{width:100%;background:transparent;border:none;border-bottom:2px solid var(--line);
+  color:var(--ink);font-size:21px;font-weight:700;padding:4px 2px 8px;outline:none}
+.cal-bigtitle:focus{border-bottom-color:var(--accent)}
+.cal-bigtitle::placeholder{color:var(--dim)}
+.cal-frow{display:flex;align-items:center;gap:8px;margin:10px 0 6px}
+.cal-frow input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+.cal-frow label{margin:0;font-size:13px;color:var(--mut);cursor:pointer}
+.cal-when{display:flex;gap:10px}
+.cal-fin,.cal-fsel{width:100%;background:var(--card);border:1px solid var(--line);color:var(--ink);
+  border-radius:9px;padding:9px 11px;font-size:13.5px;outline:none}
+.cal-fin:focus,.cal-fsel:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(var(--accent-rgb),.2)}
+.cal-fsel{cursor:pointer}
+.cal-guests{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
+.cal-gchip{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--line);
+  border-radius:14px;padding:4px 8px 4px 11px;font-size:12px;color:var(--ink);max-width:100%}
+.cal-gchip b{cursor:pointer;color:var(--dim);font-weight:700;font-size:14px;line-height:1}
+.cal-gchip b:hover{color:var(--err)}
+.cal-gchip.ok{border-color:rgba(51,182,121,.5)}
+.cal-gchip.no{border-color:rgba(213,0,0,.5);opacity:.7}
+.cal-gchip.maybe{border-color:rgba(246,191,38,.5)}
+.cal-gchip.sm{padding:2px 8px;font-size:11px;border-radius:11px}
+.cal-pguests{display:flex;flex-wrap:wrap;gap:5px;margin:6px 0 2px}
+.cal-rsvp{display:flex;align-items:center;gap:6px;margin-top:9px;font-size:12px;color:var(--mut)}
+.cal-rb{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:8px;
+  padding:5px 12px;cursor:pointer;font-size:12px;font-weight:600}
+.cal-rb:hover{border-color:var(--accent)}
+.cal-rb.on{background:var(--grad);color:#15120a;border-color:transparent;font-weight:700}
 </style></head><body>
 <div id="splash"><div class="cfwrap"><img src="/static/brand/claudefather_logo.png" alt="ClaudeFather"><div class="cfshine"></div></div><div class="cfhint">click to enter</div><div class="cfver" id="cfver"></div></div>
 <script>(function(){var v=(window.CC&&window.CC.version)||"";var e=document.getElementById("cfver");if(e&&v)e.innerHTML="v<b>"+v.replace(/[<>]/g,"")+"</b>";})();</script>
@@ -6915,8 +7217,8 @@ var GM_CHIPS = [
 ];
 
 function gmLaneQuery(){
-  var lane = GM_LANES.find(function(l){return l.k===GM.lane;}) || GM_LANES[0];
-  var parts = [lane.q];
+  var base = (GM.lane.indexOf('lbl:')===0) ? (GM.labelQuery||'') : ((GM_LANES.find(function(l){return l.k===GM.lane;})||GM_LANES[0]).q);
+  var parts = [base];
   Object.keys(GM.chips).forEach(function(k){ if(GM.chips[k]){ var c=GM_CHIPS.find(function(x){return x.k===k;}); if(c) parts.push(c.q); }});
   if(GM.text.trim()) parts.push(GM.text.trim());
   return parts.join(' ');
@@ -6926,13 +7228,123 @@ function gmLaneQuery(){
 async function loadGmail(){
   var g=document.getElementById('grid');
   if(!(window.CC&&window.CC.google)){ g.innerHTML=gErr({error:'Google Workspace not configured on this node.'}); return; }
-  // scaffold shell once
-  g.innerHTML='<div class="gm-app" id="gmApp">'+gmRailHTML()+gmListShell()+gmReadEmpty()+'</div>';
+  g.innerHTML='<div class="gm-app" id="gmApp">'
+    +gmRailHTML()
+    +gmListShell()
+    +'<div class="gm-grip" id="gmGrip" title="Drag to resize · double-click to reset"></div>'
+    +gmReadEmpty()
+  +'</div>';
+  gmApplySplit();
+  gmInitResizer();
   gmBindKeys();
-  // labels for the rail (best-effort, async) + first fetch
   gmFetchLabels();
   await gmFetchList(true);
 }
+
+// ---- b0: persisted list|reading split + resizer ----
+var GM_SPLIT_KEY='cc.gm.listw';
+function gmSavedListW(){
+  var v=parseInt(localStorage.getItem(GM_SPLIT_KEY)||'',10);
+  return (v&&v>=240&&v<=1100)?v:null;
+}
+function gmApplySplit(){
+  var app=document.getElementById('gmApp'); if(!app) return;
+  var w=gmSavedListW();
+  app.style.setProperty('--gm-listw', w?(w+'px'):'minmax(320px,1fr)');
+}
+function gmInitResizer(){
+  var grip=document.getElementById('gmGrip'), app=document.getElementById('gmApp');
+  if(!grip||!app) return;
+  var rail=200;
+  function startW(){ var l=document.querySelector('.gm-list'); return l?l.getBoundingClientRect().width:420; }
+  grip.onmousedown=function(ev){
+    ev.preventDefault();
+    var x0=ev.clientX, w0=startW();
+    grip.classList.add('gm-dragging'); document.body.classList.add('gm-resizing');
+    function mv(e){
+      var appR=app.getBoundingClientRect();
+      var max=appR.width-rail-6-360;
+      var w=Math.max(260, Math.min(max>320?max:320, w0+(e.clientX-x0)));
+      app.style.setProperty('--gm-listw', w+'px');
+    }
+    function up(){
+      document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up);
+      grip.classList.remove('gm-dragging'); document.body.classList.remove('gm-resizing');
+      var cur=document.querySelector('.gm-list'); if(cur) localStorage.setItem(GM_SPLIT_KEY, Math.round(cur.getBoundingClientRect().width));
+    }
+    document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up);
+  };
+  grip.ondblclick=function(){ localStorage.removeItem(GM_SPLIT_KEY); gmApplySplit(); };
+}
+
+// ---- b0: attachment strip + Quick Look (gmAttStrip used inside gmRenderRead) ----
+function gmAttExt(fn){ var m=(fn||'').match(/\.([a-z0-9]{1,5})$/i); return m?m[1].toLowerCase():''; }
+function gmAttIsImg(a){ return /^image\//.test(a.mime||'') || /^(png|jpe?g|gif|webp|bmp|svg|heic)$/.test(gmAttExt(a.filename)); }
+function gmAttIcon(a){
+  var e=gmAttExt(a.filename), m=a.mime||'';
+  if(gmAttIsImg(a)) return '\u{1F5BC}';
+  if(/pdf/.test(m)||e==='pdf') return '\u{1F4D5}';
+  if(/zip|rar|7z|tar|gz/.test(e)) return '\u{1F5DC}';
+  if(/sheet|excel|csv/.test(m)||/xlsx?|csv/.test(e)) return '\u{1F4CA}';
+  if(/word|document/.test(m)||/docx?/.test(e)) return '\u{1F4DD}';
+  if(/audio/.test(m)) return '\u{1F3B5}';
+  if(/video/.test(m)) return '\u{1F3AC}';
+  return '\u{1F4C4}';
+}
+function gmAttURL(mid,a,dl){
+  return '/api/google/gmail-att?id='+encodeURIComponent(mid)
+    +'&att='+encodeURIComponent(a.attachmentId)
+    +'&name='+encodeURIComponent(a.filename||'attachment')
+    +'&mime='+encodeURIComponent(a.mime||'')
+    +(dl?'&dl=1':'');
+}
+function gmAttStrip(m){
+  var atts=(m.attachments||[]); if(!atts.length) return '';
+  var cards=atts.map(function(a,ai){
+    var img=gmAttIsImg(a);
+    var src=gmAttURL(m.id,a,false);
+    var ext=gmAttExt(a.filename);
+    var thumb = img
+      ? '<div class="gm-attthumb gm-img" style="background-image:url(\''+src.replace(/'/g,"%27")+'\')" onclick="gmQuickLook(\''+m.id+'\','+ai+')"></div>'
+      : '<div class="gm-attthumb" onclick="gmQuickLook(\''+m.id+'\','+ai+')">'+gmAttIcon(a)+(ext?'<span class="gm-ext">'+e2(ext)+'</span>':'')+'</div>';
+    return '<div class="gm-attcard">'
+      +thumb
+      +'<div class="gm-attmeta"><div class="gm-attname" title="'+e2(a.filename)+'">'+e2(a.filename)+'</div>'
+        +'<div class="gm-attsize">'+driveSize(a.size)+'</div></div>'
+      +'<div class="gm-attbar">'
+        +'<button onclick="gmQuickLook(\''+m.id+'\','+ai+')" title="Preview">\u{1F441} View</button>'
+        +'<a href="'+gmAttURL(m.id,a,true)+'" download="'+e2(a.filename)+'" title="Download">↓ Save</a>'
+      +'</div>'
+    +'</div>';
+  }).join('');
+  return '<div class="gm-att"><div class="gm-attlabel">\u{1F4CE} '+atts.length+' attachment'+(atts.length>1?'s':'')+'</div>'+cards+'</div>';
+}
+function gmQLAtt(mid,ai){
+  var t=GM.thread; if(!t) return null;
+  var m=(t.messages||[]).find(function(x){return x.id===mid;}); if(!m) return null;
+  var a=(m.attachments||[])[ai]; return a?{m:m,a:a}:null;
+}
+function gmQuickLook(mid,ai){
+  var ctx=gmQLAtt(mid,ai); if(!ctx) return;
+  var a=ctx.a, view=gmAttURL(mid,a,false), dl=gmAttURL(mid,a,true);
+  var inner;
+  if(gmAttIsImg(a)) inner='<img src="'+view+'" alt="'+e2(a.filename)+'">';
+  else if(/pdf/.test(a.mime||'')||gmAttExt(a.filename)==='pdf') inner='<iframe src="'+view+'"></iframe>';
+  else inner='<div class="gm-ql-fallback"><div class="gm-big">'+gmAttIcon(a)+'</div><div>'+e2(a.filename)+'</div>'
+        +'<div style="font-size:12px;color:var(--dim)">No inline preview for this type.</div></div>';
+  var ov=document.createElement('div');
+  ov.className='gm-ql'; ov.id='gmQL';
+  ov.innerHTML='<div class="gm-ql-bar"><span>'+e2(a.filename)+'</span><span style="color:var(--dim)">'+driveSize(a.size)+'</span>'
+      +'<span class="gm-ql-sp"></span>'
+      +'<a href="'+dl+'" download="'+e2(a.filename)+'">↓ Download</a>'
+      +'<button onclick="gmCloseQuickLook()">✕ Close</button></div>'
+    +'<div class="gm-ql-body">'+inner+'</div>';
+  ov.onclick=function(e){ if(e.target===ov||e.target.className==='gm-ql-body') gmCloseQuickLook(); };
+  document.body.appendChild(ov);
+  document.addEventListener('keydown', gmQLKey);
+}
+function gmQLKey(e){ if(e.key==='Escape') gmCloseQuickLook(); }
+function gmCloseQuickLook(){ var ov=document.getElementById('gmQL'); if(ov) ov.remove(); document.removeEventListener('keydown', gmQLKey); }
 
 function gmRailHTML(){
   var laneBtn=function(l){
@@ -7082,10 +7494,7 @@ function gmRenderRead(){
     var bodyHtml=(m.body&&m.body.html)
       ? '<iframe sandbox srcdoc="'+e2(gmStyleHtml(m.body.html))+'" onload="gmFitFrame(this)"></iframe>'
       : '<pre>'+e2((m.body&&m.body.text)||m.snippet||'(no content)')+'</pre>';
-    var atts=(m.attachments&&m.attachments.length)
-      ? '<div class="gm-att">'+m.attachments.map(function(a){
-          return '<span class="gm-attbtn">\u{1F4CE} '+e2(a.filename)+' <span style="color:var(--dim)">'+driveSize(a.size)+'</span></span>';
-        }).join('')+'</div>' : '';
+    var atts=gmAttStrip(m);
     return '<div class="gm-msg'+(open?' open':'')+'" data-mi="'+idx+'">'
       +'<div class="gm-mhead" onclick="gmToggleMsg('+idx+')">'
         +'<span class="gm-avatar">'+e2(gmInitials(m.from))+'</span>'
@@ -7134,7 +7543,7 @@ async function gmActOn(m,action,i){
   var removeFromList = (action==='archive'||action==='trash'||action==='spam') &&
                        (GM.lane!=='all'&&GM.lane!=='sent');
   // optimistic remove
-  if(removeFromList && i>=0){ GM.msgs.splice(i,1); if(GM.cur>=GM.msgs.length) GM.cur=GM.msgs.length-1; gmRenderRows(); if(GM.cur>=0){ gmOpen(GM.cur);} else gmCloseRead(); }
+  if(removeFromList && i>=0){ GM.msgs.splice(i,1); if(GM.cur>=GM.msgs.length) GM.cur=GM.msgs.length-1; gmRenderRows(); gmCloseRead(); }   /* advance the highlight but do NOT auto-open the next thread (that would mark an unread one read without you reading it) */
   var r=await gmPost('/api/google/gmail-modify',{id:m.id,action:action});
   if(r&&r.error){ toast('Failed: '+r.error,4000); gmFetchList(true); return; }
   if(undoAction){
@@ -7197,29 +7606,309 @@ async function gmBatch(action){
 }
 
 // ---- compose / reply / forward (beautiful, threaded) ----
+/* ============================================================================
+   gmc-* — STATE-OF-THE-ART WYSIWYG COMPOSER (b1). Beats Gmail:
+   - contenteditable rich editor + full toolbar + keyboard shortcuts
+   - paste KEEPS formatting AND images; drag-drop files; inline images (cid)
+   - signature + draft autosave (localStorage)
+   - editor-HTML -> email-safe inline-CSS HTML; sends multipart/related+mixed
+   One open composer at a time, in the modal; state on GMC.
+   ========================================================================== */
+var GMC = null;
+var GMC_SIG_KEY = 'cc.gmail.signature';
+var GMC_DRAFT_KEY = 'cc.gmail.draft';
+
+function gmcSignature(){ try{ return localStorage.getItem(GMC_SIG_KEY)||''; }catch(e){ return ''; } }
+function gmcSetSignature(h){ try{ localStorage.setItem(GMC_SIG_KEY, h||''); }catch(e){} }
+
 function gmCompose(pre){
   pre=pre||{};
   var showCc=!!(pre.cc||pre.bcc);
-  showM('<div class="gm-compose"><h2>'+(pre.title||'✎ New message')+'</h2>'
-    +'<div class="row"><label>To</label><input id="gmTo" value="'+e2(pre.to||'')+'" placeholder="name@example.com"></div>'
-    +'<div id="gmCcWrap" style="'+(showCc?'':'display:none')+'">'
-      +'<div class="row"><label>Cc</label><input id="gmCc" value="'+e2(pre.cc||'')+'"></div>'
-      +'<div class="row"><label>Bcc</label><input id="gmBcc" value="'+e2(pre.bcc||'')+'"></div></div>'
-    +'<div class="row"><label>Subject <span class="gm-cc-toggle" onclick="var w=document.getElementById(\'gmCcWrap\');w.style.display=w.style.display===\'none\'?\'block\':\'none\'">Cc/Bcc</span></label>'
-      +'<input id="gmSubj" value="'+e2(pre.subject||'')+'"></div>'
-    +'<div class="row"><label>Message</label><textarea id="gmBody">'+e2(pre.body||'')+'</textarea></div>'
-    +'<div class="gm-sendlater"><label style="font-weight:600">Send later:</label>'
-      +'<input type="datetime-local" id="gmLater" style="flex:0 0 auto"><span style="font-size:11px;color:var(--dim)">(optional)</span></div>'
-    +'<div class="btns"><button class="btn" onclick="closeM()">Discard</button>'
-      +'<button class="btn go" onclick="gmDoSend('
-        +(pre.threadId?('\''+esc(pre.threadId)+'\''):'null')+','
-        +(pre.inReplyTo?('\''+esc(pre.inReplyTo)+'\''):'null')+','
-        +(pre.references?('\''+esc(pre.references)+'\''):'null')+')">Send ➜</button></div>'
-  +'</div>');
-  setTimeout(function(){var t=document.getElementById(pre.to?'gmSubj':'gmTo'); if(t){t.focus();}},60);
+  var sig=gmcSignature();
+  var sigBlock = sig ? '<br><br><div class="gmc-sig">'+sig+'</div>' : '';
+  var body=pre.bodyHtml||'';
+  var initial = '<div><br></div>' + sigBlock + (body?('<br>'+body):'');
+  GMC = { ctx:{ threadId:pre.threadId||null, inReplyTo:pre.inReplyTo||'', references:pre.references||'' },
+    attachments:[], inline:{}, autosaveT:null, _savedModal:null };
+  showM(gmcShellHTML(pre, showCc, initial));
+  setTimeout(function(){
+    var ed=document.getElementById('gmcBody'); if(ed) gmcWireEditor(ed);
+    var first=document.getElementById(pre.to?'gmcSubj':'gmcTo'); if(first) first.focus();
+    if(!pre.threadId && !pre.to) gmcMaybeRestoreDraft();
+  },50);
+}
+
+function gmcShellHTML(pre, showCc, initial){
+  return '<div class="gmc" id="gmcRoot">'
+    +'<div class="gmc-head"><span class="gmc-title">'+e2(pre.title||'✎ New message')+'</span>'
+      +'<span class="gmc-draftnote" id="gmcDraftNote"></span>'
+      +'<button class="gmc-x" onclick="gmcDiscard()" title="Discard">✕</button></div>'
+    +'<div class="gmc-flds">'
+      +'<div class="gmc-fld"><label>To</label><input id="gmcTo" value="'+e2(pre.to||'')+'" placeholder="name@example.com, …">'
+        +'<span class="gmc-ccbtn" onclick="gmcToggleCc()">Cc/Bcc</span></div>'
+      +'<div id="gmcCcWrap" style="'+(showCc?'':'display:none')+'">'
+        +'<div class="gmc-fld"><label>Cc</label><input id="gmcCc" value="'+e2(pre.cc||'')+'"></div>'
+        +'<div class="gmc-fld"><label>Bcc</label><input id="gmcBcc" value="'+e2(pre.bcc||'')+'"></div></div>'
+      +'<div class="gmc-fld"><label>Subject</label><input id="gmcSubj" value="'+e2(pre.subject||'')+'"></div>'
+    +'</div>'
+    +gmcToolbarHTML()
+    +'<div class="gmc-body" id="gmcBody" contenteditable="true" spellcheck="true">'+initial+'</div>'
+    +'<div class="gmc-atts" id="gmcAtts" style="display:none"></div>'
+    +'<div class="gmc-foot">'
+      +'<button class="gmc-send" onclick="gmcSend()">Send <span class="gmc-sendk">⌘↵</span></button>'
+      +'<button class="gmc-tool" onclick="document.getElementById(\'gmcFile\').click()" title="Attach files">📎</button>'
+      +'<button class="gmc-tool" onclick="document.getElementById(\'gmcImg\').click()" title="Insert inline image">🖼</button>'
+      +'<span class="gmc-spacer"></span>'
+      +'<button class="gmc-tool" onclick="gmcEditSignature()" title="Edit signature">✍ Signature</button>'
+      +'<button class="gmc-tool" onclick="gmcDiscard()">Discard</button>'
+      +'<input type="file" id="gmcFile" multiple style="display:none" onchange="gmcAddFiles(this.files);this.value=\'\'">'
+      +'<input type="file" id="gmcImg" accept="image/*" multiple style="display:none" onchange="gmcInsertImages(this.files);this.value=\'\'">'
+    +'</div>'
+  +'</div>';
+}
+
+function gmcToolbarHTML(){
+  var b=function(cmd,ic,t,arg){ return '<button class="gmc-tb" type="button" title="'+t+'" onmousedown="event.preventDefault()" onclick="gmcCmd(\''+cmd+'\''+(arg!==undefined?(',\''+arg+'\''):'')+')">'+ic+'</button>'; };
+  return '<div class="gmc-toolbar">'
+    +'<select class="gmc-tbsel" onmousedown="event.stopPropagation()" onchange="gmcCmd(\'formatBlock\',this.value);this.selectedIndex=0">'
+      +'<option value="">Style</option><option value="p">Normal</option><option value="h1">Heading 1</option>'
+      +'<option value="h2">Heading 2</option><option value="h3">Heading 3</option><option value="blockquote">Quote</option><option value="pre">Code</option></select>'
+    +b('bold','<b>B</b>','Bold (⌘B)')
+    +b('italic','<i>I</i>','Italic (⌘I)')
+    +b('underline','<u>U</u>','Underline (⌘U)')
+    +b('strikeThrough','<s>S</s>','Strikethrough')
+    +'<span class="gmc-tbsep"></span>'
+    +b('insertUnorderedList','•','Bulleted list')
+    +b('insertOrderedList','1.','Numbered list')
+    +b('outdent','⇤','Outdent')
+    +b('indent','⇥','Indent')
+    +'<span class="gmc-tbsep"></span>'
+    +b('justifyLeft','⬅','Align left')
+    +b('justifyCenter','⬌','Center')
+    +b('justifyRight','➡','Align right')
+    +'<span class="gmc-tbsep"></span>'
+    +'<button class="gmc-tb" type="button" title="Text color" onmousedown="event.preventDefault()" onclick="document.getElementById(\'gmcColor\').click()">A<input type="color" id="gmcColor" class="gmc-color" value="#1a56db" onchange="gmcCmd(\'foreColor\',this.value)"></button>'
+    +b('','🔗','Insert link (⌘K)','__link')
+    +b('removeFormat','✗','Clear formatting')
+  +'</div>';
+}
+
+function gmcToggleCc(){ var w=document.getElementById('gmcCcWrap'); if(w) w.style.display=w.style.display==='none'?'block':'none'; }
+
+function gmcCmd(cmd, arg){
+  var ed=document.getElementById('gmcBody'); if(ed) ed.focus();
+  if(arg==='__link'){
+    var url=prompt('Link URL:','https://'); if(!url) return;
+    document.execCommand('createLink', false, url); gmcMarkLinks(); gmcDirty(); return;
+  }
+  if(cmd==='formatBlock' && arg){ document.execCommand('formatBlock', false, '<'+arg+'>'); gmcDirty(); return; }
+  try{ document.execCommand(cmd, false, arg||null); }catch(e){}
+  gmcDirty();
+}
+function gmcMarkLinks(){ var ed=document.getElementById('gmcBody'); if(!ed) return;
+  ed.querySelectorAll('a').forEach(function(a){ a.setAttribute('target','_blank'); a.style.color='#1a56db'; }); }
+
+function gmcWireEditor(ed){
+  ed.addEventListener('keydown', function(ev){
+    var meta=ev.metaKey||ev.ctrlKey;
+    if(meta && ev.key==='Enter'){ ev.preventDefault(); gmcSend(); return; }
+    if(meta && ev.key.toLowerCase()==='b'){ ev.preventDefault(); gmcCmd('bold'); return; }
+    if(meta && ev.key.toLowerCase()==='i'){ ev.preventDefault(); gmcCmd('italic'); return; }
+    if(meta && ev.key.toLowerCase()==='u'){ ev.preventDefault(); gmcCmd('underline'); return; }
+    if(meta && ev.key.toLowerCase()==='k'){ ev.preventDefault(); gmcCmd('','__link'); return; }
+  });
+  ed.addEventListener('paste', gmcOnPaste);
+  ed.addEventListener('dragover', function(ev){ ev.preventDefault(); ed.classList.add('gmc-drag'); });
+  ed.addEventListener('dragleave', function(){ ed.classList.remove('gmc-drag'); });
+  ed.addEventListener('drop', function(ev){
+    ev.preventDefault(); ed.classList.remove('gmc-drag');
+    var files=ev.dataTransfer&&ev.dataTransfer.files; if(!files||!files.length) return;
+    var imgs=[],others=[];
+    Array.prototype.forEach.call(files,function(f){ (/^image\//.test(f.type)?imgs:others).push(f); });
+    if(imgs.length) gmcInsertImages(imgs);
+    if(others.length) gmcAddFiles(others);
+  });
+  ed.addEventListener('input', gmcDirty);
+}
+
+function gmcOnPaste(ev){
+  var dt=ev.clipboardData; if(!dt) return;
+  var imgItems=[];
+  for(var i=0;i<dt.items.length;i++){ var it=dt.items[i]; if(it.kind==='file' && /^image\//.test(it.type)){ var f=it.getAsFile(); if(f) imgItems.push(f); } }
+  if(imgItems.length){ ev.preventDefault(); gmcInsertImages(imgItems); return; }
+  var html=dt.getData('text/html');
+  if(html){ ev.preventDefault(); document.execCommand('insertHTML', false, gmcSanitizePaste(html)); gmcMarkLinks(); gmcDirty(); return; }
+}
+
+function gmcSanitizePaste(html){
+  var doc=new DOMParser().parseFromString(html,'text/html');
+  var allow={A:1,B:1,STRONG:1,I:1,EM:1,U:1,S:1,STRIKE:1,P:1,DIV:1,SPAN:1,BR:1,UL:1,OL:1,LI:1,
+    BLOCKQUOTE:1,PRE:1,CODE:1,H1:1,H2:1,H3:1,H4:1,H5:1,H6:1,TABLE:1,THEAD:1,TBODY:1,TR:1,TD:1,TH:1,IMG:1,HR:1,FONT:1};
+  var allowStyle=['color','background-color','font-weight','font-style','text-decoration','text-align','font-size','font-family','padding','margin','border','border-collapse'];
+  function walk(node){
+    Array.prototype.slice.call(node.childNodes).forEach(function(n){
+      if(n.nodeType===1){
+        var tag=n.tagName;
+        if(/^(SCRIPT|STYLE|META|LINK|TITLE|HEAD|OBJECT|IFRAME|SVG|FORM|INPUT|BUTTON)$/.test(tag)){ n.remove(); return; }
+        if(!allow[tag]){ while(n.firstChild) n.parentNode.insertBefore(n.firstChild, n); n.remove(); return; }
+        Array.prototype.slice.call(n.attributes).forEach(function(at){
+          var name=at.name.toLowerCase();
+          if(name==='href' && tag==='A'){ if(/^\s*javascript:/i.test(at.value)) n.removeAttribute('href'); return; }
+          if((name==='src'||name==='alt') && tag==='IMG'){ if(name==='src'&&/^\s*javascript:/i.test(at.value)) n.removeAttribute('src'); return; }
+          if(name==='style'){
+            var keep=at.value.split(';').map(function(s){return s.trim();}).filter(function(s){
+              var p=s.split(':')[0].trim().toLowerCase(); return p && allowStyle.indexOf(p)>=0; }).join('; ');
+            if(keep) n.setAttribute('style',keep); else n.removeAttribute('style'); return;
+          }
+          n.removeAttribute(at.name);
+        });
+        if(tag==='A') n.setAttribute('target','_blank');
+        walk(n);
+      } else if(n.nodeType===8){ n.remove(); }
+    });
+  }
+  walk(doc.body);
+  return doc.body.innerHTML;
+}
+
+function gmcInsertImages(files){
+  var ed=document.getElementById('gmcBody'); if(ed) ed.focus();
+  Array.prototype.forEach.call(files,function(f){
+    var rd=new FileReader();
+    rd.onload=function(){
+      var id='img'+Date.now()+Math.floor(Math.random()*1e5);
+      GMC.inline[id]={id:id, filename:f.name||(id+'.png'), mime:f.type||'image/png', data:rd.result};
+      document.execCommand('insertHTML', false, '<img src="'+rd.result+'" data-cid="'+id+'" style="max-width:100%;height:auto" alt="'+e2(f.name||'')+'">');
+      gmcDirty();
+    };
+    rd.readAsDataURL(f);
+  });
+}
+
+function gmcAddFiles(files){
+  Array.prototype.forEach.call(files,function(f){
+    var rd=new FileReader();
+    rd.onload=function(){
+      GMC.attachments.push({id:'a'+Date.now()+Math.floor(Math.random()*1e5),
+        filename:f.name||'file', mime:f.type||'application/octet-stream', size:f.size||0, data:rd.result});
+      gmcRenderAtts();
+    };
+    rd.readAsDataURL(f);
+  });
+}
+function gmcRenderAtts(){
+  var w=document.getElementById('gmcAtts'); if(!w) return;
+  if(!GMC||!GMC.attachments.length){ w.innerHTML=''; w.style.display='none'; return; }
+  w.style.display='flex';
+  w.innerHTML=GMC.attachments.map(function(a){
+    return '<span class="gmc-att"><span class="gmc-attic">📎</span><span class="gmc-attn">'+e2(a.filename)+'</span>'
+      +'<span class="gmc-atts2">'+driveSize(a.size)+'</span>'
+      +'<span class="gmc-attx" onclick="gmcRemoveAtt(\''+a.id+'\')">✕</span></span>';
+  }).join('');
+}
+function gmcRemoveAtt(id){ if(GMC) GMC.attachments=GMC.attachments.filter(function(a){return a.id!==id;}); gmcRenderAtts(); }
+
+function gmcBuildEmailHtml(){
+  var ed=document.getElementById('gmcBody'); if(!ed) return {html:'', inline:[]};
+  var clone=ed.cloneNode(true);
+  var usedInline=[];
+  clone.querySelectorAll('img[data-cid]').forEach(function(img){
+    var id=img.getAttribute('data-cid');
+    if(GMC.inline[id]){ img.setAttribute('src','cid:'+id); img.removeAttribute('data-cid');
+      img.style.maxWidth='100%'; img.style.height='auto';
+      if(usedInline.indexOf(id)<0) usedInline.push(id); }
+  });
+  clone.querySelectorAll('img[src^="data:"]').forEach(function(img){
+    var id='img'+Date.now()+Math.floor(Math.random()*1e5);
+    GMC.inline[id]={id:id, filename:id+'.png', mime:(img.src.split(';')[0].split(':')[1]||'image/png'), data:img.src};
+    img.setAttribute('src','cid:'+id); usedInline.push(id);
+  });
+  gmcInlineCommonStyles(clone);
+  var inlineList=usedInline.map(function(id){ return GMC.inline[id]; }).filter(Boolean);
+  var html='<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;'
+    +'font-size:14px;line-height:1.55;color:#1a1a1a">'+clone.innerHTML+'</div>';
+  return {html:html, inline:inlineList};
+}
+function gmcInlineCommonStyles(root){
+  var map={
+    BLOCKQUOTE:'margin:0 0 0 12px;padding:6px 0 6px 14px;border-left:3px solid #c7c7c7;color:#555',
+    PRE:'background:#f4f4f6;border:1px solid #e1e1e6;border-radius:6px;padding:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;white-space:pre-wrap;overflow:auto',
+    CODE:'background:#f4f4f6;border-radius:4px;padding:1px 4px;font-family:ui-monospace,Menlo,monospace;font-size:13px',
+    H1:'font-size:24px;line-height:1.25;margin:14px 0 8px;font-weight:700',
+    H2:'font-size:20px;line-height:1.3;margin:12px 0 6px;font-weight:700',
+    H3:'font-size:17px;line-height:1.35;margin:10px 0 5px;font-weight:600',
+    A:'color:#1a56db', UL:'margin:6px 0;padding-left:24px', OL:'margin:6px 0;padding-left:24px',
+    TABLE:'border-collapse:collapse', TD:'border:1px solid #ddd;padding:5px 8px', TH:'border:1px solid #ddd;padding:5px 8px;background:#f4f4f6'
+  };
+  Object.keys(map).forEach(function(tag){
+    root.querySelectorAll(tag.toLowerCase()).forEach(function(el){
+      el.setAttribute('style', (map[tag]+';'+(el.getAttribute('style')||'')));
+    });
+  });
+}
+
+function gmcDirty(){ if(!GMC) return; if(GMC.autosaveT) clearTimeout(GMC.autosaveT); GMC.autosaveT=setTimeout(gmcSaveDraft, 1200); }
+function gmcSaveDraft(){
+  if(!GMC) return; var ed=document.getElementById('gmcBody'); if(!ed) return;
+  if(GMC.ctx.threadId) return;
+  try{ localStorage.setItem(GMC_DRAFT_KEY, JSON.stringify({
+    to:gVal('gmcTo'), cc:gVal('gmcCc'), bcc:gVal('gmcBcc'), subject:gVal('gmcSubj'), html:ed.innerHTML, t:Date.now() }));
+    var n=document.getElementById('gmcDraftNote'); if(n) n.textContent='Draft saved';
+    setTimeout(function(){ var n2=document.getElementById('gmcDraftNote'); if(n2&&n2.textContent==='Draft saved') n2.textContent=''; },1500);
+  }catch(e){}
+}
+function gmcMaybeRestoreDraft(){
+  try{ var raw=localStorage.getItem(GMC_DRAFT_KEY); if(!raw) return;
+    var d=JSON.parse(raw); if(!d) return;
+    var has=(d.html||'').replace(/<[^>]+>|&nbsp;|\s/g,'') || d.subject || d.to; if(!has) return;
+    var n=document.getElementById('gmcDraftNote');
+    if(n) n.innerHTML='Restore draft? <a href="#" onclick="gmcDoRestore();return false;">Yes</a> · <a href="#" onclick="gmcClearDraft();return false;">No</a>';
+  }catch(e){}
+}
+function gmcDoRestore(){ try{ var d=JSON.parse(localStorage.getItem(GMC_DRAFT_KEY)||'{}');
+  var set=function(id,v){var e=document.getElementById(id); if(e&&v!=null) e.value=v;};
+  set('gmcTo',d.to);set('gmcCc',d.cc);set('gmcBcc',d.bcc);set('gmcSubj',d.subject);
+  var ed=document.getElementById('gmcBody'); if(ed&&d.html) ed.innerHTML=d.html;
+  var n=document.getElementById('gmcDraftNote'); if(n) n.textContent='Draft restored'; }catch(e){} }
+function gmcClearDraft(){ try{ localStorage.removeItem(GMC_DRAFT_KEY); }catch(e){} var n=document.getElementById('gmcDraftNote'); if(n) n.textContent=''; }
+
+function gmcDiscard(){ closeM(); GMC=null; }
+
+function gmcEditSignature(){
+  var box=document.getElementById('mbox'); if(!box||!GMC) return;
+  GMC._savedModal=box.innerHTML;
+  box.innerHTML='<div class="gmc-sigedit"><h2>✍ Signature</h2>'
+    +'<div class="gmc-sigbody" id="gmcSigEd" contenteditable="true">'+(gmcSignature()||'')+'</div>'
+    +'<div class="btns"><button class="btn" onclick="gmcCloseSig()">Cancel</button>'
+    +'<button class="btn go" onclick="gmcSaveSig()">Save signature</button></div></div>';
+  setTimeout(function(){var e=document.getElementById('gmcSigEd'); if(e) e.focus();},40);
+}
+function gmcSaveSig(){ var e=document.getElementById('gmcSigEd'); if(e) gmcSetSignature(e.innerHTML); gmcCloseSig(); toast('Signature saved ✓'); }
+function gmcCloseSig(){ var box=document.getElementById('mbox'); if(box&&GMC&&GMC._savedModal!=null){ box.innerHTML=GMC._savedModal; var ed=document.getElementById('gmcBody'); if(ed) gmcWireEditor(ed); gmcRenderAtts(); } }
+
+async function gmcSend(){
+  if(!GMC) return;
+  var to=gVal('gmcTo'); if(!to.trim()){ toast('Need a recipient',3000); return; }
+  var built=gmcBuildEmailHtml();
+  var payload={ to:to, cc:gVal('gmcCc'), bcc:gVal('gmcBcc'), subject:gVal('gmcSubj'),
+    html:built.html, body:'', inline:built.inline,
+    attachments:GMC.attachments.map(function(a){return {filename:a.filename,mime:a.mime,data:a.data};}),
+    threadId:GMC.ctx.threadId||undefined, inReplyTo:GMC.ctx.inReplyTo||'', references:GMC.ctx.references||'' };
+  /* "Send later" removed: it was a browser setTimeout that silently dropped the mail if the tab closed.
+     A real scheduler needs a server-side queue (future enhancement); until then, send now -- no fake feature. */
+  toast('Sending…');
+  var r=await gmPost('/api/google/gmail-send',payload);
+  if(r&&!r.error){ gmcClearDraft(); closeM(); GMC=null; toast('Sent ✓'); if(GM.thread&&GM.cur>=0) gmOpen(GM.cur); }
+  else toast('Failed: '+((r||{}).error||'?'),6000);
 }
 
 function gmLastMsg(){ var m=GM.thread&&GM.thread.messages; return m&&m.length?m[0]:null; } // newest-first -> [0]
+
+function gmcQuoteHtml(m){
+  var inner=(m.body&&m.body.html)? gmcSanitizePaste(m.body.html) : '<pre style="white-space:pre-wrap;font:inherit">'+e2((m.body&&m.body.text)||m.snippet||'')+'</pre>';
+  return '<div style="color:#555">On '+e2(gmFullDate(m.date))+', '+e2(gFrom(m.from))+' wrote:</div>'
+    +'<blockquote style="margin:0 0 0 8px;padding:4px 0 4px 12px;border-left:2px solid #ccc;color:#555">'+inner+'</blockquote>';
+}
 
 function gmReply(all){
   var m=gmLastMsg(); if(!m){ toast('Open a message first'); return; }
@@ -7230,42 +7919,23 @@ function gmReply(all){
       .filter(function(x){return x && gAddr(x)!==to && (GM.email?x.indexOf(GM.email)<0:true);});
     cc=extra.join(', ');
   }
-  var quote='\n\nOn '+gmFullDate(m.date)+', '+gFrom(m.from)+' wrote:\n'
-    +(((m.body&&m.body.text)||m.snippet||'').split('\n').map(function(l){return '> '+l;}).join('\n'));
   gmCompose({title:all?'↪ Reply all':'↩ Reply', to:to, cc:cc,
     subject:(/^re:/i.test(m.subject)?'':'Re: ')+m.subject,
     threadId:GM.thread.id, inReplyTo:m.messageId, references:(m.references?m.references+' ':'')+m.messageId,
-    body:quote});
+    bodyHtml:gmcQuoteHtml(m)});
 }
 function gmForward(){
   var m=gmLastMsg(); if(!m){ toast('Open a message first'); return; }
-  var fwd='\n\n---------- Forwarded message ----------\nFrom: '+gFrom(m.from)+'\nDate: '+gmFullDate(m.date)
-    +'\nSubject: '+m.subject+'\nTo: '+m.to+'\n\n'+((m.body&&m.body.text)||m.snippet||'');
-  gmCompose({title:'➤ Forward', subject:(/^fwd:/i.test(m.subject)?'':'Fwd: ')+m.subject, body:fwd});
-}
-
-async function gmDoSend(threadId,inReplyTo,references){
-  var to=gVal('gmTo'); if(!to){ toast('Need a recipient',3000); return; }
-  var later=gVal('gmLater');
-  var payload={to:to, cc:gVal('gmCc'), bcc:gVal('gmBcc'), subject:gVal('gmSubj'), body:gVal('gmBody'),
-    threadId:threadId||undefined, inReplyTo:inReplyTo||'', references:references||''};
-  if(later){
-    // send-later: stash client-side and fire at the chosen time (best-effort; survives while tab is open).
-    var when=new Date(later).getTime()-Date.now();
-    if(when>0){ closeM(); toast('Scheduled for '+new Date(later).toLocaleString());
-      setTimeout(function(){ fetch('/api/google/gmail-send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(){ if(window.toast) toast('Scheduled mail sent ✓'); }); }, when);
-      return; }
-  }
-  toast('Sending…');
-  var r=await gmPost('/api/google/gmail-send',payload);
-  if(r&&!r.error){ closeM(); toast('Sent ✓'); if(GM.thread&&GM.cur>=0) gmOpen(GM.cur); }
-  else toast('Failed: '+((r||{}).error||'?'),5000);
+  var head='<div style="color:#555">---------- Forwarded message ----------<br>From: '+e2(gFrom(m.from))
+    +'<br>Date: '+e2(gmFullDate(m.date))+'<br>Subject: '+e2(m.subject)+'<br>To: '+e2(m.to)+'</div>';
+  var inner=(m.body&&m.body.html)? gmcSanitizePaste(m.body.html) : '<pre style="white-space:pre-wrap">'+e2((m.body&&m.body.text)||m.snippet||'')+'</pre>';
+  gmCompose({title:'➤ Forward', subject:(/^fwd:/i.test(m.subject)?'':'Fwd: ')+m.subject, bodyHtml:head+'<br>'+inner});
 }
 
 // ---- lane / chip switching ----
 function gmToggleLabels(){ GM.labelsOpen=!GM.labelsOpen; var w=document.getElementById('gmLabelWrap'); if(w) w.style.display=GM.labelsOpen?'block':'none'; var c=document.getElementById('gmLblChev'); if(c) c.textContent=GM.labelsOpen?'▾':'▸'; }
 function gmSetLane(k){ GM.lane=k; GM.text=''; var s=document.getElementById('gmSearch'); if(s) s.value=''; gmHighlightRail(); gmFetchList(true); if(k==='snoozed'){} }
-function gmSetLabelLane(id,name){ GM.lane='lbl:'+id; GM.text=''; GM.q='label:'+name.replace(/ /g,'-'); gmHighlightRail(); gmFetchListRaw('label:"'+name+'"'); }
+function gmSetLabelLane(id,name){ GM.lane='lbl:'+id; GM.text=''; GM.labelQuery='label:"'+name+'"'; gmHighlightRail(); gmFetchList(true); }
 async function gmFetchListRaw(q){ GM.cur=-1; GM.sel={}; gmPaintBatch(); var rows=document.getElementById('gmRows'); if(rows) rows.innerHTML=empty('Loading…');
   var r; try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(q)+'&max=50')).json(); }catch(e){ if(rows) rows.innerHTML=gErr({error:'network'}); return; }
   if(r.error){ if(rows) rows.innerHTML=gErr(r); return; }
@@ -7374,8 +8044,7 @@ async function loadCalendar(force){
     var r;try{r=await(await fetch('/api/google/calendar?tmin='+tmin+'&tmax='+tmax)).json();}
     catch(err){g.innerHTML='<div class="cal-root">'+gErr({error:'network'})+'</div>';return;}
     if(r.error){g.innerHTML='<div class="cal-root">'+gErr(r)+'</div>';return;}
-    CAL.events=(r.events||[]).map(calNorm);CAL.email=r.email;CAL.loaded=key;
-    if(r.tz)CAL.tz=r.tz;
+    CAL.email=r.email;if(r.tz)CAL.tz=r.tz;CAL.events=(r.events||[]).map(calNorm);CAL.loaded=key;
   }
   calRender();
 }
@@ -7525,13 +8194,15 @@ function calLayoutDay(evs,day){
       var w=100/ncol,left=e._lc*w;
       var st=calMyStatus(e),dec=st=='declined'?' declined':'';
       var dur=(e._e-e._s)/60000;
+      var glyph=(e.hangout?' &#128249;':'')+(e.recurring?' &#8635;':'');
       html+='<div class="cal-ev'+dec+(CAL.selEvId==e.id?' sel':'')+'" data-id="'+e.id+'" '
         +'style="top:'+top+'px;height:'+hgt+'px;left:calc('+left+'% + 1px);width:calc('+w+'% - 3px);'
         +'background:'+calColor(e)+'28;border-left-color:'+calColor(e)+'" '
         +'onclick="calOpenEvent(\''+e.id+'\',event)" onmousedown="calEvMouseDown(event,\''+e.id+'\')">'
-        +'<div class="tt">'+e2(e.summary)+'</div>'
+        +'<div class="rz top" onmousedown="calResizeStart(event,\''+e.id+'\',\'top\')"></div>'
+        +'<div class="tt">'+e2(e.summary)+glyph+'</div>'
         +(dur>=40?'<div class="ti">'+e2(calHM(e._s))+(e.location?' · '+e2(e.location):'')+'</div>':'')
-        +'<div class="rz" onmousedown="calResizeStart(event,\''+e.id+'\')"></div></div>';});
+        +'<div class="rz" onmousedown="calResizeStart(event,\''+e.id+'\',\'bottom\')"></div></div>';});
   });
   return html;
 }
@@ -7551,10 +8222,10 @@ function calMonthView(){
   for(var i=0;i<42;i++){var d=calAddDays(start,i);var k=calYMD(d);
     var evs=(byDay[k]||[]).sort(function(a,b){return (b.allDay?1:0)-(a.allDay?1:0)||a._s-b._s;});
     var cls='cal-mcell'+(d.getMonth()!=m?' oth':'')+(calSameDay(d,today)?' today':'');
-    h+='<div class="'+cls+'" onclick="calMonthCellClick(event,'+d.getFullYear()+','+d.getMonth()+','+d.getDate()+')">'
+    h+='<div class="'+cls+'" data-date="'+k+'" ondragover="calMonthDragOver(event)" ondragleave="calMonthDragLeave(event)" ondrop="calMonthDrop(event,\''+k+'\')" onclick="calMonthCellClick(event,'+d.getFullYear()+','+d.getMonth()+','+d.getDate()+')">'
       +'<span class="mnum">'+d.getDate()+'</span>';
     evs.slice(0,3).forEach(function(e){
-      h+='<div class="cal-mev'+(e.allDay?' allday':'')+'" style="'+(e.allDay?'':'border-left-color:'+calColor(e)+';background:'+calColor(e)+'28')+'" onclick="event.stopPropagation();calOpenEvent(\''+e.id+'\',event)">'
+      h+='<div class="cal-mev'+(e.allDay?' allday':'')+'" draggable="true" data-id="'+e.id+'" ondragstart="calMonthDragStart(event,\''+e.id+'\')" ondragend="calMonthDragEnd(event)" style="'+(e.allDay?'':'border-left-color:'+calColor(e)+';background:'+calColor(e)+'28')+'" onclick="event.stopPropagation();calOpenEvent(\''+e.id+'\',event)">'
         +(e.allDay?'':'<b style="font-weight:700">'+e2(calHM(e._s))+'</b> ')+e2(e.summary)+'</div>';});
     if(evs.length>3)h+='<div class="cal-mmore" onclick="event.stopPropagation();calPickDay('+d.getFullYear()+','+d.getMonth()+','+d.getDate()+');calSetView(\'day\')">+'+(evs.length-3)+' more</div>';
     h+='</div>';}
@@ -7598,6 +8269,31 @@ function calMiniPick(y,m,d){CAL.sel=new Date(y,m,d);CAL.anchor=new Date(y,m,d);
   if(CAL.view=='month'){CAL.anchor=new Date(y,m,1);}CAL.miniMonth=new Date(y,m,1);loadCalendar();}
 function calPickDay(y,m,d){CAL.sel=new Date(y,m,d);CAL.anchor=new Date(y,m,d);CAL.view='day';CAL.miniMonth=new Date(y,m,1);loadCalendar();}
 function calMonthCellClick(ev,y,m,d){calCreateAt(new Date(y,m,d,9,0),false);}
+
+// ---- month view: drag an event to another day ------------------------------
+function calMonthDragStart(ev,id){CAL._mdrag=id;ev.dataTransfer.effectAllowed='move';try{ev.dataTransfer.setData('text/plain',id);}catch(e){}}
+function calMonthDragEnd(ev){CAL._mdrag=null;document.querySelectorAll('.cal-mcell.dragover').forEach(function(n){n.classList.remove('dragover');});}
+function calMonthDragOver(ev){if(!CAL._mdrag)return;ev.preventDefault();ev.dataTransfer.dropEffect='move';var c=ev.currentTarget;if(!c.classList.contains('dragover'))c.classList.add('dragover');}
+function calMonthDragLeave(ev){ev.currentTarget.classList.remove('dragover');}
+async function calMonthDrop(ev,ymd){
+  ev.preventDefault();var c=ev.currentTarget;c.classList.remove('dragover');
+  var id=CAL._mdrag||(ev.dataTransfer&&ev.dataTransfer.getData('text/plain'));CAL._mdrag=null;
+  var e=CAL.events.find(function(x){return x.id==id;});if(!e)return;
+  if(calYMD(e._s)===ymd)return; // dropped on same day
+  var nd=new Date(ymd+'T00:00:00');
+  var payload={id:id,tz:CAL.tz};
+  if(e.allDay){
+    var span=Math.max(1,Math.round((e._e-e._s)/86400000));
+    payload.allDay=true;payload.start=ymd;var ne=calAddDays(nd,span);payload.end=calYMD(ne);
+  }else{
+    var ns=new Date(nd);ns.setHours(e._s.getHours(),e._s.getMinutes(),0,0);
+    var nen=new Date(ns.getTime()+(e._e-e._s));
+    payload.start=calLocalISO(ns);payload.end=calLocalISO(nen);
+  }
+  toast('Moving…');
+  var r=await(await fetch('/api/google/calendar-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
+  if(r&&r.ok){toast('Moved &#10003;');loadCalendar(true);}else toast('Move failed: '+((r||{}).error||'?'),4000);
+}
 
 // ---- natural-language quick add --------------------------------------------
 function calParse(txt){
@@ -7667,6 +8363,12 @@ async function calQuickAdd(){
 }
 async function calUndoCreate(id){var r=await(await fetch('/api/google/calendar-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})).json();
   if(r&&r.ok){toast('Removed');loadCalendar(true);}else toast('Undo failed',3000);}
+async function calRsvp(id,resp){
+  var notify=confirm('Notify the organizer of your response?');
+  toast('Responding…');
+  var r=await(await fetch('/api/google/calendar-rsvp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,response:resp,sendUpdates:notify?'all':'none'})})).json();
+  if(r&&r.ok){toast({accepted:'Going &#10003;',tentative:'Maybe &#10003;',declined:'Declined &#10003;'}[resp]||'Done');calClosePop();loadCalendar(true);}
+  else toast('Failed: '+((r||{}).error||'?'),4000);}
 
 // ---- event popover detail ---------------------------------------------------
 function calOpenEvent(id,ev){
@@ -7677,11 +8379,31 @@ function calOpenEvent(id,ev){
   var when=e.allDay?e._s.toLocaleDateString([],{weekday:'long',month:'long',day:'numeric'})+' · all-day'
     :e._s.toLocaleDateString([],{weekday:'long',month:'short',day:'numeric'})+'  ·  '+calHM(e._s)+' – '+calHM(e._e);
   var guests=(e.attendees||[]).filter(function(a){return a.email;});
+  var myStatus=calMyStatus(e);
+  var isGuest=guests.some(function(a){return a.self;})&&!e._mine;
+  var glist='';
+  if(guests.length){
+    var counts={accepted:0,declined:0,tentative:0,needsAction:0};
+    guests.forEach(function(a){counts[a.status||'needsAction']=(counts[a.status||'needsAction']||0)+1;});
+    var summ=[];if(counts.accepted)summ.push(counts.accepted+' yes');if(counts.declined)summ.push(counts.declined+' no');
+    if(counts.tentative)summ.push(counts.tentative+' maybe');if(counts.needsAction)summ.push(counts.needsAction+' awaiting');
+    glist='<div class="pm"><span class="ic">&#128101;</span><span>'+guests.length+' guest'+(guests.length>1?'s':'')
+      +(summ.length?' · '+e2(summ.join(', ')):'')+'</span></div>'
+      +'<div class="cal-pguests">'+guests.slice(0,8).map(function(a){
+        var cls=a.status==='accepted'?'ok':a.status==='declined'?'no':a.status==='tentative'?'maybe':'';
+        return '<span class="cal-gchip sm '+cls+'">'+e2(a.name||a.email)+(a.self?' (you)':'')+'</span>';}).join('')
+      +(guests.length>8?'<span class="cal-gchip sm">+'+(guests.length-8)+'</span>':'')+'</div>';
+  }
+  var rsvp=isGuest?'<div class="cal-rsvp"><span>Going?</span>'
+    +'<button class="cal-rb'+(myStatus==='accepted'?' on':'')+'" onclick="calRsvp(\''+e.id+'\',\'accepted\')">Yes</button>'
+    +'<button class="cal-rb'+(myStatus==='tentative'?' on':'')+'" onclick="calRsvp(\''+e.id+'\',\'tentative\')">Maybe</button>'
+    +'<button class="cal-rb'+(myStatus==='declined'?' on':'')+'" onclick="calRsvp(\''+e.id+'\',\'declined\')">No</button></div>':'';
   var pop=document.createElement('div');pop.className='cal-pop';
   pop.innerHTML='<div class="ph" style="border-left-color:'+calColor(e)+'"><div class="pt">'+e2(e.summary)+'</div>'
     +'<div class="pm"><span class="ic">&#128197;</span><span>'+e2(when)+(e.recurring?' · repeats':'')+'</span></div>'
     +(e.location?'<div class="pm"><span class="ic">&#128205;</span><span>'+e2(e.location)+'</span></div>':'')
-    +(guests.length?'<div class="pm"><span class="ic">&#128101;</span><span>'+guests.length+' guest'+(guests.length>1?'s':'')+'</span></div>':'')
+    +(e.hangout?'<div class="pm"><span class="ic">&#128249;</span><a href="'+e2(e.hangout)+'" target="_blank" style="color:var(--accent-light)">'+e2(e.hangout.replace(/^https?:\/\//,''))+'</a></div>':'')
+    +glist+rsvp
     +(e.description?'<div class="pdesc">'+e2(e.description)+'</div>':'')
     +'</div><div class="pbtns">'
     +(e.hangout?'<a class="mini go" href="'+e2(e.hangout)+'" target="_blank">&#128249; Join</a>':'')
@@ -7711,44 +8433,127 @@ function calCreateAt(startDate,allDay){
 }
 function calNew(){calCreateAt(null,false);} // back-compat entry
 function calEdit(id){calClosePop();var e=CAL.events.find(function(x){return x.id==id;});if(e)calEventForm(id,e);}
+
+// recurrence presets -> RRULE (or '' for none)
+var CAL_RRULE=[
+  {v:'',label:'Does not repeat'},
+  {v:'RRULE:FREQ=DAILY',label:'Daily'},
+  {v:'RRULE:FREQ=WEEKLY',label:'Weekly'},
+  {v:'RRULE:FREQ=WEEKLY;INTERVAL=2',label:'Every 2 weeks'},
+  {v:'RRULE:FREQ=MONTHLY',label:'Monthly'},
+  {v:'RRULE:FREQ=YEARLY',label:'Annually'},
+  {v:'RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR',label:'Every weekday (Mon–Fri)'}];
+function calRRuleOf(e){var rr=(e.recurrence||[]).filter(function(x){return /^RRULE/.test(x);});return rr[0]||'';}
+var CAL_CNAME={'':'Default','1':'Lavender','2':'Sage','3':'Grape','4':'Flamingo','5':'Banana','6':'Tangerine','7':'Peacock','8':'Graphite','9':'Blueberry','10':'Basil','11':'Tomato'};
+
 function calEventForm(id,e){
-  var fmt=function(d){return d.getFullYear()+'-'+calPad(d.getMonth()+1)+'-'+calPad(d.getDate())+'T'+calPad(d.getHours())+':'+calPad(d.getMinutes());};
+  CAL._formId=id;
+  var dtfmt=function(d){return d.getFullYear()+'-'+calPad(d.getMonth()+1)+'-'+calPad(d.getDate())+'T'+calPad(d.getHours())+':'+calPad(d.getMinutes());};
+  var allDay=!!e.allDay;
+  var endDisp=new Date(e._e);if(allDay)endDisp.setDate(endDisp.getDate()-1); // show inclusive last day
   var dots=Object.keys(CAL_COLORS).map(function(c){
-    return '<span class="cal-cd'+(((e.colorId||'')===c)?' on':'')+'" data-c="'+c+'" style="background:'+CAL_COLORS[c]+'" onclick="calPickColor(this)"></span>';}).join('');
+    return '<span class="cal-cd'+(((e.colorId||'')===c)?' on':'')+'" data-c="'+c+'" title="'+(CAL_CNAME[c]||'')+'" style="background:'+CAL_COLORS[c]+'" onclick="calPickColor(this)"></span>';}).join('');
+  var curRR=calRRuleOf(e);var rrMatch=CAL_RRULE.some(function(o){return o.v===curRR;});
+  var rrOpts=CAL_RRULE.map(function(o){return '<option value="'+e2(o.v)+'"'+(o.v===curRR?' selected':'')+'>'+e2(o.label)+'</option>';}).join('')
+    +(!rrMatch&&curRR?'<option value="'+e2(curRR)+'" selected>Custom rule</option>':'');
+  var remVal=(e.reminders==='default'||e.reminders==null)?'default'
+    :((e.reminders&&e.reminders.length)?String(e.reminders[0].minutes):'none');
+  var remOpts=[['default','Default notification'],['none','No notification'],['0','At time of event'],['5','5 min before'],['10','10 min before'],['30','30 min before'],['60','1 hour before'],['1440','1 day before']]
+    .map(function(o){return '<option value="'+o[0]+'"'+(remVal===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('');
+  CAL._guests=(e.attendees||[]).map(function(a){return {email:a.email,name:a.name,status:a.status,optional:a.optional,self:a.self,organizer:a.organizer};});
+  var hasMeet=!!e.hangout;
   showM('<h2>'+(id?'Edit event':'New event')+'</h2>'
-    +'<div class="row"><label>Title</label><input id="evT" placeholder="Event title" value="'+e2(e.summary||'')+'"></div>'
-    +'<div class="row" style="flex-direction:row;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="evAll" style="width:auto" '+(e.allDay?'checked':'')+' onchange="calToggleAllDay()"><label style="margin:0">All day</label></div>'
-    +'<div style="display:flex;gap:10px"><div class="row" style="flex:1"><label>Start</label><input id="evS" type="datetime-local" value="'+fmt(e._s)+'"></div>'
-    +'<div class="row" style="flex:1"><label>End</label><input id="evE" type="datetime-local" value="'+fmt(e._e)+'"></div></div>'
-    +'<div class="row"><label>Location</label><input id="evL" placeholder="optional" value="'+e2(e.location||'')+'"></div>'
-    +'<div class="row"><label>Notes</label><textarea id="evD" rows="3" style="width:100%">'+e2(e.description||'')+'</textarea></div>'
-    +'<div class="row"><label>Color</label><div class="cal-color-dots" id="evC" data-c="'+e2(e.colorId||'')+'">'+dots+'</div></div>'
-    +'<div class="btns" style="display:flex;gap:8px;justify-content:flex-end">'
+    +'<div class="row"><input id="evT" class="cal-bigtitle" placeholder="Add title" value="'+e2(e.summary||'')+'"></div>'
+    +'<div class="cal-frow"><input type="checkbox" id="evAll" '+(allDay?'checked':'')+' onchange="calToggleAllDay()"><label for="evAll">All day</label></div>'
+    +'<div class="cal-when"><div class="row" style="flex:1"><label>Starts</label>'
+        +'<input id="evS" type="'+(allDay?'date':'datetime-local')+'" value="'+(allDay?calYMD(e._s):dtfmt(e._s))+'" onchange="calSyncEnd()"></div>'
+      +'<div class="row" style="flex:1"><label>Ends</label>'
+        +'<input id="evE" type="'+(allDay?'date':'datetime-local')+'" value="'+(allDay?calYMD(endDisp):dtfmt(e._e))+'"></div></div>'
+    +'<div class="row"><label>Repeat</label><select id="evRR" class="cal-fsel">'+rrOpts+'</select></div>'
+    +'<div class="row"><label>Guests</label>'
+      +'<input id="evGI" class="cal-fin" placeholder="Add guest email, press Enter" onkeydown="calGuestKey(event)">'
+      +'<div class="cal-guests" id="evGL"></div></div>'
+    +'<div class="cal-frow"><input type="checkbox" id="evMeet" '+(hasMeet?'checked disabled':'')+'><label for="evMeet">'+(hasMeet?'Google Meet attached':'Add Google Meet video conferencing')+'</label></div>'
+    +'<div class="row"><label>Location</label><input id="evL" class="cal-fin" placeholder="Add location or virtual link" value="'+e2(e.location||'')+'"></div>'
+    +'<div style="display:flex;gap:10px">'
+      +'<div class="row" style="flex:1"><label>Notification</label><select id="evRem" class="cal-fsel">'+remOpts+'</select></div>'
+      +'<div class="row" style="flex:1"><label>Color</label><div class="cal-color-dots" id="evC" data-c="'+e2(e.colorId||'')+'">'+dots+'</div></div></div>'
+    +'<div class="row"><label>Description</label><textarea id="evD" rows="3" class="cal-fin" style="resize:vertical">'+e2(e.description||'')+'</textarea></div>'
+    +'<div class="btns" style="display:flex;gap:8px;justify-content:flex-end;align-items:center">'
     +(id?'<button class="btn" style="margin-right:auto" onclick="calDelete(\''+id+'\')">Delete</button>':'')
     +'<button class="btn" onclick="closeM()">Cancel</button>'
     +'<button class="btn go" onclick="calSaveEvent('+(id?'\''+id+'\'':'null')+')">'+(id?'Save':'Create')+'</button></div>');
+  calRenderGuests();
+  setTimeout(function(){var t=document.getElementById('evT');if(t&&!e.summary)t.focus();},40);
+}
+function calGuestKey(ev){
+  if(ev.key==='Enter'||ev.key===','){ev.preventDefault();calAddGuest();}
+  else if(ev.key==='Backspace'&&!ev.target.value&&CAL._guests.length){CAL._guests.pop();calRenderGuests();}
+}
+function calAddGuest(){
+  var inp=document.getElementById('evGI');if(!inp)return;
+  var v=(inp.value||'').trim().replace(/,$/,'');if(!v)return;
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)){toast('Enter a valid email',2500);return;}
+  if(CAL._guests.some(function(g){return g.email.toLowerCase()===v.toLowerCase();})){inp.value='';return;}
+  CAL._guests.push({email:v,status:'needsAction',_new:true});inp.value='';calRenderGuests();
+}
+function calRmGuest(em){CAL._guests=CAL._guests.filter(function(g){return g.email!==em;});calRenderGuests();}
+function calRenderGuests(){
+  var box=document.getElementById('evGL');if(!box)return;
+  if(!CAL._guests.length){box.innerHTML='';return;}
+  box.innerHTML=CAL._guests.map(function(g){
+    var cls=g.status==='accepted'?'ok':g.status==='declined'?'no':g.status==='tentative'?'maybe':'';
+    var dot=g.self?' (you)':g.organizer?' (organizer)':'';
+    return '<span class="cal-gchip '+cls+'" title="'+e2(g.status||'')+'">'+e2(g.name||g.email)+e2(dot)
+      +'<b onclick="calRmGuest(\''+e2(g.email).replace(/'/g,"\\'")+'\')">&times;</b></span>';}).join('');
 }
 function calPickColor(el){var box=document.getElementById('evC');box.querySelectorAll('.cal-cd').forEach(function(n){n.classList.remove('on');});
   el.classList.add('on');box.setAttribute('data-c',el.getAttribute('data-c'));}
-function calToggleAllDay(){/* visual only — inputs stay datetime-local; we read the checkbox on save */}
+function calReadInput(el){var v=el.value;if(!v)return new Date();return el.type==='date'?new Date(v+'T00:00:00'):new Date(v);}
+function calToggleAllDay(){
+  var on=document.getElementById('evAll').checked;
+  var s=document.getElementById('evS'),en=document.getElementById('evE');
+  var sd=calReadInput(s),ed=calReadInput(en);
+  var f=function(d){return d.getFullYear()+'-'+calPad(d.getMonth()+1)+'-'+calPad(d.getDate())+'T'+calPad(d.getHours())+':'+calPad(d.getMinutes());};
+  if(on){s.type='date';en.type='date';s.value=calYMD(sd);en.value=calYMD(ed);}
+  else{s.type='datetime-local';en.type='datetime-local';sd.setHours(9,0,0,0);ed=new Date(sd.getTime()+3600000);s.value=f(sd);en.value=f(ed);}
+}
+function calSyncEnd(){ // keep end > start on a start change (timed only)
+  var s=document.getElementById('evS'),en=document.getElementById('evE');if(s.type==='date')return;
+  var sd=new Date(s.value),ed=new Date(en.value);if(isNaN(sd))return;
+  if(isNaN(ed)||ed<=sd){var ne=new Date(sd.getTime()+3600000);
+    en.value=ne.getFullYear()+'-'+calPad(ne.getMonth()+1)+'-'+calPad(ne.getDate())+'T'+calPad(ne.getHours())+':'+calPad(ne.getMinutes());}
+}
 async function calSaveEvent(id){
   var t=gVal('evT'),s=gVal('evS'),en=gVal('evE');
-  if(!t||!s||!en){toast('Title + start + end required',3000);return;}
+  if(!t||!s||!en){toast('Title, start and end are required',3000);return;}
   var allDay=document.getElementById('evAll')&&document.getElementById('evAll').checked;
   var color=(document.getElementById('evC')||{getAttribute:function(){return'';}}).getAttribute('data-c')||'';
-  var payload={summary:t,location:gVal('evL'),desc:gVal('evD'),tz:CAL.tz,allDay:allDay,color:color};
+  var rr=gVal('evRR'),remSel=gVal('evRem');
+  var reminders=remSel==='default'?'default':(remSel==='none'?[]:[{method:'popup',minutes:parseInt(remSel,10)}]);
+  var attendees=(CAL._guests||[]).filter(function(g){return !g.self;}).map(function(g){return {email:g.email,optional:!!g.optional};});
+  var meet=document.getElementById('evMeet')&&document.getElementById('evMeet').checked&&!document.getElementById('evMeet').disabled;
+  var sendUpdates=attendees.length?(confirm('Email invitations / updates to '+attendees.length+' guest(s)?')?'all':'none'):'none';
+  var payload={summary:t,location:gVal('evL'),desc:gVal('evD'),tz:CAL.tz,allDay:allDay,color:color,
+    recurrence:rr,reminders:reminders,attendees:attendees,sendUpdates:sendUpdates};
+  if(meet)payload.meet=true;
   if(allDay){payload.start=s.slice(0,10);
-    var ed=new Date(en.slice(0,10)+'T00:00:00');ed.setDate(ed.getDate()+1);payload.end=calYMD(ed);}
+    var ed=new Date(en.slice(0,10)+'T00:00:00');ed.setDate(ed.getDate()+1);payload.end=calYMD(ed);} // end exclusive
   else{payload.start=calLocalISO(new Date(s));payload.end=calLocalISO(new Date(en));}
   toast(id?'Saving…':'Creating…');
   var url=id?'/api/google/calendar-update':'/api/google/calendar-create';
   if(id)payload.id=id;
   var r=await(await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
-  if(r&&!r.error){closeM();toast(id?'Saved &#10003;':'Created &#10003;');loadCalendar(true);}
+  if(r&&!r.error&&r.ok!==false){closeM();toast(id?'Saved &#10003;':(meet?'Created with Meet &#10003;':'Created &#10003;'));loadCalendar(true);}
   else toast('Failed: '+((r||{}).error||'?'),5000);
 }
 async function calDelete(id){
-  var e=CAL.events.find(function(x){return x.id==id;});var snap=e?JSON.parse(JSON.stringify({summary:e.summary,start:e.allDay?calYMD(e._s):calLocalISO(e._s),end:e.allDay?calYMD(e._e):calLocalISO(e._e),allDay:e.allDay,location:e.location,desc:e.description,color:e.colorId,tz:CAL.tz})):null;
+  var e=CAL.events.find(function(x){return x.id==id;});
+  var snap=e?JSON.parse(JSON.stringify({summary:e.summary,
+    start:e.allDay?calYMD(e._s):calLocalISO(e._s),end:e.allDay?calYMD(e._e):calLocalISO(e._e),
+    allDay:e.allDay,location:e.location,desc:e.description,color:e.colorId,tz:CAL.tz,
+    recurrence:calRRuleOf(e),
+    attendees:(e.attendees||[]).filter(function(a){return !a.self;}).map(function(a){return {email:a.email,optional:a.optional};})})):null;
   closeM();calClosePop();
   var r=await(await fetch('/api/google/calendar-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})).json();
   if(r&&r.ok){
@@ -7780,11 +8585,11 @@ function calEvMouseDown(ev,id){
   CAL.drag={mode:'pending-move',id:id,node:node,col:col,grabT:calPxToTime(col,ev.clientY),e:e,dur:(e._e-e._s)};
   document.addEventListener('mousemove',calDragMove);document.addEventListener('mouseup',calDragUp);
 }
-function calResizeStart(ev,id){
+function calResizeStart(ev,id,edge){
   ev.stopPropagation();if(ev.button!==0)return;
   var node=ev.target.closest('.cal-ev');var col=node.closest('.cal-col');
   var e=CAL.events.find(function(x){return x.id==id;});if(!e)return;
-  CAL.drag={mode:'resize',id:id,node:node,col:col,e:e};
+  CAL.drag={mode:'resize',edge:edge||'bottom',id:id,node:node,col:col,e:e};
   document.addEventListener('mousemove',calDragMove);document.addEventListener('mouseup',calDragUp);
 }
 function calDragMove(ev){
@@ -7808,8 +8613,14 @@ function calDragMove(ev){
     ns.setMinutes(mins);d.newStart=ns;d.newEnd=new Date(ns.getTime()+d.dur);d.col=col;
     calDrawGhost(col,ns,d.newEnd);
   }else if(d.mode=='resize'){
-    var te=calPxToTime(col,ev.clientY);if(te<=d.e._s)te=new Date(d.e._s.getTime()+900000);
-    d.newEnd=te;calDrawGhost(d.col,d.e._s,te);
+    var tt=calPxToTime(d.col,ev.clientY);
+    if(d.edge=='top'){
+      if(tt>=d.e._e)tt=new Date(d.e._e.getTime()-900000); // keep >= 15m
+      d.newStart=tt;calDrawGhost(d.col,tt,d.e._e);
+    }else{
+      if(tt<=d.e._s)tt=new Date(d.e._s.getTime()+900000);
+      d.newEnd=tt;calDrawGhost(d.col,d.e._s,tt);
+    }
   }
 }
 function calDrawGhost(col,a,b){
@@ -7836,10 +8647,11 @@ async function calDragUp(ev){
   if((d.mode=='move'||d.mode=='resize')&&(d.newStart||d.newEnd)){
     var payload={id:d.id,tz:CAL.tz};
     if(d.mode=='move'){payload.start=calLocalISO(d.newStart);payload.end=calLocalISO(d.newEnd);}
+    else if(d.edge=='top'){payload.start=calLocalISO(d.newStart);}
     else{payload.end=calLocalISO(d.newEnd);}
     toast('Updating…');
     var r=await(await fetch('/api/google/calendar-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
-    if(r&&r.ok){toast('Moved &#10003;');loadCalendar(true);}else toast('Update failed: '+((r||{}).error||'?'),4000);
+    if(r&&r.ok){toast(d.mode=='move'?'Moved &#10003;':'Resized &#10003;');loadCalendar(true);}else toast('Update failed: '+((r||{}).error||'?'),4000);
   }
 }
 
@@ -7881,7 +8693,7 @@ function calKeyHandler(e){
     return;}
   if(k=='Enter'){if(CAL.selEvId){e.preventDefault();calOpenEvent(CAL.selEvId,null);}return;}
   if(k=='e'||k=='E'){if(CAL.selEvId){e.preventDefault();calEdit(CAL.selEvId);}return;}
-  if(k=='Backspace'||k=='Delete'){if(CAL.selEvId){e.preventDefault();calDelete(CAL.selEvId);}return;}
+  if(k=='Backspace'||k=='Delete'){if(CAL.selEvId){e.preventDefault();if(confirm('Delete this event?'))calDelete(CAL.selEvId);}return;}
 }
 document.addEventListener('keydown',calKeyHandler);
 
@@ -8566,33 +9378,26 @@ function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attache
   +'<button class="mini" style="color:#f85149" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
   +'</span></div>';}
 function renderFocus(s){
-  if(!SESSBIG||!s.find(x=>x.name==SESSBIG))SESSBIG=s[0].name;
-  const big=s.find(x=>x.name==SESSBIG), littles=s.filter(x=>x.name!=SESSBIG);
-  let h='<div class="focuswrap" style="grid-column:1/-1">';
-  h+='<div class="bigsess">'+bigHead(big)+'<iframe class="stframe" src="/term?name='+encodeURIComponent(big.name)+'"></iframe></div>';
-  if(littles.length){
-    h+='<div class="dock">'+littles.map((x,i)=>
-      '<div class="dtile" data-name="'+esc(x.name)+'" onmouseenter="peek(\''+esc(x.name)+'\')" onmouseleave="schedUnpeek()" onclick="swapBig(\''+esc(x.name)+'\')" title="click → swap into the big · hover → peek (usable)">'
-      +'<div class="dhead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span><span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)
-        +'<span class="stbtns" onclick="event.stopPropagation()">'
-        +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
-        +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
-        +'<button class="mini" style="color:#f85149" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
-        +'</span></div>'
-      +'<pre class="dsnap" id="snap_'+i+'">…</pre></div>').join("")+'</div>';
-  } else h+='<div class="dock"><div class="meta" style="padding:14px 8px">Only one session open — start another with ＋ New and it docks here.</div></div>';
-  return h+'</div>';
+  if(!SESSBIG||!s.find(function(x){return x.name==SESSBIG;}))SESSBIG=s[0].name;
+  var big=s.find(function(x){return x.name==SESSBIG;});
+  // Switcher chips so you can still change which session is big WITHOUT a docked grid.
+  var chips=s.map(function(x){
+    var on=(x.name==SESSBIG);
+    return '<button class="mini'+(on?' go':'')+'" title="'+e2(x.label||x.name)+'" onclick="focusBig(\''+esc(x.name)+'\')">'
+      +(x.attached?'🟢 ':'⚪ ')+e2(x.label||x.name)+'</button>';
+  }).join('');
+  var h='<div class="focusonly">'
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">'+chips+'</div>'
+    +'<div class="bigsess">'+bigHead(big)+'<iframe class="stframe" src="/term?name='+encodeURIComponent(big.name)+'"></iframe></div>'
+    +'</div>';
+  return h;
 }
-function swapBig(name){if(name==SESSBIG)return;SESSBIG=name;unpeekNow();PEEKSUP=Date.now();loadSessions(true);syncHash();}
-function peek(name){if(Date.now()-PEEKSUP<700)return;clearTimeout(PEEKT);if(PEEKEL&&PEEKEL.dataset.name==name)return;unpeekNow();
-  const x=SESSDATA.find(s=>s.name==name)||{};const lbl=x.label||name;
-  const ov=document.createElement('div');ov.id='peek';ov.className='peekpanel';ov.dataset.name=name;
-  ov.innerHTML='<div class="sthead"><span class="stdot">🔎</span><span class="stname" title="'+esc(name)+'">'+esc(lbl)+' — peek (click into it to use)</span><span class="stbtns"><button class="mini go" onclick="swapBig(\''+esc(name)+'\')">⤢ make big</button></span></div>'
-    +'<iframe class="stframe" src="/term?name='+encodeURIComponent(name)+'"></iframe>';
-  ov.onmouseenter=()=>clearTimeout(PEEKT); ov.onmouseleave=schedUnpeek;
-  document.body.appendChild(ov); PEEKEL=ov;}
-function schedUnpeek(){clearTimeout(PEEKT);PEEKT=setTimeout(unpeekNow,220);}
-function unpeekNow(){clearTimeout(PEEKT);if(PEEKEL){PEEKEL.remove();PEEKEL=null;}}
+function focusBig(name){ if(name==SESSBIG)return; SESSBIG=name; loadSessions(true); if(typeof syncHash==='function')syncHash(); }
+// littles dock removed — keep no-op/alias stubs so any stray caller stays defined.
+function unpeekNow(){}
+function swapBig(n){focusBig(n);}
+function peek(){}
+function schedUnpeek(){}
 function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="cursor:default"><h3><span title="'+esc(x.name)+'">'+(x.attached?"🟢 ":"⚪ ")+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+badge(x.attached?"running":"paused")+'</h3>'
   +'<div class="meta">active '+ago(now-x.activity)+' ago</div>'
   +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="openInSessions(\''+esc(x.name)+'\')">▶ open</button>'
@@ -9194,12 +9999,14 @@ function navSeedGoogle(){   // one-time: tuck the live Google lenses into a "Goo
 setupNavDnD();renderNav();navSeedGoogle();
 // ===== Global sessions taskbar (desktop): live dock of ALL project sessions + gold "done" pulse + hover preview =====
 var SB={prev:{},done:{},hover:null,popHover:false,pvTimer:null,baseTitle:document.title};
+SB.protected={}; SB.holdT=null;
 function sbDesktop(){return window.matchMedia('(min-width:901px)').matches;}
 async function sbPoll(){
   var bar=document.getElementById('sessbar'); if(!bar)return;
   if(!sbDesktop()){bar.innerHTML='';return;}
   var r; try{ r=await(await fetch('/api/session-bar')).json(); }catch(e){ return; }
   var list=r.sessions||[], names={};
+  SB.list=list;
   list.forEach(function(s){ names[s.name]=1;
     // busy -> idle = just finished -> flag for the gold pulse, UNLESS you're already viewing it big in the
     // Sessions tab (you've obviously seen it).
@@ -9225,28 +10032,64 @@ function sbRender(list){
   document.title=(doneCount? '\u{1F7E1} '+doneCount+' done · ':'')+SB.baseTitle;   // cue even when in another browser tab
 }
 function sbAck(name){ if(SB.done[name]){ delete SB.done[name]; var sel='.sb-tile[data-n="'+((window.CSS&&CSS.escape)?CSS.escape(name):name)+'"]'; var t=document.querySelector(sel); if(t)t.classList.remove('done'); } }
-function sbHover(name,el){ SB.hover=name; sbAck(name); sbShowPreview(name,el); }
-function sbLeave(){ SB.hover=null; setTimeout(function(){ if(!SB.hover && !SB.popHover){ var p=document.getElementById('sessprev'); if(p)p.style.display='none'; clearInterval(SB.pvTimer); } },200); }
-function sbShowPreview(name,anchor){
+// --- taskbar blow-up panel: a FULL interactive terminal + actions (b3) ---
+function sbHover(name,el){ SB.hover=name; sbAck(name); clearTimeout(SB.holdT); sbShowPanel(name,el); }
+function sbLeave(){ SB.hover=null;
+  clearTimeout(SB.holdT);
+  SB.holdT=setTimeout(function(){
+    if(!SB.hover && !SB.popHover){ var p=document.getElementById('sessprev'); if(p)p.style.display='none'; clearInterval(SB.pvTimer); }
+  },260); }
+function sbProtected(name){ var s=(SB.list||[]).find(function(x){return x.name===name;}); return s?!!s.protected:false; }
+function sbShowPanel(name,anchor){
   var p=document.getElementById('sessprev'); if(!p)return;
-  var r=anchor.getBoundingClientRect(), w=Math.min(620,window.innerWidth*0.82);
-  p.style.display='block';
+  var prot=sbProtected(name);
+  var r=anchor.getBoundingClientRect(), w=Math.min(880,window.innerWidth*0.86);
+  p.style.display='flex';
   p.style.left=Math.max(8,Math.min(r.left,window.innerWidth-w-8))+'px';
   p.style.bottom=(window.innerHeight-r.top+8)+'px';
-  p.onmouseenter=function(){SB.popHover=true;}; p.onmouseleave=function(){SB.popHover=false;sbLeave();};
-  p.innerHTML='<div class="sb-pvh"><b>'+e2(name)+'</b><span class="sb-pvbusy" id="sbPvBusy"></span>'
-    +'<span style="margin-left:auto"><button class="mini go" onclick="sbOpen(\''+esc(name)+'\')">Open ↗</button></span></div>'
-    +'<pre id="sbPvBody">loading…</pre>';
-  sbRefreshPreview(name);
+  p.onmouseenter=function(){SB.popHover=true;clearTimeout(SB.holdT);};
+  p.onmouseleave=function(){SB.popHover=false;sbLeave();};
+  var acts='<button class="mini" title="usage / cost for this session" onclick="sbUsage(\''+esc(name)+'\')">📊 Usage</button>'
+    +'<button class="mini" title="open in a new browser tab" onclick="sbNewTab(\''+esc(name)+'\')">↗ New tab</button>';
+  if(!prot){
+    acts+='<button class="mini sb-exit" title="graceful exit: writes a handoff + resume pointer, then closes" onclick="sbExit(\''+esc(name)+'\')">⏏ Exit</button>'
+      +'<button class="mini sb-kill" title="force kill: NO handoff, NO resume notes" onclick="sbKill(\''+esc(name)+'\')">✕ Kill</button>';
+  }
+  // Only rebuild the shell when the panel is for a NEW session (so the iframe keeps its scroll/focus on re-hover).
+  if(p.dataset.name!==name){
+    p.dataset.name=name;
+    p.innerHTML='<div class="sb-pvh"><b title="'+e2(name)+'">'+e2(name)+'</b>'
+      +'<span class="sb-pvbusy" id="sbPvBusy"></span>'
+      +'<span class="sb-acts">'+acts+'<button class="mini go" title="open big in the Sessions tab" onclick="sbOpen(\''+esc(name)+'\')">⤢ Focus</button></span></div>'
+      +'<iframe class="sb-pvframe" id="sbPvFrame" src="/term?name='+encodeURIComponent(name)+'" allow="clipboard-read; clipboard-write"></iframe>';
+  } else {
+    var a=p.querySelector('.sb-acts'); if(a) a.innerHTML=acts+'<button class="mini go" title="open big in the Sessions tab" onclick="sbOpen(\''+esc(name)+'\')">⤢ Focus</button>';
+  }
+  sbRefreshBusy(name);
   clearInterval(SB.pvTimer);
-  SB.pvTimer=setInterval(function(){ if(SB.hover===name||SB.popHover) sbRefreshPreview(name); else clearInterval(SB.pvTimer); },1500);
+  SB.pvTimer=setInterval(function(){ if(SB.hover===name||SB.popHover) sbRefreshBusy(name); else clearInterval(SB.pvTimer); },1500);
 }
-async function sbRefreshPreview(name){
-  try{ var r=await(await fetch('/api/term-snapshot?name='+encodeURIComponent(name)+'&lines=44')).json();
-    var b=document.getElementById('sbPvBody'); if(b) b.textContent=(r.text||'(no output)').slice(-4000);
-    var bz=document.getElementById('sbPvBusy'); if(bz){ var busy=SB.prev[name]; bz.textContent=busy?'working':'idle';
-      bz.style.background=busy?'rgba(var(--accent-rgb),.2)':'#0008'; bz.style.color=busy?'var(--accent)':'var(--dim)'; }
-  }catch(e){}
+function sbRefreshBusy(name){
+  var bz=document.getElementById('sbPvBusy'); if(!bz)return;
+  var busy=SB.prev[name];
+  bz.textContent=busy?'working':'idle';
+  bz.style.background=busy?'rgba(var(--accent-rgb),.2)':'#0008';
+  bz.style.color=busy?'var(--accent)':'var(--dim)';
+}
+function sbHide(){ var p=document.getElementById('sessprev'); if(p){p.style.display='none';p.dataset.name='';} clearInterval(SB.pvTimer); SB.hover=null; SB.popHover=false; }
+// --- actions ---
+function sbUsage(name){ sbHide(); if(typeof openInSessions==='function') openInSessions(name); if(typeof gotoLens==='function') gotoLens('usage'); }
+function sbNewTab(name){ window.open('/term?name='+encodeURIComponent(name),'_blank'); }
+async function sbExit(name){
+  if(typeof toast==='function') toast('Sending /endsession to '+esc(name)+' — writes a handoff, updates the CLAUDE.md resume pointer, then closes.',6500);
+  try{ await fetch('/api/close-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,force:false})}); }catch(e){}
+  sbHide(); setTimeout(sbPoll,1200);
+}
+async function sbKill(name){
+  if(!confirm('Force-kill '+name+'?\n\nThis SKIPS the handoff — no /endsession, no resume notes.'))return;
+  try{ var r=await(await fetch('/api/close-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,force:true})})).json();
+    if(r&&r.protected&&typeof toast==='function')toast(r.error||'Protected session — cannot be killed.',6000); }catch(e){}
+  sbHide(); setTimeout(sbPoll,700);
 }
 function sbClick(name){ sbAck(name); sbOpen(name); }
 function sbOpen(name){ sbAck(name); var p=document.getElementById('sessprev'); if(p)p.style.display='none'; if(typeof openInSessions==='function') openInSessions(name); }

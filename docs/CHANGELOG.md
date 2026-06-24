@@ -3,6 +3,31 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.17.0 -- 2026-06-24
+- REBUILD (email + calendar + sessions, the big one): integrated a 10-agent research/build of the whole
+  Gmail/Calendar/Sessions UX, then QA-reviewed and PROVED it before shipping.
+  - GMAIL READER: draggable, persisted list|reading resizer; attachment strip with inline image previews,
+    Quick Look, and download (new /api/google/gmail-att bytes endpoint); threaded reader.
+  - WYSIWYG COMPOSER (gmc-*): contenteditable rich text (full toolbar + shortcuts), paste that retains
+    formatting AND images (sanitized to email-safe HTML), inline images embedded via cid + drag-drop file
+    attachments, signature, draft autosave. Backend gmail_send REBUILT (stdlib email.*) -> multipart/mixed >
+    related > alternative with cid inline images, file attachments, text fallback, In-Reply-To/References.
+    PROVEN by a live carsearch round-trip: received MIME = mixed>related>alternative(text+html w/ <h2>/<ul>) +
+    inline image (Content-ID) + downloadable attachment. Renders correctly on the recipient end.
+  - CALENDAR: richer events (attendees/recurrence/reminders/Meet), drag create/resize/move, NL quick-add,
+    inline edit, RSVP (/api/google/calendar-rsvp), delete + undo. Backend create/update/delete verified live.
+  - SESSIONS TASKBAR is now the primary session surface: hover a tile -> full interactive terminal blow-up
+    with Usage / New-tab / Graceful-exit / Kill; Sessions-lens "littles" removed (lens shows only the focused
+    big; fixes the big-floating-over-usage bug); acknowledge-on-view preserved.
+  - QA fixes before ship: calendar key-delete now confirms (was instant data loss); calendar email-before-map
+    ordering (RSVP buttons); archive/trash no longer auto-marks the next thread read; removed the fake
+    browser-only "send later" (silent loss); reply/forward now sanitize quoted inbound HTML; label-lane
+    refresh no longer jumps back to Inbox.
+- NEW (session watchdog): cc-session-watchdog.py + a launchd timer (45s) nudges any watched Claude session
+  that is IDLE and stalled on a trailing API-error line ("continue"), riding through API outages until they
+  clear (persistence + cooldown; opt-in watchlist; anchored detection so it never fires on chat that merely
+  mentions errors). Ships as a framework file; each deployment enables its own per-user launchd.
+
 ## 0.16.1 -- 2026-06-24
 - FIX (sessions taskbar): opening/viewing a session big in the Sessions tab now clears that session's gold
   "done" pulse in the bottom taskbar immediately (you're obviously seeing it) -- and a session that finishes
