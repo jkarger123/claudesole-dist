@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.10 -- 2026-06-24
+- FIX (Smart reply addressed the reply to YOU): it replied to the newest message in the thread, but if you
+  sent the last message, that's you -- so the draft went To: yourself and the "facts" bullets described you.
+  Now it targets the latest message from the COUNTERPARTY (the person you're replying to), falls back to the
+  address you last wrote to if the whole thread is yours, and the AI prompt is explicit about writing AS the
+  owner TO the other party. The 360 bundle/dossier now profiles the counterparty, not the account owner.
+- FIX (no Drafts folder): added a "Drafts" lane to the Gmail rail (in:drafts) -- staged Smart Reply drafts
+  (and any draft) are now reachable.
+- FIX (sessions taskbar tiles jumping): the bar rebuilt every poll and re-sorted, so tiles moved and the one
+  under your cursor got destroyed mid-hover. Tiles now sort by a STABLE key and the DOM is rebuilt only when
+  the set of sessions changes (busy/done state applied in place) -- they stay put and stay clickable.
+- FIX (attachment "downloads but nothing shows up"): files in iCloud-backed deliverables/ can be EVICTED
+  (dataless placeholder), so the server read 0/partial bytes and served an empty file. /api/file-get now
+  forces the bytes back from iCloud (brctl download) and waits, retries on a short read, and returns a clear
+  503 instead of an empty file if iCloud hasn't faulted it in yet.
+
 ## 0.21.9 -- 2026-06-24
 - FIX (email cut off — the ACTUAL root cause, finally): it was never the email height. `.gm-thread` is a
   flex column; its message cards had no `flex-shrink:0`, so a tall email got SHRUNK to fit the pane and
