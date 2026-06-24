@@ -161,6 +161,22 @@ def _materialize_icloud(path, max_wait=10):
     except Exception: pass
     return _icloud_state(os.path.realpath(path)) == "local"
 
+def _read_file_materializing(path, timeout=22):
+    """Read a file's bytes, MATERIALIZING an iCloud-evicted file via the read itself -- on macOS, opening an
+    on-demand (dataless) file makes the FileProvider fault it in. The read BLOCKS until the bytes arrive, so we
+    do it in a daemon thread and join with a timeout: if it hasn't finished we return None (caller -> 503, the
+    UI retries; the orphan thread keeps the download going so a later retry finds it local). This works where
+    `brctl download` does not in a headless/login-session context, because the kernel read path is what
+    triggers iCloud materialization. Returns bytes, or None on timeout/error."""
+    box = {}
+    def _rd():
+        try:
+            with open(path, "rb") as f: box["b"] = f.read()
+        except Exception as e: box["e"] = str(e)
+    t = threading.Thread(target=_rd, daemon=True); t.start(); t.join(timeout)
+    if t.is_alive(): return None        # still downloading
+    return box.get("b")
+
 # ---- Mesh comms inbox: a persistent, UI-visible log of every inter-chief message (in + out). The TUI
 # screen-scrape relay (chief_say/chief_broadcast) is best-effort and invisible when a chief is busy or on a
 # modal; this inbox is the durable source of truth the Comms lens renders, independent of TUI state. ----
@@ -5735,17 +5751,16 @@ class H(BaseHTTPRequestHandler):
             st = _icloud_state(real)
             if st == "absent": return self._s(404, "not found")          # fast -- never a materialize wait
             if st == "evicted":
-                # pull bytes local FIRST (bounded). NEVER open().read() an evicted file: it blocks faulting
-                # the file in and hangs the request -> proxy 502/504 / browser "site wasn't available".
-                _materialize_icloud(ab, max_wait=9)
-                if _icloud_state(os.path.realpath(ab)) != "local":
-                    return self._s(503, "file is still syncing down from iCloud -- click Download again in a few seconds")
+                try: subprocess.Popen(["brctl", "download", real], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception: pass                                    # non-blocking nudge; the READ below is what actually faults it in
             import mimetypes
             ct = mimetypes.guess_type(ab)[0] or "application/octet-stream"
-            try:
-                with open(ab, "rb") as f: b = f.read()
-            except Exception: return self._s(404, "not found")
-            if not b: return self._s(503, "file is still syncing down from iCloud -- click Download again in a few seconds")
+            # read in a bounded thread: for a local file this is instant; for an evicted file the read itself
+            # materializes it from iCloud (the reliable mechanism) without hanging the server forever.
+            b = _read_file_materializing(ab, timeout=22)
+            if b is None:
+                return self._s(503, "file is still downloading from iCloud -- click Download again in a few seconds")
+            if not b: return self._s(503, "file is still downloading from iCloud -- click Download again in a few seconds")
             self.send_response(200); self.send_header("Content-Type", ct)
             self.send_header("Content-Length", str(len(b)))
             self.send_header("Content-Disposition", 'attachment; filename="%s"' % os.path.basename(ab).replace('"', ''))

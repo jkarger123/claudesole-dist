@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.19 -- 2026-06-24
+- FIX (evicted file "preparing… pulling… but never downloads"): `brctl download` does NOT materialize an
+  iCloud-evicted file in the Studio's headless login-session context. The reliable mechanism is the READ
+  itself -- opening a dataless file makes macOS fault it in. We now read in a bounded daemon thread (instant
+  for local files; for evicted, the read pulls it down from iCloud), with `brctl` only as a non-blocking
+  nudge. If it doesn't finish in ~22s we return 503 and the Download button retries (the orphan read keeps
+  downloading, so a retry finds it local). This is the actual fetch-from-iCloud fix.
+
 ## 0.21.18 -- 2026-06-24
 - FIX (502 on download): a MISSING file spent 10s running brctl before answering (it conflated 'absent' with
   'evicted'), and that delay -- plus the brief server-restart window -- made Tailscale serve return 502.
