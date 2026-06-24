@@ -125,11 +125,11 @@ def projpath(rel):
     if not (p == PROJECT or p.startswith(PROJECT + "/")): raise ValueError("bad path")
     return p
 
-def _materialize_icloud(path):
+def _materialize_icloud(path, max_wait=6):
     """deliverables/ lives in iCloud; iCloud EVICTS file bytes to save space, leaving a dataless placeholder
-    (`.<name>.icloud`). Reading that yields 0/partial bytes -> a download that 'looks like it works but is
-    empty'. Force the bytes back to local disk (brctl download) and wait. Returns True once present+non-empty.
-    No-op for normal local files."""
+    (`.<name>.icloud`). Reading that yields 0/partial bytes. Trigger a download (brctl) and wait UP TO
+    max_wait seconds. Bounded on purpose: a long block here times out the proxy/browser ('site wasn't
+    available'). Returns True once present+non-empty. No-op for already-local files."""
     try:
         real = os.path.realpath(path)
         d, n = os.path.split(real)
@@ -140,9 +140,10 @@ def _materialize_icloud(path):
                 if os.path.getsize(real) > 0: return True
             except Exception: return True
         for cmd in (["brctl", "download", real], ["/usr/bin/brctl", "download", real]):
-            try: subprocess.run(cmd, capture_output=True, timeout=30); break
+            try: subprocess.run(cmd, capture_output=True, timeout=min(max_wait, 10)); break
             except Exception: continue
-        for _ in range(60):   # up to ~15s for iCloud to fault the file in
+        deadline = time.time() + max_wait
+        while time.time() < deadline:
             if os.path.isfile(real) and not os.path.exists(placeholder):
                 try:
                     if os.path.getsize(real) > 0: return True
@@ -5681,22 +5682,20 @@ class H(BaseHTTPRequestHandler):
             try: ab = projpath(q.get("path", [""])[0])
             except Exception: return self._s(400, "bad path")
             if _path_has_secret(ab): return self._s(403, "forbidden")   # never serve secrets/keys via download
-            _materialize_icloud(ab)                                     # iCloud-evicted files: pull bytes local first
+            real = os.path.realpath(ab)
+            # Only pay the iCloud-fetch wait when the bytes aren't already local (a just-made file IS local) --
+            # and keep it SHORT so the request returns before the proxy/browser times out ("site wasn't available").
+            try: have = os.path.isfile(real) and os.path.getsize(real) > 0
+            except Exception: have = False
+            if not have: _materialize_icloud(ab, max_wait=6)
             if not os.path.isfile(ab): return self._s(404, "not found")
             import mimetypes
             ct = mimetypes.guess_type(ab)[0] or "application/octet-stream"
             try:
                 with open(ab, "rb") as f: b = f.read()
             except Exception: return self._s(404, "not found")
-            try: want = os.path.getsize(ab)
-            except Exception: want = len(b)
-            if want and len(b) < want:                                 # partial/evicted read -> materialize + retry
-                _materialize_icloud(ab)
-                try:
-                    with open(ab, "rb") as f: b = f.read()
-                except Exception: pass
-            if not b:   # better than silently serving an empty file ("looks like it downloads but nothing shows up")
-                return self._s(503, "file not downloaded from iCloud yet -- try again in a few seconds")
+            if not b:   # don't serve an empty file -- tell the user it's still coming from iCloud
+                return self._s(503, "file is still downloading from iCloud -- try again in a few seconds")
             self.send_response(200); self.send_header("Content-Type", ct)
             self.send_header("Content-Length", str(len(b)))
             self.send_header("Content-Disposition", 'attachment; filename="%s"' % os.path.basename(ab).replace('"', ''))
@@ -5868,10 +5867,22 @@ class H(BaseHTTPRequestHandler):
             try: ab = projpath(body.get("path", ""))
             except: return self._s(400, "{}")
             try:
-                _materialize_icloud(ab)     # pull the bytes back from iCloud first so Finder shows a real file, not a cloud stub
-                ab = os.path.realpath(ab)   # resolve symlinks -> reveal at the REAL location (the iCloud container), not the deliverables/ symlink
-                subprocess.Popen(["open", ab] if os.path.isdir(ab) else ["open", "-R", ab])
-                return self._s(200, json.dumps({"ok": True}))
+                _materialize_icloud(ab, max_wait=6)   # pull bytes down so the file is real on every synced device
+                real = os.path.realpath(ab)
+                # If the file lives in the iCloud container it is ALREADY synced to the operator's other Apple
+                # devices (iMac/MacBook) -- compute its iCloud Drive location so we can tell them where to look
+                # (a web server cannot open Finder on a DIFFERENT computer; iCloud is how it reaches their Mac).
+                icloud_path = ""
+                try:
+                    if real.startswith(ICLOUD_ROOT + "/"):
+                        icloud_path = "iCloud Drive ▸ " + os.path.relpath(real, ICLOUD_ROOT).replace("/", " ▸ ")
+                except Exception: pass
+                opened = False
+                try:
+                    subprocess.Popen(["open", real] if os.path.isdir(real) else ["open", "-R", real]); opened = True
+                except Exception: pass
+                return self._s(200, json.dumps({"ok": True, "opened": opened, "icloud": icloud_path,
+                                                "name": os.path.basename(real)}))
             except Exception as e: return self._s(200, json.dumps({"ok": False, "err": str(e)}))
         if u.path == "/api/icloud-relink":  return self._s(200, json.dumps(icloud_relink_all()))
         if u.path == "/api/icloud-ageoff":  return self._s(200, json.dumps(icloud_age_off(body.get("days"))))
@@ -7232,7 +7243,7 @@ async function loadModules(rel){
       const TIER={icloud:['&#9729; iCloud','#58a6ff','recent -- synced to your Apple devices, opens in iCloud'],ssd:['&#128452; SSD','#c9a227','archived (>90d) on the SSD, off iCloud -- still opens from here'],local:['',''," "]};
       const frow=f=>{const t=TIER[f.tier]||['',''];const url='/api/file-get?path='+encodeURIComponent(f.rel);return '<div class="sess"><span class="lbl" title="tap to view/download"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600">📄 '+esc(f.name)+'</a>'+(t[0]?(' <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'):'')+' <span class="sub">· '+fmtBytes(f.size)+' · '+new Date(f.mtime*1000).toLocaleString()+(f.sub?(' · '+esc(f.sub)):'')+'</span></span>'
         +'<a class="mini go" href="'+url+'" download="'+esc(f.name)+'" style="text-decoration:none" title="download to THIS device">&#8595; Download</a>'
-        +'<button class="mini" title="open the folder in Finder ON THIS MAC and select the file (downloads it from iCloud first)" onclick="reveal(\''+esc(f.rel)+'\')">&#128193; Reveal in Finder</button></div>';};
+        +'<button class="mini" title="show where this file is in your iCloud Drive (it syncs to all your Apple devices)" onclick="reveal(\''+esc(f.rel)+'\')">&#128205; Find this file</button></div>';};
       h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>&#128193; Files made for you in this folder <span class="sub">('+MODFILES.length+')</span></span></h3>'
         +'<div class="convscroll">'+MODFILES.map(frow).join("")+'</div>'
         +'<div class="meta" style="margin-top:6px">Agents save deliverables here. In iCloud mode, recent files live in iCloud (synced to your devices, &#9729;); after 90 days they age off to the SSD (&#128452;) to free space &mdash; still listed + openable here.</div></div>';
@@ -7528,7 +7539,7 @@ function renderFiles(){
         +'<span style="flex:1;min-width:220px"><a href="/api/file-get?path='+encodeURIComponent(f.rel)+'" target="_blank" rel="noopener" style="color:inherit;font-weight:700" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'
         +'<div class="sub" style="margin-top:2px">'+(f.module?('&#128194; '+esc(f.module)+' &middot; '):'')+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</div></span>'
         +'<a class="mini go" href="/api/file-get?path='+encodeURIComponent(f.rel)+'" download="'+esc(f.name)+'" style="text-decoration:none" title="download to THIS device (works on your phone)">&#8595; Download</a>'
-        +'<button class="mini" title="open the folder in Finder ON THIS MAC and select the file (downloads it from iCloud first) -- use this when you are sitting at the computer" onclick="reveal(\''+esc(f.rel)+'\')">&#128193; Reveal in Finder</button></div></div>';});
+        +'<button class="mini" title="show where this file is in your iCloud Drive (it syncs to all your Apple devices)" onclick="reveal(\''+esc(f.rel)+'\')">&#128205; Find this file</button></div></div>';});
   }
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';}
 function renderBrowse(){const b=BROWSE||{};
@@ -7541,7 +7552,7 @@ function renderBrowse(){const b=BROWSE||{};
   (b.dirs||[]).forEach(d=>{h+='<div class="card" style="cursor:pointer;grid-column:1/-1" onclick="loadBrowse(\''+esc(d.rel)+'\')"><b>&#128193; '+esc(d.name)+'</b> <span class="sub">folder</span></div>';});
   (b.files||[]).forEach(f=>{const url='/api/file-get?path='+encodeURIComponent(f.rel);h+='<div class="card" style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="flex:1;min-width:200px"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="sub">&middot; '+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</span></span>'
     +'<a class="mini go" href="'+url+'" download="'+esc(f.name)+'" style="text-decoration:none" title="download to THIS device">&#8595; Download</a>'
-    +'<button class="mini" title="open the folder in Finder ON THIS MAC and select the file (downloads it from iCloud first)" onclick="reveal(\''+esc(f.rel)+'\')">&#128193; Reveal in Finder</button></div></div>';});
+    +'<button class="mini" title="show where this file is in your iCloud Drive (it syncs to all your Apple devices)" onclick="reveal(\''+esc(f.rel)+'\')">&#128205; Find this file</button></div></div>';});
   if(!(b.dirs||[]).length&&!(b.files||[]).length){h+=empty('Empty folder (or only hidden/secret files).');}
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';}
 // ---- Pipeline Live-View lens (generic: renders whatever steps a node's pipeline declares) ----
@@ -10558,7 +10569,25 @@ async function resumeConv(id,fork){const c=HISTDATA.find(x=>x.id==id); if(!c)ret
   if(!r.ok){toast((fork?"Fork":"Resume")+" failed: "+(r.error||"?"),6000); return;}
   _openTerm(r);
 }
-async function reveal(p){const r=await(await fetch("/api/reveal",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:p})})).json();toast(r.ok?"Opened Finder on this Mac and selected the file (downloading it from iCloud if needed — give it a second). If you're on a different device, use Download instead.":"Couldn't open Finder on this Mac.",6500);}
+async function reveal(p){
+  var r; try{ r=await(await fetch("/api/reveal",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:p})})).json(); }catch(e){ toast("Couldn't locate the file.",4000); return; }
+  if(!r||!r.ok){ toast("Couldn't locate the file.",4000); return; }
+  var loc=r.icloud||'';
+  // A web app can't open Finder on a DIFFERENT computer. But the file is in iCloud Drive, so it's already on
+  // every Mac/iPhone/iPad signed into this iCloud -- show exactly where to find it (+ it tried Finder on the host Mac).
+  var body='<div class="cchelp"><div class="cchtop"><div class="cchicon"><i class="ph-light ph-cloud-check"></i></div>'
+    +'<div class="cchtt"><span class="ccheye">Find this file</span><h2>'+e2(r.name||'Your file')+'</h2></div></div>'
+    +'<div class="cchbody">'
+    +(loc? '<p>This file is in your <b>iCloud Drive</b> — so it’s already on every Mac, iPhone and iPad signed into this iCloud account. Open <b>Finder ▸ iCloud Drive</b> (or the Files app) and go to:</p>'
+          +'<p style="font-size:13px"><code id="revloc">'+e2(loc)+'</code></p>'
+          +'<p><button class="btn" onclick="navigator.clipboard&&navigator.clipboard.writeText(document.getElementById(\'revloc\').textContent);toast(\'Path copied\',2500)">Copy path</button></p>'
+          +'<p class="sub">It can take a moment to sync if it was just created. If you’re sitting at the Mac that made it, Finder was also opened there.</p>'
+       : '<p>Asked Finder to reveal the file on the host Mac. If you’re on a different computer, use the <b>Download</b> button instead — or it will appear in your iCloud Drive shortly.</p>')
+    +'</div>'
+    +'<div class="cchfoot"><a href="/api/file-get?path='+encodeURIComponent(p)+'" download style="margin-right:auto;color:var(--accent);font-weight:600;text-decoration:none">↓ Download instead</a>'
+    +'<button class="btn go" onclick="closeM()">Got it</button></div></div>';
+  showM(body);
+}
 // ---- Docs lens: managed CLAUDE.md blocks (ported) ----
 const _PIL=(window.CC&&window.CC.pillars)||[];
 const SCOPES=["grounded","pillars","subtools","root","all"].concat(_PIL);

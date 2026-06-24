@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.13 -- 2026-06-24
+- FIX (download "site wasn't available"): the blocking iCloud materialize (up to ~30s) was timing out the
+  proxy/browser. Now the wait is bounded (~6s) and only happens when the bytes aren't already local, so the
+  download returns promptly (and a just-created file, which is already local, downloads instantly).
+- FIX ("Reveal in Finder" useless on the operator's OTHER Macs): a web server on the host Mac cannot open
+  Finder on a different computer -- that's impossible. But deliverables live in iCloud Drive, so they ALREADY
+  sync to every Apple device on the account. The button (now "📍 Find this file") shows the exact iCloud Drive
+  location ("iCloud Drive ▸ ClaudeFather ▸ … ▸ file") with a Copy-path button and a Download fallback, and
+  still opens Finder on the host Mac if you're there. Honest + actually findable from her iMac/MacBook.
+
 ## 0.21.12 -- 2026-06-24
 - ADD ("Reveal in Finder" for iCloud files): when the browser download of an iCloud-backed deliverable is
   flaky, you can now open the file's folder in Finder ON THE MAC you're sitting at and have it selected. The
