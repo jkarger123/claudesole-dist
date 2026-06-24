@@ -4312,6 +4312,373 @@ def agency_model():
             "pipeline": pipeline, "counts": {"clients": len(clients), "partners": len(partners),
             "pipeline": len(pipeline), "tools": len(tools)}}
 
+# ======================================================================================================
+# EMAIL <-> FOLDER LINKING  (the "mail linking" layer -- additive on the shipped Gmail surface)
+# One generic Folder abstraction keyed on `rel`: an agency Client dir OR a project module. Only MANUAL
+# edges + per-thread meta persist (STATE_DIR/_mail_links.json); domains/emails/keywords are DERIVED into a
+# live Gmail query on every read (no cached message lists, never stale). Read-safety is preserved: every
+# folder view goes through gmail_list (format=metadata) which never marks mail read. PATH SAFETY: every rel
+# + every saved-attachment path is validated with projpath()/_path_has_secret before any write.
+# ======================================================================================================
+MAIL_LINKS = os.path.join(STATE_DIR, "_mail_links.json")
+_MAIL_LOCK = threading.Lock()
+_MAIL_SEEDED = [False]
+
+def _email_cfg():
+    """cc.config email_link block, with safe defaults (dormant Drive mirror, HubSpot-style 40MB guard)."""
+    c = (CC.get("email_link") or {})
+    return {"capture_policy": (c.get("capture_policy") or "received"),
+            "own_domains": [x.lower() for x in (c.get("own_domains") or []) if x],
+            "exclude_domains": [x.lower() for x in (c.get("exclude_domains") or []) if x],
+            "max_attachment_mb": float(c.get("max_attachment_mb") or 40),
+            "auto_link_threshold": int(c.get("auto_link_threshold") or 2),
+            "drive_mode": bool(c.get("drive_mode"))}
+
+def _mail_folder_default():
+    return {"emails": [], "domains": [], "keywords": [], "pinnedThreads": [], "hiddenThreads": [],
+            "threadMeta": {}, "driveFolderId": "", "updated": 0}
+
+def _mail_links_load():
+    """Load the link registry (IDEAS pattern). Seeds globals from cc.config + client_map once per boot."""
+    d = load(MAIL_LINKS, {})
+    if not isinstance(d, dict): d = {}
+    d.setdefault("folders", {})
+    cfg = _email_cfg()
+    d["global"] = {"own_domains": cfg["own_domains"], "exclude_domains": cfg["exclude_domains"]}
+    if not _MAIL_SEEDED[0]:
+        try: _seed_links_from_client_map(d)
+        except Exception: pass
+        _MAIL_SEEDED[0] = True
+    return d
+
+def _mail_folder_entry(d, rel):
+    f = d["folders"].get(rel)
+    if f is None:
+        f = _mail_folder_default(); d["folders"][rel] = f
+    else:
+        for k, v in _mail_folder_default().items(): f.setdefault(k, v)
+    return f
+
+def _seed_links_from_client_map(d):
+    """One-time: import cc.config granola.client_map (slug -> [domains/aliases]) into the matching folder's
+    domains/keywords so agency deployments are PRE-WIRED + stay consistent with Granola/Google. Idempotent:
+    only fills EMPTY matcher arrays (never clobbers operator edits)."""
+    cmap = ((CC.get("granola") or {}).get("client_map")) or {}
+    if not cmap: return
+    folders = mail_folders()
+    by_base = {os.path.basename(f["rel"]).lower(): f["rel"] for f in folders}
+    own = set(d["global"]["own_domains"]) | set(d["global"]["exclude_domains"])
+    for slug, aliases in cmap.items():
+        rel = by_base.get(str(slug).lower())
+        if not rel: continue
+        f = _mail_folder_entry(d, rel)
+        if f["domains"] or f["keywords"]:    # don't re-seed a folder the operator already touched
+            continue
+        for a in (aliases or []):
+            a = str(a or "").strip()
+            if not a: continue
+            if "." in a and " " not in a:    # looks like a domain
+                if a.lower() not in own and a.lower() not in f["domains"]: f["domains"].append(a.lower())
+            elif a not in f["keywords"]:     # an alias / brand phrase
+                f["keywords"].append(a)
+
+def mail_folders():
+    """ONE resolver -> [{rel,name,kind}]. Agency: every client (incl. partners' clients). Else: every module
+    in module_tree with a non-empty rel. One code path, both deployment shapes."""
+    out = []; seen = set()
+    if is_agency():
+        try: am = agency_model()
+        except Exception: am = {"clients": [], "partners": []}
+        for c in am.get("clients", []):
+            if c.get("rel") and c["rel"] not in seen:
+                out.append({"rel": c["rel"], "name": c.get("name") or os.path.basename(c["rel"]), "kind": "client"}); seen.add(c["rel"])
+        for pa in am.get("partners", []):
+            for c in pa.get("clients", []):
+                if c.get("rel") and c["rel"] not in seen:
+                    out.append({"rel": c["rel"], "name": c.get("name") or os.path.basename(c["rel"]), "kind": "client"}); seen.add(c["rel"])
+    else:
+        try: tree = module_tree("")
+        except Exception: tree = {"children": []}
+        def walk(node):
+            for ch in node.get("children", []):
+                rel = ch.get("rel")
+                if rel and rel not in seen:
+                    out.append({"rel": rel, "name": ch.get("name") or _pretty_name(os.path.basename(rel), ch.get("title")), "kind": "module"}); seen.add(rel)
+                walk(ch)
+        walk(tree)
+    return out
+
+_ADDR_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+def _addrs(*vals):
+    out = []
+    for v in vals:
+        for m in _ADDR_RE.findall(v or ""): out.append(m.lower())
+    return out
+
+def _match_folders(headers, links=None):
+    """SHARED matcher (generalizes granola.match_client to email headers). headers={from,to,cc,subject,
+    snippet}. Drops own/exclude-domain participants FIRST (precedence floor), then scores each folder:
+    exact email +3, participant domain +2, keyword phrase +1, de-slugged folder name in subject +1.
+    Returns ranked [{rel,name,score,reasons}], highest first."""
+    d = links if links is not None else _mail_links_load()
+    own = set(d["global"]["own_domains"]) | set(d["global"]["exclude_domains"])
+    participants = _addrs(headers.get("from"), headers.get("to"), headers.get("cc"))
+    # precedence floor: drop participants whose domain is own/exclude
+    kept = [a for a in participants if a.split("@")[-1] not in own]
+    pdoms = set(a.split("@")[-1] for a in kept)
+    subj = (headers.get("subject") or "").lower()
+    snip = (headers.get("snippet") or "").lower()
+    hay = subj + " " + snip
+    folders = mail_folders()
+    fmap = {f["rel"]: f for f in folders}
+    ranked = []
+    for rel, fe in d["folders"].items():
+        f = fmap.get(rel)
+        if not f: continue
+        score = 0; reasons = []
+        for em in fe.get("emails", []):
+            if em.lower() in kept: score += 3; reasons.append("from/to " + em)
+        for dom in fe.get("domains", []):
+            if dom.lower() in pdoms: score += 2; reasons.append("domain " + dom)
+        for kw in fe.get("keywords", []):
+            if kw and kw.lower() in hay: score += 1; reasons.append('subject "' + kw + '"')
+        deslug = re.sub(r"[-_]+", " ", os.path.basename(rel)).lower().strip()
+        if deslug and deslug in subj: score += 1; reasons.append("name in subject")
+        if score > 0: ranked.append({"rel": rel, "name": f["name"], "score": score, "reasons": reasons})
+    # include folders with no registry entry but a name-in-subject hit (so unconfigured folders still suggest)
+    for f in folders:
+        if f["rel"] in d["folders"]: continue
+        deslug = re.sub(r"[-_]+", " ", os.path.basename(f["rel"])).lower().strip()
+        if deslug and deslug in subj:
+            ranked.append({"rel": f["rel"], "name": f["name"], "score": 1, "reasons": ["name in subject"]})
+    ranked.sort(key=lambda x: -x["score"])
+    return ranked
+
+def _folder_query(rel, links=None):
+    """Compile folders[rel] into a live Gmail search: (from:/to: domains+emails OR keywords) minus own/
+    exclude domains, minus chats. Empty matcher set -> '' (folder shows only its pinned threads)."""
+    d = links if links is not None else _mail_links_load()
+    fe = d["folders"].get(rel) or {}
+    ors = []
+    for dom in fe.get("domains", []):
+        if dom: ors.append("from:" + dom); ors.append("to:" + dom)
+    for em in fe.get("emails", []):
+        if em: ors.append("from:" + em); ors.append("to:" + em)
+    for kw in fe.get("keywords", []):
+        if kw: ors.append('"' + kw.replace('"', "") + '"')
+    if not ors: return ""
+    q = "(" + " OR ".join(ors) + ") -in:chats"
+    for dom in (d["global"]["own_domains"] + d["global"]["exclude_domains"]):
+        if dom: q += " -from:" + dom
+    return q
+
+def _gmail_headers_for(mid):
+    """Cheap metadata header fetch (read-safe; never marks read) for the suggest endpoint."""
+    m = _g_api("GET", GMAIL_BASE + "/messages/" + mid,
+               params={"format": "metadata", "metadataHeaders": ["From", "To", "Cc", "Subject"]})
+    if not isinstance(m, dict) or "error" in m: return None
+    hs = {h["name"].lower(): h["value"] for h in m.get("payload", {}).get("headers", [])}
+    return {"from": hs.get("from", ""), "to": hs.get("to", ""), "cc": hs.get("cc", ""),
+            "subject": hs.get("subject", ""), "snippet": m.get("snippet", ""), "threadId": m.get("threadId")}
+
+def mail_suggest(thread_id):
+    """Ranked folder suggestions for a thread (read-safe metadata)."""
+    if not thread_id: return {"error": "no id"}
+    h = _gmail_headers_for(thread_id)
+    if not h: return {"error": "thread headers unavailable"}
+    cfg = _email_cfg()
+    ranked = _match_folders(h)
+    top = ranked[0] if ranked else None
+    auto = bool(top and top["score"] >= cfg["auto_link_threshold"]
+                and (len(ranked) < 2 or ranked[1]["score"] < top["score"]))   # no tie
+    return {"id": thread_id, "suggestions": ranked[:6], "auto": auto, "threshold": cfg["auto_link_threshold"]}
+
+def mail_folders_overview():
+    """Every folder + its registry matcher summary + compiled-query preview (cheap; no Gmail fetch)."""
+    d = _mail_links_load()
+    out = []
+    for f in mail_folders():
+        fe = d["folders"].get(f["rel"]) or {}
+        meta = fe.get("threadMeta") or {}
+        out.append({"rel": f["rel"], "name": f["name"], "kind": f["kind"],
+                    "domains": len(fe.get("domains", [])), "emails": len(fe.get("emails", [])),
+                    "keywords": len(fe.get("keywords", [])), "pinned": len(fe.get("pinnedThreads", [])),
+                    "linked": len(meta), "query": _folder_query(f["rel"], d)})
+    return {"folders": out, "count": len(out), "global": d["global"], "email": _GOOGLE_TOK.get("email")}
+
+def mail_folder_view(rel, maxn=25):
+    """Per-folder correspondence = a COMPILED query through gmail_list (read-safe metadata). Merge pinned
+    threads, drop hidden, decorate each msg with its threadMeta + a linked badge."""
+    try: projpath(rel)                 # PATH SAFETY -- reject anything outside the project tree
+    except Exception: return {"error": "bad path"}
+    d = _mail_links_load()
+    fe = _mail_folder_entry(d, rel) if rel in d["folders"] else (d["folders"].get(rel) or _mail_folder_default())
+    name = next((f["name"] for f in mail_folders() if f["rel"] == rel), os.path.basename(rel))
+    hidden = set(fe.get("hiddenThreads", []))
+    pinned = [t for t in fe.get("pinnedThreads", []) if t not in hidden]
+    q = _folder_query(rel, d)
+    msgs = []; seen = set()
+    if q:
+        r = gmail_list(q=q, maxn=maxn)
+        if isinstance(r, dict) and "error" in r: return {"error": r["error"], "query": q}
+        for m in (r.get("messages", []) if isinstance(r, dict) else []):
+            tid = m.get("threadId") or m.get("id")
+            if tid in hidden or tid in seen: continue
+            seen.add(tid); m["linked"] = "auto"; msgs.append(m)
+    # merge pinned threads that the query didn't already surface (fetch one head msg by thread, metadata)
+    for tid in pinned:
+        if tid in seen: continue
+        seen.add(tid)
+        h = _gmail_headers_for(tid)        # metadata only -> read-safe
+        if not h: continue
+        msgs.append({"id": tid, "threadId": tid, "from": h["from"], "subject": h["subject"] or "(no subject)",
+                     "date": "", "snippet": h["snippet"], "unread": False, "starred": False, "linked": "manual"})
+    # decorate with threadMeta + mark which are explicitly pinned (manual)
+    meta = fe.get("threadMeta") or {}
+    pinset = set(pinned)
+    for m in msgs:
+        tid = m.get("threadId") or m.get("id")
+        if tid in pinset: m["linked"] = "manual"
+        m["meta"] = meta.get(tid) or {}
+    return {"messages": msgs, "query": q, "count": len(msgs), "folder": {"rel": rel, "name": name},
+            "matchers": {"emails": fe.get("emails", []), "domains": fe.get("domains", []),
+                         "keywords": fe.get("keywords", []), "pinned": pinned}}
+
+def mail_link(rel, add=None, remove=None, thread_meta=None):
+    """Edit a folder's matchers / pins / per-thread meta. PATH SAFE. Returns the updated folder entry."""
+    try: projpath(rel)
+    except Exception: return {"ok": False, "error": "bad path"}
+    own = set(_email_cfg()["own_domains"]) | set(_email_cfg()["exclude_domains"])
+    with _MAIL_LOCK:
+        d = _mail_links_load(); fe = _mail_folder_entry(d, rel)
+        def _apply(spec, rm):
+            for key in ("emails", "domains", "keywords", "pinnedThreads", "hiddenThreads"):
+                vals = (spec or {}).get(key)
+                if not vals: continue
+                vals = vals if isinstance(vals, list) else [vals]
+                for v in vals:
+                    v = str(v or "").strip()
+                    if not v: continue
+                    if key in ("emails", "domains"): v = v.lower()
+                    if key == "domains" and not rm and v in own: continue   # never learn own/exclude
+                    if rm:
+                        if v in fe[key]: fe[key].remove(v)
+                    elif v not in fe[key]:
+                        fe[key].append(v)
+        _apply(add, False); _apply(remove, True)
+        for tid, mv in (thread_meta or {}).items():
+            tm = fe["threadMeta"].setdefault(tid, {"tags": [], "assignee": "", "status": "open", "source": "manual", "ts": int(time.time())})
+            for k in ("tags", "assignee", "status"):
+                if k in (mv or {}): tm[k] = mv[k]
+        fe["updated"] = int(time.time())
+        save(MAIL_LINKS, d)
+    return {"ok": True, "rel": rel, "folder": fe}
+
+def mail_assign(rel, thread_id, learn_domain=False, subject="", sender=""):
+    """Manual assign: pin the thread, set threadMeta source=manual, optionally learn the sender domain, and
+    append a durable dated note to the folder's CLAUDE.md. PATH SAFE (projpath via module_note + here)."""
+    try: projpath(rel)
+    except Exception: return {"ok": False, "error": "bad path"}
+    if not thread_id: return {"ok": False, "error": "no thread"}
+    learned = None; logged = False
+    own = set(_email_cfg()["own_domains"]) | set(_email_cfg()["exclude_domains"])
+    with _MAIL_LOCK:
+        d = _mail_links_load(); fe = _mail_folder_entry(d, rel)
+        if thread_id not in fe["pinnedThreads"]: fe["pinnedThreads"].append(thread_id)
+        if thread_id in fe["hiddenThreads"]: fe["hiddenThreads"].remove(thread_id)
+        fe["threadMeta"].setdefault(thread_id, {})
+        fe["threadMeta"][thread_id].update({"source": "manual", "ts": int(time.time())})
+        fe["threadMeta"][thread_id].setdefault("tags", []); fe["threadMeta"][thread_id].setdefault("assignee", "")
+        fe["threadMeta"][thread_id].setdefault("status", "open")
+        if learn_domain:
+            dom = ""
+            for a in _addrs(sender):
+                dom = a.split("@")[-1]; break
+            if dom and dom not in own and dom not in fe["domains"]:
+                fe["domains"].append(dom); learned = dom
+        fe["updated"] = int(time.time())
+        save(MAIL_LINKS, d)
+    # durable, agent-visible record (client_map dated-notes convention) -- best-effort
+    try:
+        note = "Linked email thread%s%s (%s)" % (
+            (" '" + subject[:80] + "'") if subject else "",
+            (" from " + sender[:80]) if sender else "", time.strftime("%Y-%m-%d"))
+        logged = bool(module_note(rel, note).get("ok"))
+    except Exception:
+        logged = False
+    return {"ok": True, "rel": rel, "learned": learned, "logged": logged}
+
+def _sanitize_filename(fn):
+    fn = os.path.basename(fn or "attachment")
+    fn = re.sub(r"[\x00-\x1f/\\]+", "_", fn).strip().strip(".")
+    return (fn or "attachment")[:120]
+
+def _drive_multipart_upload(name, parents, data, mime):
+    """Multipart upload bytes to a Drive folder (one new urllib POST; drive_* only do metadata/move).
+    Dormant unless email_link.drive_mode + a per-folder driveFolderId is set."""
+    tok = _google_access_token()
+    if not tok: return {"error": "google not configured"}
+    boundary = "ccmail" + secrets.token_hex(8)
+    meta = {"name": name}
+    if parents: meta["parents"] = parents if isinstance(parents, list) else [parents]
+    pre = ("--%s\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n%s\r\n--%s\r\nContent-Type: %s\r\n\r\n"
+           % (boundary, json.dumps(meta), boundary, mime or "application/octet-stream")).encode()
+    post = ("\r\n--%s--\r\n" % boundary).encode()
+    payload = pre + data + post
+    req = urllib.request.Request("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+                                 data=payload, method="POST")
+    req.add_header("Authorization", "Bearer " + tok)
+    req.add_header("Content-Type", "multipart/related; boundary=" + boundary)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read() or "{}")
+    except urllib.error.HTTPError as e:
+        try: msg = json.loads(e.read()).get("error", {}).get("message", "")
+        except Exception: msg = ""
+        return {"error": "drive upload %d%s" % (e.code, (": " + msg[:120]) if msg else "")}
+    except Exception as e:
+        return {"error": str(e)[:160]}
+
+def _save_attachment_bytes(rel, mid, att_id, filename, size=0):
+    """Fetch attachment bytes (reuse gmail_attachment_bytes) + write into the folder's deliverables/ --
+    PATH SAFE (projpath + _path_has_secret), size-guarded, collision/dedup-prefixed. Optional Drive mirror."""
+    cfg = _email_cfg()
+    try: base = projpath(rel)                                  # PATH SAFETY -- confine under PROJECT
+    except Exception: return {"ok": False, "error": "bad path"}
+    if not os.path.isdir(base): return {"ok": False, "error": "folder not found"}
+    cap = int(cfg["max_attachment_mb"] * 1024 * 1024)
+    if size and int(size) > cap:
+        return {"ok": False, "error": "attachment exceeds %d MB limit" % int(cfg["max_attachment_mb"])}
+    data, err = gmail_attachment_bytes(mid, att_id)
+    if err or data is None: return {"ok": False, "error": err or "fetch failed"}
+    if len(data) > cap: return {"ok": False, "error": "attachment exceeds %d MB limit" % int(cfg["max_attachment_mb"])}
+    deliv = _ensure_deliv_link(base, rel)                      # iCloud hot tier where configured
+    try: os.makedirs(deliv, exist_ok=True)
+    except Exception: pass
+    fn = _sanitize_filename(filename)
+    dest = os.path.join(deliv, fn)
+    if os.path.exists(dest):                                   # collision/dedup: epoch-prefix (icloud_age_off style)
+        try:
+            if hashlib.md5(open(dest, "rb").read()).hexdigest() == hashlib.md5(data).hexdigest():
+                return {"ok": True, "rel": rel, "saved": os.path.relpath(dest, PROJECT), "dedup": True}
+        except Exception: pass
+        dest = os.path.join(deliv, "%d_%s" % (int(time.time()), fn))
+    if _path_has_secret(dest): return {"ok": False, "error": "refusing to write to a secret path"}
+    try:
+        with open(dest, "wb") as f: f.write(data)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+    out = {"ok": True, "rel": rel, "saved": os.path.relpath(dest, PROJECT), "bytes": len(data)}
+    # OPT-IN Drive mirror (dormant unless drive_mode + driveFolderId)
+    if cfg["drive_mode"]:
+        d = _mail_links_load(); fid = (d["folders"].get(rel) or {}).get("driveFolderId")
+        if fid:
+            dr = _drive_multipart_upload(fn, fid, data, _gmail_att_ctype(fn, ""))
+            if isinstance(dr, dict) and "id" in dr: out["drive"] = dr["id"]
+            elif isinstance(dr, dict) and "error" in dr: out["drive_error"] = dr["error"]
+    return out
+
 def _root_uuid(tid):
     """The root-message UUID of a transcript. A fork copies the parent's history, so its root UUID
     MATCHES the parent's -- which is how we detect fork families. Fresh convos have unique roots."""
@@ -4898,6 +5265,11 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "private, max-age=3600")
             self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
         if u.path == "/api/google/gmail-labels":  return self._s(200, json.dumps(gmail_labels()))
+        # ---- Email <-> folder linking (GETs; share the window.CC.google self-hide) ----
+        if u.path == "/api/mail/folders": return self._s(200, json.dumps(mail_folders_overview()))
+        if u.path == "/api/mail/folder":  return self._s(200, json.dumps(mail_folder_view(q.get("rel", [""])[0], q.get("max", ["25"])[0])))
+        if u.path == "/api/mail/suggest": return self._s(200, json.dumps(mail_suggest(q.get("id", [""])[0])))
+        if u.path == "/api/mail/links":   return self._s(200, json.dumps(_mail_links_load()))
         if u.path == "/api/google/calendar":
             return self._s(200, json.dumps(calendar_events(
                 q.get("days", ["7"])[0],
@@ -5040,6 +5412,21 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(calendar_delete(body.get("id", ""))))
         if u.path == "/api/google/drive-modify":
             return self._s(200, json.dumps(drive_modify(body.get("id", ""), body.get("action", ""), body.get("value", ""))))
+        # ---- Email <-> folder linking (POSTs) ----
+        if u.path == "/api/mail/link":
+            return self._s(200, json.dumps(mail_link(body.get("rel", ""), body.get("add"), body.get("remove"), body.get("threadMeta"))))
+        if u.path == "/api/mail/assign":
+            return self._s(200, json.dumps(mail_assign(body.get("rel", ""), body.get("threadId", ""),
+                bool(body.get("learnDomain")), body.get("subject", ""), body.get("sender", ""))))
+        if u.path == "/api/mail/unlink":
+            r = mail_link(body.get("rel", ""), None, {"pinnedThreads": [body.get("threadId", "")]})
+            if r.get("ok"): r = mail_link(body.get("rel", ""), {"hiddenThreads": [body.get("threadId", "")]})
+            return self._s(200, json.dumps(r))
+        if u.path == "/api/mail/learn-domain":
+            return self._s(200, json.dumps(mail_link(body.get("rel", ""), {"domains": [body.get("domain", "")]})))
+        if u.path == "/api/mail/save-attachment":
+            return self._s(200, json.dumps(_save_attachment_bytes(body.get("rel", ""), body.get("mid", ""),
+                body.get("attId", ""), body.get("filename", ""), body.get("size", 0))))
         if u.path == "/api/superadmin-send":   return self._s(200, json.dumps(superadmin_send(body.get("node", ""), body.get("action", ""), body.get("params") or {}, body.get("ttl") or 120)))
         if u.path == "/api/superadmin-grant":  return self._s(200, json.dumps(superadmin_grant(body.get("node", ""), body.get("action", ""), body.get("params") or {}, body.get("ttl") or 120)))
         if u.path == "/api/superadmin-keygen": return self._s(200, json.dumps(superadmin_keygen()))
@@ -6194,6 +6581,26 @@ body.gm-resizing iframe{pointer-events:none}
   padding:5px 12px;cursor:pointer;font-size:12px;font-weight:600}
 .cal-rb:hover{border-color:var(--accent)}
 .cal-rb.on{background:var(--grad);color:#15120a;border-color:transparent;font-weight:700}
+/* ---- ml-*: email <-> folder linking (chips, folder mail tab, matcher editor) ---- */
+.ml-chip{display:inline-flex;align-items:center;gap:5px;background:#161b29;border:1px solid #283250;border-radius:13px;
+  padding:2px 9px;font-size:12px;color:#c9d1d9;cursor:pointer}
+.ml-chip:hover{border-color:var(--accent)}
+.ml-chip.auto{border-color:#3b82f6}.ml-chip.manual{border-color:#3fb950}
+.ml-sub{font-size:10px;border-radius:7px;padding:0 5px;margin-left:3px}
+.ml-sub.auto{background:#3b82f622;color:#58a6ff}.ml-sub.manual{background:#3fb95022;color:#3fb950}
+.ml-rowchip{display:inline-flex;align-items:center;gap:3px;background:#1c2333;border:1px solid #2c3550;border-radius:9px;
+  padding:0 6px;font-size:10px;color:#9fb2d6;margin-left:6px;vertical-align:middle}
+.ml-pick{margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.ml-pick input,.ml-pick select{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:5px 8px;font:inherit;font-size:12px}
+.ml-reason{font-size:11px;color:var(--mut);margin-left:4px}
+.ml-mtag{display:inline-flex;gap:4px;align-items:center;background:#c9a22722;color:var(--accent);border-radius:8px;padding:1px 7px;font-size:11px;margin:2px}
+.ml-mtag b{cursor:pointer;color:#f85149;font-weight:700}
+.ml-mhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.ml-mrow{display:flex;gap:8px;align-items:flex-start;padding:8px 6px;border-bottom:1px solid var(--line)}
+.ml-mrow .ml-mmid{flex:1;min-width:0}
+.ml-mfrom{font-weight:600;font-size:13px}.ml-msubj{font-size:12px}.ml-msnip{font-size:11px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ml-badge{font-size:10px;border-radius:7px;padding:0 6px}
+.ml-badge.auto{background:#3b82f622;color:#58a6ff}.ml-badge.manual{background:#3fb95022;color:#3fb950}
 </style></head><body>
 <div id="splash"><div class="cfwrap"><img src="/static/brand/claudefather_logo.png" alt="ClaudeFather"><div class="cfshine"></div></div><div class="cfhint">click to enter</div><div class="cfver" id="cfver"></div></div>
 <script>(function(){var v=(window.CC&&window.CC.version)||"";var e=document.getElementById("cfver");if(e&&v)e.innerHTML="v<b>"+v.replace(/[<>]/g,"")+"</b>";})();</script>
@@ -6363,6 +6770,8 @@ async function loadModules(rel){
         +'<div class="convscroll">'+MODFILES.map(frow).join("")+'</div>'
         +'<div class="meta" style="margin-top:6px">Agents save deliverables here. In iCloud mode, recent files live in iCloud (synced to your devices, &#9729;); after 90 days they age off to the SSD (&#128452;) to free space &mdash; still listed + openable here.</div></div>';
     }
+    // email <-> folder correspondence (self-hides when Google isn't configured)
+    if(typeof mlFolderCard==='function'){ var _mlc=mlFolderCard(MODREL, (node.name||MODREL)); if(_mlc) h+=_mlc; }
   } else MODCONVOS=[];
   h+='<div class="modgrid">'+(kids.map(modCard).join("")||empty(MODREL?"No sub-tools here yet -- click + add sub-tool.":"No modules found."))+'</div>';
   // stack the whole modules view in ONE full-width flex column so the page grid can't interleave the
@@ -6743,7 +7152,15 @@ function secHead(t){return '<div class="card" style="cursor:default;grid-column:
 function clientCard(cl){return '<div class="card" onclick="modLaunch(\''+esc(cl.rel)+'\')" style="cursor:pointer"><h3><span>'+esc(cl.name)+'</span>'+(cl.partner?'<span class="badge" style="background:#8b5cf622;color:#a78bfa">'+esc(cl.partner)+'</span>':'')+'</h3>'
   +'<div class="meta">'+e2(cl.summary||'')+'</div>'
   +((cl.tools||[]).length?'<div style="margin-top:7px;display:flex;gap:4px;flex-wrap:wrap">'+cl.tools.map(function(x){return '<span class="badge" style="background:#c9a22722;color:var(--accent)">'+esc(x)+'</span>';}).join('')+'</div>':'<div class="meta sub" style="margin-top:6px">no tools applied yet</div>')
-  +'<div class="meta sub" style="margin-top:6px">'+(cl.artifacts||0)+' artifact folder(s)</div></div>';}
+  +'<div class="meta sub" style="margin-top:6px">'+(cl.artifacts||0)+' artifact folder(s)</div>'
+  +((window.CC&&window.CC.google)?('<div class="btns" style="margin-top:8px" onclick="event.stopPropagation()"><button class="mini" onclick="mlClientMail(\''+esc(cl.rel)+'\',\''+esc(cl.name)+'\')">📬 Mail</button></div>'):'')
+  +'</div>';}
+// open a client's correspondence in a modal (Agency drill-in surface for the Mail tab)
+function mlClientMail(rel,name){
+  showM('<h3>📬 '+e2(name)+' — Correspondence</h3><div id="mlFolderBox_'+mlKey(rel)+'" style="max-height:60vh;overflow:auto">'+empty('Loading…')+'</div>'
+    +'<div class="btns" style="margin-top:10px"><button class="mini" onclick="closeM()">Close</button></div>');
+  ML.folders=null; setTimeout(function(){ mlFolderMail(rel,name); }, 60);
+}
 // ---- Calls lens (Granola -> agency tree): review queue. Each transcribed call is a PROPOSAL -- matched
 // client, summary, tasks, reminders -- that you Approve (applies to the client CLAUDE.md + tasks) or Skip. ----
 async function callsSync(){toast("Syncing Granola calls… (transcribing + extracting in the background)");
@@ -7314,6 +7731,7 @@ function gmAttStrip(m){
       +'<div class="gm-attbar">'
         +'<button onclick="gmQuickLook(\''+m.id+'\','+ai+')" title="Preview">\u{1F441} View</button>'
         +'<a href="'+gmAttURL(m.id,a,true)+'" download="'+e2(a.filename)+'" title="Download">↓ Save</a>'
+        +mlAttSaveBtn(m.id,ai)
       +'</div>'
     +'</div>';
   }).join('');
@@ -7434,7 +7852,7 @@ function gmRenderRows(){
       +'<div class="gm-rmid">'
         +'<div class="gm-fromrow"><span class="gm-from">'+e2(gFrom(m.from))+'</span>'
           +(m.count>1?'<span class="gm-cnt">'+m.count+'</span>':'')+'</div>'
-        +'<div class="gm-subj">'+e2(m.subject)+'</div>'
+        +'<div class="gm-subj">'+e2(m.subject)+mlRowChip(m)+'</div>'
         +'<div class="gm-snip">'+e2(m.snippet)+'</div>'
       +'</div>'
       +'<div class="gm-rright">'
@@ -7488,7 +7906,9 @@ function gmRenderRead(){
       +'<button class="gm-act" onclick="gmSnoozeMenu()" title="Snooze (h)">⏰ Snooze</button>'
       +'<button class="gm-act" onclick="gmActCur(\'unread\');gmCloseRead()" title="Mark unread (u)">✉ Unread</button>'
     +'</div>'
+    +mlReaderChip()
   +'</div>';
+  setTimeout(function(){ if(typeof mlRenderChip==='function') mlRenderChip(); }, 0);
   var body='<div class="gm-thread">'+msgs.map(function(m,idx){
     var open=(idx===last);
     var bodyHtml=(m.body&&m.body.html)
@@ -7518,6 +7938,169 @@ function gmStyleHtml(h){ // inject a base style so dark-themed mail is readable 
 }
 function gmFitFrame(f){ try{ var d=f.contentDocument||f.contentWindow.document; f.style.height=Math.min(d.body.scrollHeight+24,900)+'px'; }catch(e){ f.style.height='460px'; } }
 function gmFullDate(s){ try{var d=new Date(s); if(isNaN(d)) return e2(s); return d.toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}catch(e){return e2(s);} }
+
+// ====================================================================================================
+// ml-* : EMAIL <-> FOLDER LINKING (frontend). Self-hides on non-Google deployments (window.CC.google).
+// Reuses the shipped Gmail reader/list; never mutates Gmail labels (preserves read/unread). All edits go
+// to /api/mail/* which path-validate every rel server-side.
+// ====================================================================================================
+var ML = { folders:null, link:{} };   // folders cache; link[threadId] = {rel,name,source}
+function mlOn(){ return !!(window.CC&&window.CC.google); }
+async function mlFolders(){
+  if(ML.folders) return ML.folders;
+  try{ var r=await(await fetch('/api/mail/folders')).json(); ML.folders=(r&&r.folders)||[]; }catch(e){ ML.folders=[]; }
+  return ML.folders;
+}
+function mlThreadId(){ return GM.thread ? GM.thread.id : ''; }
+function mlLinkOf(tid){
+  // derive current link for an open thread from the loaded folder views' threadMeta cache (mlLink set on assign)
+  return ML.link[tid]||null;
+}
+// ---- reader "Linked to" chip (called from gmRenderRead) ----
+function mlReaderChip(){
+  if(!mlOn()) return '';
+  return '<div id="mlChip" class="ml-pick" style="margin:6px 0 2px"><span style="color:var(--mut);font-size:12px">📎 Linking…</span></div>';
+}
+async function mlRenderChip(){
+  var box=document.getElementById('mlChip'); if(!box||!GM.thread) return;
+  var tid=GM.thread.id; var lk=mlLinkOf(tid);
+  if(lk){
+    box.innerHTML='<span class="ml-chip '+(lk.source||'manual')+'">📂 '+e2(lk.name)
+      +'<span class="ml-sub '+(lk.source||'manual')+'">'+(lk.source||'manual')+'</span></span>'
+      +'<button class="mini" onclick="mlUnlink(\''+esc(lk.rel)+'\')">unlink</button>'
+      +'<button class="mini" onclick="mlShowPicker()">change</button>';
+    return;
+  }
+  // not linked -> ask the server for a suggestion (read-safe metadata)
+  box.innerHTML='<span style="color:var(--mut);font-size:12px">📎 Checking for a folder…</span>';
+  var s={}; try{ s=await(await fetch('/api/mail/suggest?id='+encodeURIComponent(tid))).json(); }catch(e){}
+  var sug=(s&&s.suggestions)||[];
+  if(sug.length){
+    var top=sug[0];
+    box.innerHTML='<span style="color:var(--mut);font-size:12px">Link to</span> '
+      +'<button class="ml-chip" onclick="mlAssign(\''+esc(top.rel)+'\',\''+e2(top.name).replace(/"/g,"&quot;")+'\',true)">📂 '+e2(top.name)+'?</button>'
+      +'<span class="ml-reason">'+e2((top.reasons||[]).join(', '))+'</span>'
+      +' <button class="mini" onclick="mlShowPicker()">other…</button>';
+  } else {
+    box.innerHTML='<button class="mini" onclick="mlShowPicker()">📂 Link to folder…</button>';
+  }
+}
+async function mlShowPicker(){
+  var fs=await mlFolders();
+  if(!fs.length){ toast('No linkable folders found'); return; }
+  var opts='<option value="">— pick a folder —</option>'+fs.map(function(f){return '<option value="'+esc(f.rel)+'">'+e2(f.name)+'</option>';}).join('');
+  showM('<h3>Link this thread to a folder</h3>'
+    +'<div class="ml-pick"><select id="mlPickSel">'+opts+'</select>'
+    +'<label style="font-size:12px;color:var(--mut)"><input type="checkbox" id="mlPickLearn"> also learn the sender domain</label></div>'
+    +'<div class="btns" style="margin-top:12px"><button class="mini go" onclick="mlPickGo()">Link</button> <button class="mini" onclick="closeM()">Cancel</button></div>');
+}
+function mlPickGo(){
+  var sel=document.getElementById('mlPickSel'); var rel=sel?sel.value:''; if(!rel){toast('Pick a folder');return;}
+  var name=sel.options[sel.selectedIndex].text;
+  var learn=!!(document.getElementById('mlPickLearn')||{}).checked;
+  closeM(); mlAssign(rel,name,learn);
+}
+async function mlAssign(rel,name,learn){
+  if(!GM.thread) return;
+  var tid=GM.thread.id, m=(GM.thread.messages||[])[0]||{};
+  toast('Linking to '+name+'…');
+  var r={}; try{ r=await(await fetch('/api/mail/assign',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rel:rel,threadId:tid,learnDomain:!!learn,subject:GM.thread.subject||'',sender:m.from||''})})).json(); }catch(e){}
+  if(!r||!r.ok){ toast('Link failed: '+((r||{}).error||'?'),4000); return; }
+  ML.link[tid]={rel:rel,name:name,source:'manual'};
+  toast('Linked to '+name+(r.learned?(' · learned '+r.learned):'')+(r.logged?' · logged to CLAUDE.md':''));
+  mlRenderChip();
+  if(typeof gmRenderRows==='function') gmRenderRows();
+}
+async function mlUnlink(rel){
+  if(!GM.thread) return; var tid=GM.thread.id;
+  try{ await fetch('/api/mail/unlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rel:rel,threadId:tid})}); }catch(e){}
+  delete ML.link[tid]; toast('Unlinked'); mlRenderChip();
+  if(typeof gmRenderRows==='function') gmRenderRows();
+}
+// ---- list row chip (called from gmRenderRows) ----
+function mlRowChip(m){
+  if(!mlOn()) return '';
+  var tid=m.threadId||m.id; var lk=ML.link[tid];
+  if(!lk) return '';
+  return '<span class="ml-rowchip" title="linked to '+e2(lk.name)+'">📂 '+e2(lk.name)+'</span>';
+}
+// ---- attachment "Save to <folder>" (called from gmAttStrip) ----
+function mlAttSaveBtn(mid,ai){
+  if(!mlOn()) return '';
+  return '<button onclick="mlSaveAtt(\''+mid+'\','+ai+')" title="Save to a project folder">💾 Save to…</button>';
+}
+async function mlSaveAtt(mid,ai){
+  var ctx=gmQLAtt(mid,ai); if(!ctx){toast('Attachment not found');return;}
+  var a=ctx.a; var tid=GM.thread?GM.thread.id:''; var lk=tid?ML.link[tid]:null;
+  var fs=await mlFolders();
+  var preRel=lk?lk.rel:'';
+  var opts='<option value="">— pick a folder —</option>'+fs.map(function(f){return '<option value="'+esc(f.rel)+'"'+(f.rel===preRel?' selected':'')+'>'+e2(f.name)+'</option>';}).join('');
+  showM('<h3>Save “'+e2(a.filename)+'” to a folder</h3>'
+    +'<div class="ml-pick"><select id="mlAttSel">'+opts+'</select></div>'
+    +'<div class="meta" style="margin-top:6px">Saved into that folder’s <code>deliverables/</code> — it appears in the folder’s Files panel.</div>'
+    +'<div class="btns" style="margin-top:12px"><button class="mini go" onclick="mlAttGo(\''+mid+'\','+ai+')">Save</button> <button class="mini" onclick="closeM()">Cancel</button></div>');
+}
+async function mlAttGo(mid,ai){
+  var sel=document.getElementById('mlAttSel'); var rel=sel?sel.value:''; if(!rel){toast('Pick a folder');return;}
+  var ctx=gmQLAtt(mid,ai); if(!ctx){closeM();return;}
+  var a=ctx.a; closeM(); toast('Saving '+a.filename+'…');
+  var r={}; try{ r=await(await fetch('/api/mail/save-attachment',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rel:rel,mid:mid,attId:a.attachmentId,filename:a.filename,size:a.size})})).json(); }catch(e){}
+  if(!r||!r.ok){ toast('Save failed: '+((r||{}).error||'?'),5000); return; }
+  toast(r.dedup?('Already saved (identical file)'):'Saved → '+r.saved+(r.drive?' · mirrored to Drive':''),4000);
+}
+// ---- per-folder Mail tab (reused in Projects module detail; fed by /api/mail/folder) ----
+async function mlFolderMail(rel,name){
+  var host=document.getElementById('mlFolderBox_'+mlKey(rel)); if(!host) return;
+  host.innerHTML=empty('Loading correspondence…');
+  var r={}; try{ r=await(await fetch('/api/mail/folder?rel='+encodeURIComponent(rel)+'&max=25')).json(); }catch(e){ host.innerHTML=empty('Network error'); return; }
+  if(r.error){ host.innerHTML='<div class="meta" style="color:#f85149">'+e2(r.error)+'</div>'+mlMatchers(rel,r.matchers||{}); return; }
+  var mt=r.matchers||{};
+  var head='<div class="ml-mhead"><b>📬 Correspondence</b> <span class="sub">'+(r.count||0)+' thread(s)</span></div>';
+  var rows=(r.messages||[]).map(function(m){
+    var tid=m.threadId||m.id; var src=(m.linked||'auto');
+    return '<div class="ml-mrow"><div class="ml-mmid">'
+      +'<div class="ml-mfrom">'+e2(gFrom(m.from))+' <span class="ml-badge '+src+'">'+src+'</span></div>'
+      +'<div class="ml-msubj">'+e2(m.subject)+'</div>'
+      +'<div class="ml-msnip">'+e2(m.snippet||'')+'</div></div>'
+      +'<div style="white-space:nowrap"><button class="mini" onclick="mlOpenInGmail(\''+esc(tid)+'\')">open</button></div></div>';
+  }).join('') || '<div class="meta">No correspondence yet. Add a matcher (domain / email / keyword) below, or link a thread from Gmail.</div>';
+  host.innerHTML=head+'<div class="convscroll">'+rows+'</div>'+mlMatchers(rel,mt);
+}
+function mlMatchers(rel,mt){
+  var k=mlKey(rel);
+  function chips(kind,arr){ return (arr||[]).map(function(v){
+    return '<span class="ml-mtag">'+e2(v)+' <b onclick="mlMatcherDel(\''+esc(rel)+'\',\''+kind+'\',\''+esc(v)+'\')" title="remove">✕</b></span>';
+  }).join(''); }
+  return '<div style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">'
+    +'<div class="sub" style="margin-bottom:4px"><b>Matchers</b> — folders auto-collect mail from these</div>'
+    +'<div>Domains: '+chips('domains',mt.domains)+' <input class="ml-min" id="mlIn_dom_'+k+'" placeholder="brand.com" style="background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:3px 7px;font:inherit;font-size:11px"> <button class="mini" onclick="mlMatcherAdd(\''+esc(rel)+'\',\'domains\',\'mlIn_dom_'+k+'\')">+ add</button></div>'
+    +'<div style="margin-top:5px">Emails: '+chips('emails',mt.emails)+' <input id="mlIn_em_'+k+'" placeholder="a@brand.com" style="background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:3px 7px;font:inherit;font-size:11px"> <button class="mini" onclick="mlMatcherAdd(\''+esc(rel)+'\',\'emails\',\'mlIn_em_'+k+'\')">+ add</button></div>'
+    +'<div style="margin-top:5px">Keywords: '+chips('keywords',mt.keywords)+' <input id="mlIn_kw_'+k+'" placeholder="Project Falcon" style="background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:3px 7px;font:inherit;font-size:11px"> <button class="mini" onclick="mlMatcherAdd(\''+esc(rel)+'\',\'keywords\',\'mlIn_kw_'+k+'\')">+ add</button></div>'
+  +'</div>';
+}
+function mlKey(rel){ return (rel||'').replace(/[^A-Za-z0-9]/g,'_'); }
+async function mlMatcherAdd(rel,kind,inputId){
+  var el=document.getElementById(inputId); var v=el?el.value.trim():''; if(!v){toast('Type a value');return;}
+  var add={}; add[kind]=[v];
+  try{ await fetch('/api/mail/link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rel:rel,add:add})}); }catch(e){}
+  ML.folders=null; mlFolderMail(rel);
+}
+async function mlMatcherDel(rel,kind,v){
+  var rm={}; rm[kind]=[v];
+  try{ await fetch('/api/mail/link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rel:rel,remove:rm})}); }catch(e){}
+  ML.folders=null; mlFolderMail(rel);
+}
+function mlOpenInGmail(tid){ gotoLens('gmail'); setTimeout(function(){ if(window.gmailOpen) window.gmailOpen(tid); }, 600); }
+// the card a module/client detail view embeds to show + edit its correspondence
+function mlFolderCard(rel,name){
+  if(!mlOn()) return '';
+  var k=mlKey(rel);
+  setTimeout(function(){ mlFolderMail(rel,name); }, 50);
+  return '<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>📬 Correspondence</span></h3>'
+    +'<div id="mlFolderBox_'+k+'">'+empty('Loading…')+'</div></div>';
+}
 
 // ---- triage actions (optimistic + undo) ----
 function gmCurMsg(){ return GM.msgs[GM.cur]; }

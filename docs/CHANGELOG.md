@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.18.0 -- 2026-06-24
+- NEW (email <-> client/project linking, CRM-grade): connect email to a CLIENT (agency) or PROJECT (module)
+  via one generic folder abstraction. A link registry (folder <-> emails/domains/keywords/pinned-threads,
+  manual edges only -- the query is derived live so it never goes stale) with a shared matcher (own/exclude
+  domain floor, then exact-email/domain/keyword/name scoring, auto vs suggest). Per-folder CORRESPONDENCE
+  view (a live Gmail query, read-safe metadata) in the Projects module detail + an Agency client "Mail"
+  modal. Reader "Linked to" chip (auto/manual, change/unlink, suggestions). List-row folder chips. And
+  SAVE-ATTACHMENT-TO-FOLDER: one click writes an attachment into that folder's deliverables/ (path-safe via
+  projpath + secret-guard + size cap; optional dormant Drive mirror). Seeds from cc.config client_map.
+  Proven live on carsearch: link a module to an address, its correspondence appears, and a saved attachment
+  lands in the folder's deliverables on the SSD. Endpoints under /api/mail/*.
+
 ## 0.17.0 -- 2026-06-24
 - REBUILD (email + calendar + sessions, the big one): integrated a 10-agent research/build of the whole
   Gmail/Calendar/Sessions UX, then QA-reviewed and PROVED it before shipping.
