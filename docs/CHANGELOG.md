@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.21 -- 2026-06-24
+- NEW (Claude Accounts lens — remote login wallet): authorize each Claude subscription account ONCE via
+  `claude setup-token` driven from the dashboard (click the link → authorize in your browser → paste the code
+  back), yielding a ~1yr OAuth token stored 0600. Sessions then launch headless with that token — no per-session
+  browser dance. **One-click switch** between stored accounts (new sessions use it immediately). Per-account
+  **/usage** view: 5-hour + weekly (all models / Sonnet) bars with reset times, scraped from the official
+  `/usage` command (no reverse-engineered endpoint). Gated per-node by cc.config `account_wallet` (ON for the
+  local nodes to shake out bugs; OFF/untouched on AFP until tonight). Token export is spliced into launches only
+  when the wallet is enabled AND an active token exists, so legacy/keychain nodes are unaffected. Design:
+  docs/REMOTE_LOGIN_DESIGN.md.
+- POLISH (Projects): a module with no one-line summary no longer shows an alarming RED "no description"
+  warning — it's now a muted, italic hint. Lacking a summary isn't an error.
+
 ## 0.21.20 -- 2026-06-24  *** deliverables off iCloud, onto the SSD ***
 - The real fix for the whole download saga: a new `deliverables_root` config makes deliverables live on a
   plain LOCAL/SSD path, NOT the evictable iCloud container. When set it overrides iCloud entirely -- downloads

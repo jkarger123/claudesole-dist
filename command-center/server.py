@@ -75,6 +75,54 @@ STATE_DIR = os.path.expanduser(CC.get("state_dir") or BASE)
 try: os.makedirs(STATE_DIR, exist_ok=True)
 except Exception: pass
 
+# ---- Claude account wallet (remote login + per-node account + usage) ------------------------------------
+# Authorize each Claude subscription account ONCE (claude setup-token -> ~1yr OAuth token), store it, and inject
+# it into session launches so headless/remote sessions never do the browser dance again. Switching accounts =
+# pick a stored one (one click). Gated per-node by cc.config "account_wallet" (off = legacy keychain login).
+ACCOUNT_WALLET = bool(CC.get("account_wallet"))
+CLAUDE_TOKENS_DIR = os.path.join(CC_HOME, "secrets", "claude_tokens")        # one 0600 token file per account label (shared wallet)
+CLAUDE_WALLET_FILE = os.path.join(STATE_DIR, "_claude_wallet.json")          # {accounts:[{label,added,expires}], default}
+ACTIVE_TOKEN_FILE = os.path.join(STATE_DIR, "claude_active_token")           # the account THIS node launches with (per-instance, 0600)
+import re as _re_w
+def _tok_label_safe(label): return _re_w.sub(r"[^A-Za-z0-9_.@+-]", "_", (label or "").strip())
+def _tok_path(label):
+    s = _tok_label_safe(label); return os.path.join(CLAUDE_TOKENS_DIR, s) if s else None
+def _tok_read(label):
+    p = _tok_path(label)
+    try:
+        if p and os.path.isfile(p): return open(p).read().strip()
+    except Exception: pass
+    return ""
+def _tok_write(label, tok):
+    p = _tok_path(label)
+    if not p or not (tok or "").strip(): return False
+    try:
+        os.makedirs(CLAUDE_TOKENS_DIR, exist_ok=True)
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, tok.strip().encode()); os.close(fd)
+        return True
+    except Exception: return False
+def _wallet_load():
+    try: return json.load(open(CLAUDE_WALLET_FILE))
+    except Exception: return {"accounts": [], "default": ""}
+def _wallet_save(d):
+    try:
+        fd = os.open(CLAUDE_WALLET_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(fd, json.dumps(d, indent=2).encode()); os.close(fd)
+    except Exception: pass
+def _account_activate(label):
+    """Make <label> the account THIS node launches with: copy its token to the per-instance active file (0600).
+    New sessions pick it up at launch (the env prefix cats this file). No restart needed."""
+    tok = _tok_read(label)
+    if not tok: return False
+    try:
+        fd = os.open(ACTIVE_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, tok.encode()); os.close(fd)
+        w = _wallet_load(); w["default"] = label; _wallet_save(w); return True
+    except Exception: return False
+# spliced into every claude launch prefix (see _CC_ENVP): conditionally export the active OAuth token at launch
+# time. Empty unless the wallet is enabled -> AFP and legacy nodes are completely unaffected until turned on.
+_CC_ENVP = (('[ -s "%s" ] && export CLAUDE_CODE_OAUTH_TOKEN="$(cat "%s")"; ' % (ACTIVE_TOKEN_FILE, ACTIVE_TOKEN_FILE))
+            if ACCOUNT_WALLET else "")
+
 def render_page():
     """Serve the dashboard with project/brand injected from cc.config.json (so the SAME framework UI
     operates on any project). Frontend reads window.CC.{project,projectName,brand}."""
@@ -82,7 +130,7 @@ def render_page():
     except Exception: _lenses = None
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
-        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "google": google_configured(),
+        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "google": google_configured(), "accountWallet": ACCOUNT_WALLET,
         "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md", "MASTER_HANDOFF.md",
             "FILE_SYSTEM_GOVERNANCE.md", "TEXT2TUNE_ARCHITECTURE.md", "ENTERPRISE_MIGRATION.md",
             "BRIDGE_MIGRATION.md"]})
@@ -2172,6 +2220,103 @@ def _uniq_session(base):
         name = "%s-%d" % (base, i); i += 1
     return name
 
+# ---- Claude account login (setup-token capture) + per-account /usage scrape ----------------------------
+CC_LOGIN_SESSION = "cc-acct-login"
+_CC_AUTH_URL = re.compile(r"https://[^\s\"'<>]+")
+_CC_OAT = re.compile(r"(sk-ant-oat[A-Za-z0-9_-]+)")
+
+def claude_login_start(label):
+    """Drive `claude setup-token` in a tmux pty to mint a ~1yr OAuth token for <label>. Returns once started;
+    the operator then opens the URL (claude_login_status) and pastes the code (claude_login_code)."""
+    if not _tok_label_safe(label): return {"ok": False, "error": "bad label"}
+    import shlex
+    sh([TMUX, "kill-session", "-t", CC_LOGIN_SESSION])
+    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; '
+          'export CC_LOGIN_LABEL=%s; claude setup-token; echo CC_LOGIN_DONE; sleep 600' % shlex.quote(label))
+    rc = sh([TMUX, "new-session", "-d", "-s", CC_LOGIN_SESSION, "-x", "220", "-y", "50", cl])[0]
+    return {"ok": rc == 0, "label": label}
+
+def claude_login_status(label=None):
+    """Read the login pty: surface the auth URL, whether it's awaiting a code, or capture the finished token."""
+    if sh([TMUX, "has-session", "-t", CC_LOGIN_SESSION])[0] != 0:
+        return {"state": "idle"}
+    txt = sh([TMUX, "capture-pane", "-t", CC_LOGIN_SESSION, "-p", "-S", "-200"])[1] or ""
+    tok = _CC_OAT.findall(txt)
+    if tok:                                                   # token minted -> store + activate + close
+        lbl = label or _wallet_load().get("_pending") or "account"
+        _tok_write(lbl, tok[-1])
+        w = _wallet_load()
+        if lbl not in [a.get("label") for a in w.get("accounts", [])]:
+            w.setdefault("accounts", []).append({"label": lbl, "added": int(time.time())})
+        w.pop("_pending", None); _wallet_save(w)
+        _account_activate(lbl)
+        sh([TMUX, "send-keys", "-t", CC_LOGIN_SESSION, "C-c"]); sh([TMUX, "kill-session", "-t", CC_LOGIN_SESSION])
+        return {"state": "done", "label": lbl}
+    low = txt.lower()
+    urls = [u for u in _CC_AUTH_URL.findall(txt) if "anthropic" in u or "claude" in u]
+    awaiting_code = ("paste" in low and "code" in low) or "authorization code" in low or "enter the code" in low
+    if urls:
+        return {"state": "awaiting_code" if awaiting_code else "awaiting_auth", "url": urls[-1]}
+    if "error" in low or "failed" in low: return {"state": "error", "tail": txt[-400:]}
+    return {"state": "starting"}
+
+def claude_login_code(code):
+    """Relay the operator-pasted authorization code into the waiting setup-token pty."""
+    code = (code or "").strip()
+    if not code: return {"ok": False, "error": "empty code"}
+    if sh([TMUX, "has-session", "-t", CC_LOGIN_SESSION])[0] != 0: return {"ok": False, "error": "no login in progress"}
+    sh([TMUX, "send-keys", "-t", CC_LOGIN_SESSION, "-l", code]); time.sleep(0.3)
+    sh([TMUX, "send-keys", "-t", CC_LOGIN_SESSION, "Enter"])
+    return {"ok": True}
+
+def _parse_usage(text):
+    """Parse the three windows out of `/usage` output: pct used + reset time."""
+    def grab(lbl):
+        m = re.search(re.escape(lbl) + r"[^\n]*\n[^\n]*?(\d+)%\s*used[^\n]*\n\s*Resets ([^\n(]+)", text)
+        if not m: m = re.search(re.escape(lbl) + r".{0,160}?(\d+)%\s*used.{0,120}?Resets ([^\n(]+)", text, re.S)
+        return {"pct": int(m.group(1)), "resets": m.group(2).strip()} if m else None
+    return {"session": grab("Current session"), "week": grab("Current week (all models)"),
+            "week_sonnet": grab("Current week (Sonnet")}
+
+def claude_usage_scrape(label):
+    """Spawn a brief claude session with <label>'s token, run /usage, parse + cache the windows."""
+    tok = _tok_read(label)
+    if not tok: return {"error": "no token for " + str(label)}
+    import shlex
+    sess = "cc-acct-usage"
+    sh([TMUX, "kill-session", "-t", sess])
+    cl = ('export CLAUDE_CODE_OAUTH_TOKEN=%s; export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude'
+          % shlex.quote(tok))
+    if sh([TMUX, "new-session", "-d", "-s", sess, "-x", "220", "-y", "50", cl])[0] != 0:
+        return {"error": "could not start session"}
+    time.sleep(7)
+    sh([TMUX, "send-keys", "-t", sess, "/usage"]); time.sleep(1.2); sh([TMUX, "send-keys", "-t", sess, "Enter"])
+    time.sleep(7)
+    txt = sh([TMUX, "capture-pane", "-t", sess, "-p", "-S", "-120"])[1] or ""
+    sh([TMUX, "send-keys", "-t", sess, "C-c"]); sh([TMUX, "kill-session", "-t", sess])
+    u = _parse_usage(txt); rec = {"label": label, "usage": u, "ts": int(time.time())}
+    try: _wallet_save_usage(label, rec)
+    except Exception: pass
+    return rec
+
+def _usage_cache_path(label): return os.path.join(STATE_DIR, "_usage_" + _tok_label_safe(label) + ".json")
+def _wallet_save_usage(label, rec):
+    try: json.dump(rec, open(_usage_cache_path(label), "w"))
+    except Exception: pass
+def _usage_cached(label):
+    try: return json.load(open(_usage_cache_path(label)))
+    except Exception: return None
+
+def claude_accounts():
+    """Wallet state for the Accounts panel: each account + its (cached) usage; the active/default; gate flag."""
+    w = _wallet_load(); active = w.get("default", "")
+    accts = []
+    for a in w.get("accounts", []):
+        lbl = a.get("label")
+        accts.append({"label": lbl, "added": a.get("added"), "active": lbl == active,
+                      "usage": (_usage_cached(lbl) or {}).get("usage"), "usage_ts": (_usage_cached(lbl) or {}).get("ts")})
+    return {"enabled": ACCOUNT_WALLET, "accounts": accts, "default": active}
+
 def launch(target, name, cid=None, rel=None):
     """Create a tmux session ON THE STUDIO. studio target runs Claude locally in the pillar dir;
        windows target wraps `ssh -t <alias> claude` so it's still a persistent, browser-attachable Studio session."""
@@ -2182,7 +2327,7 @@ def launch(target, name, cid=None, rel=None):
     # so it must work even on a deployment with no machines registered (the record is a per-deployment
     # preserve-path that fresh installs lack). Only remote targets need a registered machine (for the ssh alias).
     if target != "studio" and not m: return {"ok": False, "error": "unknown target: " + str(target)}
-    cl = 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG
+    cl = 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG
     if target == "studio":
         try: wd = projpath(rel) if rel else (comp_dir(cid) if cid else PROJECT)
         except Exception: wd = PROJECT
@@ -2245,7 +2390,7 @@ def chief_open():
               "PROACTIVELY reach a peer, POST {text, targets:[id]} to /api/chief-broadcast on THIS instance "
               "({text} alone = all peers); GET /api/peers lists them. All visible in your Comms lens. %s"
               % (brief, roster_text()))
-    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; export MESH_CC="http://localhost:%d"; '
+    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'export MESH_CC="http://localhost:%d"; '
           "claude --dangerously-skip-permissions %s --settings %s %s"
           % (PORT, CC_TITLE_FLAG, shlex.quote(settings_file), shlex.quote(prompt)))
     rc = sh([TMUX, "new-session", "-d", "-s", CHIEF, "-c", PROJECT, cl])[0]
@@ -2353,7 +2498,7 @@ def agent_open(slug):
     sess = "agt-" + slug
     if sh([TMUX, "has-session", "-t", sess])[0] == 0:
         return {"ok": True, "term": "/term?name=" + sess, "note": "resumed"}
-    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
           "'You are the %s agent. Read CLAUDE.md in this folder -- it is your charter (your job, tools, and "
           "hard boundaries). Then give me a one-line status and stand by. "
           "For sudo/interactive commands you can't run (no TTY): pre-type them into the project Admin "
@@ -2601,7 +2746,7 @@ def extension_setup(eid):
     sess = "ext-" + eid
     if sh([TMUX, "has-session", "-t", sess])[0] == 0:
         return {"ok": True, "term": "/term?name=" + sess, "note": "resumed"}
-    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
           "'You are the SETUP GUIDE for the %s ClaudeFather extension. Read SETUP.md in this folder -- it is "
           "your script. Walk me through setup ONE step at a time, wait at each step, help me create any "
           "accounts/API keys, store secrets ONLY in the gitignored deployment env (never echo or commit "
@@ -2814,7 +2959,7 @@ def skill_open(scope, slug):
     if not base or not os.path.isdir(d): return {"ok": False, "error": "no such skill"}
     sess = "skill-" + re.sub(r"[^a-z0-9]+", "-", (PROJECT_NAME + "-" + slug).lower()).strip("-")
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
               "'You are authoring the Agent Skill in this folder (SKILL.md). Read it, then help me write/improve "
               "it per the best practices in the ClaudeFather docs/MEMORY_SKILLS_AGENTS.md (esp: the description "
               "is the trigger; keep it lean; lock side-effect skills to manual). One-line status, then stand by.'")
@@ -3049,7 +3194,7 @@ def team_run(slug):
     try: os.makedirs(TEAM_RUNS_DIR, exist_ok=True)
     except Exception: pass
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
               "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
     return {"ok": True, "slug": real, "name": t.get("name") or real, "session": sess,
@@ -3124,7 +3269,7 @@ def team_session(members, assignment=""):
     )).strip().replace("'", "")   # single-quote-free: the brief is wrapped in '...' in the shell launcher
     sess = ("team-" + re.sub(r"[^a-z0-9]+", "-", (PROJECT_NAME + "-" + "-".join(p["slug"] for p in picked)).lower()).strip("-"))[:60]
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' ' + "'" + brief + "'")
+        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' ' + "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
         def _trust():
             for _ in range(10):
@@ -3435,7 +3580,7 @@ def audit_run(block, slug):
     try: os.makedirs(AUDIT_RUNS_DIR, exist_ok=True)
     except Exception: pass
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
               "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
     return {"ok": True, "block": block, "name": real, "session": sess,
@@ -3725,7 +3870,7 @@ def resume_session(machine, sid, cwd, fork=False, label=""):
     if machine == "studio":
         wd = cwd if (cwd and os.path.isdir(cwd)) else PROJECT
         sh([TMUX, "new-session", "-d", "-s", name, "-c", wd,
-            'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --resume %s%s --dangerously-skip-permissions %s' % (sid, fk, CC_TITLE_FLAG)])
+            'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --resume %s%s --dangerously-skip-permissions %s' % (sid, fk, CC_TITLE_FLAG)])
     else:
         alias = mm.get("alias") or mm["ssh"]
         wd = cwd if (cwd and re.match(r"^[A-Za-z]:[\\/][\w\\/ .:-]*$", cwd)) else "C:\\hptuners"
@@ -5754,6 +5899,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/google/gmail-msg":return self._s(200, json.dumps(gmail_get(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-unread": return self._s(200, json.dumps(gmail_unread()))
         if u.path == "/api/session-bar":   return self._s(200, json.dumps(session_bar()))
+        if u.path == "/api/claude-accounts": return self._s(200, json.dumps(claude_accounts()))
+        if u.path == "/api/claude-login/status": return self._s(200, json.dumps(claude_login_status(q.get("label", [""])[0] or None)))
         if u.path == "/api/google/gmail-thread":  return self._s(200, json.dumps(gmail_thread(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-att":
             b, err = gmail_attachment_bytes(q.get("id", [""])[0], q.get("att", [""])[0])
@@ -5854,6 +6001,25 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(launch(body.get("target", "studio"), body.get("name", "session"), body.get("component"))))
         if u.path == "/api/close-session":
             return self._s(200, json.dumps(close_session(body["name"], body.get("force", False))))
+        if u.path == "/api/claude-login/start":
+            w = _wallet_load(); w["_pending"] = body.get("label", ""); _wallet_save(w)
+            return self._s(200, json.dumps(claude_login_start(body.get("label", ""))))
+        if u.path == "/api/claude-login/code":
+            return self._s(200, json.dumps(claude_login_code(body.get("code", ""))))
+        if u.path == "/api/claude-account/activate":
+            ok = _account_activate(body.get("label", "")); return self._s(200, json.dumps({"ok": ok, "default": _wallet_load().get("default", "")}))
+        if u.path == "/api/claude-account/usage":
+            return self._s(200, json.dumps(claude_usage_scrape(body.get("label", ""))))
+        if u.path == "/api/claude-account/remove":
+            lbl = body.get("label", ""); w = _wallet_load()
+            w["accounts"] = [a for a in w.get("accounts", []) if a.get("label") != lbl]
+            if w.get("default") == lbl: w["default"] = ""
+            _wallet_save(w)
+            try:
+                tp = _tok_path(lbl);  os.remove(tp) if tp and os.path.isfile(tp) else None
+                up = _usage_cache_path(lbl); os.remove(up) if os.path.isfile(up) else None
+            except Exception: pass
+            return self._s(200, json.dumps({"ok": True}))
         if u.path == "/api/term-mouse":     # per-session tmux mouse: on=wheel-scroll, off=drag-select+copy
             nm = re.sub(r"[^A-Za-z0-9_-]", "", body.get("name", ""))[:48]
             on = bool(body.get("on", True))
@@ -7244,6 +7410,7 @@ body.gm-resizing iframe{pointer-events:none}
 <button data-l="ideas"><i class="ph-light ph-lightbulb"></i>Ideas</button>
 <button data-l="docs"><i class="ph-light ph-book-open"></i>Docs</button>
 <button data-l="doctor"><i class="ph-light ph-stethoscope"></i>Doctor</button>
+<button data-l="accounts"><i class="ph-light ph-identification-badge"></i>Claude Accounts</button>
 <button data-l="settings"><i class="ph-light ph-gear"></i>Settings</button></nav>
 <div id="navmode" title="Tabs reorder themselves by how often you use them. Drag any tab to pin a custom order."></div>
 <div class="health" id="svchealth"></div>
@@ -7325,6 +7492,7 @@ function render(){
   else if(LENS=="ideas"){loadIdeas();return;}
   else if(LENS=="ccr"){loadCcr();return;}
   else if(LENS=="propose"){loadPropose();return;}
+  else if(LENS=="accounts"){loadAccounts();return;}
   else if(LENS=="settings"){loadSettings();return;}
   else if(LENS=="chief"){loadChief();return;}
   else if(LENS=="docs"){loadDocs();return;}
@@ -7411,7 +7579,7 @@ async function modResumeId(id,fork){const c=MODCONVOMAP[id]; if(!c)return;
 function modCard(c){const n=(c.children||[]).length;
   return '<div class="card" onclick="loadModules(\''+esc(c.rel)+'\')" style="cursor:pointer"><h3><span>🧩 '+esc(c.name)+'</span>'+(n?'<span class="badge" style="background:#3b82f622;color:#3b82f6">'+n+' inside</span>':'')+'</h3>'
     +(c.summary?('<div class="meta"'+(c.summary_default?' style="opacity:.65;font-style:italic"':'')+'>'+esc(c.summary)+(c.summary_default?' <span class="sub">(suggested &mdash; set your own under the <code># title</code> in CLAUDE.md)</span>':'')+'</div>')
-              :'<div class="meta" style="color:#f85149">&#9888; no description -- add a one-line summary right under the <code># title</code> in this module&#39;s CLAUDE.md (it shows here + in the module map)</div>')
+              :'<div class="meta sub" style="opacity:.55;font-style:italic">No summary yet &mdash; add a one-line description under the <code># title</code> in this module&#39;s CLAUDE.md and it shows here.</div>')
     +'<div class="meta sub" style="margin-top:4px"><code>'+esc(c.rel)+'</code>'+(c.last_convo?' · 💬 '+tago(c.last_convo):'')+'</div>'
     +'<div class="btns" style="margin-top:9px" onclick="event.stopPropagation()">'
     +'<button class="mini go" onclick="modLaunch(\''+esc(c.rel)+'\')">▶ launch</button>'
@@ -10927,7 +11095,7 @@ async function treeResume(id,cwd,fork){const _c=CONVOMAP[id]||{};toast((fork?"Fo
   const r=await(await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({machine:"studio",id:id,cwd:cwd,fork:!!fork,label:_c.label||""})})).json();
   if(!r||!r.ok){toast("Failed: "+((r||{}).error||"?"),5000);return;}
   closeInfo();_openTerm(r);}
-const NAV={portfolio:'Portfolio',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',agency:'Agency',calls:'Calls',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Usage Analytics',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive'};
+const NAV={portfolio:'Portfolio',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',agency:'Agency',calls:'Calls',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Usage Analytics',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Claude Accounts'};
 // ---- Chief of Staff: your office (top-level command + a direct line to me) ----
 function gotoLens(l){const b=document.querySelector('#lens button[data-l="'+l+'"]');if(b)b.click();}
 async function talkChief(){toast("Opening your Chief of Staff…");
@@ -11093,6 +11261,72 @@ async function proposeSend(){const t=document.getElementById("pr_t");if(!t.value
 
 // ---- Settings lens: set this node's Tier (ClaudeFather/ClaudeGrandfather) + Type (Project/Agency) ----
 let SETTINGS={};
+// ===== Claude Accounts lens: account wallet (login once -> 1yr token), one-click switch, per-account /usage =====
+var ACCT_POLL=null;
+function uBar(u){ if(!u) return '<span class="sub">—</span>';
+  var p=Math.max(0,Math.min(100,u.pct||0)); var col=p>=90?'#f85149':p>=70?'#d29922':'var(--accent)';
+  return '<div style="display:flex;align-items:center;gap:8px"><div style="flex:1;height:9px;border-radius:5px;background:#0006;overflow:hidden"><div style="height:100%;width:'+p+'%;background:'+col+'"></div></div>'
+    +'<span class="sub" style="white-space:nowrap;min-width:120px">'+p+'% · resets '+e2(u.resets||'?')+'</span></div>'; }
+async function loadAccounts(){
+  var g=document.getElementById("grid");
+  g.innerHTML=empty("Loading accounts…");
+  var d={}; try{ d=await(await fetch("/api/claude-accounts")).json(); }catch(e){ g.innerHTML=empty("Couldn't load accounts."); return; }
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🪪 Claude Accounts</b> <span class="sub">log in once per account (~1yr token) · one-click switch · usage per account</span>'
+    +'<div style="margin-left:auto"><button class="mini go" onclick="acctAddStart()">+ Add account</button></div></div>'
+    +'<div class="sub" style="margin-top:6px">Sessions on THIS node launch with the <b>active</b> account. Switching is one click; new sessions use it immediately (running sessions keep their account until relaunched).</div></div>';
+  if(!(d.accounts||[]).length){ h+=empty("No accounts yet — click + Add account. You'll open a link in your browser (signed into the account you want), paste back the code, and that's it for ~a year."); }
+  (d.accounts||[]).forEach(function(a){
+    var u=a.usage||{};
+    h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>'+(a.active?'🟢 ':'⚪ ')+e2(a.label)+'</span>'+(a.active?'<span class="badge" style="background:#3fb95022;color:#3fb950">active</span>':'')+'</h3>'
+      +'<div style="margin-top:8px;display:flex;flex-direction:column;gap:7px">'
+      +'<div><div class="sub">5-hour session</div>'+uBar(u.session)+'</div>'
+      +'<div><div class="sub">This week (all models)</div>'+uBar(u.week)+'</div>'
+      +'<div><div class="sub">This week (Sonnet)</div>'+uBar(u.week_sonnet)+'</div></div>'
+      +'<div class="meta sub" style="margin-top:6px">'+(a.usage_ts?('usage checked '+tago(a.usage_ts)):'usage not checked yet')+'</div>'
+      +'<div class="btns" style="margin-top:9px">'
+      +(a.active?'':'<button class="mini go" onclick="acctActivate(\''+esc(a.label)+'\')">▶ make active</button>')
+      +'<button class="mini" onclick="acctUsage(\''+esc(a.label)+'\',this)">↻ refresh usage</button>'
+      +'<button class="mini" onclick="acctAddStart(\''+esc(a.label)+'\')">re-authenticate</button>'
+      +'<button class="mini" style="color:#f85149" onclick="acctRemove(\''+esc(a.label)+'\')">remove</button>'
+      +'</div></div>';
+  });
+  g.innerHTML='<div class="modstack">'+h+'</div>';
+}
+async function acctActivate(label){ toast('Switching active account to '+label+'…'); await fetch('/api/claude-account/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})}); toast('Active account: '+label+' — new sessions use it now.',5000); loadAccounts(); }
+async function acctUsage(label,btn){ if(btn){btn.disabled=true;btn.textContent='checking…';} toast('Checking '+label+' usage (spawns a quick session)…',4000);
+  try{ await fetch('/api/claude-account/usage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})}); }catch(e){}
+  loadAccounts(); }
+async function acctRemove(label){ if(!confirm('Remove account "'+label+'"? (its stored token is deleted; you can re-add it)'))return;
+  await fetch('/api/claude-account/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})}); loadAccounts(); }
+function acctAddStart(relabel){
+  var label=relabel||prompt("Label for this account (e.g. james / getcalibrated / sarah):","");
+  if(label===null||!label.trim())return; label=label.trim();
+  fetch('/api/claude-login/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})}).then(function(){ acctLoginModal(label); });
+}
+function acctLoginModal(label){
+  showM('<div class="cchelp"><div class="cchtop"><div class="cchicon"><i class="ph-light ph-sign-in"></i></div><div class="cchtt"><span class="ccheye">Log in</span><h2>'+e2(label)+'</h2></div></div>'
+    +'<div class="cchbody" id="acctLoginBody"><p>Starting…</p></div>'
+    +'<div class="cchfoot"><button class="btn" onclick="acctLoginStop()">Cancel</button></div></div>');
+  if(ACCT_POLL)clearInterval(ACCT_POLL);
+  ACCT_POLL=setInterval(function(){ acctLoginPoll(label); },2000); acctLoginPoll(label);
+}
+function acctLoginStop(){ if(ACCT_POLL){clearInterval(ACCT_POLL);ACCT_POLL=null;} closeM(); }
+async function acctLoginPoll(label){
+  var b=document.getElementById('acctLoginBody'); if(!b){ if(ACCT_POLL){clearInterval(ACCT_POLL);ACCT_POLL=null;} return; }
+  var r={}; try{ r=await(await fetch('/api/claude-login/status?label='+encodeURIComponent(label))).json(); }catch(e){ return; }
+  if(r.state==='done'){ if(ACCT_POLL){clearInterval(ACCT_POLL);ACCT_POLL=null;} b.innerHTML='<p>✓ <b>Logged in as '+e2(r.label||label)+'</b> — token saved (~1 year). It is now the active account.</p>'; toast('Logged in: '+(r.label||label),5000); setTimeout(function(){closeM();loadAccounts();},1400); return; }
+  if(r.state==='error'){ b.innerHTML='<p style="color:#f85149">Login error.</p><pre class="snap" style="white-space:pre-wrap">'+e2(r.tail||'')+'</pre>'; return; }
+  if(r.url){
+    b.innerHTML='<p><b>1.</b> Open this in a browser <b>signed into the Claude account "'+e2(label)+'"</b> (pick the right Google/Chrome profile):</p>'
+      +'<p><a href="'+e2(r.url)+'" target="_blank" rel="noopener" class="btn go" style="text-decoration:none;display:inline-block">Open authorization page ↗</a></p>'
+      +'<p style="font-size:11px;word-break:break-all;color:var(--dim)">'+e2(r.url)+'</p>'
+      +'<p><b>2.</b> Authorize, copy the <b>code</b> it gives you, paste it here:</p>'
+      +'<p style="display:flex;gap:8px"><input id="acctCode" placeholder="paste authorization code" style="flex:1;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:8px 11px"><button class="btn go" onclick="acctSubmitCode()">Submit</button></p>'
+      +(r.state==='awaiting_code'?'<p class="sub">Waiting for the code…</p>':'<p class="sub">If the page logs you straight in, this will finish on its own.</p>');
+  } else { b.innerHTML='<p>Starting the login… opening the authorization link in a moment.</p>'; }
+}
+async function acctSubmitCode(){ var el=document.getElementById('acctCode'); var c=el?el.value.trim():''; if(!c){toast('Paste the code first');return;}
+  await fetch('/api/claude-login/code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:c})}); toast('Code submitted — finishing…',3000); }
 async function loadSettings(){
   const g=document.getElementById("grid");
   try{SETTINGS=await(await fetch("/api/settings")).json();}catch(e){SETTINGS={};}
@@ -11149,6 +11383,7 @@ function applyPreset(){var L=(window.CC&&window.CC.lenses);if(!L||!L.length)retu
   // Google lenses self-hide unless the google-workspace extension has a token on this node; when present they
   // override the preset-hide above (they live outside the preset lens list). See navSeedGoogle() for the folder.
   ['gmail','calendar','drive'].forEach(function(l){var _gb=document.querySelector('#lens button[data-l="'+l+'"]');if(_gb)_gb.style.display=(window.CC&&window.CC.google)?'':'none';});
+  {var _ab=document.querySelector('#lens button[data-l="accounts"]');if(_ab)_ab.style.display=(window.CC&&window.CC.accountWallet)?'':'none';}  // Claude Accounts lens self-hides until the wallet is enabled on this node
   if(!(window.CC&&window.CC.role==='org')){var _pb=document.querySelector('#lens button[data-l="portfolio"]');if(_pb)_pb.style.display='none';}  // Portfolio = ClaudeGrandfather (overseer) only
   LENS=L[0];   // land on the preset's first lens (portfolio for an overseer, sessions for a project)
   document.querySelectorAll('#lens button').forEach(function(b){b.classList.toggle('on',b.dataset.l===LENS);});
