@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.5 -- 2026-06-24
+- FIX (Gmail reader: emails cut off at the bottom / "just lines"): newsletter & marketing mail commonly
+  set `html,body{height:100%}`, which inside an iframe collapses scrollHeight to the frame's own height —
+  so the body was clipped to a sliver (the reported Sam Breen "RE: 2026 PR and Affiliate Support" email).
+  We now force `height:auto` on the email's html/body, measure the true content height (max of body +
+  documentElement scroll/offset), and attach a **ResizeObserver** + image-load/error hooks so the frame
+  re-fits on any reflow. Verified by a headless render of a height:100% newsletter — frame sized to the
+  full 2210px content instead of ~120px.
+- POLISH (Gmail reader: long reply chains): collapsed older replies are now a compact, slightly
+  **overlapping stack** that **cascades apart when you hover the thread** (and each lifts on hover), so a
+  long chain takes minimal vertical space but every message is one move away. The newest message stays
+  expanded; click any to open it full-length.
+
 ## 0.21.4 -- 2026-06-24
 - FIX (Smart reply: "thread headers unavailable"): the 360 bundle resolved headers with
   GET /messages/{id} but the reader passes a THREAD id -- and a Gmail thread id only coincidentally

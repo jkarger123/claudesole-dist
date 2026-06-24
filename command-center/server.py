@@ -6518,8 +6518,16 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-act{font-size:12px;padding:6px 11px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;font-weight:600;display:inline-flex;align-items:center;gap:5px}
 .gm-act:hover{border-color:var(--accent)}
 .gm-act.go{background:var(--grad);color:#15120a;border:none;font-weight:700}
-.gm-thread{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:11px}
-.gm-msg{border:1px solid var(--line);border-radius:11px;background:var(--bg);overflow:hidden}
+.gm-thread{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:0}
+.gm-msg{border:1px solid var(--line);border-radius:11px;background:var(--bg);overflow:hidden;margin-bottom:11px;transition:margin .17s ease,box-shadow .17s ease,transform .17s ease}
+/* collapsed older replies = a compact, slightly-overlapping stack that fans apart when you hover the thread
+   (so a long reply chain takes minimal space but every message is one move away). */
+.gm-msg:not(.open){position:relative;cursor:pointer}
+.gm-msg:not(.open)+.gm-msg:not(.open){margin-top:-20px}
+.gm-thread:hover .gm-msg:not(.open)+.gm-msg:not(.open){margin-top:0}
+.gm-msg:not(.open):hover{border-color:var(--accent);box-shadow:0 9px 24px rgba(0,0,0,.5);transform:translateY(-1px);z-index:3}
+.gm-msg:not(.open) .gm-mhead{padding:7px 12px}
+.gm-msg:not(.open) .gm-collapsed{padding:0 12px 7px}
 .gm-mhead{padding:9px 12px;display:flex;align-items:center;gap:9px;cursor:pointer;border-bottom:1px solid transparent}
 .gm-msg.open .gm-mhead{border-bottom-color:var(--line)}
 .gm-avatar{flex:0 0 30px;width:30px;height:30px;border-radius:50%;background:var(--card2);color:var(--mut);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px}
@@ -8308,18 +8316,28 @@ function gmToggleMsg(idx){
   // an iframe sized while it was collapsed (display:none) measures as ~0 -> re-fit now that it's visible
   if(el.classList.contains('open')){ var f=el.querySelector('.gm-mbody iframe'); if(f) gmFitFrame(f); }
 }
-function gmStyleHtml(h){ // inject a base style so dark-themed mail is readable in the white iframe
-  return '<base target="_blank"><style>body{font:14px/1.55 -apple-system,sans-serif;color:#111;margin:8px;word-break:break-word}img{max-width:100%;height:auto}a{color:#1a56db}</style>'+(h||'');
+function gmStyleHtml(h){ // inject a base style so mail is readable + so the frame can be sized to content
+  // CRITICAL: marketing/newsletter mail often sets html,body{height:100%} -> inside an iframe that collapses
+  // scrollHeight to the frame's own height, so the body gets cut off ("just lines"). Force height:auto.
+  return '<base target="_blank"><style>'
+    +'html,body{height:auto!important;min-height:0!important;max-height:none!important;overflow:visible!important}'
+    +'body{font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111;margin:8px;word-break:break-word;background:#fff}'
+    +'img{max-width:100%;height:auto}a{color:#1a56db}table{max-width:100%}'
+    +'</style>'+(h||'');
 }
 function gmFitFrame(f){
   try{
-    var d=f.contentDocument||f.contentWindow.document;
-    var fit=function(){ var h=Math.max((d.body&&d.body.scrollHeight)||0,(d.documentElement&&d.documentElement.scrollHeight)||0);
-      if(h>0) f.style.height=(h+22)+'px'; };   // NO cap -- full email length; the thread pane does the scrolling
+    var d=f.contentDocument||f.contentWindow.document; if(!d){ f.style.height='600px'; return; }
+    var fit=function(){
+      var b=d.body, e=d.documentElement;
+      var h=Math.max(b?b.scrollHeight:0, b?b.offsetHeight:0, e?e.scrollHeight:0, e?e.offsetHeight:0);
+      if(h>0) f.style.height=(h+22)+'px';   // NO cap -- full email length; the thread pane does the scrolling
+    };
     fit();
-    // images load async and grow the body after onload -> re-fit as each arrives, plus a couple of safety ticks
-    try{ Array.prototype.forEach.call(d.images||[], function(img){ if(!img.complete) img.addEventListener('load', fit, {once:true}); }); }catch(e){}
-    setTimeout(fit,250); setTimeout(fit,800);
+    // content grows after onload (images, web fonts, reflow) -> refit on each image + on ANY body resize
+    try{ Array.prototype.forEach.call(d.images||[], function(img){ if(!img.complete){ img.addEventListener('load',fit,{once:true}); img.addEventListener('error',fit,{once:true}); } }); }catch(e){}
+    try{ if(window.ResizeObserver && d.body){ new ResizeObserver(fit).observe(d.body); } }catch(e){}
+    setTimeout(fit,120); setTimeout(fit,400); setTimeout(fit,1000);
   }catch(e){ f.style.height='600px'; }   // last resort if the doc is somehow unreadable
 }
 function gmFullDate(s){ try{var d=new Date(s); if(isNaN(d)) return e2(s); return d.toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}catch(e){return e2(s);} }
