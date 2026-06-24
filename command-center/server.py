@@ -8413,7 +8413,7 @@ async function mlFolderMail(rel,name){
   var r={}; try{ r=await(await fetch('/api/mail/folder?rel='+encodeURIComponent(rel)+'&max=25')).json(); }catch(e){ host.innerHTML=empty('Network error'); return; }
   if(r.error){ host.innerHTML='<div class="meta" style="color:#f85149">'+e2(r.error)+'</div>'+mlMatchers(rel,r.matchers||{}); return; }
   var mt=r.matchers||{};
-  var head='<div class="ml-mhead"><b>📬 Correspondence</b> <span class="sub">'+(r.count||0)+' thread(s)</span></div>';
+  var head='<div class="ml-mhead"><span class="sub">'+(r.count||0)+' thread'+((r.count===1)?'':'s')+' · auto-collected from Gmail</span></div>';
   var rows=(r.messages||[]).map(function(m){
     var tid=m.threadId||m.id; var src=(m.linked||'auto');
     return '<div class="ml-mrow"><div class="ml-mmid">'
@@ -8455,6 +8455,7 @@ function mlFolderCard(rel,name){
   var k=mlKey(rel);
   setTimeout(function(){ mlFolderMail(rel,name); }, 50);
   return '<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>📬 Correspondence</span></h3>'
+    +'<div class="sub" style="margin:-2px 0 11px;color:var(--dim);line-height:1.55">Gmail threads that belong to this project — <b>auto-collected</b> by the matchers below (a sender domain, an address, or a keyword). Read-only; nothing is sent from here. <a onclick="ccHelp(\'correspondence\')" style="color:var(--accent);cursor:pointer;font-weight:600">Learn more</a></div>'
     +'<div id="mlFolderBox_'+k+'">'+empty('Loading…')+'</div></div>';
 }
 
@@ -10221,7 +10222,7 @@ async function loadPortfolio(){document.getElementById("grid").innerHTML=empty("
     +'<input id="chiefmsg" class="mini" style="flex:1;min-width:220px" placeholder="message to the chief(s)...">'
     +'<button class="mini go" onclick="chiefComms()">Send</button></div><div id="chiefreplies" style="margin-top:10px"></div></div>';
   insts.forEach(x=>{const col=x.rag=='green'?'#3fb950':x.rag=='amber'?'#d29922':x.rag=='red'?'#f85149':'#8b949e';
-    h+='<div class="card" onclick="location.href=\''+x.url+'\'" title="Open this ClaudeFather">'
+    h+='<div class="card" onclick="window.open(\''+x.url+'\',\'_blank\',\'noopener\')" title="Open this ClaudeFather in a new tab">'
       +'<h3><span>'+esc(x.id)+'</span><span class="badge" style="background:'+col+'22;color:'+col+'">'+x.status+'</span></h3>'
       +'<div class="meta">'+esc(x.preset||x.role||'')+' &middot; '+esc(x.url)+'</div>'
       +'<div class="sub" style="margin-top:9px">sessions '+(x.sessions_n!=null?x.sessions_n:'?')+' &middot; loops '+(x.loops_running!=null?x.loops_running:'?')+' &middot; security '+(x.security||'?')+'</div><div class="btns" style="margin-top:9px" onclick="event.stopPropagation()"><button class="mini" onclick="chiefDM(&#39;'+esc(x.id)+'&#39;)">&#128172; DM chief</button></div></div>';});
@@ -10507,6 +10508,7 @@ var HELP={
  sessions:{t:'🖥 Sessions + the bottom taskbar',h:'<p>The bar pinned at the bottom is every live session, like a Windows taskbar. A tile <b>blinks gold while working</b> and <b>pulses gold when it finishes</b> — a done agent pulls you back even if you\'re in email. <b>Hover a tile</b> to blow it up into a full interactive terminal with Usage / New-tab / Graceful-exit / Kill.</p>'},
  pipeline:{t:'🚦 Pipeline Live-View',h:'<p>A live run-map of your nightly/scheduled pipeline. A loud full-width banner goes <b>red</b> if a run FAILS or STALLS, <b>amber</b> if a run is MISSED — so a silent failure can never slip by unnoticed again.</p>'},
  comms:{t:'📡 Comms — the inter-chief mesh',h:'<p>Your Chief of Staff talks to the Chiefs of your other instances over a durable mesh. Message one or all; replies come back here.</p>'},
+ correspondence:{t:'Correspondence — a project\'s shared inbox',h:'<p>Every project / client folder can <b>auto-collect the Gmail threads that belong to it</b> — so the email about a job lives next to the job instead of being lost in your inbox.</p><p>You teach it with <b>matchers</b>, set just below the list:</p><ul><li>a sender <b>domain</b> — <code>brand.com</code> pulls in everyone at that company</li><li>a specific <b>email</b> — <code>jane@brand.com</code></li><li>a <b>keyword</b> — a project codename that appears in the subject or body</li></ul><p>Any thread that matches shows up here automatically. It is <b>read-only</b>: listing never marks mail read, and <b>nothing is ever sent from here</b>. Click <b>open</b> on a thread to jump to it in Gmail, and use <b>Save to…</b> on a Gmail attachment to drop the file straight into this project folder.</p>'},
 };
 function _cchk(k){return 'cchelp_'+k;}
 function ccHelpSeen(k){try{return localStorage.getItem(_cchk(k))==='1';}catch(e){return false;}}

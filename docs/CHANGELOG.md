@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.3 -- 2026-06-24
+- FIX (Portfolio, overseer): clicking an instance card now opens that ClaudeFather in a NEW TAB
+  (`window.open(..., _blank)`) instead of replacing the overseer page in the current tab.
+- FIX + CLARITY (Projects ▸ Correspondence): the "📬 Correspondence" header rendered TWICE (the card
+  title + the inner list head both printed it). Dropped the duplicate; the inner head now just shows the
+  thread count ("N threads · auto-collected from Gmail").
+- The feature was unclear, so it now explains itself: an always-visible one-liner under the header ("Gmail
+  threads that belong to this project, auto-collected by the matchers below… read-only; nothing is sent")
+  with a **Learn more** link, plus a full **"How this works"** explainer (matchers = domain / email /
+  keyword; read-only; open jumps to Gmail; Save-to drops attachments into the folder).
+
 ## 0.21.2 -- 2026-06-24
 - POLISH ("How this works" explainers redesigned): the informative popups now read as refined/enterprise
   instead of the previous busy gradient + gold top-bar. Calm flat surface, a small gold "HOW THIS WORKS"
