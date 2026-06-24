@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.15.1 -- 2026-06-24
+- FIX (Google suite rendered completely unstyled): the 0.15.0 integration pasted the entire new stylesheet
+  (cmdk-*/gm-*/cal-*/dr-*) into the RALPH page's <style> instead of the main app page's, so every Gmail/
+  Calendar/Drive lens rendered as raw unstyled HTML. Moved the 477-line CSS block into the main page <style>
+  (where --accent-rgb/--dim/etc. resolve). Lenses now styled. The shell JS was already correctly placed.
+
 ## 0.15.0 -- 2026-06-24
 - REBUILD (Google suite -- "beat Google"): a ground-up rebuild of the Gmail/Calendar/Drive lenses into a
   premium, keyboard-first client, produced by a 10-agent research+design+build workflow (SOTA study of
