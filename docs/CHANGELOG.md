@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.15 -- 2026-06-24
+- FIX (download "site wasn't available" through the proxy): download URLs carried the raw rel path, so a
+  filename with spaces + parens (e.g. "... (Action Sheet).xlsx") became a query full of %20/%28/%29 -- which
+  some tunnels/proxies reject before the request reaches the server. Downloads now use a clean base64url
+  token (`?b64=`), pure ASCII. Verified end-to-end: a messy-named file downloads HTTP 200 with correct bytes
+  over a clean URL. The server accepts both ?b64= and legacy ?path=.
+- LOCK (Chief of Staff session): its label is now ALWAYS "Chief of Staff" -- a canonical name that an
+  agent-declared title can never override -- and it remains a protected singleton that cannot be ended/killed
+  from the dashboard.
+
 ## 0.21.14 -- 2026-06-24
 - ADD (sessions name themselves): every launched session now gets a system-prompt instruction
   (`--append-system-prompt`) to emit, once it understands its job, a line `[[CC_TITLE: <2-6 word title>]]`.

@@ -1391,8 +1391,9 @@ CC_TITLE_FLAG = "--append-system-prompt " + _shlex.quote(TITLE_INSTRUCTION)
 def _session_label(name):
     """A descriptive title instead of a code like hp-r-767755d1 -- agent-declared title wins, else derived
     from the conversation it was resumed/forked from (its opening message), or the launch name."""
+    if name in _FRIENDLY: return _FRIENDLY[name]           # canonical system names (Chief of Staff, etc.) -- NEVER overridden
+    if name == globals().get("CHIEF"): return "Chief of Staff"
     if name in _AGENT_TITLES: return _AGENT_TITLES[name]   # the agent named this session itself
-    if name in _FRIENDLY: return _FRIENDLY[name]
     if name in _SESSLABEL: return _SESSLABEL[name]
     if name.startswith("ralph-"): return "Ralph: " + name[6:]
     m = re.match(r"hp-(fork|r)-([A-Za-z0-9]+)", name)
@@ -5705,7 +5706,17 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "private, max-age=3600")
             self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
         if u.path == "/api/file-get":
-            try: ab = projpath(q.get("path", [""])[0])
+            # Accept the rel path EITHER as ?b64=<base64url> (clean ASCII -- proxies/tunnels choke on a raw
+            # path full of %20/%28/%29 from filenames with spaces+parens, which shows as "site wasn't
+            # available" before the request ever reaches us) OR the legacy ?path=.
+            rel = q.get("path", [""])[0]
+            _b = q.get("b64", [""])[0]
+            if _b:
+                try:
+                    import base64 as _b64m
+                    rel = _b64m.urlsafe_b64decode(_b + "=" * (-len(_b) % 4)).decode("utf-8")
+                except Exception: return self._s(400, "bad path")
+            try: ab = projpath(rel)
             except Exception: return self._s(400, "bad path")
             if _path_has_secret(ab): return self._s(403, "forbidden")   # never serve secrets/keys via download
             real = os.path.realpath(ab)
@@ -7168,6 +7179,8 @@ const CST={production:["Production","#3fb950"],live:["Live","#3fb950"],stable:["
 function badge(s){const x=CST[s]||[s||"?","#a0a0b0"];return '<span class="badge" style="background:'+x[1]+'22;color:'+x[1]+'">'+x[0]+'</span>';}
 function esc(s){return (s||"").replace(/'/g,"").replace(/</g,"&lt;");}
 function e2(s){return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+// base64url-encode a path for a download URL -> clean ASCII (no %20/%28/%29) that proxies/tunnels won't drop.
+function b64u(s){ try{ return btoa(unescape(encodeURIComponent(s||""))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); }catch(e){ return encodeURIComponent(s||""); } }
 function paintSvc(){const el=document.getElementById("svchealth");if(!el)return;
   const c=s=>s=="online"?"var(--ok)":(s=="offline"?"var(--err)":"var(--dim)");
   const row=(s,lbl)=>'<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--mut)" title="'+lbl+': '+(s||"?")+'"><span style="width:8px;height:8px;border-radius:50%;background:'+c(s)+';flex:0 0 8px"></span>'+lbl+'</div>';
@@ -7267,7 +7280,7 @@ async function loadModules(rel){
     let MODFILES=[]; try{MODFILES=await(await fetch("/api/module-files?rel="+encodeURIComponent(MODREL))).json();}catch(e){MODFILES=[];}
     if(MODFILES.length){
       const TIER={icloud:['&#9729; iCloud','#58a6ff','recent -- synced to your Apple devices, opens in iCloud'],ssd:['&#128452; SSD','#c9a227','archived (>90d) on the SSD, off iCloud -- still opens from here'],local:['',''," "]};
-      const frow=f=>{const t=TIER[f.tier]||['',''];const url='/api/file-get?path='+encodeURIComponent(f.rel);return '<div class="sess"><span class="lbl" title="tap to view/download"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600">📄 '+esc(f.name)+'</a>'+(t[0]?(' <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'):'')+' <span class="sub">· '+fmtBytes(f.size)+' · '+new Date(f.mtime*1000).toLocaleString()+(f.sub?(' · '+esc(f.sub)):'')+'</span></span>'
+      const frow=f=>{const t=TIER[f.tier]||['',''];const url='/api/file-get?b64='+b64u(f.rel);return '<div class="sess"><span class="lbl" title="tap to view/download"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600">📄 '+esc(f.name)+'</a>'+(t[0]?(' <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'):'')+' <span class="sub">· '+fmtBytes(f.size)+' · '+new Date(f.mtime*1000).toLocaleString()+(f.sub?(' · '+esc(f.sub)):'')+'</span></span>'
         +'<a class="mini go" href="'+url+'" download="'+esc(f.name)+'" style="text-decoration:none" title="download to THIS device">&#8595; Download</a>'
         +'<button class="mini" title="show where this file is in your iCloud Drive (it syncs to all your Apple devices)" onclick="reveal(\''+esc(f.rel)+'\')">&#128205; Find this file</button></div>';};
       h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>&#128193; Files made for you in this folder <span class="sub">('+MODFILES.length+')</span></span></h3>'
@@ -7562,9 +7575,9 @@ function renderFiles(){
     fs.forEach(f=>{const g=fileGroup(f.mtime);if(g!==lastG){h+='<div class="card" style="cursor:default;grid-column:1/-1;background:transparent;border:none;padding:8px 2px 0"><b style="font-size:14px;color:#e8c547">'+g+'</b></div>';lastG=g;}
       const t=TIER[f.tier]||TIER.local;
       h+='<div class="card" style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
-        +'<span style="flex:1;min-width:220px"><a href="/api/file-get?path='+encodeURIComponent(f.rel)+'" target="_blank" rel="noopener" style="color:inherit;font-weight:700" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'
+        +'<span style="flex:1;min-width:220px"><a href="/api/file-get?b64='+b64u(f.rel)+'" target="_blank" rel="noopener" style="color:inherit;font-weight:700" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'
         +'<div class="sub" style="margin-top:2px">'+(f.module?('&#128194; '+esc(f.module)+' &middot; '):'')+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</div></span>'
-        +'<a class="mini go" href="/api/file-get?path='+encodeURIComponent(f.rel)+'" download="'+esc(f.name)+'" style="text-decoration:none" title="download to THIS device (works on your phone)">&#8595; Download</a>'
+        +'<a class="mini go" href="/api/file-get?b64='+b64u(f.rel)+'" download="'+esc(f.name)+'" style="text-decoration:none" title="download to THIS device (works on your phone)">&#8595; Download</a>'
         +'<button class="mini" title="show where this file is in your iCloud Drive (it syncs to all your Apple devices)" onclick="reveal(\''+esc(f.rel)+'\')">&#128205; Find this file</button></div></div>';});
   }
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';}
@@ -7576,7 +7589,7 @@ function renderBrowse(){const b=BROWSE||{};
   if(!b.ok){h+=empty('Could not browse: '+esc(b.error||'?'));document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';return;}
   if(BROWSEREL!==''){h+='<div class="card" style="cursor:pointer;grid-column:1/-1" onclick="loadBrowse(\''+esc(b.parent||'')+'\')"><b>&#11014; ..</b> <span class="sub">up a level</span></div>';}
   (b.dirs||[]).forEach(d=>{h+='<div class="card" style="cursor:pointer;grid-column:1/-1" onclick="loadBrowse(\''+esc(d.rel)+'\')"><b>&#128193; '+esc(d.name)+'</b> <span class="sub">folder</span></div>';});
-  (b.files||[]).forEach(f=>{const url='/api/file-get?path='+encodeURIComponent(f.rel);h+='<div class="card" style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="flex:1;min-width:200px"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="sub">&middot; '+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</span></span>'
+  (b.files||[]).forEach(f=>{const url='/api/file-get?b64='+b64u(f.rel);h+='<div class="card" style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="flex:1;min-width:200px"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="sub">&middot; '+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</span></span>'
     +'<a class="mini go" href="'+url+'" download="'+esc(f.name)+'" style="text-decoration:none" title="download to THIS device">&#8595; Download</a>'
     +'<button class="mini" title="show where this file is in your iCloud Drive (it syncs to all your Apple devices)" onclick="reveal(\''+esc(f.rel)+'\')">&#128205; Find this file</button></div></div>';});
   if(!(b.dirs||[]).length&&!(b.files||[]).length){h+=empty('Empty folder (or only hidden/secret files).');}
@@ -10610,7 +10623,7 @@ async function reveal(p){
           +'<p class="sub">It can take a moment to sync if it was just created. If you’re sitting at the Mac that made it, Finder was also opened there.</p>'
        : '<p>Asked Finder to reveal the file on the host Mac. If you’re on a different computer, use the <b>Download</b> button instead — or it will appear in your iCloud Drive shortly.</p>')
     +'</div>'
-    +'<div class="cchfoot"><a href="/api/file-get?path='+encodeURIComponent(p)+'" download style="margin-right:auto;color:var(--accent);font-weight:600;text-decoration:none">↓ Download instead</a>'
+    +'<div class="cchfoot"><a href="/api/file-get?b64='+b64u(p)+'" download style="margin-right:auto;color:var(--accent);font-weight:600;text-decoration:none">↓ Download instead</a>'
     +'<button class="btn go" onclick="closeM()">Got it</button></div></div>';
   showM(body);
 }
