@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.8 -- 2026-06-24
+- FIX (email cut off — the REAL fix): replaced the per-message iframe (whose height had to be measured, and
+  kept getting it short) with a **Shadow DOM** render. The email's CSS is still encapsulated, but the host
+  grows to the content's NATURAL height — nothing to measure, nothing to clip. The missing piece behind every
+  prior attempt: emails clip their body in a fixed **`height:Npx`** overflow:hidden wrapper, and I had only
+  ever neutralized `max-height`. Now container tags are forced to `height:auto !important; overflow:visible`
+  so the body flows full-length. Proven headless against the worst case (html,body height:100% + nested
+  fixed-height overflow:hidden): the body renders its full 2041px instead of a clipped 278px.
+- Email HTML is sanitized server-side before render (strips <script>, on* handlers, javascript: URLs,
+  iframe/object/embed/form) since Shadow DOM scopes CSS but doesn't sandbox JS. Links open in a new tab.
+
 ## 0.21.7 -- 2026-06-24
 - FIX (email STILL cut off at the bottom): the prior fix only handled html,body{height:100%}. Business mail
   can also trap content in an inner wrapper with a fixed height / max-height / overflow:hidden, which clips

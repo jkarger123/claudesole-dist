@@ -552,6 +552,20 @@ def gmail_unread():
     if not isinstance(r, dict) or "error" in r: return {"count": 0}
     return {"count": r.get("messagesUnread", 0)}
 
+def _sanitize_email_html(html):
+    """Make third-party email HTML safe to inject into a Shadow DOM (the shadow root scopes its CSS, so the
+    email renders at its natural full height -- no iframe, no height measurement, never clipped). Shadow DOM
+    does NOT sandbox JS and innerHTML won't run <script>, but we still strip scripts, on* handlers,
+    javascript: URLs, and frame/embed tags. <style> is KEPT (scoped by the shadow root)."""
+    if not html: return ""
+    h = html
+    h = re.sub(r"(?is)<script\b.*?</script\s*>", "", h)
+    h = re.sub(r"(?is)<script\b[^>]*/?>", "", h)
+    h = re.sub(r"(?is)</?(iframe|object|embed|applet|frame|frameset|base|meta|link|form)\b[^>]*>", "", h)
+    h = re.sub(r"(?is)\son[a-z0-9_-]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", h)   # strip event handlers
+    h = re.sub(r"(?is)(href|src|xlink:href|action)\s*=\s*(['\"])\s*javascript:[^'\"]*\2", r"\1=\2#\2", h)
+    return h
+
 def _gmail_body(payload):
     import base64
     def dec(data):
@@ -689,6 +703,7 @@ def gmail_thread(tid):
             drafts += 1; continue
         hs = {h["name"].lower(): h["value"] for h in m.get("payload", {}).get("headers", [])}
         body = _gmail_body(m.get("payload", {}))
+        if body.get("html"): body["html"] = _sanitize_email_html(body["html"])   # safe to inject into Shadow DOM
         snip = (m.get("snippet", "") or "").strip()
         if not snip:   # image-only / empty-snippet mail -> derive a preview so the collapsed card isn't blank
             snip = ((_html_to_text(body.get("html", "")) if isinstance(body, dict) else "")
@@ -6546,6 +6561,7 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-mto{font-size:11px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .gm-mdate{flex:0 0 auto;font-size:11px;color:var(--dim)}
 .gm-mbody{padding:0 14px 14px}
+.gm-shadow{display:block;width:100%}   /* Shadow-DOM host for an email body -- grows to natural content height */
 .gm-msg:not(.open) .gm-mbody{display:none}
 .gm-msg:not(.open) .gm-collapsed{display:block;padding:0 12px 9px;font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .gm-msg.open .gm-collapsed{display:none}
@@ -8302,10 +8318,11 @@ function gmRenderRead(){
   if(!GM.expandThread && msgs.length>HIDE_OVER){ hideFrom=1; hideTo=last-KEEP_TAIL; }   // hide [hideFrom, hideTo)
   function gmMsgCard(m,idx){
     var open=(idx===last);
+    // Render the body into a SHADOW DOM host (mounted after innerHTML, see gmMountBodies). Shadow DOM scopes
+    // the email's CSS but the host grows to the content's NATURAL height -> full-length, never clipped, no
+    // iframe height measurement. Plain-text mail uses a <pre>.
     var bodyHtml=(m.body&&m.body.html)
-      // allow-same-origin (but NOT allow-scripts) so the parent can MEASURE the real content height and
-      // grow the frame to full length -- email scripts still never run.
-      ? '<iframe scrolling="no" sandbox="allow-same-origin" srcdoc="'+e2(gmStyleHtml(m.body.html))+'" onload="gmFitFrame(this)"></iframe>'
+      ? '<div class="gm-shadow" data-shadow="'+idx+'"></div>'
       : '<pre>'+e2((m.body&&m.body.text)||m.snippet||'(no content)')+'</pre>';
     var atts=gmAttStrip(m);
     return '<div class="gm-msg'+(open?' open':'')+'" data-mi="'+idx+'">'
@@ -8328,49 +8345,35 @@ function gmRenderRead(){
     cards.push(gmMsgCard(m,idx));
   });
   read.innerHTML=head+'<div class="gm-thread">'+cards.join('')+'</div>';
+  gmMountBodies(read, msgs);
+}
+// mount each HTML body into a Shadow DOM: encapsulates the email's own CSS, renders at full natural height
+// (so the thread pane scrolls like a normal client -- no iframe, no measurement, no clipping).
+function gmMountBodies(read, msgs){
+  read.querySelectorAll('.gm-shadow').forEach(function(host){
+    if(host.shadowRoot) return;
+    var idx=+host.getAttribute('data-shadow'); var m=msgs[idx]; if(!m||!m.body||!m.body.html) return;
+    var root;
+    try{ root=host.attachShadow({mode:'open'}); }catch(e){ host.innerHTML=m.body.html; return; }   // fallback
+    root.innerHTML='<style>'
+      +':host{all:initial;display:block}'
+      +'.cf-mail{font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111;background:#fff;border-radius:8px;padding:14px;word-break:break-word;overflow-wrap:anywhere}'
+      +'.cf-mail img{max-width:100%;height:auto}.cf-mail a{color:#1a56db}.cf-mail table{max-width:100%}'
+      // UN-TRAP: emails clip their body in a fixed-HEIGHT (not just max-height) overflow:hidden wrapper. Force
+      // container tags to auto height + visible overflow + no max-height so the content flows to full length
+      // (tables/cells left alone to preserve layout). This is what makes the email never get cut off.
+      +'.cf-mail *{max-height:none!important}'
+      +'.cf-mail div,.cf-mail section,.cf-mail article,.cf-mail main,.cf-mail center,.cf-mail blockquote,.cf-mail span{height:auto!important;max-height:none!important;overflow:visible!important}'
+      +'</style><div class="cf-mail">'+m.body.html+'</div>';
+    try{ root.querySelectorAll('a[href]').forEach(function(a){ a.setAttribute('target','_blank'); a.setAttribute('rel','noopener noreferrer'); }); }catch(e){}
+  });
 }
 function gmReadEmptyBody(){return '<div class="gm-empty"><div class="gm-big">✉️</div><div>Select a conversation</div><div style="font-size:11px">j/k move · Enter open</div></div>';}
 function gmCloseRead(){ GM.thread=null; gmRenderRead(); }
 function gmExpandThread(){ GM.expandThread=true; gmRenderRead(); }
 function gmToggleMsg(idx){
   var el=document.querySelector('.gm-msg[data-mi="'+idx+'"]'); if(!el) return;
-  el.classList.toggle('open');
-  // an iframe sized while it was collapsed (display:none) measures as ~0 -> re-fit now that it's visible
-  if(el.classList.contains('open')){ var f=el.querySelector('.gm-mbody iframe'); if(f) gmFitFrame(f); }
-}
-function gmStyleHtml(h){ // inject a base style so mail is readable + so the frame can be sized to content
-  // CRITICAL: marketing/newsletter mail often sets html,body{height:100%} -> inside an iframe that collapses
-  // scrollHeight to the frame's own height, so the body gets cut off ("just lines"). Force height:auto.
-  // Un-TRAP the content so the frame can be sized to its TRUE height:
-  //  - height:100% on html/body collapses scrollHeight to the frame height (newsletters) -> force auto.
-  //  - a fixed height / overflow:hidden / max-height on an inner wrapper CLIPS content so scrollHeight is
-  //    short and the email looks cut off -> neutralize height caps + overflow on every element.
-  return '<base target="_blank"><style>'
-    +'html,body{height:auto!important;min-height:0!important;max-height:none!important;overflow:visible!important}'
-    +'*{max-height:none!important}'
-    +'html,body,div,section,article,main,td,table,tbody,tr,center,blockquote{overflow:visible!important}'
-    +'body{font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111;margin:8px;word-break:break-word;background:#fff}'
-    +'img{max-width:100%;height:auto}a{color:#1a56db}table{max-width:100%}'
-    +'</style>'+(h||'');
-}
-function gmFitFrame(f){
-  try{
-    var d=f.contentDocument||f.contentWindow.document; if(!d){ f.style.height='700px'; return; }
-    var fit=function(){
-      var b=d.body, e=d.documentElement;
-      var h=Math.max(b?b.scrollHeight:0, b?b.offsetHeight:0,
-                     e?e.scrollHeight:0, e?e.offsetHeight:0,
-                     (b&&b.getBoundingClientRect)?Math.ceil(b.getBoundingClientRect().height):0);
-      if(h>0) f.style.height=(h+24)+'px';   // NO cap -- full email length; the thread pane scrolls
-    };
-    fit();
-    // content grows after onload (images, web fonts, reflow) -> refit on each image + on ANY body resize +
-    // a tail of ticks so a late-loading remote image or font can't leave the frame short.
-    try{ Array.prototype.forEach.call(d.images||[], function(img){ if(!img.complete){ img.addEventListener('load',fit,{once:true}); img.addEventListener('error',fit,{once:true}); } }); }catch(e){}
-    try{ if(window.ResizeObserver && d.body){ new ResizeObserver(fit).observe(d.body); } }catch(e){}
-    try{ if(f.contentWindow) f.contentWindow.addEventListener('load',fit); }catch(e){}
-    [80,250,600,1200,2200].forEach(function(ms){ setTimeout(fit,ms); });
-  }catch(e){ f.style.height='700px'; }   // last resort if the doc is somehow unreadable
+  el.classList.toggle('open');   // body is a Shadow-DOM host -- natural height, nothing to re-measure
 }
 function gmFullDate(s){ try{var d=new Date(s); if(isNaN(d)) return e2(s); return d.toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}catch(e){return e2(s);} }
 
