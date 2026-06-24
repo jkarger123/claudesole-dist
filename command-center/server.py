@@ -6448,6 +6448,11 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-chip:hover{color:var(--ink)}
 .gm-chip.on{background:rgba(var(--accent-rgb),.16);border-color:rgba(var(--accent-rgb),.5);color:var(--ink)}
 .gm-rows{flex:1;overflow-y:auto}
+.gm-newpill{position:sticky;top:0;z-index:3;margin:6px auto;display:block;width:fit-content;background:var(--accent);color:#15120a;font-weight:700;font-size:12px;padding:5px 14px;border-radius:14px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.4)}
+.gm-newpill:hover{filter:brightness(1.08)}
+.cchelp .cchbody{font-size:13.5px;line-height:1.62;color:var(--mut);max-height:54vh;overflow-y:auto}
+.cchelp .cchbody p{margin:0 0 10px}.cchelp .cchbody b{color:var(--ink)}
+.cchelp .cchnever{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);margin-right:auto;cursor:pointer}
 .gm-row{display:grid;grid-template-columns:14px 1fr auto;gap:9px;align-items:start;padding:10px 12px;border-bottom:1px solid #1c1c26;cursor:pointer;position:relative}
 .gm-row:hover{background:var(--card)}
 .gm-row.cur{background:rgba(var(--accent-rgb),.10)}
@@ -6962,7 +6967,7 @@ body.gm-resizing iframe{pointer-events:none}
 <div class="health" id="svchealth"></div>
 </aside>
 <main id="main">
-<div class="topbar"><h2 id="viewtitle">Sessions</h2><input id="search" placeholder="Search…"><button class="btn" id="agentBtn" style="display:none" onclick="openAgent(LENS)">🤖 Agent</button><button class="btn" id="addBtn" onclick="openAdd()">＋ Add</button><button class="btn go" onclick="openLaunch()">▶ New session</button></div>
+<div class="topbar"><h2 id="viewtitle">Sessions</h2><button class="btn" id="helpBtn" title="How this works" onclick="ccHelp(LENS)" style="padding:7px 11px">?</button><input id="search" placeholder="Search…"><button class="btn" id="agentBtn" style="display:none" onclick="openAgent(LENS)">🤖 Agent</button><button class="btn" id="addBtn" onclick="openAdd()">＋ Add</button><button class="btn go" onclick="openLaunch()">▶ New session</button></div>
 <div class="wrap" id="grid"></div>
 </main>
 </div>
@@ -7980,6 +7985,7 @@ async function loadGmail(){
   gmBindKeys();
   gmFetchLabels();
   await gmFetchList(true);
+  clearInterval(window.GMTIMER); window.GMTIMER=setInterval(function(){ if(LENS!=='gmail'){clearInterval(window.GMTIMER);return;} gmAutoRefresh(); }, 45000);  // pull in new mail
 }
 
 // ---- b0: persisted list|reading split + resizer ----
@@ -10474,6 +10480,44 @@ function showM(h){document.getElementById("mbox").innerHTML=h;document.getElemen
 function closeM(){document.getElementById("mbg").style.display="none";}
 document.getElementById("mbg").addEventListener("click",e=>{if(e.target.id=="mbg")closeM();});
 function toast(t,ms){const e=document.getElementById("toast");e.innerHTML=t;e.style.display="block";clearTimeout(e._t);e._t=setTimeout(()=>e.style.display="none",ms||2800);}
+// ---- "How this works" explainers: per-feature, auto-shows once, dismissible + never-again, reopen via the ? button ----
+var HELP={
+ gmail:{t:'✉️ Gmail — a full client, built in',h:'<p>Keyboard-first triage: <b>j/k</b> move · <b>↵</b> open · <b>e</b> archive · <b>s</b> star · <b>#</b> trash · <b>r</b> reply · <b>c</b> compose · <b>z</b> undo. Saved lanes, threaded reader, search.</p><p><b>✨ Smart reply</b> drafts a reply <i>in your voice</i> using everything we know about the sender — past emails, calls, calendar, Drive files, pipeline status — and stages it as a Gmail <b>draft</b>. It <b>never sends</b>; you review and click Send.</p><p><b>🔎 Sender history</b> = a one-glance dossier. Attachments preview/download inline; <b>💾 Save to…</b> drops a file straight into a client/project folder. New mail appears on its own (list auto-refreshes; badge shows unread).</p>'},
+ calendar:{t:'📅 Calendar',h:'<p>Day / week / month / agenda. <b>Drag</b> the grid to create, drag edges to resize, drag to move. <b>Natural-language quick-add</b> — type "lunch with Sam thu 1pm". Click an event to edit, RSVP, or delete (with undo). Gold line = now.</p>'},
+ drive:{t:'🗂️ Drive',h:'<p>Browse folders with breadcrumbs, search, grid/list. <b>Spacebar = Quick Look</b> (full-screen preview without leaving). Multi-select for batch actions; open or download anything.</p>'},
+ files:{t:'📁 Files',h:'<p>Everything your agents make for you, newest first — open or download from anywhere (mobile too). Email attachments you "Save to…" a folder land here.</p>'},
+ sessions:{t:'🖥 Sessions + the bottom taskbar',h:'<p>The bar pinned at the bottom is every live session, like a Windows taskbar. A tile <b>blinks gold while working</b> and <b>pulses gold when it finishes</b> — a done agent pulls you back even if you\'re in email. <b>Hover a tile</b> to blow it up into a full interactive terminal with Usage / New-tab / Graceful-exit / Kill.</p>'},
+ pipeline:{t:'🚦 Pipeline Live-View',h:'<p>A live run-map of your nightly/scheduled pipeline. A loud full-width banner goes <b>red</b> if a run FAILS or STALLS, <b>amber</b> if a run is MISSED — so a silent failure can never slip by unnoticed again.</p>'},
+ comms:{t:'📡 Comms — the inter-chief mesh',h:'<p>Your Chief of Staff talks to the Chiefs of your other instances over a durable mesh. Message one or all; replies come back here.</p>'},
+};
+function _cchk(k){return 'cchelp_'+k;}
+function ccHelpSeen(k){try{return localStorage.getItem(_cchk(k))==='1';}catch(e){return false;}}
+function ccHelp(k){var d=HELP[k];if(!d)return;
+  showM('<div class="cchelp"><h2 style="margin-top:0">'+d.t+'</h2><div class="cchbody">'+d.h+'</div>'
+   +'<div class="btns" style="align-items:center;gap:14px"><label class="cchnever"><input type="checkbox" id="cchNever"> Don\\'t show this again</label>'
+   +'<button class="btn" onclick="closeM()">Dismiss</button><button class="btn go" onclick="ccHelpGotit(\\''+k+'\\')">Got it</button></div></div>');}
+function ccHelpGotit(k){var nv=document.getElementById('cchNever');if(nv&&nv.checked){try{localStorage.setItem(_cchk(k),'1');}catch(e){}}closeM();}
+function ccHelpAuto(k){ if(HELP[k] && !ccHelpSeen(k)) setTimeout(function(){ if(LENS===k) ccHelp(k); },700); }
+// ---- Gmail auto-refresh: pull new mail without yanking the list while you're reading ----
+async function gmAutoRefresh(){
+  if(LENS!=='gmail' || !document.getElementById('gmApp')) return;
+  var r; try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q||gmLaneQuery())+'&max=50')).json(); }catch(e){ return; }
+  if(!r || r.error) return;
+  var seen={}, list=[];
+  (r.messages||[]).forEach(function(m){var tid=m.threadId||m.id; if(seen[tid]!==undefined){list[seen[tid]].count++; if(m.unread)list[seen[tid]].unread=true; return;} seen[tid]=list.length; m.count=1; list.push(m);});
+  var have={}; GM.msgs.forEach(function(m){have[m.threadId||m.id]=1;});
+  var fresh=list.filter(function(m){return !have[m.threadId||m.id];});
+  if(!fresh.length) return;
+  if(GM.cur>=0 && GM.msgs[GM.cur]){ gmNewPill(fresh.length); }   // reading -> offer a pill, don't reorder under them
+  else { GM.msgs=list; gmRenderRows(); }                          // nothing open -> silent refresh
+}
+function gmNewPill(n){
+  var rows=document.getElementById('gmRows'); if(!rows) return;
+  var ex=document.getElementById('gmNewPill'); if(ex){ ex.textContent='↑ '+n+' new — click to refresh'; return; }
+  var p=document.createElement('div'); p.id='gmNewPill'; p.className='gm-newpill';
+  p.textContent='↑ '+n+' new — click to refresh'; p.onclick=function(){ gmFetchList(true); };
+  rows.insertBefore(p, rows.firstChild);
+}
 // ---- Conversation Tree ----
 let TREEDAYS=7, CONVOMAP={};
 async function loadTree(days){
@@ -10720,7 +10764,7 @@ async function settingsSave(){
     loadSettings();
   }else toast("Failed: "+((r||{}).error||"?"),5000);
 }
-document.getElementById("lens").addEventListener("click",e=>{const btn=e.target.closest('button[data-l]');if(!btn)return;if(navDragged)return;LENS=btn.dataset.l;[...document.querySelectorAll("#lens button")].forEach(b=>b.classList.toggle("on",b==btn));const vt=document.getElementById("viewtitle");if(vt)vt.textContent=NAV[LENS]||LENS;refreshAgentBtn();if(LENS=="modules")MODREL="";navBump(LENS);render();syncHash(true);});
+document.getElementById("lens").addEventListener("click",e=>{const btn=e.target.closest('button[data-l]');if(!btn)return;if(navDragged)return;LENS=btn.dataset.l;[...document.querySelectorAll("#lens button")].forEach(b=>b.classList.toggle("on",b==btn));const vt=document.getElementById("viewtitle");if(vt)vt.textContent=NAV[LENS]||LENS;refreshAgentBtn();if(LENS=="modules")MODREL="";navBump(LENS);render();syncHash(true);var hb=document.getElementById("helpBtn");if(hb)hb.style.display=HELP[LENS]?"":"none";ccHelpAuto(LENS);});
 function syncHash(push){let s=LENS;
   if(LENS=="modules"){if(MODREL)s+=":"+encodeURIComponent(MODREL);}
   else if(LENS=="sessions"){s+=":"+SESSVIEW+(SESSBIG?":"+encodeURIComponent(SESSBIG):"");}
@@ -11089,6 +11133,7 @@ function fxDossierHTML(b, bullets){
 Shell.init();              // shared shell: command palette + keyboard router + quick look
 load();
 if(!restoreFromHash())syncHash(false);   // restore exact place on refresh; else stamp the landing lens as the back-stack baseline (so the first Back lands here, not the overseer)
+(function(){var hb=document.getElementById("helpBtn");if(hb)hb.style.display=HELP[LENS]?"":"none";ccHelpAuto(LENS);})();  // help for the landing lens
 // live health: repaint the header strip (+ machines lens) every 60s without a page reload
 setInterval(()=>{fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;paintSvc();if(LENS=="machines")render();}).catch(()=>{});},60000);
 </script></body></html>"""

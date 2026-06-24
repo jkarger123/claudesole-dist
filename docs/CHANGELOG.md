@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.20.0 -- 2026-06-24
+- NEW (in-app "How this works" explainers): every powerful lens (Gmail, Calendar, Drive, Files, Sessions,
+  Pipeline, Comms) has a dismissible explainer that AUTO-SHOWS ONCE on first visit ("Don't show again" +
+  Dismiss), reopenable anytime via a "?" button in the top bar. So users actually understand the power.
+  Plus docs/FEATURES.md (written companion).
+- NEW (Gmail auto-refresh): the inbox list now pulls in new mail on its own (~45s) WITHOUT yanking the list
+  while you read -- if a thread is open it shows a "↑ N new -- click to refresh" pill instead of reordering
+  under you; silent refresh when nothing's open. (Before, only the unread badge updated; the list was static.)
+
 ## 0.19.0 -- 2026-06-24
 - NEW (AGENTIC LEVERAGE -- first vertical slice: "Smart Reply with 360 context"): the platform starts to
   FLEX its extensions together instead of siloing them. Foundation + first recipe, PROVEN live on carsearch.
