@@ -33,10 +33,11 @@ NUDGE = "Please continue where you left off -- an API error interrupted you; res
 # (optionally prefixed by Claude Code's box/glyph chars). This is what distinguishes a real stall from
 # prose that merely contains the words "api error".
 ERR_LINE = re.compile(
-    r"^[\s>│|⎿╰╭✗✘×⚠!•\-\*]*"
+    r"^[\s>│|⎿╰╭✗✘×⚠!•⏺✻●◉◯·\-\*]*"   # allow Claude Code line glyphs (⏺ ✻ ⎿ etc.) as a prefix
     r"(api error|overloaded(_error)?|internal server error|service[ _]unavailable|"
     r"request timed out|request failed|connection (error|closed|reset)|econnreset|"
-    r"stream (idle )?timeout|stream error|fetch failed|rate[_ ]?limit(_error)?|"
+    r"stream (idle )?timeout|stream error|fetch failed|rate[ _]?limit(ed|_error)?|"
+    r"server is temporarily limiting|temporarily limiting requests|"
     r"(5\d\d)\b|too many requests|upstream connect error)",
     re.I,
 )

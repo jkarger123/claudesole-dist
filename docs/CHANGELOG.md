@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.18.2 -- 2026-06-24
+- FIX (session watchdog): now watches ALL Claude sessions (was opt-in to 3 chiefs, so e.g. a text2tune
+  working session got no nudge), and the error detector now recognizes Claude Code's "⏺ API Error:" line
+  glyph + rate-limit/"temporarily limiting requests" wording. Idle+persistent(2 checks)+cooldown gating
+  unchanged, so it lets Claude Code's own retry go first, then nudges a truly-stuck session.
+
 ## 0.18.1 -- 2026-06-24
 - Pipeline lens: the FAILED/STALLED/MISSED alarm is now a LOUD full-width banner pinned to the top of the
   card (red pulses; amber for missed/stall) with the run id + expected-by + last-heartbeat context -- not a
