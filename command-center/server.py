@@ -411,10 +411,14 @@ def superadmin_exec(grant):
     return {"ok": False, "error": "unknown superadmin action: " + str(action)}
 
 def _self_restart():
-    """Reload the CC process in place (picks up new framework code / config). Re-exec, so it does not depend
-    on knowing its own tmux/launchd supervisor. Brief: the HTTP response has already flushed before this."""
+    """Reload the CC process in place (picks up new framework code / config). Re-exec with an ABSOLUTE script
+    path (BASE is captured at boot) so the re-exec does NOT depend on the runtime cwd -- a relative sys.argv[0]
+    ('server.py') would fail to be found if the launcher left a different cwd, killing the process with no
+    respawn (this took AFP down once). Brief: the HTTP response has already flushed before this."""
     time.sleep(1)
-    try: os.execv(sys.executable, [sys.executable] + sys.argv)
+    script = os.path.join(BASE, os.path.basename(__file__))   # absolute, cwd-independent
+    if not os.path.isfile(script): script = os.path.abspath(__file__)
+    try: os.execv(sys.executable, [sys.executable, script] + sys.argv[1:])
     except Exception: pass
 
 def superadmin_send(node_id, action, params=None, ttl=120):
@@ -6464,29 +6468,32 @@ def _ensure_skip_permissions_accepted():
     return touched
 
 if __name__ == "__main__":
-    print("HP Tuners Command Center on http://0.0.0.0:%d  (tailnet http://%s:%d)" % (PORT, STUDIO_TS, PORT))
-    try: regen_treemap(force=True)   # stamp the whole-tree module map into the root CLAUDE.md on boot
-    except Exception: pass
-    try: seed_framework_blocks()     # stamp framework governance (CCR policy) into project nodes' root CLAUDE.md
-    except Exception: pass
-    # Lock secret-bearing per-deployment files to owner-only (0600). The OS umask writes them 644
-    # (world-readable) -> on a shared box another account could read auth_token/mesh_token. Self-heals
-    # existing 644 files on every boot + closes the hole for fresh deploys. (CCR ccr-secret-file-perms.)
+    print("%s Command Center on http://0.0.0.0:%d  (tailnet http://%s:%d)" % (BRAND, PORT, STUDIO_TS, PORT))
+    # Lock secret-bearing per-deployment files to owner-only (0600) -- fast + security-critical, so it stays
+    # inline (before serving). The OS umask writes them 644 (world-readable) -> on a shared box another
+    # account could read auth_token/mesh_token. Self-heals 644 on boot + closes it for fresh deploys.
     for _p in (_CC_CONFIG, PEERS_FILE, os.path.join(STATE_DIR, "_mesh_hook_settings.json")):
         try:
             if os.path.isfile(_p): os.chmod(_p, 0o600)
         except Exception: pass
-    # Accept --dangerously-skip-permissions for THIS user (one-time per-user gate) so console-launched
-    # sessions open straight into skip-permissions instead of stalling on the Bypass-Permissions screen.
-    try:
-        _t = _ensure_skip_permissions_accepted()
-        if _t: print("skip-permissions: self-healed acceptance in", ", ".join(_t))
-    except Exception: pass
-    # iCloud tiered deliverables: ensure the hot container exists + age old files off internal -> SSD on boot.
-    if _icloud_ready():
-        try:
-            os.makedirs(ICLOUD_DELIV_ROOT, exist_ok=True)
-            _ao = icloud_age_off()
-            if _ao.get("moved"): print("icloud deliverables: aged off %d file(s) internal->SSD" % _ao["moved"])
+    # Heavy boot housekeeping (whole-tree walk + iCloud file ops) MUST NOT gate the HTTP server. On an
+    # iCloud-backed node (e.g. AFP) regen_treemap()/icloud_age_off() can block on slow iCloud I/O for
+    # minutes -- which printed the banner but never reached serve_forever(), so the server "came up" yet
+    # accepted no connections (this took AFP down). Run it all in a daemon thread; serve immediately.
+    def _boot_housekeeping():
+        try: regen_treemap(force=True)   # stamp the whole-tree module map into the root CLAUDE.md
         except Exception: pass
+        try: seed_framework_blocks()     # stamp framework governance (CCR policy) into project nodes' CLAUDE.md
+        except Exception: pass
+        try:
+            _t = _ensure_skip_permissions_accepted()   # console sessions open straight into skip-permissions
+            if _t: print("skip-permissions: self-healed acceptance in", ", ".join(_t))
+        except Exception: pass
+        if _icloud_ready():              # iCloud tiered deliverables: ensure hot container + age off to SSD
+            try:
+                os.makedirs(ICLOUD_DELIV_ROOT, exist_ok=True)
+                _ao = icloud_age_off()
+                if _ao.get("moved"): print("icloud deliverables: aged off %d file(s) internal->SSD" % _ao["moved"])
+            except Exception: pass
+    threading.Thread(target=_boot_housekeeping, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()

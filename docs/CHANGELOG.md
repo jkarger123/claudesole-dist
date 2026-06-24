@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.13.4 -- 2026-06-23
+- FIX (boot hang on iCloud nodes -- took AFP down): the server printed its banner then ran
+  regen_treemap() (whole-tree walk) + icloud_age_off() (iCloud file moves) BEFORE serve_forever() --
+  on an iCloud-backed node those block on slow iCloud I/O, so the process "started" (banner) but never
+  accepted a connection. Moved all heavy boot housekeeping into a daemon thread; the HTTP server now binds
+  and serves IMMEDIATELY regardless of iCloud state. Secret-file 0600 self-heal stays inline (fast).
+- FIX (remote restart killed a node it couldn't recover): _self_restart now re-execs with an ABSOLUTE
+  script path (BASE-derived), cwd-independent -- a relative sys.argv[0] ('server.py') could fail to resolve
+  after re-exec and kill the process with no respawn.
+- FIX (banner branding): the startup banner used a hardcoded "HP Tuners Command Center" on every node;
+  it now uses the deployment's configured BRAND (so AFP announces Sarah's brand, not "HP Tuners").
+
 ## 0.13.3 -- 2026-06-23
 - NEW (splash version): the ClaudeFather entry splash now shows the running framework version, tastefully,
   centered at the bottom ("v0.13.3", gold-on-dim, gentle fade-in). Sourced from window.CC.version (the
