@@ -6224,15 +6224,17 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--mut)}.dot.ok{background:var(--ok)}.dot.bad{background:var(--err)}
 @media (max-width:820px){
   #app{flex-direction:column;height:auto;min-height:100dvh;overflow:visible}
-  #side{flex:none;width:auto;flex-direction:row;align-items:center;gap:10px;border-right:none;border-bottom:1px solid var(--line);padding:9px 12px;position:sticky;top:0;z-index:8;background:#0c0c12}
+  #side{flex:none;width:auto;flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px;border-right:none;border-bottom:1px solid var(--line);padding:9px 12px;position:sticky;top:0;z-index:8;background:#0c0c12}
   .brand{padding:0;flex:0 0 auto}.brand small{display:none}.brand .cfmark{height:26px}.brand .bword{font-size:14px}
-  .lens{flex-direction:row;flex:1;overflow-x:auto;overflow-y:visible;gap:5px;scrollbar-width:none}
+  /* tabs wrap to their OWN full-width scroll row -- never share the line with brand/navmode (that squeezed them to a sliver) */
+  .lens{flex-direction:row;flex:1 1 100%;order:3;width:100%;overflow-x:auto;overflow-y:visible;gap:5px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
   .lens::-webkit-scrollbar{display:none}
   .lens button{width:auto;flex:0 0 auto;white-space:nowrap;min-height:38px}
   .lens button i{display:none}
+  #navmode{display:none}            /* drag-to-reorder is a desktop affordance; on mobile it stole the tab row */
   .health{display:none}
   #main{overflow-x:hidden;overflow-y:visible;max-width:100%}
-  .topbar{padding:11px 14px;gap:9px;position:sticky;top:54px;background:var(--bg);z-index:6}
+  .topbar{padding:11px 14px;gap:9px;position:sticky;top:92px;background:var(--bg);z-index:6}  /* clears the 2-row mobile #side (brand row + full-width tab row) */
   .topbar h2{font-size:16px;width:100%}.topbar #search{max-width:none;flex:1}
   .wrap{overflow:visible;padding:13px;gap:11px;grid-template-columns:minmax(0,1fr);max-width:100%}
   .card{min-width:0;overflow:hidden}.card .meta,.card .brief{overflow-wrap:anywhere}
@@ -10303,14 +10305,8 @@ function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attache
 function renderFocus(s){
   if(!SESSBIG||!s.find(function(x){return x.name==SESSBIG;}))SESSBIG=s[0].name;
   var big=s.find(function(x){return x.name==SESSBIG;});
-  // Switcher chips so you can still change which session is big WITHOUT a docked grid.
-  var chips=s.map(function(x){
-    var on=(x.name==SESSBIG);
-    return '<button class="mini'+(on?' go':'')+'" title="'+e2(x.label||x.name)+'" onclick="focusBig(\''+esc(x.name)+'\')">'
-      +(x.attached?'🟢 ':'⚪ ')+e2(x.label||x.name)+'</button>';
-  }).join('');
+  // Just the one big terminal -- the bottom taskbar lists/switches every session, so no redundant chip row.
   var h='<div class="focusonly">'
-    +'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">'+chips+'</div>'
     +'<div class="bigsess">'+bigHead(big)+'<iframe class="stframe" src="/term?name='+encodeURIComponent(big.name)+'"></iframe></div>'
     +'</div>';
   return h;

@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.1 -- 2026-06-24
+- FIX (Sessions Focus view): removed the redundant per-session switcher-chip row that sat between the
+  usage strip and the terminal. The bottom session taskbar already lists/switches every session, so Focus
+  now shows just the one big terminal (its header still names which session). Clicking Focus opens it big.
+- FIX (mobile nav tabs not showing): on a phone the side rail became a single horizontal row of
+  [brand | tabs | reorder-controls], which squeezed the tab strip down to a sliver -- so all you saw was
+  the "most-used first / + category" reorder text and no actual lens tabs. The tab strip now WRAPS to its
+  own full-width scroll row, and the desktop-only drag-reorder controls (`#navmode`) are hidden on mobile.
+  Bumped the sticky topbar offset to clear the now-two-row mobile header.
+
 ## 0.21.0 -- 2026-06-24
 - POLISH (icons): the left-nav now uses the PHOSPHOR icon set (ph-light weight) -- the same free set the
   carsearch site uses (jsDelivr @phosphor-icons/web@2.1.1, light + fill) -- replacing the emoji nav icons
