@@ -1,0 +1,10 @@
+{
+  "_source": "https://github.com/modelcontextprotocol/servers (Slack reference server). Confirm the current package/command at setup.",
+  "mcpServers": {
+    "slack": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-slack"],
+      "env": { "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}", "SLACK_TEAM_ID": "${SLACK_TEAM_ID}" }
+    }
+  }
+}

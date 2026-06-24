@@ -1,0 +1,9 @@
+{
+  "_source": "https://linear.app/docs/mcp (confirm exact endpoint/command at setup)",
+  "mcpServers": {
+    "linear": {
+      "type": "http",
+      "url": "https://mcp.linear.app/mcp"
+    }
+  }
+}

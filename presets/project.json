@@ -1,0 +1,39 @@
+{
+  "role": "project",
+  "description": "Operate ONE project: its modules, sessions, security, backup, usage, ideas, routines.",
+  "agents": [
+    "security",
+    "backup",
+    "usage",
+    "deploy",
+    "incidents",
+    "cost",
+    "ideas",
+    "routines"
+  ],
+  "lenses": [
+    "sessions",
+    "modules",
+    "files",
+    "propose",
+    "marketplace",
+    "agency",
+    "ralph",
+    "pipeline",
+    "chief",
+    "tree",
+    "desktop",
+    "usage",
+    "backup",
+    "security",
+    "agents",
+    "skills",
+    "history",
+    "machines",
+    "jobs",
+    "routines",
+    "ideas",
+    "docs",
+    "settings"
+  ]
+}

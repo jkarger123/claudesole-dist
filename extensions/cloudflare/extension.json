@@ -1,0 +1,20 @@
+{
+  "id": "cloudflare",
+  "name": "Cloudflare",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "CF",
+  "summary": "Manage Cloudflare (Workers, DNS, KV/R2, analytics) -- this project ships on CF.",
+  "description": "Query + manage Cloudflare resources (Workers, DNS, KV/R2, Pages, analytics). ClaudeFather/text2tune already deploys on Cloudflare, so an agent that checks Worker status, reads analytics, and inspects config closes the deploy + ops loop. Uses Cloudflare's official MCP server (URL + OAuth).",
+  "provides": [
+    "mcp:cloudflare"
+  ],
+  "requires": [
+    {
+      "key": "CLOUDFLARE_OAUTH",
+      "label": "A Cloudflare account + OAuth (account + zone access)"
+    }
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true
+}

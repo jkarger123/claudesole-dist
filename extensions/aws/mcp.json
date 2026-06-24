@@ -1,0 +1,15 @@
+{
+  "_source": "https://awslabs.github.io/mcp/ (confirm exact package/command at setup)",
+  "mcpServers": {
+    "aws-api": {
+      "command": "uvx",
+      "args": [
+        "awslabs.aws-api-mcp-server@latest"
+      ],
+      "env": {
+        "AWS_PROFILE": "${AWS_PROFILE}",
+        "AWS_REGION": "${AWS_REGION}"
+      }
+    }
+  }
+}

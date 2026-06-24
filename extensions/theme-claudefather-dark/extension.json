@@ -1,0 +1,15 @@
+{
+  "id": "theme-claudefather-dark",
+  "name": "ClaudeFather Dark",
+  "category": "theme",
+  "version": "1.0.0",
+  "icon": "TH",
+  "summary": "A dark, high-contrast ClaudeFather palette + brand accents for the dashboard.",
+  "description": "A tuned, low-eye-strain dark theme (deeper black, brighter gold, oxblood accent) for a control center you stare at all day. Cosmetic only -- no data access, no secrets. Install registers the palette; select it by setting theme: claudefather-dark in cc.config.",
+  "provides": [
+    "theme:claudefather-dark"
+  ],
+  "requires": [],
+  "setup_doc": "SETUP.md",
+  "setup_agent": false
+}

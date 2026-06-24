@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to config.json (per-deployment, gitignored, a PRESERVE path). Where this project's cost numbers live. Read-only local artifacts only -- never a paid/billing API.",
+  "currency": "USD",
+  "sources": [
+    { "name": "ai-weekly", "type": "json", "path": "/path/to/ai_cost_weekly.json", "field": "total_usd", "warn": 50, "err": 100 },
+    { "name": "tokens", "type": "jsonl_sum", "path": "/path/to/usage.jsonl", "field": "cost_usd", "warn": 20, "err": 40 }
+  ]
+}

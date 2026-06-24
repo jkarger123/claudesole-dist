@@ -1,0 +1,10 @@
+{
+  "_source": "https://supabase.com/docs/guides/ai-tools/mcp + https://github.com/modelcontextprotocol/servers (Postgres). Confirm package/flags at setup. --read-only is the safety default.",
+  "mcpServers": {
+    "supabase": {
+      "command": "npx",
+      "args": ["-y", "@supabase/mcp-server-supabase@latest", "--read-only", "--project-ref=${SUPABASE_PROJECT_REF}"],
+      "env": { "SUPABASE_ACCESS_TOKEN": "${SUPABASE_ACCESS_TOKEN}" }
+    }
+  }
+}

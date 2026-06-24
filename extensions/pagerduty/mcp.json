@@ -1,0 +1,9 @@
+{
+  "_source": "https://support.pagerduty.com/main/docs/pagerduty-mcp-server-integration-guide (confirm exact endpoint/command at setup)",
+  "mcpServers": {
+    "pagerduty": {
+      "type": "http",
+      "url": "https://mcp.pagerduty.com/mcp"
+    }
+  }
+}

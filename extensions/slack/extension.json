@@ -1,0 +1,16 @@
+{
+  "id": "slack",
+  "name": "Slack",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "SL",
+  "summary": "Post to + read from Slack channels so agents can report and listen in the team's chat.",
+  "description": "Lets agents read recent messages in chosen channels and post updates (loop done, deploy ready, standup digest). Slack is where the team already is, so pushing status there beats making people open a dashboard, and reading lets an agent pick up requests. Uses the official MCP reference server driven by a Slack app bot token.",
+  "provides": ["mcp:slack"],
+  "requires": [
+    {"key": "SLACK_BOT_TOKEN", "label": "A Slack app bot token (xoxb-...) with chat:write, channels:history, channels:read"},
+    {"key": "SLACK_TEAM_ID", "label": "Your Slack workspace/team ID"}
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true
+}

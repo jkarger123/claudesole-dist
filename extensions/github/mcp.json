@@ -1,0 +1,6 @@
+{
+  "_source": "https://github.com/github/github-mcp-server (remote GA). Confirm the current endpoint at setup.",
+  "mcpServers": {
+    "github": { "type": "http", "url": "https://api.githubcopilot.com/mcp/" }
+  }
+}

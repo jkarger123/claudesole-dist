@@ -1,0 +1,20 @@
+{
+  "id": "linear",
+  "name": "Linear",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "LN",
+  "summary": "Read + manage Linear issues, projects, and cycles from the control center.",
+  "description": "Create/update/triage Linear issues and see project + cycle status. For teams on Linear this is the task backbone -- an agent that files and updates issues turns plans into tracked work. Uses Linear's official hosted remote MCP server (OAuth).",
+  "provides": [
+    "mcp:linear"
+  ],
+  "requires": [
+    {
+      "key": "LINEAR_OAUTH",
+      "label": "A Linear workspace + browser OAuth"
+    }
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true
+}

@@ -1,0 +1,20 @@
+{
+  "id": "pagerduty",
+  "name": "PagerDuty",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "PD",
+  "summary": "Read incidents + on-call schedules and (with approval) ack/resolve.",
+  "description": "Retrieve incident data, see who's on call, and create/ack/resolve incidents. Pairs with the incident-scanner agent to give a real, write-capable incident surface. Uses PagerDuty's official MCP server (hosted OAuth, or self-hosted token).",
+  "provides": [
+    "mcp:pagerduty"
+  ],
+  "requires": [
+    {
+      "key": "PAGERDUTY_AUTH",
+      "label": "A PagerDuty account + auth (hosted OAuth or a self-hosted API token)"
+    }
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true
+}

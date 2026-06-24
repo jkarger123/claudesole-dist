@@ -1,0 +1,13 @@
+{
+  "_source": "https://github.com/modelcontextprotocol/servers (Filesystem) (confirm exact package/command at setup)",
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "${FS_ROOT}"
+      ]
+    }
+  }
+}

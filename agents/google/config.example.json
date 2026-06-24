@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to config.json (per-deployment, gitignored, a PRESERVE path). Tunes the Google agent: timezone + work hours for scheduling, the operator's primary calendar, the client->domain map (keep in sync with the granola module's client_map), and where the Calls module drops Google actions to drain.",
+  "timezone": "America/Chicago",
+  "work_hours": { "start": "09:00", "end": "17:00", "exclude_weekends": true },
+  "primary_calendar": "you@example.com",
+  "client_map": {
+    "acme": ["acme.com", "Acme Corp"],
+    "the-childrens-place": ["childrensplace.com", "TCP"]
+  },
+  "granola_outbox": "_granola_google_outbox.jsonl"
+}

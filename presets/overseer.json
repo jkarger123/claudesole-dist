@@ -1,0 +1,27 @@
+{
+  "role": "org",
+  "description": "Pure overseer: a PORTFOLIO of child ClaudeFathers. Aggregates status/cost/security across projects and drills into each. Does not operate a single project directly.",
+  "agents": [
+    "security",
+    "backup",
+    "usage",
+    "deploy",
+    "incidents",
+    "cost"
+  ],
+  "lenses": [
+    "portfolio",
+    "sessions",
+    "files",
+    "ccr",
+    "pipeline",
+    "usage",
+    "security",
+    "agents",
+    "skills",
+    "marketplace",
+    "backup",
+    "docs",
+    "settings"
+  ]
+}

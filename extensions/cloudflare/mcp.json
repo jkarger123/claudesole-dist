@@ -1,0 +1,9 @@
+{
+  "_source": "https://github.com/cloudflare/mcp (confirm exact endpoint/command at setup)",
+  "mcpServers": {
+    "cloudflare": {
+      "type": "http",
+      "url": "https://mcp.cloudflare.com/mcp"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "id": "notion",
+  "name": "Notion",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "NO",
+  "summary": "Read + write Notion pages and databases (docs, specs, wikis) from your agents.",
+  "description": "Search/read Notion pages + query databases, and (when allowed) create/update pages. A lot of project knowledge lives in Notion; this lets agents pull context and write durable notes back. Uses Notion's official hosted MCP server with one-click OAuth.",
+  "provides": [
+    "mcp:notion"
+  ],
+  "requires": [
+    {
+      "key": "NOTION_OAUTH",
+      "label": "A Notion workspace + OAuth; share the specific pages/DBs with the connection"
+    }
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true
+}

@@ -1,0 +1,23 @@
+{
+  "slug": "incident-commander",
+  "title": "Incident Commander",
+  "overall": "warn",
+  "counts": {
+    "sources_active": 0,
+    "sources_possible": 2
+  },
+  "items": [
+    {
+      "name": "sentry",
+      "status": "not installed",
+      "detail": "production errors / issues"
+    },
+    {
+      "name": "pagerduty",
+      "status": "not installed",
+      "detail": "incidents + on-call"
+    }
+  ],
+  "note": "Logs-only: install the sentry and/or pagerduty extensions for full incident coverage, then talk to me.",
+  "ts": 1782086063
+}

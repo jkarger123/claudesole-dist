@@ -1,0 +1,6 @@
+# Ignore EVERYTHING under secrets/ (OAuth client JSON + minted refresh tokens) -- but ship the protective
+# secrets/.gitignore so a fresh deploy's secrets dir is self-protecting the moment it is created.
+secrets/*
+!secrets/.gitignore
+*.json.local
+google_oauth.json

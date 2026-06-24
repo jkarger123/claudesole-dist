@@ -1,0 +1,26 @@
+{
+  "_comment": "TEMPLATE -- Path B (self-hosted, headless) wiring for the Google Workspace extension. The setup agent copies this block into the DEPLOYMENT's .mcp.json (via _ext_wire_mcp) and replaces the <PLACEHOLDERS>; this file itself stays a placeholder template and is never the live config. Server: taylorwilsdon/google_workspace_mcp (`uvx workspace-mcp`), single-user/stdio. Secrets (OAuth client JSON + minted refresh token) live under ./secrets (gitignored, chmod 700/600) and are NEVER committed or propagated by cc-update.",
+  "_scope_model": "workspace-mcp --permissions service:level (cumulative). SAFE DEFAULT below is gmail:drafts (compose, never send) + calendar:full + drive:full. To let the agent SEND email, change 'gmail:drafts' to 'gmail:send' (documented upgrade in SETUP.md, with the blast-radius warning). Levels: gmail readonly->organize->drafts->send->full; drive readonly->full; calendar readonly->full.",
+  "_verified_env": "workspace-mcp reads GOOGLE_CLIENT_SECRET_PATH (client JSON), WORKSPACE_MCP_CREDENTIALS_DIR (token store), USER_GOOGLE_EMAIL (single-user default), OAUTHLIB_INSECURE_TRANSPORT=1 (local loopback callback). Do NOT use GOOGLE_OAUTH_CREDENTIALS -- that name is not read by this server.",
+  "mcpServers": {
+    "google": {
+      "command": "uvx",
+      "args": [
+        "workspace-mcp",
+        "--single-user",
+        "--transport",
+        "stdio",
+        "--permissions",
+        "gmail:drafts",
+        "calendar:full",
+        "drive:full"
+      ],
+      "env": {
+        "GOOGLE_CLIENT_SECRET_PATH": "<DEPLOYMENT>/extensions/google-workspace/secrets/google_oauth.json",
+        "WORKSPACE_MCP_CREDENTIALS_DIR": "<DEPLOYMENT>/extensions/google-workspace/secrets/tokens",
+        "USER_GOOGLE_EMAIL": "<ACCOUNT@gmail.com>",
+        "OAUTHLIB_INSECURE_TRANSPORT": "1"
+      }
+    }
+  }
+}

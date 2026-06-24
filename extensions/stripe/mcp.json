@@ -1,0 +1,9 @@
+{
+  "_source": "https://docs.stripe.com/mcp (confirm exact endpoint/command at setup)",
+  "mcpServers": {
+    "stripe": {
+      "type": "http",
+      "url": "https://mcp.stripe.com"
+    }
+  }
+}

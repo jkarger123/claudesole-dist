@@ -1,0 +1,16 @@
+{
+  "id": "sentry",
+  "name": "Sentry",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "SN",
+  "summary": "Surface production errors + issues from Sentry so the incident posture is real, not guessed.",
+  "description": "Lists and inspects Sentry issues/errors for your apps so the control center's core question -- 'is it healthy?' -- is answered from production reality. Pairs naturally with the incident-scanner agent. Uses Sentry's official MCP server (hosted remote OAuth, or self-hosted stdio + token).",
+  "provides": ["mcp:sentry"],
+  "requires": [
+    {"key": "SENTRY_AUTH_TOKEN", "label": "A Sentry auth token (self-hosted/stdio) -- or use the hosted remote server with OAuth"},
+    {"key": "SENTRY_HOST", "label": "Your Sentry host/org (e.g. org.sentry.io) if self-hosted"}
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true
+}

@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy to config.json (per-deployment, gitignored, a PRESERVE path). Where this project's incident/nightly/error logs live.",
+  "open_patterns": ["OPEN", "UNRESOLVED", "INCIDENT", "FAIL", "ERROR"],
+  "critical_patterns": ["CRITICAL", "SEV1", "P0", "BRICK"],
+  "sources": [
+    { "name": "incident-log", "path": "/path/to/docs/INCIDENT_LOG.md", "type": "md" },
+    { "name": "nightly-reports", "path": "/path/to/docs/nightly_reports", "type": "dir", "recent_days": 3 }
+  ]
+}

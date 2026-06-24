@@ -1,0 +1,6 @@
+[data-theme="claudefather-dark"]{
+  --bg:#08080c;--bg2:#0e0e16;--card:#15151f;--card2:#1d1d29;--ink:#f6f6fb;--mut:#b9b9cc;--dim:#6a6a80;
+  --line:#33334a;--accent:#e8c547;--accent-rgb:232,197,71;--accent-light:#f6e08a;--accent-dark:#b8962f;
+  --accent2:#8c1622;--accent2-light:#b51e2e;--grad:linear-gradient(135deg,#e8c547,#f6e08a,#e8c547);
+  --glow:0 0 28px rgba(232,197,71,.32);
+}

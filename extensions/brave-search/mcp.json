@@ -1,0 +1,15 @@
+{
+  "_source": "https://mcpservers.org/ (Brave Search) (confirm exact package/command at setup)",
+  "mcpServers": {
+    "brave-search": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-brave-search"
+      ],
+      "env": {
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+      }
+    }
+  }
+}

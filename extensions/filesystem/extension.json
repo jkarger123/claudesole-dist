@@ -1,0 +1,20 @@
+{
+  "id": "filesystem",
+  "name": "Filesystem",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "FS",
+  "summary": "Scoped, read-controlled file operations over a chosen directory.",
+  "description": "Secure file read/write/search confined to configured paths -- lets agents work over a docs/data folder outside the repo with explicit access controls. Uses the official Filesystem reference MCP server.",
+  "provides": [
+    "mcp:filesystem"
+  ],
+  "requires": [
+    {
+      "key": "FS_ROOT",
+      "label": "The allowed root directory(ies) -- scope as narrowly as possible"
+    }
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true
+}

@@ -1,0 +1,20 @@
+{
+  "id": "google-workspace",
+  "name": "Google Workspace",
+  "category": "integration",
+  "version": "2.1.0",
+  "icon": "G",
+  "summary": "Gmail + Calendar + Drive, driven by a power-agent: daily brief, inbox triage, scheduling, Drive, per-client comms.",
+  "description": "Connects Gmail, Google Calendar, and Google Drive AND ships a Google power-agent (agents/google) that uses the WHOLE surface, not just read: inbox triage with labels + reply DRAFTS, free/busy scheduling via suggest_time, Drive search + doc creation + permission checks, and a daily brief. Email is DRAFT-FIRST by default (the agent composes, you send); auto-SEND is a documented one-flag opt-in (gmail:drafts -> gmail:send). It integrates with the rest of the platform: a client_map ties email/meetings/Drive to client folders (and files dated notes into each client's CLAUDE.md), and it drains the Calls (Granola) module's google destination into real calendar events. For a headless ClaudeFather the DEFAULT is Path B (a self-hosted Google MCP server with a stored refresh token -- acts for a dedicated/service account, no re-auth, can send); Path A (Claude's first-party connectors) is operator-account-bound and read/draft-only. The setup agent walks you through auth (incl. the remote-host reverse-tunnel case) + wiring the client_map so you never touch a raw config.",
+  "provides": [
+    "mcp:gmail",
+    "mcp:google-calendar",
+    "mcp:google-drive",
+    "agent:google"
+  ],
+  "requires": [
+    {"key": "GOOGLE_OAUTH", "label": "A Google account + an OAuth Desktop client JSON from Google Cloud Console (the setup agent walks you through creating it -- project, enable APIs, Testing-mode consent + test-user, Desktop client; then mints the headless token for you)"}
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true
+}

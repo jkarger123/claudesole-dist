@@ -1,0 +1,20 @@
+{
+  "id": "atlassian-jira-confluence",
+  "name": "Jira + Confluence",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "AT",
+  "summary": "Connect Jira issues + Confluence pages (Atlassian Cloud) to your agents.",
+  "description": "Read/manage Jira issues, sprints, boards; read/search Confluence pages. Enterprise teams run on Jira/Confluence; this brings that work + knowledge into the control center. Uses Atlassian's official Rovo MCP server (GA; remote, OAuth). Cloud only.",
+  "provides": [
+    "mcp:atlassian-jira-confluence"
+  ],
+  "requires": [
+    {
+      "key": "ATLASSIAN_OAUTH",
+      "label": "An Atlassian Cloud site (Jira and/or Confluence) + OAuth"
+    }
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true
+}

@@ -1,0 +1,20 @@
+{
+  "id": "aws",
+  "name": "AWS",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "AW",
+  "summary": "Query AWS resources + docs (read-first) for projects with AWS infra.",
+  "description": "Inspect AWS resources and search AWS documentation via MCP. For AWS-hosted projects, gives agents grounded infra visibility. Uses the official awslabs MCP servers. (This project ships on Cloudflare, so AWS is niche unless a deployment uses it.)",
+  "provides": [
+    "mcp:aws"
+  ],
+  "requires": [
+    {
+      "key": "AWS_PROFILE",
+      "label": "An AWS profile/role -- prefer a READ-ONLY, least-privilege profile"
+    }
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true
+}

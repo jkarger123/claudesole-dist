@@ -1,0 +1,16 @@
+{
+  "id": "telegram-notify",
+  "name": "Telegram",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "TG",
+  "summary": "Two-way Telegram: get notified on your phone and chat to your agents from anywhere.",
+  "description": "A Telegram bot bridge so ClaudeFather can push notifications (loop done, deploy ready, incident) to your phone AND let you message your agents back from Telegram. The setup agent walks you through making a bot with @BotFather and grabbing your chat id.",
+  "provides": ["notify:telegram", "inbound:telegram"],
+  "requires": [
+    {"key": "TELEGRAM_BOT_TOKEN", "label": "Bot token from @BotFather"},
+    {"key": "TELEGRAM_CHAT_ID", "label": "Your chat id (the bot tells you on first message)"}
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true
+}

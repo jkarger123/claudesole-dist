@@ -1,0 +1,20 @@
+{
+  "id": "figma",
+  "name": "Figma",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "FG",
+  "summary": "Pull real Figma design data (files, components, frames) into agents for design-to-code work.",
+  "description": "Read Figma files/components/frames so an agent can reference real designs when generating or reviewing UI -- closes the design-to-code gap. Uses Figma's Dev Mode MCP server. NOTE: the exact official endpoint + plan requirements are UNCONFIRMED; the setup agent verifies and wires .mcp.json at setup (no server is auto-wired on install).",
+  "provides": [
+    "mcp:figma"
+  ],
+  "requires": [
+    {
+      "key": "FIGMA_AUTH",
+      "label": "A Figma account (Dev Mode MCP may require a paid seat -- confirm) + auth"
+    }
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true
+}

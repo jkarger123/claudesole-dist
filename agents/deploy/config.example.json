@@ -1,0 +1,20 @@
+{
+  "_comment": "Copy to config.json (per-deployment, gitignored, a PRESERVE path). Defines this project's deploy targets. All fields optional except name.",
+  "targets": [
+    {
+      "name": "api",
+      "health_url": "https://api.example.com/status",
+      "expect": "ok",
+      "git_dir": "/path/to/repo",
+      "cwd": "/path/to/repo/worker",
+      "deploy_cmd": "npx wrangler deploy --env production"
+    },
+    {
+      "name": "frontend",
+      "health_url": "https://www.example.com/",
+      "git_dir": "/path/to/repo",
+      "cwd": "/path/to/repo",
+      "deploy_cmd": "npx wrangler pages deploy public --project-name=example --branch=main --commit-dirty=true"
+    }
+  ]
+}

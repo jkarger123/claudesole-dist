@@ -1,0 +1,10 @@
+# never publish per-deployment secrets / state in the public mirror
+secrets/
+**/secrets/
+*.env
+.env
+.env.*
+*.local
+.superadmin_ed25519
+*oauth*.json
+google_oauth.json

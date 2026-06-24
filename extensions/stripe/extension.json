@@ -1,0 +1,20 @@
+{
+  "id": "stripe",
+  "name": "Stripe",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "ST",
+  "summary": "Look up customers, subscriptions, invoices, and refunds in Stripe (read-first).",
+  "description": "Query Stripe for customers, payments, subscriptions, invoices, and search Stripe docs. For a product/company control center, revenue + billing is core signal. Uses Stripe's official MCP server (remote OAuth at mcp.stripe.com, or a local toolkit with a Restricted API Key).",
+  "provides": [
+    "mcp:stripe"
+  ],
+  "requires": [
+    {
+      "key": "STRIPE_AUTH",
+      "label": "A Stripe Restricted API Key (rk_*, read-only to start) -- or OAuth to the remote server"
+    }
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true
+}

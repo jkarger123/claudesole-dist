@@ -1,0 +1,9 @@
+{
+  "_source": "https://github.com/atlassian/atlassian-mcp-server (confirm exact endpoint/command at setup)",
+  "mcpServers": {
+    "atlassian": {
+      "type": "http",
+      "url": "https://mcp.atlassian.com/v1/sse"
+    }
+  }
+}
