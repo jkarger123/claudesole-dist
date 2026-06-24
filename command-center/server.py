@@ -125,32 +125,37 @@ def projpath(rel):
     if not (p == PROJECT or p.startswith(PROJECT + "/")): raise ValueError("bad path")
     return p
 
-def _materialize_icloud(path, max_wait=6):
-    """deliverables/ lives in iCloud; iCloud EVICTS file bytes to save space, leaving a dataless placeholder
-    (`.<name>.icloud`). Reading that yields 0/partial bytes. Trigger a download (brctl) and wait UP TO
-    max_wait seconds. Bounded on purpose: a long block here times out the proxy/browser ('site wasn't
-    available'). Returns True once present+non-empty. No-op for already-local files."""
+def _is_dataless(real):
+    """True if `real` is an iCloud-EVICTED file: present by name but with NO disk blocks (st_blocks==0 despite
+    a non-zero logical st_size), or only a `.<name>.icloud` placeholder, or absent. CRITICAL: os.path.getsize()
+    reports the LOGICAL size even when evicted, so it cannot tell us the bytes are local -- reading a dataless
+    file BLOCKS until macOS faults it in, which hangs the request ('site wasn't available'). st_blocks is the
+    truth."""
+    try:
+        d, n = os.path.split(real)
+        if os.path.exists(os.path.join(d, "." + n + ".icloud")): return True
+        if not os.path.isfile(real): return True
+        st = os.stat(real)
+        return st.st_size > 0 and st.st_blocks == 0
+    except Exception:
+        return not os.path.isfile(real)
+
+def _materialize_icloud(path, max_wait=10):
+    """Force an iCloud-evicted file's bytes back to local disk (brctl download) and wait UP TO max_wait sec.
+    Returns True once the bytes are local (not dataless). We ONLY read a file after this confirms it -- never
+    call open().read() on a dataless file (it blocks indefinitely)."""
     try:
         real = os.path.realpath(path)
-        d, n = os.path.split(real)
-        placeholder = os.path.join(d, "." + n + ".icloud")
-        present = os.path.isfile(real) and not os.path.exists(placeholder)
-        if present:
-            try:
-                if os.path.getsize(real) > 0: return True
-            except Exception: return True
+        if not _is_dataless(real): return True   # bytes already local
         for cmd in (["brctl", "download", real], ["/usr/bin/brctl", "download", real]):
-            try: subprocess.run(cmd, capture_output=True, timeout=min(max_wait, 10)); break
+            try: subprocess.run(cmd, capture_output=True, timeout=min(max_wait, 12)); break
             except Exception: continue
         deadline = time.time() + max_wait
         while time.time() < deadline:
-            if os.path.isfile(real) and not os.path.exists(placeholder):
-                try:
-                    if os.path.getsize(real) > 0: return True
-                except Exception: pass
-            time.sleep(0.25)
+            if not _is_dataless(real): return True
+            time.sleep(0.3)
     except Exception: pass
-    return os.path.isfile(path)
+    return not _is_dataless(os.path.realpath(path))
 
 # ---- Mesh comms inbox: a persistent, UI-visible log of every inter-chief message (in + out). The TUI
 # screen-scrape relay (chief_say/chief_broadcast) is best-effort and invisible when a chief is busy or on a
@@ -5723,19 +5728,18 @@ class H(BaseHTTPRequestHandler):
             except Exception: return self._s(400, "bad path")
             if _path_has_secret(ab): return self._s(403, "forbidden")   # never serve secrets/keys via download
             real = os.path.realpath(ab)
-            # Only pay the iCloud-fetch wait when the bytes aren't already local (a just-made file IS local) --
-            # and keep it SHORT so the request returns before the proxy/browser times out ("site wasn't available").
-            try: have = os.path.isfile(real) and os.path.getsize(real) > 0
-            except Exception: have = False
-            if not have: _materialize_icloud(ab, max_wait=6)
+            # iCloud-evicted file -> materialize FIRST (bounded). NEVER open().read() a dataless file: that
+            # blocks until macOS faults it in and hangs the request -> the browser shows "site wasn't available".
+            if _is_dataless(real): _materialize_icloud(ab, max_wait=10)
+            if _is_dataless(os.path.realpath(ab)):
+                return self._s(503, "file is still syncing down from iCloud -- click Download again in a few seconds")
             if not os.path.isfile(ab): return self._s(404, "not found")
             import mimetypes
             ct = mimetypes.guess_type(ab)[0] or "application/octet-stream"
             try:
                 with open(ab, "rb") as f: b = f.read()
             except Exception: return self._s(404, "not found")
-            if not b:   # don't serve an empty file -- tell the user it's still coming from iCloud
-                return self._s(503, "file is still downloading from iCloud -- try again in a few seconds")
+            if not b: return self._s(503, "file is still syncing down from iCloud -- click Download again in a few seconds")
             self.send_response(200); self.send_header("Content-Type", ct)
             self.send_header("Content-Length", str(len(b)))
             self.send_header("Content-Disposition", 'attachment; filename="%s"' % os.path.basename(ab).replace('"', ''))
@@ -7184,6 +7188,25 @@ function esc(s){return (s||"").replace(/'/g,"").replace(/</g,"&lt;");}
 function e2(s){return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
 // base64url-encode a path for a download URL -> clean ASCII (no %20/%28/%29) that proxies/tunnels won't drop.
 function b64u(s){ try{ return btoa(unescape(encodeURIComponent(s||""))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); }catch(e){ return encodeURIComponent(s||""); } }
+// Robust download: fetch as a blob and save. If the file is iCloud-evicted the server returns 503 while it
+// pulls the bytes back -- we auto-retry so the user just sees "preparing" then the file, never an error page.
+async function dlFile(rel,name){
+  name=name||(rel||'file').split('/').pop();
+  toast('Preparing '+name+'…',2500);
+  for(var i=0;i<10;i++){
+    try{
+      var r=await fetch('/api/file-get?b64='+b64u(rel));
+      if(r.status===503){ if(i===2)toast('Pulling it down from iCloud…',3000); await new Promise(function(s){setTimeout(s,2500);}); continue; }
+      if(!r.ok){ toast('Download failed ('+r.status+')',4500); return; }
+      var blob=await r.blob();
+      var u=URL.createObjectURL(blob), a=document.createElement('a');
+      a.href=u; a.download=name; document.body.appendChild(a); a.click();
+      setTimeout(function(){ URL.revokeObjectURL(u); a.remove(); },1500);
+      toast('Downloaded '+name,2500); return;
+    }catch(e){ await new Promise(function(s){setTimeout(s,2000);}); }
+  }
+  toast('Still syncing from iCloud — give it a few seconds and click again.',6000);
+}
 function paintSvc(){const el=document.getElementById("svchealth");if(!el)return;
   const c=s=>s=="online"?"var(--ok)":(s=="offline"?"var(--err)":"var(--dim)");
   const row=(s,lbl)=>'<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--mut)" title="'+lbl+': '+(s||"?")+'"><span style="width:8px;height:8px;border-radius:50%;background:'+c(s)+';flex:0 0 8px"></span>'+lbl+'</div>';
@@ -7284,8 +7307,7 @@ async function loadModules(rel){
     if(MODFILES.length){
       const TIER={icloud:['&#9729; iCloud','#58a6ff','recent -- synced to your Apple devices, opens in iCloud'],ssd:['&#128452; SSD','#c9a227','archived (>90d) on the SSD, off iCloud -- still opens from here'],local:['',''," "]};
       const frow=f=>{const t=TIER[f.tier]||['',''];const url='/api/file-get?b64='+b64u(f.rel);return '<div class="sess"><span class="lbl" title="tap to view/download"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600">📄 '+esc(f.name)+'</a>'+(t[0]?(' <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'):'')+' <span class="sub">· '+fmtBytes(f.size)+' · '+new Date(f.mtime*1000).toLocaleString()+(f.sub?(' · '+esc(f.sub)):'')+'</span></span>'
-        +'<a class="mini go" href="'+url+'" download="'+esc(f.name)+'" style="text-decoration:none" title="download to THIS device">&#8595; Download</a>'
-        +'<button class="mini" title="show where this file is in your iCloud Drive (it syncs to all your Apple devices)" onclick="reveal(\''+esc(f.rel)+'\')">&#128205; Find this file</button></div>';};
+        +'<button class="mini go" title="download to THIS device" onclick="dlFile(\''+esc(f.rel)+'\',\''+esc(f.name)+'\')">&#8595; Download</button></div>';};
       h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>&#128193; Files made for you in this folder <span class="sub">('+MODFILES.length+')</span></span></h3>'
         +'<div class="convscroll">'+MODFILES.map(frow).join("")+'</div>'
         +'<div class="meta" style="margin-top:6px">Agents save deliverables here. In iCloud mode, recent files live in iCloud (synced to your devices, &#9729;); after 90 days they age off to the SSD (&#128452;) to free space &mdash; still listed + openable here.</div></div>';
@@ -7580,8 +7602,8 @@ function renderFiles(){
       h+='<div class="card" style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
         +'<span style="flex:1;min-width:220px"><a href="/api/file-get?b64='+b64u(f.rel)+'" target="_blank" rel="noopener" style="color:inherit;font-weight:700" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'
         +'<div class="sub" style="margin-top:2px">'+(f.module?('&#128194; '+esc(f.module)+' &middot; '):'')+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</div></span>'
-        +'<a class="mini go" href="/api/file-get?b64='+b64u(f.rel)+'" download="'+esc(f.name)+'" style="text-decoration:none" title="download to THIS device (works on your phone)">&#8595; Download</a>'
-        +'<button class="mini" title="show where this file is in your iCloud Drive (it syncs to all your Apple devices)" onclick="reveal(\''+esc(f.rel)+'\')">&#128205; Find this file</button></div></div>';});
+        +'<button class="mini go" title="download to THIS device (works on your phone)" onclick="dlFile(\''+esc(f.rel)+'\',\''+esc(f.name)+'\')">&#8595; Download</button>'
+        +'</div></div>';});
   }
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';}
 function renderBrowse(){const b=BROWSE||{};
@@ -7593,8 +7615,8 @@ function renderBrowse(){const b=BROWSE||{};
   if(BROWSEREL!==''){h+='<div class="card" style="cursor:pointer;grid-column:1/-1" onclick="loadBrowse(\''+esc(b.parent||'')+'\')"><b>&#11014; ..</b> <span class="sub">up a level</span></div>';}
   (b.dirs||[]).forEach(d=>{h+='<div class="card" style="cursor:pointer;grid-column:1/-1" onclick="loadBrowse(\''+esc(d.rel)+'\')"><b>&#128193; '+esc(d.name)+'</b> <span class="sub">folder</span></div>';});
   (b.files||[]).forEach(f=>{const url='/api/file-get?b64='+b64u(f.rel);h+='<div class="card" style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="flex:1;min-width:200px"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="sub">&middot; '+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</span></span>'
-    +'<a class="mini go" href="'+url+'" download="'+esc(f.name)+'" style="text-decoration:none" title="download to THIS device">&#8595; Download</a>'
-    +'<button class="mini" title="show where this file is in your iCloud Drive (it syncs to all your Apple devices)" onclick="reveal(\''+esc(f.rel)+'\')">&#128205; Find this file</button></div></div>';});
+    +'<button class="mini go" title="download to THIS device" onclick="dlFile(\''+esc(f.rel)+'\',\''+esc(f.name)+'\')">&#8595; Download</button>'
+    +'</div></div>';});
   if(!(b.dirs||[]).length&&!(b.files||[]).length){h+=empty('Empty folder (or only hidden/secret files).');}
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';}
 // ---- Pipeline Live-View lens (generic: renders whatever steps a node's pipeline declares) ----

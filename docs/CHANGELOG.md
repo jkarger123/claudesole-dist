@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.17 -- 2026-06-24  *** the actual download fix ***
+- ROOT CAUSE (download "site wasn't available"): NOT the proxy and NOT the URL -- both were verified working
+  (HTTP 200 in ~40ms through the real Tailscale serve path). The file was iCloud-EVICTED on the headless
+  Studio. `os.path.getsize()` reports the logical size even for an evicted dataless file, so the old code
+  thought the bytes were local, then `open().read()` BLOCKED forever faulting the file in from iCloud -> the
+  request never returned -> the browser timed out as "site wasn't available".
+- FIX: detect eviction by `st_blocks==0` (the truth), materialize the bytes via `brctl download` BEFORE
+  reading (bounded ~10s, never hang), and if it can't be pulled in time return a fast 503 instead of hanging.
+  The Download button is now a blob fetch that AUTO-RETRIES on 503 ("Pulling it down from iCloud…") so the
+  user just sees "preparing" then the file -- never an error page.
+- Removed the dead "Reveal in Finder / Find this file" buttons from file rows: the Studio is headless and
+  accessed only remotely, so opening Finder on it is meaningless. Download is the path.
+
 ## 0.21.16 -- 2026-06-24
 - FIX (shipped fixes didn't take effect without a manual hard-refresh): the dashboard HTML (with inline JS)
   had no Cache-Control, so browsers served a stale cached page -- e.g. still building the old `?path=` download
