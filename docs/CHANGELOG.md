@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.2 -- 2026-06-24
+- POLISH ("How this works" explainers redesigned): the informative popups now read as refined/enterprise
+  instead of the previous busy gradient + gold top-bar. Calm flat surface, a small gold "HOW THIS WORKS"
+  eyebrow, an info icon badge, proper title/body type hierarchy, inline `code` chips, and a separated
+  footer (Don't-show-again on the left, ghost Dismiss + gold Got it on the right). Verified by an actual
+  headless-Chrome render before ship. The generic .modal is untouched; this scopes via `.modal:has(.cchelp)`.
+
 ## 0.21.1 -- 2026-06-24
 - FIX (Sessions Focus view): removed the redundant per-session switcher-chip row that sat between the
   usage strip and the terminal. The bottom session taskbar already lists/switches every session, so Focus

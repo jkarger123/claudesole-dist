@@ -6460,9 +6460,23 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-rows{flex:1;overflow-y:auto}
 .gm-newpill{position:sticky;top:0;z-index:3;margin:6px auto;display:block;width:fit-content;background:var(--accent);color:#15120a;font-weight:700;font-size:12px;padding:5px 14px;border-radius:14px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.4)}
 .gm-newpill:hover{filter:brightness(1.08)}
-.cchelp .cchbody{font-size:13.5px;line-height:1.62;color:var(--mut);max-height:54vh;overflow-y:auto}
-.cchelp .cchbody p{margin:0 0 10px}.cchelp .cchbody b{color:var(--ink)}
-.cchelp .cchnever{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);margin-right:auto;cursor:pointer}
+/* "How this works" explainer -- refined/enterprise: calm flat surface, eyebrow, icon badge, clean hierarchy.
+   (Overrides the busy gradient + gold top-bar of the generic .modal when it hosts a .cchelp.) */
+.modal:has(.cchelp){background:#15151f;border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:0;width:min(516px,94vw);box-shadow:0 30px 90px rgba(0,0,0,.6)}
+.modal:has(.cchelp)::before{display:none}
+.cchelp{display:flex;flex-direction:column}
+.cchelp .cchtop{display:flex;gap:14px;align-items:flex-start;padding:24px 26px 16px}
+.cchelp .cchicon{flex:0 0 42px;width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:rgba(var(--accent-rgb),.11);border:1px solid rgba(var(--accent-rgb),.26);color:var(--accent);font-size:22px}
+.cchelp .cchtt{display:flex;flex-direction:column;gap:4px;min-width:0;padding-top:1px}
+.cchelp .ccheye{font-size:10px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);opacity:.82}
+.cchelp h2{margin:0;font-size:18px;font-weight:700;letter-spacing:-.01em;color:var(--ink)}
+.cchelp .cchbody{padding:2px 26px 6px;font-size:13.5px;line-height:1.66;color:var(--mut);max-height:50vh;overflow-y:auto}
+.cchelp .cchbody p{margin:0 0 11px}.cchelp .cchbody b{color:var(--ink);font-weight:600}
+.cchelp .cchbody ul{margin:0 0 11px;padding-left:18px}.cchelp .cchbody li{margin:0 0 5px}
+.cchelp .cchbody code,.cchelp .cchbody kbd{background:var(--card2);border:1px solid var(--line);border-radius:5px;padding:1px 5px;font:12px ui-monospace,monospace;color:var(--ink)}
+.cchelp .cchfoot{display:flex;align-items:center;gap:12px;padding:15px 26px 19px;margin-top:8px;border-top:1px solid rgba(255,255,255,.06)}
+.cchelp .cchnever{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dim);margin-right:auto;cursor:pointer;user-select:none}
+.cchelp .cchnever input{width:auto;margin:0;accent-color:var(--accent)}
 .gm-row{display:grid;grid-template-columns:14px 1fr auto;gap:9px;align-items:start;padding:10px 12px;border-bottom:1px solid #1c1c26;cursor:pointer;position:relative}
 .gm-row:hover{background:var(--card)}
 .gm-row.cur{background:rgba(var(--accent-rgb),.10)}
@@ -10497,9 +10511,13 @@ var HELP={
 function _cchk(k){return 'cchelp_'+k;}
 function ccHelpSeen(k){try{return localStorage.getItem(_cchk(k))==='1';}catch(e){return false;}}
 function ccHelp(k){var d=HELP[k];if(!d)return;
-  showM('<div class="cchelp"><h2 style="margin-top:0">'+d.t+'</h2><div class="cchbody">'+d.h+'</div>'
-   +'<div class="btns" style="align-items:center;gap:14px"><label class="cchnever"><input type="checkbox" id="cchNever"> Do not show this again</label>'
-   +'<button class="btn" onclick="closeM()">Dismiss</button><button class="btn go" onclick="ccHelpGotit(\''+k+'\')">Got it</button></div></div>');}
+  showM('<div class="cchelp">'
+   +'<div class="cchtop"><div class="cchicon"><i class="ph-light ph-info"></i></div>'
+   +'<div class="cchtt"><span class="ccheye">How this works</span><h2>'+d.t+'</h2></div></div>'
+   +'<div class="cchbody">'+d.h+'</div>'
+   +'<div class="cchfoot"><label class="cchnever"><input type="checkbox" id="cchNever"> Don’t show this again</label>'
+   +'<button class="btn" onclick="closeM()">Dismiss</button><button class="btn go" onclick="ccHelpGotit(\''+k+'\')">Got it</button></div>'
+   +'</div>');}
 function ccHelpGotit(k){var nv=document.getElementById('cchNever');if(nv&&nv.checked){try{localStorage.setItem(_cchk(k),'1');}catch(e){}}closeM();}
 function ccHelpAuto(k){ if(HELP[k] && !ccHelpSeen(k)) setTimeout(function(){ if(LENS===k) ccHelp(k); },700); }
 // ---- Gmail auto-refresh: pull new mail without yanking the list while you're reading ----
