@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.15.2 -- 2026-06-24
+- FIX (Gmail rail): the Labels section is now a COLLAPSIBLE group (collapsed by default, chevron + count)
+  so a long label list no longer floods the rail. Account email is separated from the Inbox lane (border +
+  spacing) so they no longer visually collide.
+- FIX (Google lens leaked onto sibling instances): google_configured() now requires the google-workspace
+  extension to be INSTALLED on THIS instance (per-instance EXT_STATE), not merely that a token exists in the
+  shared CC_HOME. So text2tune / mission-control no longer show Gmail/Calendar/Drive; only nodes where the
+  operator set up the extension (carsearch, AFP) do. Any previously-seeded "Google" nav folder self-removes
+  on instances where it's now gated off.
+
 ## 0.15.1 -- 2026-06-24
 - FIX (Google suite rendered completely unstyled): the 0.15.0 integration pasted the entire new stylesheet
   (cmdk-*/gm-*/cal-*/dr-*) into the RALPH page's <style> instead of the main app page's, so every Gmail/

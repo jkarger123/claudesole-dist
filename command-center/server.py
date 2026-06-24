@@ -459,7 +459,12 @@ def _google_token_file():
     return None
 
 def google_configured():
-    return _google_token_file() is not None
+    # Show Google ONLY where the operator INSTALLED the extension on THIS instance -- not merely where a token
+    # exists. Local instances share CC_HOME (hence the same secrets/tokens dir), so token-presence alone would
+    # leak the Gmail/Calendar/Drive lenses onto every sibling (text2tune, mission-control). Per-instance
+    # install state (EXT_STATE in the instance's state_dir) is the real gate.
+    if _google_token_file() is None: return False
+    return "google-workspace" in _ext_installed()
 
 def _google_access_token():
     """Refresh-token -> short-lived access token, cached until ~90s before expiry. Thread-safe."""
@@ -5498,7 +5503,11 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 
 /* --- rail (saved lanes) --- */
 .gm-rail{background:#0c0c12;border-right:1px solid var(--line);display:flex;flex-direction:column;overflow-y:auto;padding:10px 8px}
-.gm-rail .gm-acct{font-size:11px;color:var(--dim);font-weight:700;letter-spacing:.4px;padding:4px 8px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gm-rail .gm-acct{font-size:11px;color:var(--dim);font-weight:700;letter-spacing:.4px;padding:4px 8px 9px;margin-bottom:7px;border-bottom:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 0 auto}
+.gm-rail .gm-lbltog{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+.gm-rail .gm-lbltog:hover{color:var(--mut)}
+.gm-rail .gm-lbltog .gm-lblchev{font-size:9px;width:10px;display:inline-block}
+.gm-rail .gm-lbltog .gm-lblct{margin-left:auto;font-size:10px;font-weight:800;color:var(--dim);background:#0008;border-radius:8px;padding:1px 6px}
 .gm-lane{display:flex;align-items:center;gap:9px;padding:8px 9px;border-radius:9px;cursor:pointer;color:var(--mut);font-weight:600;font-size:13px;border:1px solid transparent;margin-bottom:1px}
 .gm-lane:hover{background:var(--card);color:var(--ink)}
 .gm-lane.on{background:rgba(var(--accent-rgb),.13);color:var(--ink);border-color:rgba(var(--accent-rgb),.45)}
@@ -6823,6 +6832,7 @@ window.Shell=(function(){
 
 // ---- state ----
 var GM = {
+  labelsOpen: false,       // rail Labels section collapsed by default (many labels)
   lane: 'inbox',           // active saved-lane key
   q: '',                   // current Gmail query (lane query + chips + text)
   text: '',                // free-text portion of the search
@@ -6887,16 +6897,18 @@ function gmRailHTML(){
       +'<i class="gm-li">'+l.i+'</i><span class="gm-ln">'+l.n+'</span>'+meta+'</div>';
   };
   var sys=GM_LANES.map(laneBtn).join('');
-  var userLabels=GM.labels.filter(function(x){return x.id.indexOf('Label_')===0||(x.name.indexOf('CATEGORY_')!==0&&['INBOX','SENT','DRAFT','STARRED','IMPORTANT','TRASH','SPAM','UNREAD','CHAT'].indexOf(x.id)<0);})
-    .map(function(x){
+  var ulArr=GM.labels.filter(function(x){return x.id.indexOf('Label_')===0||(x.name.indexOf('CATEGORY_')!==0&&['INBOX','SENT','DRAFT','STARRED','IMPORTANT','TRASH','SPAM','UNREAD','CHAT'].indexOf(x.id)<0);});
+  var userLabels=ulArr.map(function(x){
       return '<div class="gm-lane'+(GM.lane==='lbl:'+x.id?' on':'')+'" onclick="gmSetLabelLane(\''+esc(x.id)+'\',\''+esc(x.name)+'\')">'
         +'<i class="gm-li">\u{1F3F7}</i><span class="gm-ln">'+e2(x.name)+'</span>'
         +(x.unread?'<span class="gm-ct">'+x.unread+'</span>':'')+'</div>';
     }).join('');
+  var lblOpen=!!GM.labelsOpen;
   return '<aside class="gm-rail" id="gmRail">'
     +'<div class="gm-acct">'+e2(GM.email||'')+'</div>'
     +sys
-    +(userLabels?'<div class="gm-sec">Labels</div>'+userLabels:'')
+    +(ulArr.length?'<div class="gm-sec gm-lbltog" onclick="gmToggleLabels()"><span class="gm-lblchev" id="gmLblChev">'+(lblOpen?'▾':'▸')+'</span> Labels <span class="gm-lblct">'+ulArr.length+'</span></div>'
+        +'<div id="gmLabelWrap" style="display:'+(lblOpen?'block':'none')+'">'+userLabels+'</div>':'')
     +'<div class="gm-railfoot"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>e</kbd> archive · <kbd>#</kbd> trash · <kbd>s</kbd> star · <kbd>u</kbd> unread · <kbd>c</kbd> compose · <kbd>z</kbd> undo · <kbd>/</kbd> search</div>'
     +'</aside>';
 }
@@ -7207,6 +7219,7 @@ async function gmDoSend(threadId,inReplyTo,references){
 }
 
 // ---- lane / chip switching ----
+function gmToggleLabels(){ GM.labelsOpen=!GM.labelsOpen; var w=document.getElementById('gmLabelWrap'); if(w) w.style.display=GM.labelsOpen?'block':'none'; var c=document.getElementById('gmLblChev'); if(c) c.textContent=GM.labelsOpen?'▾':'▸'; }
 function gmSetLane(k){ GM.lane=k; GM.text=''; var s=document.getElementById('gmSearch'); if(s) s.value=''; gmHighlightRail(); gmFetchList(true); if(k==='snoozed'){} }
 function gmSetLabelLane(id,name){ GM.lane='lbl:'+id; GM.text=''; GM.q='label:'+name.replace(/ /g,'-'); gmHighlightRail(); gmFetchListRaw('label:"'+name+'"'); }
 async function gmFetchListRaw(q){ GM.cur=-1; GM.sel={}; gmPaintBatch(); var rows=document.getElementById('gmRows'); if(rows) rows.innerHTML=empty('Loading…');
@@ -9118,7 +9131,16 @@ function setupNavDnD(){
   nav.addEventListener("dblclick",function(e){var g=e.target.closest('.navgroup');if(g){e.preventDefault();navRenameGrp(g.dataset.g);}});
 }
 function navSeedGoogle(){   // one-time: tuck the live Google lenses into a "Google" category folder
-  if(!(window.CC&&window.CC.google))return;
+  if(!(window.CC&&window.CC.google)){
+    // Google not enabled on this instance -> remove any previously-seeded folder + lenses so no empty
+    // "Google" group lingers (e.g. after gating tightened, or the extension was removed).
+    var s0=navState(),ch=false;
+    if(s0.tree){for(var i=s0.tree.length-1;i>=0;i--){if(s0.tree[i].t==="grp"&&s0.tree[i].id==="gGoogle"){s0.tree.splice(i,1);ch=true;}}
+      ['gmail','calendar','drive'].forEach(function(l){var b=s0.tree.length;treeRemoveLens(s0.tree,l);if(s0.tree.length!==b)ch=true;});}
+    if(s0._gseed){delete s0._gseed;ch=true;}
+    if(ch){navSave(s0);renderNav();}
+    return;
+  }
   var s=navState();if(s._gseed)return;
   if(!s.tree||!s.tree.length)s.tree=seedTree();
   ['gmail','calendar','drive'].forEach(function(l){treeRemoveLens(s.tree,l);});
