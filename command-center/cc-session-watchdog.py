@@ -59,14 +59,23 @@ def is_claude(txt):
     return ("esc to interrupt" in low) or ("? for shortcuts" in low) or ("/help for" in low) or ("✻" in txt) or ("context left" in low)
 
 def is_busy(txt):
-    return "esc to interrupt" in txt.lower()   # Claude shows this only while actively working/retrying
+    # "esc to interrupt" is the classic working flag; also treat an ACTIVE spinner with an elapsing timer as
+    # busy ("Actioning… (32s · thinking)") -- but NOT a past-tense "Worked for 39s" (that's a finished turn).
+    if "esc to interrupt" in txt.lower(): return True
+    for ln in txt.splitlines()[-5:]:
+        if re.search(r"…\s*\(\d+\s*s\b", ln): return True
+    return False
+
+def has_feedback(txt):
+    low = txt.lower()
+    return "how is claude doing this session" in low or "0: dismiss" in low
 
 def is_stalled_on_error(txt):
-    """Idle AND a trailing error line in the last few non-empty lines."""
+    """Idle AND an error line anywhere in the last ~15 non-empty lines (the error can be pushed ABOVE a
+    feedback prompt / input box when a turn dies -- so a tiny tail window misses it)."""
     if is_busy(txt): return False
     lines = [ln for ln in txt.splitlines() if ln.strip()]
-    tail = lines[-6:]                          # only the bottom of the pane (where a failed turn leaves the error)
-    return any(ERR_LINE.match(ln) for ln in tail)
+    return any(ERR_LINE.match(ln) for ln in lines[-15:])
 
 def load():
     try: return json.load(open(STATE_FILE))
@@ -82,8 +91,12 @@ def logline(msg):
     except Exception: pass
 
 def nudge(s):
+    txt = pane(s)
+    if has_feedback(txt):                                 # the "How is Claude doing?" overlay eats input -> dismiss it first
+        sh([TMUX, "send-keys", "-t", s, "0"]); time.sleep(0.6)
     sh([TMUX, "send-keys", "-t", s, "-l", NUDGE]); time.sleep(0.4)
-    sh([TMUX, "send-keys", "-t", s, "Enter"])
+    sh([TMUX, "send-keys", "-t", s, "Enter"]); time.sleep(0.6)
+    sh([TMUX, "send-keys", "-t", s, "Enter"])             # second Enter flushes a message left queued behind a rate-limit backoff
 
 def cmd_run(watch_all=False, dry=False):
     d = load(); st = d.setdefault("state", {}); watch = set(d.get("watch", []))

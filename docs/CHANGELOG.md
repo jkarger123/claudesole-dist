@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.18.3 -- 2026-06-24
+- FIX (watchdog handles the real-world stuck state): when a turn dies on an API/rate-limit error, the error
+  line gets pushed ABOVE the "How is Claude doing this session?" feedback overlay + input box -- the old
+  6-line tail scan missed it. Now scans the last ~15 lines, distinguishes an active spinner ("Actioning…
+  (32s)") from a finished turn ("Worked for 39s"), and the nudge DISMISSES the feedback overlay (0) before
+  sending + a second Enter to flush a message left queued behind a rate-limit backoff. (Caught a real
+  text2tune editor_truth session stuck exactly this way.)
+
 ## 0.18.2 -- 2026-06-24
 - FIX (session watchdog): now watches ALL Claude sessions (was opt-in to 3 chiefs, so e.g. a text2tune
   working session got no nudge), and the error detector now recognizes Claude Code's "⏺ API Error:" line
