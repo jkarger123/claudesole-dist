@@ -4494,9 +4494,22 @@ def _folder_query(rel, links=None):
     return q
 
 def _gmail_headers_for(mid):
-    """Cheap metadata header fetch (read-safe; never marks read) for the suggest endpoint."""
+    """Cheap metadata header fetch (read-safe; never marks read). The reader passes a THREAD id, and a
+    Gmail thread id is NOT a message id in general (only coincidentally equal on single-message threads) --
+    so a /messages/{thread_id} fetch 404s on any multi-reply thread. Resolve the THREAD first and use its
+    latest message; fall back to a direct message fetch if `mid` really is a message id."""
+    HDRS = ["From", "To", "Cc", "Subject"]
+    t = _g_api("GET", GMAIL_BASE + "/threads/" + mid,
+               params={"format": "metadata", "metadataHeaders": HDRS})
+    msgs = (t.get("messages") if isinstance(t, dict) else None) or []
+    if msgs:
+        m = msgs[-1]   # threads.get returns oldest->newest; the latest message is the one we reply to
+        hs = {h["name"].lower(): h["value"] for h in m.get("payload", {}).get("headers", [])}
+        return {"from": hs.get("from", ""), "to": hs.get("to", ""), "cc": hs.get("cc", ""),
+                "subject": hs.get("subject", ""), "snippet": m.get("snippet", ""),
+                "threadId": m.get("threadId", mid)}
     m = _g_api("GET", GMAIL_BASE + "/messages/" + mid,
-               params={"format": "metadata", "metadataHeaders": ["From", "To", "Cc", "Subject"]})
+               params={"format": "metadata", "metadataHeaders": HDRS})
     if not isinstance(m, dict) or "error" in m: return None
     hs = {h["name"].lower(): h["value"] for h in m.get("payload", {}).get("headers", [])}
     return {"from": hs.get("from", ""), "to": hs.get("to", ""), "cc": hs.get("cc", ""),
@@ -8268,7 +8281,10 @@ function gmRenderRead(){
   var body='<div class="gm-thread">'+msgs.map(function(m,idx){
     var open=(idx===last);
     var bodyHtml=(m.body&&m.body.html)
-      ? '<iframe sandbox srcdoc="'+e2(gmStyleHtml(m.body.html))+'" onload="gmFitFrame(this)"></iframe>'
+      // allow-same-origin (but NOT allow-scripts) so the parent can MEASURE the real content height and
+      // grow the frame to full length -- email scripts still never run. Without it, height reads are
+      // blocked and every message collapses to a fixed scroll-box.
+      ? '<iframe sandbox="allow-same-origin" srcdoc="'+e2(gmStyleHtml(m.body.html))+'" onload="gmFitFrame(this)"></iframe>'
       : '<pre>'+e2((m.body&&m.body.text)||m.snippet||'(no content)')+'</pre>';
     var atts=gmAttStrip(m);
     return '<div class="gm-msg'+(open?' open':'')+'" data-mi="'+idx+'">'
@@ -8287,12 +8303,25 @@ function gmRenderRead(){
 function gmReadEmptyBody(){return '<div class="gm-empty"><div class="gm-big">✉️</div><div>Select a conversation</div><div style="font-size:11px">j/k move · Enter open</div></div>';}
 function gmCloseRead(){ GM.thread=null; gmRenderRead(); }
 function gmToggleMsg(idx){
-  var el=document.querySelector('.gm-msg[data-mi="'+idx+'"]'); if(el) el.classList.toggle('open');
+  var el=document.querySelector('.gm-msg[data-mi="'+idx+'"]'); if(!el) return;
+  el.classList.toggle('open');
+  // an iframe sized while it was collapsed (display:none) measures as ~0 -> re-fit now that it's visible
+  if(el.classList.contains('open')){ var f=el.querySelector('.gm-mbody iframe'); if(f) gmFitFrame(f); }
 }
 function gmStyleHtml(h){ // inject a base style so dark-themed mail is readable in the white iframe
   return '<base target="_blank"><style>body{font:14px/1.55 -apple-system,sans-serif;color:#111;margin:8px;word-break:break-word}img{max-width:100%;height:auto}a{color:#1a56db}</style>'+(h||'');
 }
-function gmFitFrame(f){ try{ var d=f.contentDocument||f.contentWindow.document; f.style.height=Math.min(d.body.scrollHeight+24,900)+'px'; }catch(e){ f.style.height='460px'; } }
+function gmFitFrame(f){
+  try{
+    var d=f.contentDocument||f.contentWindow.document;
+    var fit=function(){ var h=Math.max((d.body&&d.body.scrollHeight)||0,(d.documentElement&&d.documentElement.scrollHeight)||0);
+      if(h>0) f.style.height=(h+22)+'px'; };   // NO cap -- full email length; the thread pane does the scrolling
+    fit();
+    // images load async and grow the body after onload -> re-fit as each arrives, plus a couple of safety ticks
+    try{ Array.prototype.forEach.call(d.images||[], function(img){ if(!img.complete) img.addEventListener('load', fit, {once:true}); }); }catch(e){}
+    setTimeout(fit,250); setTimeout(fit,800);
+  }catch(e){ f.style.height='600px'; }   // last resort if the doc is somehow unreadable
+}
 function gmFullDate(s){ try{var d=new Date(s); if(isNaN(d)) return e2(s); return d.toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}catch(e){return e2(s);} }
 
 // ====================================================================================================

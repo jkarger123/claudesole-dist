@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.4 -- 2026-06-24
+- FIX (Smart reply: "thread headers unavailable"): the 360 bundle resolved headers with
+  GET /messages/{id} but the reader passes a THREAD id -- and a Gmail thread id only coincidentally
+  equals a message id on single-message threads, so it 404'd on any multi-reply thread (where you most
+  want smart reply). `_gmail_headers_for` now resolves the THREAD and uses its latest message, falling
+  back to a message fetch. Also fixes the folder-suggest path. (This is why it passed on a single-message
+  carsearch test but failed on a real thread.)
+- FIX (Gmail reader: tiny scroll-boxes): each HTML email rendered in an iframe with bare `sandbox`, so the
+  page could not read the frame's content height -- the auto-fit threw and pinned every message to a fixed
+  ~460px box you had to scroll INSIDE (and collapsed replies measured as ~0). The iframe now uses
+  `sandbox="allow-same-origin"` (email scripts still never run -- no allow-scripts), the body grows to its
+  FULL height with no cap, re-fits when you expand a collapsed reply, and re-fits as images load. Result:
+  emails read full-length and the thread pane scrolls like a normal client.
+
 ## 0.21.3 -- 2026-06-24
 - FIX (Portfolio, overseer): clicking an instance card now opens that ClaudeFather in a NEW TAB
   (`window.open(..., _blank)`) instead of replacing the overseer page in the current tab.
