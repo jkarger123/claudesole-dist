@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.20 -- 2026-06-24  *** deliverables off iCloud, onto the SSD ***
+- The real fix for the whole download saga: a new `deliverables_root` config makes deliverables live on a
+  plain LOCAL/SSD path, NOT the evictable iCloud container. When set it overrides iCloud entirely -- downloads
+  then always work because the bytes are simply local (never evicted, no headless-fetch needed). The operator
+  gets a file onto iCloud by downloading it here -> it lands on their Mac -> they keep it in iCloud if they
+  want. On boot the node copies any still-local files off the old iCloud container to the SSD and re-points
+  every module's deliverables/ symlink to the SSD, so new agent writes land there too. Allowlisted for
+  superadmin set_config so Mission Control can flip a node remotely.
+
 ## 0.21.19 -- 2026-06-24
 - FIX (evicted file "preparing… pulling… but never downloads"): `brctl download` does NOT materialize an
   iCloud-evicted file in the Studio's headless login-session context. The reliable mechanism is the READ

@@ -284,7 +284,8 @@ def _mesh_token_ok(val):
 SA_MASTER = os.environ.get("MESH_SUPERADMIN_MASTER") or CC.get("superadmin_master") or ""      # MC ONLY
 SA_NODE_KEY = os.environ.get("MESH_SUPERADMIN_NODE_KEY") or CC.get("superadmin_node_key") or ""  # this node's derived key
 SA_SKEW = 300                  # max clock skew (s) tolerated on the issued timestamp
-SA_ALLOWED_KEYS = ("mesh_auth_enforce", "mesh_reply_sla", "subscription_monthly", "pipeline_stale_sec")
+SA_ALLOWED_KEYS = ("mesh_auth_enforce", "mesh_reply_sla", "subscription_monthly", "pipeline_stale_sec",
+                   "deliverables_root", "storage_mode")
 _SA_SEEN = {}                  # nonce -> exp_ts (single-use replay cache)
 _SA_LOCK = threading.Lock()
 # PUBLIC-KEY superadmin (the "every install is auto-under my superadmin" model): MC holds an Ed25519 PRIVATE
@@ -1863,13 +1864,19 @@ def _icloud_status():
 #           so agents keep writing to deliverables/ unchanged (transparent) and the bytes land in iCloud.
 #   TIER 2 (cold, > DELIV_RETAIN_DAYS): the SSD archive (off internal + off iCloud) -- still listed + openable
 #           in the Files panel (fetched from the SSD). A lifecycle pass ages hot files off to cold.
-ICLOUD_MODE = "icloud" in STORAGE_MODE
-ICLOUD_DELIV_ROOT = os.path.join(ICLOUD_ROOT, "ClaudeFather", PROJECT_NAME)        # TIER 1 hot (internal, synced)
+# DELIV_LOCAL_ROOT: an explicit local/SSD store for deliverables. When set it OVERRIDES iCloud entirely --
+# deliverables live on plain local disk (the SSD), never in the evictable iCloud container. This is the fix
+# for headless boxes where iCloud evicts files (full internal disk) and can't fault them back: downloads then
+# always work because the bytes are simply local. (Operator gets files onto iCloud by downloading them here.)
+DELIV_LOCAL_ROOT = (CC.get("deliverables_root") or "").strip() or None
+ICLOUD_MODE = ("icloud" in STORAGE_MODE) and not DELIV_LOCAL_ROOT
+ICLOUD_DELIV_ROOT = os.path.join(ICLOUD_ROOT, "ClaudeFather", PROJECT_NAME)        # legacy iCloud hot container
 DELIV_ARCHIVE_ROOT = os.path.join(PROJECT, ".deliverables_archive")                # TIER 2 cold (SSD)
 DELIV_RETAIN_DAYS = int(CC.get("deliverables_icloud_days") or 90)
 
 def _hot_dir(rel):
-    return os.path.join(ICLOUD_DELIV_ROOT, (rel or "_root"))
+    root = DELIV_LOCAL_ROOT or ICLOUD_DELIV_ROOT
+    return os.path.join(root, (rel or "_root"))
 
 def _cold_dir(rel):
     return os.path.join(DELIV_ARCHIVE_ROOT, (rel or "_root"))
@@ -1878,29 +1885,82 @@ def _icloud_ready():
     return ICLOUD_MODE and os.path.isdir(ICLOUD_ROOT)
 
 def _ensure_deliv_link(base, rel):
-    """iCloud mode: make <base>/deliverables a symlink into the iCloud (hot) container, migrating any files
-    that were already there. Idempotent + safe (any failure -> leave the plain dir, never break agents)."""
+    """Route <base>/deliverables to the managed store: the SSD/local store if DELIV_LOCAL_ROOT is set, else the
+    iCloud hot container (legacy). Migrates whatever is currently there -- a plain dir OR a stale iCloud
+    symlink (copying its LOCAL, non-evicted files over). Idempotent + safe (any failure -> leave it, never
+    break agents)."""
     d = os.path.join(base, "deliverables")
-    if not _icloud_ready():
-        return d
+    if not (DELIV_LOCAL_ROOT or _icloud_ready()):
+        return d                                      # plain-local default deployment -- nothing to route
     try:
+        target = _hot_dir(rel); os.makedirs(target, exist_ok=True)
         if os.path.islink(d):
-            return d                                  # already routed into iCloud
-        hot = _hot_dir(rel); os.makedirs(hot, exist_ok=True)
-        if os.path.isdir(d):                          # migrate pre-existing deliverables into iCloud, then relink
+            cur = os.path.realpath(d)
+            if os.path.realpath(target) == cur: return d   # already where we want
+            if os.path.isdir(cur):                    # RE-POINT (e.g. iCloud -> SSD): copy local files, then relink
+                for fn in os.listdir(cur):
+                    if fn.startswith("."): continue
+                    src, dst = os.path.join(cur, fn), os.path.join(target, fn)
+                    if os.path.exists(dst): continue
+                    if _icloud_state(src) == "local":
+                        try: shutil.copy2(src, dst)
+                        except Exception: pass         # evicted files have no local bytes here -> skip (operator has them on their device)
+            os.unlink(d); os.symlink(target, d); return d
+        if os.path.isdir(d):                          # plain dir -> migrate files then relink
             for fn in os.listdir(d):
-                src, dst = os.path.join(d, fn), os.path.join(hot, fn)
+                if fn.startswith("."): continue
+                src, dst = os.path.join(d, fn), os.path.join(target, fn)
                 if not os.path.exists(dst):
-                    shutil.move(src, dst)
+                    try: shutil.move(src, dst)
+                    except Exception: pass
             try: os.rmdir(d)
-            except OSError: os.rename(d, d + ".pre_icloud")   # leftovers -> set aside, never lose data
+            except OSError: os.rename(d, d + ".pre_move")
         elif os.path.exists(d):
             return d                                   # a non-dir 'deliverables' file -> leave it alone
-        os.makedirs(os.path.dirname(d), exist_ok=True)  # the module dir may be sparse locally -> ensure it
-        os.symlink(hot, d)
+        os.makedirs(os.path.dirname(d), exist_ok=True)
+        os.symlink(target, d)
     except Exception:
         return os.path.join(base, "deliverables")
     return d
+
+def _route_all_deliverables():
+    """Boot: re-point EVERY module's deliverables/ to the managed store (SSD when deliverables_root is set), so
+    new agent writes land on the SSD and existing LOCAL files get copied off iCloud. Bounded walk."""
+    if not (DELIV_LOCAL_ROOT or _icloud_ready()): return 0
+    n = 0; seen = 0
+    try:
+        for root, dirs, files in os.walk(PROJECT):
+            seen += 1
+            if seen > 6000: break
+            dirs[:] = [x for x in dirs if not x.startswith(".") and x not in ("node_modules", "deliverables")]
+            dpath = os.path.join(root, "deliverables")
+            if os.path.islink(dpath) or os.path.isdir(dpath):
+                rel = os.path.relpath(root, PROJECT); rel = "" if rel == "." else rel
+                _ensure_deliv_link(root, rel); n += 1
+    except Exception: pass
+    return n
+
+def _migrate_icloud_deliverables_to_local():
+    """Boot: copy any LOCAL (non-evicted) files still sitting in the legacy iCloud container over to the SSD
+    store, preserving structure. Evicted files have no bytes on this box (operator has them on their devices)."""
+    if not DELIV_LOCAL_ROOT or not os.path.isdir(ICLOUD_DELIV_ROOT): return 0
+    copied = 0
+    try:
+        for root, dirs, files in os.walk(ICLOUD_DELIV_ROOT):
+            dirs[:] = [x for x in dirs if not x.startswith(".")]
+            relmod = os.path.relpath(root, ICLOUD_DELIV_ROOT)
+            for fn in files:
+                if fn.startswith("."): continue
+                src = os.path.join(root, fn)
+                if _icloud_state(src) != "local": continue
+                dst = os.path.join(DELIV_LOCAL_ROOT, fn) if relmod == "." else os.path.join(DELIV_LOCAL_ROOT, relmod, fn)
+                if os.path.exists(dst): continue
+                try:
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst); copied += 1
+                except Exception: pass
+    except Exception: pass
+    return copied
 
 def _deliv_listing(rel):
     """Both tiers for a module: hot (iCloud, via the deliverables symlink) + cold (SSD archive). Returns
@@ -11544,7 +11604,14 @@ if __name__ == "__main__":
             _t = _ensure_skip_permissions_accepted()   # console sessions open straight into skip-permissions
             if _t: print("skip-permissions: self-healed acceptance in", ", ".join(_t))
         except Exception: pass
-        if _icloud_ready():              # iCloud tiered deliverables: ensure hot container + age off to SSD
+        if DELIV_LOCAL_ROOT:             # SSD/local store: get deliverables OFF evictable iCloud onto the SSD
+            try:
+                os.makedirs(DELIV_LOCAL_ROOT, exist_ok=True)
+                _cp = _migrate_icloud_deliverables_to_local()
+                _rt = _route_all_deliverables()
+                print("deliverables: SSD-local store %s -- copied %d off iCloud, routed %d module dir(s)" % (DELIV_LOCAL_ROOT, _cp, _rt))
+            except Exception as e: print("deliverables SSD migrate error:", str(e)[:120])
+        elif _icloud_ready():            # legacy iCloud tiered deliverables: ensure hot container + age off to SSD
             try:
                 os.makedirs(ICLOUD_DELIV_ROOT, exist_ok=True)
                 _ao = icloud_age_off()
