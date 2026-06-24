@@ -7092,13 +7092,21 @@ function renderPipeline(){if(!PIPE)return;const p=PIPE;
   const css='<style>@keyframes ppulse{0%{box-shadow:0 0 0 0 #58a6ff99}70%{box-shadow:0 0 0 9px #58a6ff00}100%{box-shadow:0 0 0 0 #58a6ff00}}'
     +'.pstep{display:flex;gap:13px;align-items:flex-start;padding:11px 0;position:relative}.pdot{width:15px;height:15px;border-radius:50%;flex:0 0 auto;margin-top:2px;z-index:1}.pdot.run{animation:ppulse 1.4s infinite}'
     +'.pline{position:absolute;left:7px;top:20px;height:100%;width:2px;background:#2a2a3a}.pmx{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}'
-    +'.pmchip{background:#161b29;border:1px solid #283250;border-radius:7px;padding:1px 7px;font-size:12px;color:#c9d1d9}.pmchip i{color:#8b949e;font-style:normal;margin-right:3px}</style>';
+    +'.pmchip{background:#161b29;border:1px solid #283250;border-radius:7px;padding:1px 7px;font-size:12px;color:#c9d1d9}.pmchip i{color:#8b949e;font-style:normal;margin-right:3px}'
+    +'.pbanner{grid-column:1/-1;border-radius:13px;padding:15px 18px;display:flex;align-items:center;gap:14px;margin-bottom:4px;border:1.5px solid}'
+    +'.pbanner .pbic{font-size:27px;flex:0 0 auto;line-height:1}.pbanner .pbtx{flex:1;min-width:0}'
+    +'.pbanner .pbtt{font-size:16px;font-weight:800;letter-spacing:.3px}.pbanner .pbsub{font-size:12px;color:#c9d1d9;opacity:.8;margin-top:3px}'
+    +'.pbanner.red{background:#f8514920;border-color:#f85149;animation:pbflash 1.25s ease-in-out infinite}'
+    +'.pbanner.amber{background:#d2992220;border-color:#d29922}'
+    +'@keyframes pbflash{0%,100%{box-shadow:0 0 0 0 rgba(248,81,73,0)}50%{box-shadow:0 0 24px 3px rgba(248,81,73,.5)}}</style>';
   if(!p.present){document.getElementById("grid").innerHTML='<div class="modstack"><div class="card" style="cursor:default"><div class="modnav"><b>🚦 Pipeline Live-View</b></div>'
     +'<div class="meta" style="margin-top:6px">No pipeline declared on this node yet. A live run-map appears here once a pipeline drops a <code>manifest.json</code> into its pipeline dir. The contract (manifest + heartbeat + events) is in <code>docs/PIPELINE_LIVEVIEW.md</code> — instrument to it and this lights up automatically, zero per-node code.</div></div></div>';return;}
   const now=p.now,run=p.run||{};const rs=PSTATE[run.state]||{c:'#8b949e',l:run.state||'idle'};
   const overall=run.started_ts?(run.state=='running'?now-run.started_ts:(run.ended_ts?run.ended_ts-run.started_ts:null)):null;
   let h=css;
-  if(p.alarm){const lv=p.alarm.level=='red'?'#f85149':'#d29922';h+='<div class="card" style="cursor:default;border-color:'+lv+';background:'+lv+'18"><b style="color:'+lv+';font-size:15px">⚠ '+esc(p.alarm.msg)+'</b></div>';}
+  if(p.alarm){const red=p.alarm.level=='red';const lv=red?'#f85149':'#d29922';
+    const sub='run '+esc(run.run_id||'—')+(p.expect_by?' · expected done by '+esc(p.expect_by):'')+(run.updated_ts?' · last heartbeat '+pdur(now-run.updated_ts)+' ago':'');
+    h+='<div class="pbanner '+(red?'red':'amber')+'"><span class="pbic">'+(red?'🚨':'⏰')+'</span><div class="pbtx"><div class="pbtt" style="color:'+lv+'">'+esc(p.alarm.msg)+'</div><div class="pbsub">'+sub+'</div></div></div>';}
   h+='<div class="card" style="cursor:default"><div class="modnav"><b>🚦 '+esc(p.label)+'</b> <span class="sub">live run map · refreshes every 4s'+(p.schedule?' · sched '+esc(p.schedule):'')+(p.expect_by?' · expect by '+esc(p.expect_by):'')+'</span></div>'
     +'<div class="ucsub" style="margin-top:5px">run <b>'+esc(run.run_id||'—')+'</b> · <b style="color:'+rs.c+'">'+esc(rs.l)+'</b>'+(overall!=null?' · '+(run.state=='running'?'elapsed ':'took ')+'<b>'+pdur(overall)+'</b>':'')+(run.updated_ts?' · last update '+pdur(now-run.updated_ts)+' ago':'')+'</div></div>';
   const done=p.steps.filter(s=>s.state=='done').length;

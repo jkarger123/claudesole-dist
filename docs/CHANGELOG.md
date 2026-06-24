@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.18.1 -- 2026-06-24
+- Pipeline lens: the FAILED/STALLED/MISSED alarm is now a LOUD full-width banner pinned to the top of the
+  card (red pulses; amber for missed/stall) with the run id + expected-by + last-heartbeat context -- not a
+  normal-width tinted card. Makes "something is wrong" unmissable at a glance (the silent-missed-run this
+  pilot exists to prevent). Backend alarm fields unchanged; pure render upgrade. (Requested by the carsearch
+  pilot.)
+
 ## 0.18.0 -- 2026-06-24
 - NEW (email <-> client/project linking, CRM-grade): connect email to a CLIENT (agency) or PROJECT (module)
   via one generic folder abstraction. A link registry (folder <-> emails/domains/keywords/pinned-threads,
