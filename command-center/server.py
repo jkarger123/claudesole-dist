@@ -10494,8 +10494,8 @@ function _cchk(k){return 'cchelp_'+k;}
 function ccHelpSeen(k){try{return localStorage.getItem(_cchk(k))==='1';}catch(e){return false;}}
 function ccHelp(k){var d=HELP[k];if(!d)return;
   showM('<div class="cchelp"><h2 style="margin-top:0">'+d.t+'</h2><div class="cchbody">'+d.h+'</div>'
-   +'<div class="btns" style="align-items:center;gap:14px"><label class="cchnever"><input type="checkbox" id="cchNever"> Don\\'t show this again</label>'
-   +'<button class="btn" onclick="closeM()">Dismiss</button><button class="btn go" onclick="ccHelpGotit(\\''+k+'\\')">Got it</button></div></div>');}
+   +'<div class="btns" style="align-items:center;gap:14px"><label class="cchnever"><input type="checkbox" id="cchNever"> Do not show this again</label>'
+   +'<button class="btn" onclick="closeM()">Dismiss</button><button class="btn go" onclick="ccHelpGotit(\''+k+'\')">Got it</button></div></div>');}
 function ccHelpGotit(k){var nv=document.getElementById('cchNever');if(nv&&nv.checked){try{localStorage.setItem(_cchk(k),'1');}catch(e){}}closeM();}
 function ccHelpAuto(k){ if(HELP[k] && !ccHelpSeen(k)) setTimeout(function(){ if(LENS===k) ccHelp(k); },700); }
 // ---- Gmail auto-refresh: pull new mail without yanking the list while you're reading ----

@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.20.1 -- 2026-06-24
+- HOTFIX (portal blank / "missing ) after argument list"): the 0.20.0 "How this works" block had a
+  double-backslash (Don\\'t / ccHelpGotit(\\')) that broke the main app <script>, blanking EVERY portal on
+  the fleet. Fixed (single-backslash + dropped the apostrophe). Verified by node-checking the ACTUAL SERVED
+  page, not a source slice (the source-slice check had truncated before the bad line -- root cause of the miss).
+
 ## 0.20.0 -- 2026-06-24
 - NEW (in-app "How this works" explainers): every powerful lens (Gmail, Calendar, Drive, Files, Sessions,
   Pipeline, Comms) has a dismissible explainer that AUTO-SHOWS ONCE on first visit ("Don't show again" +
