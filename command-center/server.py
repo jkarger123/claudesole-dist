@@ -6055,7 +6055,7 @@ function placeholder(){
 (async()=>{await refresh();if(DETAIL.alive)connectTerm();else placeholder();setInterval(refresh,5000);})();
 </script></body></html>"""
 
-PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>text2tune — Command Center</title><link rel="icon" type="image/png" href="/static/brand/claudefather_favicon.png?v=2"><link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=2"><style>
+PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>text2tune — Command Center</title><link rel="icon" type="image/png" href="/static/brand/claudefather_favicon.png?v=2"><link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=2"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/light/style.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/fill/style.css"><style>
 :root{--bg:#0a0a0f;--bg2:#12121a;--card:#1a1a24;--card2:#22222e;--ink:#ffffff;--mut:#a0a0b0;--dim:#606070;--line:#2a2a3a;--accent:#c9a227;--accent-rgb:201,162,39;--accent-light:#e8c547;--accent-dark:#9a7a1a;--accent2:#7a1220;--accent2-light:#a01828;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--blue:#3b82f6;--grad:linear-gradient(135deg,#c9a227,#e8c547,#c9a227);--glow:0 0 26px rgba(201,162,39,.26)}
 /* brand lockup styled in the .brand rule below (cfmark + gold-foil serif wordmark) */
 *{box-sizing:border-box}body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--ink);-webkit-text-size-adjust:100%;overflow-x:hidden}
@@ -6938,39 +6938,39 @@ body.gm-resizing iframe{pointer-events:none}
 <aside id="side">
 <div class="brand"><img class="cfmark" src="/static/brand/claudefather_mark.png" alt=""><span class="bword">text2tune<small>COMMAND CENTER</small></span></div>
 <nav class="lens" id="lens">
-<button data-l="portfolio"><i>🛰</i>Portfolio</button>
-<button data-l="sessions" class="on"><i>🟢</i>Sessions</button>
-<button data-l="modules"><i>🗂</i>Projects</button>
-<button data-l="files"><i>📁</i>Files</button>
-<button data-l="gmail"><i>✉️</i>Gmail<span id="gmailBadge" style="display:none;margin-left:6px;background:#ea4335;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
-<button data-l="calendar"><i>📅</i>Calendar</button>
-<button data-l="drive"><i>🗂️</i>Drive</button>
-<button data-l="marketplace"><i>🏛</i>Marketplace</button>
-<button data-l="agency"><i>🏢</i>Agency</button>
-<button data-l="calls"><i>📞</i>Calls</button>
-<button data-l="comms"><i>📡</i>Comms<span id="commsBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
-<button data-l="ccr"><i>📥</i>Change Requests<span id="ccrBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
-<button data-l="propose"><i>📤</i>Propose Change</button>
-<button data-l="ralph"><i>🔁</i>Ralph Loops</button>
-<button data-l="pipeline"><i>🚦</i>Pipeline</button>
-<button data-l="chief"><i>🎖</i>Chief of Staff</button>
-<button data-l="tree"><i>🌳</i>Convo Tree</button>
-<button data-l="desktop"><i>🪟</i>Remote Desktop</button>
-<button data-l="usage"><i>📊</i>Usage</button>
-<button data-l="backup"><i>💾</i>Backup</button>
-<button data-l="security"><i>🛡</i>Security</button>
-<button data-l="agents"><i>🤖</i>Agents</button>
-<button data-l="skills"><i>🧪</i>Skills</button>
-<button data-l="teams"><i>👥</i>Teams</button>
-<button data-l="audit"><i>🔬</i>Audit</button>
-<button data-l="history"><i>📜</i>History</button>
-<button data-l="machines"><i>🖥</i>Machines</button>
-<button data-l="jobs"><i>📋</i>Jobs</button>
-<button data-l="routines"><i>↻</i>Routines</button>
-<button data-l="ideas"><i>💡</i>Ideas</button>
-<button data-l="docs"><i>📘</i>Docs</button>
-<button data-l="doctor"><i>🩺</i>Doctor</button>
-<button data-l="settings"><i>⚙️</i>Settings</button></nav>
+<button data-l="portfolio"><i class="ph-light ph-broadcast"></i>Portfolio</button>
+<button data-l="sessions" class="on"><i class="ph-light ph-terminal-window"></i>Sessions</button>
+<button data-l="modules"><i class="ph-light ph-folders"></i>Projects</button>
+<button data-l="files"><i class="ph-light ph-folder"></i>Files</button>
+<button data-l="gmail"><i class="ph-light ph-envelope-simple"></i>Gmail<span id="gmailBadge" style="display:none;margin-left:6px;background:#ea4335;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
+<button data-l="calendar"><i class="ph-light ph-calendar-dots"></i>Calendar</button>
+<button data-l="drive"><i class="ph-light ph-cloud"></i>Drive</button>
+<button data-l="marketplace"><i class="ph-light ph-storefront"></i>Marketplace</button>
+<button data-l="agency"><i class="ph-light ph-buildings"></i>Agency</button>
+<button data-l="calls"><i class="ph-light ph-phone-call"></i>Calls</button>
+<button data-l="comms"><i class="ph-light ph-chats-circle"></i>Comms<span id="commsBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
+<button data-l="ccr"><i class="ph-light ph-git-pull-request"></i>Change Requests<span id="ccrBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
+<button data-l="propose"><i class="ph-light ph-paper-plane-tilt"></i>Propose Change</button>
+<button data-l="ralph"><i class="ph-light ph-repeat"></i>Ralph Loops</button>
+<button data-l="pipeline"><i class="ph-light ph-flow-arrow"></i>Pipeline</button>
+<button data-l="chief"><i class="ph-light ph-medal"></i>Chief of Staff</button>
+<button data-l="tree"><i class="ph-light ph-git-branch"></i>Convo Tree</button>
+<button data-l="desktop"><i class="ph-light ph-monitor"></i>Remote Desktop</button>
+<button data-l="usage"><i class="ph-light ph-chart-line-up"></i>Usage</button>
+<button data-l="backup"><i class="ph-light ph-floppy-disk"></i>Backup</button>
+<button data-l="security"><i class="ph-light ph-shield-check"></i>Security</button>
+<button data-l="agents"><i class="ph-light ph-robot"></i>Agents</button>
+<button data-l="skills"><i class="ph-light ph-flask"></i>Skills</button>
+<button data-l="teams"><i class="ph-light ph-users-three"></i>Teams</button>
+<button data-l="audit"><i class="ph-light ph-magnifying-glass"></i>Audit</button>
+<button data-l="history"><i class="ph-light ph-clock-counter-clockwise"></i>History</button>
+<button data-l="machines"><i class="ph-light ph-computer-tower"></i>Machines</button>
+<button data-l="jobs"><i class="ph-light ph-clipboard-text"></i>Jobs</button>
+<button data-l="routines"><i class="ph-light ph-arrows-clockwise"></i>Routines</button>
+<button data-l="ideas"><i class="ph-light ph-lightbulb"></i>Ideas</button>
+<button data-l="docs"><i class="ph-light ph-book-open"></i>Docs</button>
+<button data-l="doctor"><i class="ph-light ph-stethoscope"></i>Doctor</button>
+<button data-l="settings"><i class="ph-light ph-gear"></i>Settings</button></nav>
 <div id="navmode" title="Tabs reorder themselves by how often you use them. Drag any tab to pin a custom order."></div>
 <div class="health" id="svchealth"></div>
 </aside>

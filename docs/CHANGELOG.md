@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.0 -- 2026-06-24
+- POLISH (icons): the left-nav now uses the PHOSPHOR icon set (ph-light weight) -- the same free set the
+  carsearch site uses (jsDelivr @phosphor-icons/web@2.1.1, light + fill) -- replacing the emoji nav icons
+  for a consistent, enterprise look. (Lens-header + button emoji can follow in a sweep.)
+
 ## 0.20.3 -- 2026-06-24
 - FIX (Sessions lens: session chips overlapping the usage strip): the head card (with the metered-usage
   strip) and the focus block are now wrapped in a clean vertical stack (.modstack) so usage always sits
