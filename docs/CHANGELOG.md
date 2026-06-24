@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.24 -- 2026-06-24
+- FIX (Claude Accounts login: pasted code vanished before you could submit): the login modal re-rendered on
+  every 2s status poll, wiping the code input. The URL+code form now renders ONCE and the poll leaves your
+  typed code alone (still polls to detect completion after you Submit). Submit shows a "finishing…" hint.
+
 ## 0.21.23 -- 2026-06-24
 - FIX (Claude Accounts login: "Invalid OAuth Request: Missing state parameter"): the setup-token OAuth URL is
   ~346 chars and wrapped across lines in the capture pane, so we grabbed only the first ~80 chars — dropping

@@ -11316,19 +11316,25 @@ function acctLoginStop(){ if(ACCT_POLL){clearInterval(ACCT_POLL);ACCT_POLL=null;
 async function acctLoginPoll(label){
   var b=document.getElementById('acctLoginBody'); if(!b){ if(ACCT_POLL){clearInterval(ACCT_POLL);ACCT_POLL=null;} return; }
   var r={}; try{ r=await(await fetch('/api/claude-login/status?label='+encodeURIComponent(label))).json(); }catch(e){ return; }
-  if(r.state==='done'){ if(ACCT_POLL){clearInterval(ACCT_POLL);ACCT_POLL=null;} b.innerHTML='<p>✓ <b>Logged in as '+e2(r.label||label)+'</b> — token saved (~1 year). It is now the active account.</p>'; toast('Logged in: '+(r.label||label),5000); setTimeout(function(){closeM();loadAccounts();},1400); return; }
-  if(r.state==='error'){ b.innerHTML='<p style="color:#f85149">Login error.</p><pre class="snap" style="white-space:pre-wrap">'+e2(r.tail||'')+'</pre>'; return; }
+  if(r.state==='done'){ if(ACCT_POLL){clearInterval(ACCT_POLL);ACCT_POLL=null;} b.innerHTML='<p>✓ <b>Logged in as '+e2(r.label||label)+'</b> — token saved (~1 year). It is now the active account.</p>'; b.dataset.form='done'; toast('Logged in: '+(r.label||label),5000); setTimeout(function(){closeM();loadAccounts();},1400); return; }
+  if(r.state==='error'){ if(b.dataset.form!=='err'){ b.innerHTML='<p style="color:#f85149">Login error.</p><pre class="snap" style="white-space:pre-wrap">'+e2(r.tail||'')+'</pre>'; b.dataset.form='err'; } return; }
   if(r.url){
+    // Render the URL + code form ONCE. Do NOT rewrite it on later polls -- that was wiping the code you pasted
+    // before you could submit. We keep polling (to catch 'done' after you submit) but leave the input alone.
+    if(b.dataset.form==='url') return;
     b.innerHTML='<p><b>1.</b> Open this in a browser <b>signed into the Claude account "'+e2(label)+'"</b> (pick the right Google/Chrome profile):</p>'
       +'<p><a href="'+e2(r.url)+'" target="_blank" rel="noopener" class="btn go" style="text-decoration:none;display:inline-block">Open authorization page ↗</a></p>'
       +'<p style="font-size:11px;word-break:break-all;color:var(--dim)">'+e2(r.url)+'</p>'
       +'<p><b>2.</b> Authorize, copy the <b>code</b> it gives you, paste it here:</p>'
       +'<p style="display:flex;gap:8px"><input id="acctCode" placeholder="paste authorization code" style="flex:1;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:8px 11px"><button class="btn go" onclick="acctSubmitCode()">Submit</button></p>'
-      +(r.state==='awaiting_code'?'<p class="sub">Waiting for the code…</p>':'<p class="sub">If the page logs you straight in, this will finish on its own.</p>');
-  } else { b.innerHTML='<p>Starting the login… opening the authorization link in a moment.</p>'; }
+      +'<p class="sub" id="acctCodeHint">Paste the code and click Submit.</p>';
+    b.dataset.form='url';
+  } else { if(b.dataset.form!=='start'){ b.innerHTML='<p>Starting the login… opening the authorization link in a moment.</p>'; b.dataset.form='start'; } }
 }
 async function acctSubmitCode(){ var el=document.getElementById('acctCode'); var c=el?el.value.trim():''; if(!c){toast('Paste the code first');return;}
-  await fetch('/api/claude-login/code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:c})}); toast('Code submitted — finishing…',3000); }
+  var h=document.getElementById('acctCodeHint'); if(h)h.textContent='Submitting the code… finishing login (a few seconds).';
+  try{ await fetch('/api/claude-login/code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:c})}); }catch(e){}
+  toast('Code submitted — finishing…',3000); }
 async function loadSettings(){
   const g=document.getElementById("grid");
   try{SETTINGS=await(await fetch("/api/settings")).json();}catch(e){SETTINGS={};}
