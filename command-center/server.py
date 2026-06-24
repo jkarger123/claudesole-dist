@@ -6198,9 +6198,17 @@ textarea{width:100%;min-height:240px;font-family:ui-monospace,Menlo,Monaco,monos
 .card h3>span:first-child{min-width:0;overflow-wrap:anywhere}
 .badge{font-size:10px;font-weight:800;padding:3px 9px;border-radius:20px;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;flex:0 0 auto}
 .meta{color:var(--mut);font-size:12px;margin-top:5px;overflow-wrap:anywhere}.brief{color:var(--mut);font-size:12.5px;margin-top:7px}.sub{color:var(--dim);font-size:12px}
-.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.66);display:none;align-items:center;justify-content:center;z-index:50;padding:16px}
-.modal{background:var(--card2);border:1px solid var(--line);border-radius:16px;padding:22px;width:min(600px,94vw);max-height:88vh;overflow:auto}
-.modal h2{margin:0 0 12px;font-size:17px}.row{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}.row label{font-size:12px;color:var(--mut);font-weight:600}.modal input,.modal select{width:100%}
+.modal-bg{position:fixed;inset:0;background:rgba(8,8,12,.74);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);display:none;align-items:center;justify-content:center;z-index:50;padding:18px}
+.modal-bg.show,.modal-bg[style*="flex"]{animation:mfade .14s ease}@keyframes mfade{from{opacity:0}to{opacity:1}}
+.modal{position:relative;background:linear-gradient(180deg,#1b1b26 0%,#141420 100%);border:1px solid rgba(255,255,255,.09);border-radius:18px;padding:26px 26px 22px;width:min(560px,94vw);max-height:88vh;overflow:auto;box-shadow:0 26px 80px rgba(0,0,0,.62),0 1px 0 rgba(255,255,255,.05) inset;animation:mpop .16s cubic-bezier(.2,.85,.2,1)}
+@keyframes mpop{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}
+.modal::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;border-radius:18px 18px 0 0;background:var(--grad);opacity:.9}
+.modal h2{margin:0 0 16px;font-size:19px;font-weight:700;letter-spacing:-.01em;color:var(--ink);display:flex;align-items:center;gap:9px}
+.row{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}.row label{font-size:11.5px;color:var(--mut);font-weight:700;letter-spacing:.2px}
+.modal input,.modal select,.modal textarea{width:100%;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:10px;padding:9px 12px;font-size:13.5px;outline:none;transition:border-color .12s,box-shadow .12s}
+.modal input:focus,.modal select:focus,.modal textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(var(--accent-rgb),.18)}
+.modal .btns{display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-top:22px}
+.modal .btns .btn{padding:9px 16px;border-radius:10px;font-weight:600}
 .btns{display:flex;gap:9px;flex-wrap:wrap;margin-top:6px}.btn{padding:10px 14px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;font-weight:600;font-size:13px}.btn.go{background:var(--grad);color:#15120a;border:none}
 .sess{display:flex;align-items:center;gap:8px;padding:7px 0;border-top:1px solid var(--line);font-size:12.5px}.sess .lbl{flex:1;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .convscroll{max-height:44vh;overflow-y:auto;margin:2px -4px 0;padding:0 4px}
@@ -6248,7 +6256,7 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 @keyframes cfhint{to{opacity:.65}}
 @media(prefers-reduced-motion:reduce){#splash .cfwrap,#splash .cfshine,#splash .cfhint{animation:none}#splash .cfhint{opacity:.65}}
 /* ===== Global sessions taskbar (desktop) -- Windows-style dock of all project sessions, gold-flash on done ===== */
-#app{height:calc(100vh - 38px)}            /* reserve room for the fixed taskbar */
+@media(min-width:821px){#app{height:calc(100vh - 38px)}}   /* taskbar room -- DESKTOP ONLY (taskbar hidden on mobile; never shrink mobile #app or the top nav clips) */
 #sessbar{position:fixed;left:0;right:0;bottom:0;height:38px;display:flex;align-items:center;gap:6px;
   padding:0 10px;background:#0c0c12;border-top:1px solid var(--line);z-index:60;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
 #sessbar::-webkit-scrollbar{height:5px}#sessbar::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
@@ -6279,7 +6287,7 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 #sessprev .sb-acts .mini.sb-kill{color:#f85149}
 #sessprev .sb-acts .mini.sb-exit{color:#d29922}
 #sessprev .sb-pvframe{flex:1;min-height:0;width:100%;border:0;display:block;background:#0a0a0f}
-@media(max-width:900px){#sessbar,#sessprev{display:none!important}#app{height:auto}}
+@media(max-width:820px){#sessbar,#sessprev{display:none!important}}
 /* Sessions LENS: focus = ONLY the big terminal (littles removed); in-flow column, never floats over usage. */
 .focusonly{grid-column:1/-1;display:flex;flex-direction:column;
   height:calc(100vh - 232px);min-height:440px}

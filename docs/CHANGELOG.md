@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.20.2 -- 2026-06-24
+- FIX (mobile top nav missing): the desktop sessions-taskbar was shrinking #app + had a 900px breakpoint
+  that fought the 820px nav breakpoint, clipping the mobile top tab bar. The taskbar + its #app height
+  reservation are now DESKTOP-ONLY (>820px); mobile layout is untouched -> tabs show again.
+- POLISH (popups): the modal/explainer dialogs are redesigned -- gradient card, gold top-accent, blurred
+  backdrop, pop-in animation, and refined inputs/buttons with gold focus rings. Enterprise feel.
+
 ## 0.20.1 -- 2026-06-24
 - HOTFIX (portal blank / "missing ) after argument list"): the 0.20.0 "How this works" block had a
   double-backslash (Don\\'t / ccHelpGotit(\\')) that broke the main app <script>, blanking EVERY portal on
