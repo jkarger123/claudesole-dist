@@ -5868,7 +5868,8 @@ class H(BaseHTTPRequestHandler):
             try: ab = projpath(body.get("path", ""))
             except: return self._s(400, "{}")
             try:
-                ab = os.path.realpath(ab)   # resolve symlinks -> reveal the file at its REAL location (e.g. the iCloud container), not the deliverables/ symlink on the SSD
+                _materialize_icloud(ab)     # pull the bytes back from iCloud first so Finder shows a real file, not a cloud stub
+                ab = os.path.realpath(ab)   # resolve symlinks -> reveal at the REAL location (the iCloud container), not the deliverables/ symlink
                 subprocess.Popen(["open", ab] if os.path.isdir(ab) else ["open", "-R", ab])
                 return self._s(200, json.dumps({"ok": True}))
             except Exception as e: return self._s(200, json.dumps({"ok": False, "err": str(e)}))
@@ -7231,7 +7232,7 @@ async function loadModules(rel){
       const TIER={icloud:['&#9729; iCloud','#58a6ff','recent -- synced to your Apple devices, opens in iCloud'],ssd:['&#128452; SSD','#c9a227','archived (>90d) on the SSD, off iCloud -- still opens from here'],local:['',''," "]};
       const frow=f=>{const t=TIER[f.tier]||['',''];const url='/api/file-get?path='+encodeURIComponent(f.rel);return '<div class="sess"><span class="lbl" title="tap to view/download"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600">📄 '+esc(f.name)+'</a>'+(t[0]?(' <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'):'')+' <span class="sub">· '+fmtBytes(f.size)+' · '+new Date(f.mtime*1000).toLocaleString()+(f.sub?(' · '+esc(f.sub)):'')+'</span></span>'
         +'<a class="mini go" href="'+url+'" download="'+esc(f.name)+'" style="text-decoration:none" title="download to THIS device">&#8595; Download</a>'
-        +'<button class="mini" style="opacity:.6" title="reveal in Finder ON THE STUDIO -- only useful if you are physically at the Studio" onclick="reveal(\''+esc(f.rel)+'\')">&#10530; Studio</button></div>';};
+        +'<button class="mini" title="open the folder in Finder ON THIS MAC and select the file (downloads it from iCloud first)" onclick="reveal(\''+esc(f.rel)+'\')">&#128193; Reveal in Finder</button></div>';};
       h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>&#128193; Files made for you in this folder <span class="sub">('+MODFILES.length+')</span></span></h3>'
         +'<div class="convscroll">'+MODFILES.map(frow).join("")+'</div>'
         +'<div class="meta" style="margin-top:6px">Agents save deliverables here. In iCloud mode, recent files live in iCloud (synced to your devices, &#9729;); after 90 days they age off to the SSD (&#128452;) to free space &mdash; still listed + openable here.</div></div>';
@@ -7527,7 +7528,7 @@ function renderFiles(){
         +'<span style="flex:1;min-width:220px"><a href="/api/file-get?path='+encodeURIComponent(f.rel)+'" target="_blank" rel="noopener" style="color:inherit;font-weight:700" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'
         +'<div class="sub" style="margin-top:2px">'+(f.module?('&#128194; '+esc(f.module)+' &middot; '):'')+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</div></span>'
         +'<a class="mini go" href="/api/file-get?path='+encodeURIComponent(f.rel)+'" download="'+esc(f.name)+'" style="text-decoration:none" title="download to THIS device (works on your phone)">&#8595; Download</a>'
-        +'<button class="mini" style="opacity:.6" title="reveal in Finder ON THE STUDIO -- only useful if you are at the Studio" onclick="reveal(\''+esc(f.rel)+'\')">&#10530; Studio</button></div></div>';});
+        +'<button class="mini" title="open the folder in Finder ON THIS MAC and select the file (downloads it from iCloud first) -- use this when you are sitting at the computer" onclick="reveal(\''+esc(f.rel)+'\')">&#128193; Reveal in Finder</button></div></div>';});
   }
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';}
 function renderBrowse(){const b=BROWSE||{};
@@ -7540,7 +7541,7 @@ function renderBrowse(){const b=BROWSE||{};
   (b.dirs||[]).forEach(d=>{h+='<div class="card" style="cursor:pointer;grid-column:1/-1" onclick="loadBrowse(\''+esc(d.rel)+'\')"><b>&#128193; '+esc(d.name)+'</b> <span class="sub">folder</span></div>';});
   (b.files||[]).forEach(f=>{const url='/api/file-get?path='+encodeURIComponent(f.rel);h+='<div class="card" style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="flex:1;min-width:200px"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="sub">&middot; '+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</span></span>'
     +'<a class="mini go" href="'+url+'" download="'+esc(f.name)+'" style="text-decoration:none" title="download to THIS device">&#8595; Download</a>'
-    +'<button class="mini" style="opacity:.6" title="reveal on the Studio (only if you are there)" onclick="reveal(\''+esc(f.rel)+'\')">&#10530; Studio</button></div></div>';});
+    +'<button class="mini" title="open the folder in Finder ON THIS MAC and select the file (downloads it from iCloud first)" onclick="reveal(\''+esc(f.rel)+'\')">&#128193; Reveal in Finder</button></div></div>';});
   if(!(b.dirs||[]).length&&!(b.files||[]).length){h+=empty('Empty folder (or only hidden/secret files).');}
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';}
 // ---- Pipeline Live-View lens (generic: renders whatever steps a node's pipeline declares) ----
@@ -10557,7 +10558,7 @@ async function resumeConv(id,fork){const c=HISTDATA.find(x=>x.id==id); if(!c)ret
   if(!r.ok){toast((fork?"Fork":"Resume")+" failed: "+(r.error||"?"),6000); return;}
   _openTerm(r);
 }
-async function reveal(p){const r=await(await fetch("/api/reveal",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:p})})).json();toast(r.ok?"Revealed in Finder ON THE STUDIO — only visible if you're sitting at the Studio. To get it on THIS device, tap the file name or Download.":"Couldn't open Finder on the Studio.",6000);}
+async function reveal(p){const r=await(await fetch("/api/reveal",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:p})})).json();toast(r.ok?"Opened Finder on this Mac and selected the file (downloading it from iCloud if needed — give it a second). If you're on a different device, use Download instead.":"Couldn't open Finder on this Mac.",6500);}
 // ---- Docs lens: managed CLAUDE.md blocks (ported) ----
 const _PIL=(window.CC&&window.CC.pillars)||[];
 const SCOPES=["grounded","pillars","subtools","root","all"].concat(_PIL);

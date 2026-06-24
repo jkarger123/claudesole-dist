@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.12 -- 2026-06-24
+- ADD ("Reveal in Finder" for iCloud files): when the browser download of an iCloud-backed deliverable is
+  flaky, you can now open the file's folder in Finder ON THE MAC you're sitting at and have it selected. The
+  reveal endpoint first forces the bytes down from iCloud (brctl) so Finder shows a real file, then
+  `open -R`. The button is now prominent ("📁 Reveal in Finder") on the Files lens, the browse view, and a
+  module's Files panel -- replacing the buried, discouraging "⤲ Studio" button. Toast copy clarified.
+
 ## 0.21.11 -- 2026-06-24
 - FIX (sessions stuck on a permission prompt): `--dangerously-skip-permissions` does NOT bypass Claude
   Code's hard safety prompt for commands containing shell command-substitution ($()/backticks) -- so an
