@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.7 -- 2026-06-24
+- FIX (email STILL cut off at the bottom): the prior fix only handled html,body{height:100%}. Business mail
+  can also trap content in an inner wrapper with a fixed height / max-height / overflow:hidden, which clips
+  scrollHeight short -> the body is cut off with no scroll. We now neutralize `max-height` on every element
+  and force `overflow:visible` on structural tags, measure via getBoundingClientRect too, add an inner-window
+  load hook + a longer tail of re-fit ticks, and set the iframe `scrolling="no"` so you can never get trapped
+  in an internal scrollbar. Proven headless: content locked in a 300px overflow:hidden box now sizes to its
+  full 2225px. Emails open full-length; the thread pane scrolls like a normal client.
+- FIX (the "bunch of lines" above a long thread): the overlap/cascade deck looked terrible on a 40-message
+  thread. Replaced with the Gmail pattern -- clean compact collapsed rows, and the MIDDLE of a long thread is
+  folded behind a "⋯ N earlier messages" pill (click to expand). First message + last couple + the open
+  newest always show. Empty-snippet rows show "(no preview)" rather than blank.
+
 ## 0.21.6 -- 2026-06-24
 - FIX (reader cascade over-eager): the collapsed-reply stack fanned apart on ANY hover in the thread —
   including when you were reading the open email. It now reacts ONLY when the pointer is directly on a

@@ -6528,18 +6528,16 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-act{font-size:12px;padding:6px 11px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;font-weight:600;display:inline-flex;align-items:center;gap:5px}
 .gm-act:hover{border-color:var(--accent)}
 .gm-act.go{background:var(--grad);color:#15120a;border:none;font-weight:700}
-.gm-thread{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:0}
-.gm-msg{border:1px solid var(--line);border-radius:11px;background:var(--bg);overflow:hidden;margin-bottom:11px;transition:margin .17s ease,box-shadow .17s ease,transform .17s ease}
-/* collapsed older replies = a compact, slightly-overlapping stack that fans apart when you hover the thread
-   (so a long reply chain takes minimal space but every message is one move away). */
-.gm-msg:not(.open){position:relative;cursor:pointer}
-.gm-msg:not(.open)+.gm-msg:not(.open){margin-top:-20px}
-/* react ONLY when the pointer is on a collapsed card (not when hovering the open email): lift it above the
-   deck and drop the tuck on the card right after it so the hovered one is fully readable. */
-.gm-msg:not(.open):hover{border-color:var(--accent);box-shadow:0 9px 24px rgba(0,0,0,.5);transform:translateY(-1px);z-index:3}
-.gm-msg:not(.open):hover + .gm-msg:not(.open){margin-top:6px}
+.gm-thread{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:7px}
+.gm-msg{border:1px solid var(--line);border-radius:11px;background:var(--bg);overflow:hidden;transition:box-shadow .15s ease,border-color .15s ease}
+/* collapsed older replies = clean compact one-line rows (sender + preview); hover highlights. The MIDDLE of
+   a long thread is folded behind a "N earlier messages" pill (see gm-earlier) so a 40-message chain stays tidy. */
+.gm-msg:not(.open){cursor:pointer}
+.gm-msg:not(.open):hover{border-color:var(--accent);background:var(--card)}
 .gm-msg:not(.open) .gm-mhead{padding:7px 12px}
 .gm-msg:not(.open) .gm-collapsed{padding:0 12px 7px}
+.gm-earlier{align-self:center;margin:1px 0 5px;background:var(--card);border:1px solid var(--line);color:var(--mut);border-radius:16px;padding:6px 16px;font-size:12px;font-weight:600;cursor:pointer;transition:all .14s}
+.gm-earlier:hover{border-color:var(--accent);color:var(--ink)}
 .gm-mhead{padding:9px 12px;display:flex;align-items:center;gap:9px;cursor:pointer;border-bottom:1px solid transparent}
 .gm-msg.open .gm-mhead{border-bottom-color:var(--line)}
 .gm-avatar{flex:0 0 30px;width:30px;height:30px;border-radius:50%;background:var(--card2);color:var(--mut);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px}
@@ -8266,7 +8264,7 @@ async function gmOpen(i){
   try{ r=await(await fetch('/api/google/gmail-thread?id='+encodeURIComponent(m.threadId||m.id))).json(); }
   catch(e){ if(read) read.innerHTML=gErr({error:'network'}); return; }
   if(r.error){ if(read) read.innerHTML=gErr(r); return; }
-  GM.thread=r;
+  GM.thread=r; GM.expandThread=false;   // long threads start with the middle folded
   // listing showed unread; opening marks read -> reflect locally
   if(GM.msgs[i]){ GM.msgs[i].unread=false; gmRenderRows(); }
   gmFetchBadge();
@@ -8298,13 +8296,16 @@ function gmRenderRead(){
     +mlReaderChip()
   +'</div>';
   setTimeout(function(){ if(typeof mlRenderChip==='function') mlRenderChip(); }, 0);
-  var body='<div class="gm-thread">'+msgs.map(function(m,idx){
+  // For long threads, fold the MIDDLE behind a "N earlier messages" pill (Gmail-style) so 40 replies don't
+  // become a wall. Always show the first message, the last few, and the open (newest) one.
+  var HIDE_OVER=6, KEEP_TAIL=2, hideFrom=-1, hideTo=-1;
+  if(!GM.expandThread && msgs.length>HIDE_OVER){ hideFrom=1; hideTo=last-KEEP_TAIL; }   // hide [hideFrom, hideTo)
+  function gmMsgCard(m,idx){
     var open=(idx===last);
     var bodyHtml=(m.body&&m.body.html)
       // allow-same-origin (but NOT allow-scripts) so the parent can MEASURE the real content height and
-      // grow the frame to full length -- email scripts still never run. Without it, height reads are
-      // blocked and every message collapses to a fixed scroll-box.
-      ? '<iframe sandbox="allow-same-origin" srcdoc="'+e2(gmStyleHtml(m.body.html))+'" onload="gmFitFrame(this)"></iframe>'
+      // grow the frame to full length -- email scripts still never run.
+      ? '<iframe scrolling="no" sandbox="allow-same-origin" srcdoc="'+e2(gmStyleHtml(m.body.html))+'" onload="gmFitFrame(this)"></iframe>'
       : '<pre>'+e2((m.body&&m.body.text)||m.snippet||'(no content)')+'</pre>';
     var atts=gmAttStrip(m);
     return '<div class="gm-msg'+(open?' open':'')+'" data-mi="'+idx+'">'
@@ -8314,14 +8315,23 @@ function gmRenderRead(){
           +'<div class="gm-mto">to '+e2(gAddr(m.to)||'me')+'</div></div>'
         +'<span class="gm-mdate">'+e2(gmFullDate(m.date))+'</span>'
       +'</div>'
-      +'<div class="gm-collapsed">'+e2(m.snippet)+'</div>'
+      +'<div class="gm-collapsed">'+e2(m.snippet||'(no preview)')+'</div>'
       +'<div class="gm-mbody">'+bodyHtml+atts+'</div>'
     +'</div>';
-  }).join('')+'</div>';
-  read.innerHTML=head+body;
+  }
+  var cards=[];
+  msgs.forEach(function(m,idx){
+    if(hideFrom>=0 && idx>=hideFrom && idx<hideTo){
+      if(idx===hideFrom) cards.push('<button class="gm-earlier" onclick="gmExpandThread()">⋯ '+(hideTo-hideFrom)+' earlier messages</button>');
+      return;
+    }
+    cards.push(gmMsgCard(m,idx));
+  });
+  read.innerHTML=head+'<div class="gm-thread">'+cards.join('')+'</div>';
 }
 function gmReadEmptyBody(){return '<div class="gm-empty"><div class="gm-big">✉️</div><div>Select a conversation</div><div style="font-size:11px">j/k move · Enter open</div></div>';}
 function gmCloseRead(){ GM.thread=null; gmRenderRead(); }
+function gmExpandThread(){ GM.expandThread=true; gmRenderRead(); }
 function gmToggleMsg(idx){
   var el=document.querySelector('.gm-msg[data-mi="'+idx+'"]'); if(!el) return;
   el.classList.toggle('open');
@@ -8331,26 +8341,36 @@ function gmToggleMsg(idx){
 function gmStyleHtml(h){ // inject a base style so mail is readable + so the frame can be sized to content
   // CRITICAL: marketing/newsletter mail often sets html,body{height:100%} -> inside an iframe that collapses
   // scrollHeight to the frame's own height, so the body gets cut off ("just lines"). Force height:auto.
+  // Un-TRAP the content so the frame can be sized to its TRUE height:
+  //  - height:100% on html/body collapses scrollHeight to the frame height (newsletters) -> force auto.
+  //  - a fixed height / overflow:hidden / max-height on an inner wrapper CLIPS content so scrollHeight is
+  //    short and the email looks cut off -> neutralize height caps + overflow on every element.
   return '<base target="_blank"><style>'
     +'html,body{height:auto!important;min-height:0!important;max-height:none!important;overflow:visible!important}'
+    +'*{max-height:none!important}'
+    +'html,body,div,section,article,main,td,table,tbody,tr,center,blockquote{overflow:visible!important}'
     +'body{font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111;margin:8px;word-break:break-word;background:#fff}'
     +'img{max-width:100%;height:auto}a{color:#1a56db}table{max-width:100%}'
     +'</style>'+(h||'');
 }
 function gmFitFrame(f){
   try{
-    var d=f.contentDocument||f.contentWindow.document; if(!d){ f.style.height='600px'; return; }
+    var d=f.contentDocument||f.contentWindow.document; if(!d){ f.style.height='700px'; return; }
     var fit=function(){
       var b=d.body, e=d.documentElement;
-      var h=Math.max(b?b.scrollHeight:0, b?b.offsetHeight:0, e?e.scrollHeight:0, e?e.offsetHeight:0);
-      if(h>0) f.style.height=(h+22)+'px';   // NO cap -- full email length; the thread pane does the scrolling
+      var h=Math.max(b?b.scrollHeight:0, b?b.offsetHeight:0,
+                     e?e.scrollHeight:0, e?e.offsetHeight:0,
+                     (b&&b.getBoundingClientRect)?Math.ceil(b.getBoundingClientRect().height):0);
+      if(h>0) f.style.height=(h+24)+'px';   // NO cap -- full email length; the thread pane scrolls
     };
     fit();
-    // content grows after onload (images, web fonts, reflow) -> refit on each image + on ANY body resize
+    // content grows after onload (images, web fonts, reflow) -> refit on each image + on ANY body resize +
+    // a tail of ticks so a late-loading remote image or font can't leave the frame short.
     try{ Array.prototype.forEach.call(d.images||[], function(img){ if(!img.complete){ img.addEventListener('load',fit,{once:true}); img.addEventListener('error',fit,{once:true}); } }); }catch(e){}
     try{ if(window.ResizeObserver && d.body){ new ResizeObserver(fit).observe(d.body); } }catch(e){}
-    setTimeout(fit,120); setTimeout(fit,400); setTimeout(fit,1000);
-  }catch(e){ f.style.height='600px'; }   // last resort if the doc is somehow unreadable
+    try{ if(f.contentWindow) f.contentWindow.addEventListener('load',fit); }catch(e){}
+    [80,250,600,1200,2200].forEach(function(ms){ setTimeout(fit,ms); });
+  }catch(e){ f.style.height='700px'; }   // last resort if the doc is somehow unreadable
 }
 function gmFullDate(s){ try{var d=new Date(s); if(isNaN(d)) return e2(s); return d.toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}catch(e){return e2(s);} }
 
