@@ -5479,6 +5479,9 @@ class H(BaseHTTPRequestHandler):
     def _s(self, code, body, ct="application/json"):
         b = body.encode() if isinstance(body, str) else body
         self.send_response(code); self.send_header("Content-Type", ct)
+        # the dashboard HTML embeds the JS inline -> never let a browser serve a stale page, or shipped fixes
+        # (like the clean download URLs) don't take effect until a manual hard-refresh.
+        if "text/html" in ct: self.send_header("Cache-Control", "no-store, must-revalidate")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def serve_static(self, rel):
         rel = rel.split("?")[0].lstrip("/")

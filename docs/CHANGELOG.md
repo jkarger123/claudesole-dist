@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.16 -- 2026-06-24
+- FIX (shipped fixes didn't take effect without a manual hard-refresh): the dashboard HTML (with inline JS)
+  had no Cache-Control, so browsers served a stale cached page -- e.g. still building the old `?path=` download
+  URL with parens. All HTML pages now send `Cache-Control: no-store`, so a normal reload always gets the
+  current code. (This is why an already-created file still showed the `(` URL: cached page, not the fix.)
+  NOTE: already-created files DO work with the b64 fix -- the clean URL is built when the page renders, not
+  when the file was made.
+
 ## 0.21.15 -- 2026-06-24
 - FIX (download "site wasn't available" through the proxy): download URLs carried the raw rel path, so a
   filename with spaces + parens (e.g. "... (Action Sheet).xlsx") became a query full of %20/%28/%29 -- which
