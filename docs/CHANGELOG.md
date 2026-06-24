@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.18 -- 2026-06-24
+- FIX (502 on download): a MISSING file spent 10s running brctl before answering (it conflated 'absent' with
+  'evicted'), and that delay -- plus the brief server-restart window -- made Tailscale serve return 502.
+  Files are now classified local / evicted / absent: absent = instant 404, evicted = bounded ~9s materialize
+  then 503 (the Download button auto-retries), local = instant 200. The Download button also retries through
+  transient 502/504 gateway blips. Verified through the real Tailscale serve path: absent=404 in 17ms,
+  fresh=200 in 20ms.
+
 ## 0.21.17 -- 2026-06-24  *** the actual download fix ***
 - ROOT CAUSE (download "site wasn't available"): NOT the proxy and NOT the URL -- both were verified working
   (HTTP 200 in ~40ms through the real Tailscale serve path). The file was iCloud-EVICTED on the headless

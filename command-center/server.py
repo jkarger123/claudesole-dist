@@ -125,37 +125,41 @@ def projpath(rel):
     if not (p == PROJECT or p.startswith(PROJECT + "/")): raise ValueError("bad path")
     return p
 
-def _is_dataless(real):
-    """True if `real` is an iCloud-EVICTED file: present by name but with NO disk blocks (st_blocks==0 despite
-    a non-zero logical st_size), or only a `.<name>.icloud` placeholder, or absent. CRITICAL: os.path.getsize()
-    reports the LOGICAL size even when evicted, so it cannot tell us the bytes are local -- reading a dataless
-    file BLOCKS until macOS faults it in, which hangs the request ('site wasn't available'). st_blocks is the
-    truth."""
+def _icloud_state(real):
+    """Classify a path: 'local' (bytes present on disk), 'evicted' (iCloud dataless stub -> needs brctl), or
+    'absent' (doesn't exist). CRITICAL: os.path.getsize() reports the LOGICAL size even when evicted, so it
+    can't tell local from evicted -- reading an evicted file BLOCKS until macOS faults it in (hangs the
+    request -> 'site wasn't available'). st_blocks==0 (no disk blocks) is the truth for an evicted file. NOTE:
+    'absent' must NOT trigger a materialize wait (that wasted 10s before a 404)."""
     try:
         d, n = os.path.split(real)
-        if os.path.exists(os.path.join(d, "." + n + ".icloud")): return True
-        if not os.path.isfile(real): return True
-        st = os.stat(real)
-        return st.st_size > 0 and st.st_blocks == 0
+        if os.path.exists(os.path.join(d, "." + n + ".icloud")): return "evicted"
+        if os.path.isfile(real):
+            try:
+                st = os.stat(real)
+                return "evicted" if (st.st_size > 0 and st.st_blocks == 0) else "local"
+            except Exception:
+                return "local"
+        return "absent"
     except Exception:
-        return not os.path.isfile(real)
+        return "absent"
 
 def _materialize_icloud(path, max_wait=10):
-    """Force an iCloud-evicted file's bytes back to local disk (brctl download) and wait UP TO max_wait sec.
-    Returns True once the bytes are local (not dataless). We ONLY read a file after this confirms it -- never
-    call open().read() on a dataless file (it blocks indefinitely)."""
+    """Force an iCloud-EVICTED file's bytes back to local disk (brctl download) and wait UP TO max_wait sec.
+    Returns True once the bytes are local. We ONLY read a file after this confirms 'local' -- never call
+    open().read() on an evicted file (it blocks). Fast no-op for already-local or absent files."""
     try:
         real = os.path.realpath(path)
-        if not _is_dataless(real): return True   # bytes already local
+        if _icloud_state(real) != "evicted": return _icloud_state(real) == "local"
         for cmd in (["brctl", "download", real], ["/usr/bin/brctl", "download", real]):
             try: subprocess.run(cmd, capture_output=True, timeout=min(max_wait, 12)); break
             except Exception: continue
         deadline = time.time() + max_wait
         while time.time() < deadline:
-            if not _is_dataless(real): return True
+            if _icloud_state(real) == "local": return True
             time.sleep(0.3)
     except Exception: pass
-    return not _is_dataless(os.path.realpath(path))
+    return _icloud_state(os.path.realpath(path)) == "local"
 
 # ---- Mesh comms inbox: a persistent, UI-visible log of every inter-chief message (in + out). The TUI
 # screen-scrape relay (chief_say/chief_broadcast) is best-effort and invisible when a chief is busy or on a
@@ -5728,12 +5732,14 @@ class H(BaseHTTPRequestHandler):
             except Exception: return self._s(400, "bad path")
             if _path_has_secret(ab): return self._s(403, "forbidden")   # never serve secrets/keys via download
             real = os.path.realpath(ab)
-            # iCloud-evicted file -> materialize FIRST (bounded). NEVER open().read() a dataless file: that
-            # blocks until macOS faults it in and hangs the request -> the browser shows "site wasn't available".
-            if _is_dataless(real): _materialize_icloud(ab, max_wait=10)
-            if _is_dataless(os.path.realpath(ab)):
-                return self._s(503, "file is still syncing down from iCloud -- click Download again in a few seconds")
-            if not os.path.isfile(ab): return self._s(404, "not found")
+            st = _icloud_state(real)
+            if st == "absent": return self._s(404, "not found")          # fast -- never a materialize wait
+            if st == "evicted":
+                # pull bytes local FIRST (bounded). NEVER open().read() an evicted file: it blocks faulting
+                # the file in and hangs the request -> proxy 502/504 / browser "site wasn't available".
+                _materialize_icloud(ab, max_wait=9)
+                if _icloud_state(os.path.realpath(ab)) != "local":
+                    return self._s(503, "file is still syncing down from iCloud -- click Download again in a few seconds")
             import mimetypes
             ct = mimetypes.guess_type(ab)[0] or "application/octet-stream"
             try:
@@ -7195,8 +7201,8 @@ async function dlFile(rel,name){
   toast('Preparing '+name+'…',2500);
   for(var i=0;i<10;i++){
     try{
-      var r=await fetch('/api/file-get?b64='+b64u(rel));
-      if(r.status===503){ if(i===2)toast('Pulling it down from iCloud…',3000); await new Promise(function(s){setTimeout(s,2500);}); continue; }
+      var r=await fetch('/api/file-get?b64='+b64u(rel),{cache:'no-store'});
+      if(r.status===503||r.status===502||r.status===504){ if(i===1)toast('Pulling it down from iCloud…',3000); await new Promise(function(s){setTimeout(s,2500);}); continue; }
       if(!r.ok){ toast('Download failed ('+r.status+')',4500); return; }
       var blob=await r.blob();
       var u=URL.createObjectURL(blob), a=document.createElement('a');
