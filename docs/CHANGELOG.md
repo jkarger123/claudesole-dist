@@ -3,6 +3,26 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.19.0 -- 2026-06-24
+- NEW (AGENTIC LEVERAGE -- first vertical slice: "Smart Reply with 360 context"): the platform starts to
+  FLEX its extensions together instead of siloing them. Foundation + first recipe, PROVEN live on carsearch.
+  - ACTION QUEUE (the safety spine): _actions.json + audit log; action_propose/list/apply/reject;
+    GET /api/actions + POST /api/actions/approve|reject (operator-only, NOT peer-reachable). Every
+    apply/reject is audited. Nothing outward executes without a human approval.
+  - gmail_draft(): stages a REAL Gmail draft (drafts.create) reusing the gmail_send MIME assembly. Never sends.
+  - /api/flex/context?tid= : the cross-extension JOIN -- _match_folders resolves the client folder, then a
+    LIVE bundle (folder correspondence + calendar + drive + call notes + pipeline stage, capped ~24k) ->
+    headless `claude -p` (free Max-sub) -> {draft_html in your voice, three_bullets "what you know about
+    them"}. Halts to a clear gate on malformed output; bundle stamped UNTRUSTED to the model.
+  - Thread reader: "✨ Smart reply" (stages a Gmail draft + an action record, opens the composer pre-filled +
+    shows the 3-bullet brief) and "🔎 Sender history" (inline dossier). Self-hides without Google.
+  - HARD INVARIANT: no flex/recipe/AI code path can call gmail_send -- staging only; the human reviews and
+    clicks Send. Proven: a real carsearch thread produced a context-aware in-voice draft + a brief fusing
+    email + folder + pipeline in ~6s, staged as a draft, never sent.
+  - Roadmap (designed, not yet built): capability registry every agent reads, the recipe engine + more
+    flexes (call->everything, state-of-client), in-surface AI across lenses, proactivity scanner, mesh
+    capability cards. This slice is the machinery the rest generalizes.
+
 ## 0.18.3 -- 2026-06-24
 - FIX (watchdog handles the real-world stuck state): when a turn dies on an API/rate-limit error, the error
   line gets pushed ABOVE the "How is Claude doing this session?" feedback overlay + input box -- the old
