@@ -2233,14 +2233,16 @@ def claude_login_start(label):
     sh([TMUX, "kill-session", "-t", CC_LOGIN_SESSION])
     cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; '
           'export CC_LOGIN_LABEL=%s; claude setup-token; echo CC_LOGIN_DONE; sleep 600' % shlex.quote(label))
-    rc = sh([TMUX, "new-session", "-d", "-s", CC_LOGIN_SESSION, "-x", "220", "-y", "50", cl])[0]
+    rc = sh([TMUX, "new-session", "-d", "-s", CC_LOGIN_SESSION, "-x", "900", "-y", "50", cl])[0]
     return {"ok": rc == 0, "label": label}
 
 def claude_login_status(label=None):
     """Read the login pty: surface the auth URL, whether it's awaiting a code, or capture the finished token."""
     if sh([TMUX, "has-session", "-t", CC_LOGIN_SESSION])[0] != 0:
         return {"state": "idle"}
-    txt = sh([TMUX, "capture-pane", "-t", CC_LOGIN_SESSION, "-p", "-S", "-200"])[1] or ""
+    # -J joins wrapped lines so a long OAuth URL isn't truncated mid-querystring (that dropped the `state`
+    # param -> "Invalid OAuth Request: Missing state parameter"). Wide pane (900) further avoids wrapping.
+    txt = sh([TMUX, "capture-pane", "-t", CC_LOGIN_SESSION, "-J", "-p", "-S", "-300"])[1] or ""
     tok = _CC_OAT.findall(txt)
     if tok:                                                   # token minted -> store + activate + close
         lbl = label or _wallet_load().get("_pending") or "account"

@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.23 -- 2026-06-24
+- FIX (Claude Accounts login: "Invalid OAuth Request: Missing state parameter"): the setup-token OAuth URL is
+  ~346 chars and wrapped across lines in the capture pane, so we grabbed only the first ~80 chars — dropping
+  the `state`/`code_challenge` params. Now captured with `capture-pane -J` (join wrapped lines) in a wide (900)
+  pane, so the full URL (with state) is surfaced. Login authorizes correctly now.
+
 ## 0.21.22 -- 2026-06-24
 - RELIABILITY (access recovery / break-glass): new `cc-recover.sh` — run in any terminal to print every node's
   login PIN (auth_token), port, tailnet URL, and recent credential-change log, even when the web UI is down.
