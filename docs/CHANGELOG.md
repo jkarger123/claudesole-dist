@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.6 -- 2026-06-24
+- FIX (reader cascade over-eager): the collapsed-reply stack fanned apart on ANY hover in the thread —
+  including when you were reading the open email. It now reacts ONLY when the pointer is directly on a
+  collapsed card (that card lifts and the one right after it drops its tuck so it's fully readable).
+- FIX (thread cluttered with empty "nothing written" cards): Gmail keeps DRAFT messages (including each
+  staged Smart Reply) INSIDE the thread; we were rendering them as blank conversation cards. Drafts are now
+  skipped in the reader (they still live in Drafts / open in the composer) and the header notes "N drafts
+  in Drafts". Any remaining empty-snippet message (image-only mail) now derives a text preview so no card
+  is blank.
+
 ## 0.21.5 -- 2026-06-24
 - FIX (Gmail reader: emails cut off at the bottom / "just lines"): newsletter & marketing mail commonly
   set `html,body{height:100%}`, which inside an iframe collapses scrollHeight to the frame's own height —

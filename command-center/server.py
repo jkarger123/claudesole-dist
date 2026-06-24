@@ -679,15 +679,25 @@ def gmail_thread(tid):
     t = _g_api("GET", GMAIL_BASE + "/threads/" + tid, params={"format": "full"})
     if not isinstance(t, dict) or "error" in t:
         return t if isinstance(t, dict) else {"error": "thread failed"}
-    msgs = []
+    msgs = []; drafts = 0
     for m in t.get("messages", []):
-        hs = {h["name"].lower(): h["value"] for h in m.get("payload", {}).get("headers", [])}
         lab = m.get("labelIds", [])
+        # DRAFT messages (incl. each staged Smart Reply) live inside the thread but are NOT conversation
+        # messages -- Gmail shows them as an editable draft, not a stacked card. Skip them so a thread isn't
+        # cluttered with a pile of empty/contentless cards. The draft still lives in Drafts / the composer.
+        if "DRAFT" in lab:
+            drafts += 1; continue
+        hs = {h["name"].lower(): h["value"] for h in m.get("payload", {}).get("headers", [])}
+        body = _gmail_body(m.get("payload", {}))
+        snip = (m.get("snippet", "") or "").strip()
+        if not snip:   # image-only / empty-snippet mail -> derive a preview so the collapsed card isn't blank
+            snip = ((_html_to_text(body.get("html", "")) if isinstance(body, dict) else "")
+                    or (body.get("text", "") if isinstance(body, dict) else "") or "").strip()[:140]
         msgs.append({"id": m.get("id"), "from": hs.get("from", ""), "to": hs.get("to", ""),
                      "cc": hs.get("cc", ""), "subject": hs.get("subject", "(no subject)"),
                      "date": hs.get("date", ""), "messageId": hs.get("message-id", ""),
-                     "references": hs.get("references", ""), "snippet": m.get("snippet", ""),
-                     "body": _gmail_body(m.get("payload", {})),
+                     "references": hs.get("references", ""), "snippet": snip,
+                     "body": body,
                      "attachments": _gmail_attachments(m.get("payload", {})),
                      "unread": "UNREAD" in lab, "starred": "STARRED" in lab, "labels": lab})
     msgs.reverse()  # newest first
@@ -695,7 +705,7 @@ def gmail_thread(tid):
     except Exception: pass
     subj = msgs[0]["subject"] if msgs else "(no subject)"
     return {"id": tid, "subject": subj, "messages": msgs, "count": len(msgs),
-            "email": _GOOGLE_TOK.get("email")}
+            "drafts": drafts, "email": _GOOGLE_TOK.get("email")}
 
 # plain-text fallback derived from the HTML body
 def _html_to_text(h):
@@ -6524,8 +6534,10 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
    (so a long reply chain takes minimal space but every message is one move away). */
 .gm-msg:not(.open){position:relative;cursor:pointer}
 .gm-msg:not(.open)+.gm-msg:not(.open){margin-top:-20px}
-.gm-thread:hover .gm-msg:not(.open)+.gm-msg:not(.open){margin-top:0}
+/* react ONLY when the pointer is on a collapsed card (not when hovering the open email): lift it above the
+   deck and drop the tuck on the card right after it so the hovered one is fully readable. */
 .gm-msg:not(.open):hover{border-color:var(--accent);box-shadow:0 9px 24px rgba(0,0,0,.5);transform:translateY(-1px);z-index:3}
+.gm-msg:not(.open):hover + .gm-msg:not(.open){margin-top:6px}
 .gm-msg:not(.open) .gm-mhead{padding:7px 12px}
 .gm-msg:not(.open) .gm-collapsed{padding:0 12px 7px}
 .gm-mhead{padding:9px 12px;display:flex;align-items:center;gap:9px;cursor:pointer;border-bottom:1px solid transparent}
@@ -8271,7 +8283,7 @@ function gmRenderRead(){
   var last=msgs.length-1;
   var head='<div class="gm-rdhead">'
     +'<div class="gm-rdsubj">'+e2(t.subject)+(msgs.length>1?' <span class="gm-cnt">'+msgs.length+'</span>':'')+'</div>'
-    +'<div class="gm-rdmeta">'+e2(gAddr((msgs[0]||{}).from||''))+' · '+msgs.length+' message'+(msgs.length>1?'s':'')+'</div>'
+    +'<div class="gm-rdmeta">'+e2(gAddr((msgs[0]||{}).from||''))+' · '+msgs.length+' message'+(msgs.length>1?'s':'')+(t.drafts?' · <span style="color:var(--accent)">'+t.drafts+' draft'+(t.drafts>1?'s':'')+' in Drafts</span>':'')+'</div>'
     +'<div class="gm-acts">'
       +'<button class="gm-act go" onclick="gmReply(false)" title="Reply (r)">↩ Reply</button>'
       +'<button class="gm-act" onclick="gmReply(true)" title="Reply all (a)">↪ Reply all</button>'
