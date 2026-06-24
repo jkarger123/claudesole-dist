@@ -6,7 +6,7 @@ A faithful port of the Karger & Co Command Center, adapted for the HP Tuners fle
    so every session is persistent + attachable in the BROWSER TERMINAL (stdlib WebSocket -> PTY)
  - lenses: Pillars / Routines / Ralph Loops / Machines / Sessions / Docs(managed CLAUDE.md blocks)
 Python stdlib only. Serves on 0.0.0.0:8799 -> reachable over Tailscale at http://100.109.63.56:8799 ."""
-import base64, fcntl, glob, hashlib, hmac, json, os, pty, re, secrets, select, shutil, signal, socket, struct, subprocess, sys, termios, threading, time, urllib.parse
+import base64, fcntl, glob, hashlib, hmac, json, os, pty, re, secrets, select, shutil, signal, socket, struct, subprocess, sys, termios, threading, time, urllib.parse, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import granola   # Granola -> agency tree module (calls + client CLAUDE.md updates + tasks/reminders)
 try:   # Ed25519 for asymmetric superadmin (public-key). Optional: nodes without it fall back to HMAC + a doctor warning.
@@ -82,7 +82,7 @@ def render_page():
     except Exception: _lenses = None
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
-        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(),
+        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "google": google_configured(),
         "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md", "MASTER_HANDOFF.md",
             "FILE_SYSTEM_GOVERNANCE.md", "TEXT2TUNE_ARCHITECTURE.md", "ENTERPRISE_MIGRATION.md",
             "BRIDGE_MIGRATION.md"]})
@@ -436,6 +436,198 @@ def superadmin_send(node_id, action, params=None, ttl=120):
             return {"ok": True, "node": node_id, "result": json.loads(r.read().decode())}
     except Exception as e:
         return {"ok": False, "error": str(e)[:160]}
+
+# ============================ GOOGLE WORKSPACE (live, server-side client) ============================
+# A real embedded Gmail/Calendar/Drive client: the CC server calls Google's REST APIs DIRECTLY using the
+# refresh token the google-workspace extension minted (extensions/google-workspace/secrets/tokens/<acct>.json),
+# so the dashboard renders LIVE inbox/calendar/drive and can read/triage/send/create -- no MCP, no agent in
+# the request path. Stdlib urllib only. Self-hides on nodes with no token (window.CC.google=false).
+GOOGLE_SECRETS_DIR = os.path.join(CC_HOME, "extensions", "google-workspace", "secrets")
+GOOGLE_TOKENS_DIR = os.path.join(GOOGLE_SECRETS_DIR, "tokens")
+_GOOGLE_TOK = {"access": None, "exp": 0, "email": None, "scopes": []}
+_GOOGLE_LOCK = threading.Lock()
+
+def _google_token_file():
+    acct = CC.get("google_account")
+    if acct:
+        p = os.path.join(GOOGLE_TOKENS_DIR, acct + ".json")
+        if os.path.isfile(p): return p
+    try:
+        cand = sorted(f for f in os.listdir(GOOGLE_TOKENS_DIR) if f.endswith(".json"))
+        if cand: return os.path.join(GOOGLE_TOKENS_DIR, cand[0])
+    except Exception: pass
+    return None
+
+def google_configured():
+    return _google_token_file() is not None
+
+def _google_access_token():
+    """Refresh-token -> short-lived access token, cached until ~90s before expiry. Thread-safe."""
+    with _GOOGLE_LOCK:
+        now = time.time()
+        if _GOOGLE_TOK["access"] and now < _GOOGLE_TOK["exp"] - 90:
+            return _GOOGLE_TOK["access"]
+        tf = _google_token_file()
+        if not tf: return None
+        try:
+            d = json.load(open(tf))
+            data = urllib.parse.urlencode({"client_id": d["client_id"], "client_secret": d["client_secret"],
+                "refresh_token": d["refresh_token"], "grant_type": "refresh_token"}).encode()
+            req = urllib.request.Request(d.get("token_uri", "https://oauth2.googleapis.com/token"), data=data)
+            r = json.loads(urllib.request.urlopen(req, timeout=20).read())
+            _GOOGLE_TOK.update(access=r["access_token"], exp=now + int(r.get("expires_in", 3600)),
+                               email=os.path.basename(tf)[:-5], scopes=d.get("scopes", []))
+            return _GOOGLE_TOK["access"]
+        except Exception:
+            return None
+
+def google_status():
+    if not google_configured(): return {"configured": False}
+    tok = _google_access_token()
+    s = _GOOGLE_TOK.get("scopes", [])
+    return {"configured": bool(tok), "email": _GOOGLE_TOK.get("email"),
+            "canRead": any("gmail.readonly" in x or "gmail.modify" in x for x in s),
+            "canSend": any("gmail.send" in x or "gmail.compose" in x for x in s),
+            "canModify": any("gmail.modify" in x for x in s)}
+
+def _g_api(method, url, params=None, body=None, raw=False, timeout=30):
+    tok = _google_access_token()
+    if not tok: return {"error": "google not configured"}
+    if params: url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params, doseq=True)
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", "Bearer " + tok)
+    if data is not None: req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            b = resp.read()
+            return b if raw else (json.loads(b) if b else {})
+    except urllib.error.HTTPError as e:
+        try: msg = json.loads(e.read()).get("error", {}).get("message", "")
+        except Exception: msg = ""
+        return {"error": "google api %d%s" % (e.code, (": " + msg[:140]) if msg else "")}
+    except Exception as e:
+        return {"error": str(e)[:160]}
+
+def _g_parallel(fns):
+    """Run a handful of independent Google fetches concurrently (the HTTP server is threaded)."""
+    out = [None] * len(fns); ths = []
+    def run(i, f):
+        try: out[i] = f()
+        except Exception: out[i] = None
+    for i, f in enumerate(fns):
+        t = threading.Thread(target=run, args=(i, f)); t.start(); ths.append(t)
+    for t in ths: t.join()
+    return out
+
+GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
+def gmail_list(view="inbox", q="", maxn=25):
+    query = (q or "").strip()
+    if not query:
+        query = {"inbox": "in:inbox", "unread": "is:unread", "sent": "in:sent",
+                 "starred": "is:starred", "important": "is:important"}.get(view, "in:inbox")
+    r = _g_api("GET", GMAIL_BASE + "/messages", params={"maxResults": min(int(maxn or 25), 50), "q": query})
+    if "error" in r: return r
+    ids = [m["id"] for m in r.get("messages", [])]
+    def fetch(mid):
+        m = _g_api("GET", GMAIL_BASE + "/messages/" + mid,
+                   params={"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]})
+        if not isinstance(m, dict) or "error" in m: return None
+        hs = {h["name"].lower(): h["value"] for h in m.get("payload", {}).get("headers", [])}
+        lab = m.get("labelIds", [])
+        return {"id": mid, "threadId": m.get("threadId"), "from": hs.get("from", ""),
+                "subject": hs.get("subject", "(no subject)"), "date": hs.get("date", ""),
+                "snippet": m.get("snippet", ""), "unread": "UNREAD" in lab, "starred": "STARRED" in lab}
+    msgs = [x for x in _g_parallel([(lambda i=i: fetch(i)) for i in ids]) if x]
+    return {"messages": msgs, "view": view, "q": q, "email": _GOOGLE_TOK.get("email")}
+
+def gmail_unread():
+    # exact unread-in-inbox count for the nav badge. Reading the label does NOT mark anything read.
+    r = _g_api("GET", GMAIL_BASE + "/labels/INBOX")
+    if not isinstance(r, dict) or "error" in r: return {"count": 0}
+    return {"count": r.get("messagesUnread", 0)}
+
+def _gmail_body(payload):
+    import base64
+    def dec(data):
+        try: return base64.urlsafe_b64decode(data + "===").decode("utf-8", "replace")
+        except Exception: return ""
+    got = {"html": "", "text": ""}
+    def walk(p):
+        mt = p.get("mimeType", ""); bd = p.get("body", {})
+        if bd.get("data"):
+            if mt == "text/html" and not got["html"]: got["html"] = dec(bd["data"])
+            elif mt == "text/plain" and not got["text"]: got["text"] = dec(bd["data"])
+        for sub in (p.get("parts") or []): walk(sub)
+    walk(payload)
+    return got
+
+def gmail_get(mid):
+    m = _g_api("GET", GMAIL_BASE + "/messages/" + mid, params={"format": "full"})
+    if "error" in m: return m
+    hs = {h["name"].lower(): h["value"] for h in m.get("payload", {}).get("headers", [])}
+    # mark read on open (best-effort)
+    try: _g_api("POST", GMAIL_BASE + "/messages/" + mid + "/modify", body={"removeLabelIds": ["UNREAD"]})
+    except Exception: pass
+    return {"id": mid, "threadId": m.get("threadId"), "from": hs.get("from", ""), "to": hs.get("to", ""),
+            "cc": hs.get("cc", ""), "subject": hs.get("subject", "(no subject)"), "date": hs.get("date", ""),
+            "body": _gmail_body(m.get("payload", {})), "labels": m.get("labelIds", [])}
+
+def gmail_send(to, subject, body, cc="", bcc="", thread_id=None):
+    import base64
+    lines = ["To: " + to]
+    if cc: lines.append("Cc: " + cc)
+    if bcc: lines.append("Bcc: " + bcc)
+    lines += ["Subject: " + subject, "Content-Type: text/plain; charset=utf-8", "", body]
+    raw = base64.urlsafe_b64encode("\r\n".join(lines).encode("utf-8")).decode()
+    payload = {"raw": raw}
+    if thread_id: payload["threadId"] = thread_id
+    return _g_api("POST", GMAIL_BASE + "/messages/send", body=payload)
+
+def gmail_modify(mid, action):
+    if action == "trash": return _g_api("POST", GMAIL_BASE + "/messages/" + mid + "/trash")
+    m = {"archive": {"removeLabelIds": ["INBOX"]}, "read": {"removeLabelIds": ["UNREAD"]},
+         "unread": {"addLabelIds": ["UNREAD"]}, "star": {"addLabelIds": ["STARRED"]},
+         "unstar": {"removeLabelIds": ["STARRED"]}}
+    if action not in m: return {"error": "unknown action: " + str(action)}
+    r = _g_api("POST", GMAIL_BASE + "/messages/" + mid + "/modify", body=m[action])
+    return {"ok": "error" not in r, **({"error": r["error"]} if isinstance(r, dict) and "error" in r else {})}
+
+def calendar_events(days=7):
+    now = time.time()
+    tmin = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 3600))
+    tmax = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + int(days or 7) * 86400))
+    r = _g_api("GET", "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+               params={"timeMin": tmin, "timeMax": tmax, "singleEvents": "true", "orderBy": "startTime", "maxResults": 50})
+    if "error" in r: return r
+    evs = []
+    for e in r.get("items", []):
+        st = e.get("start", {}); en = e.get("end", {})
+        evs.append({"id": e.get("id"), "summary": e.get("summary", "(no title)"), "location": e.get("location", ""),
+                    "start": st.get("dateTime") or st.get("date"), "end": en.get("dateTime") or en.get("date"),
+                    "allDay": "date" in st, "link": e.get("htmlLink"), "hangout": e.get("hangoutLink", ""),
+                    "attendees": [a.get("email") for a in e.get("attendees", [])][:8]})
+    return {"events": evs, "days": int(days or 7), "email": _GOOGLE_TOK.get("email")}
+
+def calendar_create(summary, start, end, desc="", location="", tz=None):
+    s = {"dateTime": start}; en = {"dateTime": end}
+    if tz: s["timeZone"] = tz; en["timeZone"] = tz
+    return _g_api("POST", "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                  body={"summary": summary, "description": desc, "location": location, "start": s, "end": en})
+
+def drive_list(q="", maxn=30):
+    query = (q or "").strip().replace("'", "")
+    qexpr = ("name contains '%s' and trashed=false" % query) if query else "trashed=false"
+    r = _g_api("GET", "https://www.googleapis.com/drive/v3/files",
+               params={"pageSize": min(int(maxn or 30), 100), "orderBy": "modifiedTime desc", "q": qexpr,
+                       "fields": "files(id,name,mimeType,modifiedTime,size,webViewLink,iconLink,owners(displayName))"})
+    if "error" in r: return r
+    fs = []
+    for f in r.get("files", []):
+        fs.append({"id": f["id"], "name": f.get("name", ""), "mime": f.get("mimeType", ""),
+                   "modified": f.get("modifiedTime", ""), "size": f.get("size"), "link": f.get("webViewLink"),
+                   "icon": f.get("iconLink"), "owner": (f.get("owners") or [{}])[0].get("displayName", "")})
+    return {"files": fs, "q": q, "email": _GOOGLE_TOK.get("email")}
 
 # ---- Dashboard/API authentication (CCR ccr-1782162511858). OFF by default (open) so existing deployments
 # keep working until an operator sets a token; /api/doctor warns loudly while it is off. Enable by setting
@@ -4265,6 +4457,13 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/module-files": return self._s(200, json.dumps(module_files(q.get("rel", [""])[0])))
         if u.path == "/api/files":        return self._s(200, json.dumps(all_deliverables()))
         if u.path == "/api/browse":       return self._s(200, json.dumps(browse_dir(q.get("rel", [""])[0])))
+        # ---- Google Workspace (live client) ----
+        if u.path == "/api/google/status":   return self._s(200, json.dumps(google_status()))
+        if u.path == "/api/google/gmail":    return self._s(200, json.dumps(gmail_list(q.get("view", ["inbox"])[0], q.get("q", [""])[0], q.get("max", ["25"])[0])))
+        if u.path == "/api/google/gmail-msg":return self._s(200, json.dumps(gmail_get(q.get("id", [""])[0])))
+        if u.path == "/api/google/gmail-unread": return self._s(200, json.dumps(gmail_unread()))
+        if u.path == "/api/google/calendar": return self._s(200, json.dumps(calendar_events(q.get("days", ["7"])[0])))
+        if u.path == "/api/google/drive":    return self._s(200, json.dumps(drive_list(q.get("q", [""])[0], q.get("max", ["30"])[0])))
         if u.path == "/api/file-get":
             try: ab = projpath(q.get("path", [""])[0])
             except Exception: return self._s(400, "bad path")
@@ -4352,6 +4551,15 @@ class H(BaseHTTPRequestHandler):
         # Superadmin: exec is reachable cross-family (the SA signature IS the auth -> in AUTH_MESH_INGRESS).
         # send/grant/derive need the MASTER + are operator-authed (NOT mesh-ingress) -> MC operator only.
         if u.path == "/api/superadmin-exec":   return self._s(200, json.dumps(superadmin_exec(body)))
+        # ---- Google Workspace (live client) writes ----
+        if u.path == "/api/google/gmail-send":
+            return self._s(200, json.dumps(gmail_send(body.get("to", ""), body.get("subject", ""), body.get("body", ""),
+                                                       body.get("cc", ""), body.get("bcc", ""), body.get("threadId"))))
+        if u.path == "/api/google/gmail-modify":
+            return self._s(200, json.dumps(gmail_modify(body.get("id", ""), body.get("action", ""))))
+        if u.path == "/api/google/calendar-create":
+            return self._s(200, json.dumps(calendar_create(body.get("summary", ""), body.get("start", ""), body.get("end", ""),
+                                                           body.get("desc", ""), body.get("location", ""), body.get("tz"))))
         if u.path == "/api/superadmin-send":   return self._s(200, json.dumps(superadmin_send(body.get("node", ""), body.get("action", ""), body.get("params") or {}, body.get("ttl") or 120)))
         if u.path == "/api/superadmin-grant":  return self._s(200, json.dumps(superadmin_grant(body.get("node", ""), body.get("action", ""), body.get("params") or {}, body.get("ttl") or 120)))
         if u.path == "/api/superadmin-keygen": return self._s(200, json.dumps(superadmin_keygen()))
@@ -4886,6 +5094,9 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 <button data-l="sessions" class="on"><i>🟢</i>Sessions</button>
 <button data-l="modules"><i>🗂</i>Projects</button>
 <button data-l="files"><i>📁</i>Files</button>
+<button data-l="gmail"><i>✉️</i>Gmail<span id="gmailBadge" style="display:none;margin-left:6px;background:#ea4335;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
+<button data-l="calendar"><i>📅</i>Calendar</button>
+<button data-l="drive"><i>🗂️</i>Drive</button>
 <button data-l="marketplace"><i>🏛</i>Marketplace</button>
 <button data-l="agency"><i>🏢</i>Agency</button>
 <button data-l="calls"><i>📞</i>Calls</button>
@@ -4943,6 +5154,9 @@ function render(){
   else if(LENS=="routines")h=(D.routines||[]).filter(r=>!q||(r.name+r.desc).toLowerCase().includes(q)).map(rouCard).join("")||empty("No routines yet.");
   else if(LENS=="modules"){loadModules();return;}
   else if(LENS=="files"){loadFiles();return;}
+  else if(LENS=="gmail"){loadGmail();return;}
+  else if(LENS=="calendar"){loadCalendar();return;}
+  else if(LENS=="drive"){loadDrive();return;}
   else if(LENS=="ralph"){loadRalph();return;}
   else if(LENS=="pipeline"){loadPipeline();return;}
   else if(LENS=="jobs")h=(D.jobs||[]).filter(j=>!q||(j.name+j.desc).toLowerCase().includes(q)).map(jobCard).join("")||empty("No active jobs — click ＋ Add.");
@@ -5475,6 +5689,126 @@ async function commsRefresh(){const ta=document.getElementById('commsMsg');const
 function commsSetBadge(n){const b=document.getElementById('commsBadge');if(!b)return;if(n>0){b.textContent=n>99?'99+':n;b.style.display='inline-block';}else{b.textContent='';b.style.display='none';}}
 async function commsBadgePoll(){try{const d=await(await fetch('/api/mesh')).json();const seen=parseInt(localStorage.getItem('comms_seen')||'0');const unread=(d.messages||[]).filter(function(m){return m.dir==='in'&&(m.ts||0)>seen;}).length;const drops=((d.overdue||[]).length)+((d.unanswered||[]).length);if(LENS!=='comms')commsSetBadge(unread+drops);}catch(e){}}  // badge also shows OVERDUE/UNANSWERED (persists until resolved) so a dropped ball surfaces without watching
 setInterval(commsBadgePoll,15000);setTimeout(commsBadgePoll,1500);
+// ============ GOOGLE WORKSPACE LENSES (live Gmail / Calendar / Drive, server-side OAuth) ============
+var GMAILVIEW='inbox',GMAILQ='',GMAILMSG=null;
+function gVal(id){var e=document.getElementById(id);return e?e.value:'';}
+function gFrom(s){s=s||'';var m=s.match(/^(.*?)</);var nm=m?m[1].replace(/"/g,'').trim():s;return nm||s;}
+function gAddr(s){var m=(s||'').match(/<(.*)>/);return m?m[1]:(s||'');}
+function gDate(s){if(!s)return'';try{var d=new Date(s);if(isNaN(d))return e2(s);var n=new Date();return d.toDateString()==n.toDateString()?d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):d.toLocaleDateString([],{month:'short',day:'numeric'});}catch(e){return e2(s)}}
+function gErr(r){return '<div class="card" style="cursor:default;grid-column:1/-1"><b style="color:#f85149">Google error</b><div class="meta" style="margin-top:6px">'+e2((r&&r.error)||'request failed')+'</div><div class="meta" style="margin-top:4px">Check the google-workspace extension token on this node.</div></div>';}
+
+async function loadGmail(){
+  var g=document.getElementById("grid");g.innerHTML=empty("Loading Gmail…");GMAILMSG=null;
+  var r;try{r=await(await fetch('/api/google/gmail?view='+GMAILVIEW+'&q='+encodeURIComponent(GMAILQ))).json();}catch(e){g.innerHTML=gErr({error:'network'});return;}
+  if(r.error){g.innerHTML=gErr(r);return;}
+  var tabs=['inbox','unread','starred','sent'].map(function(v){return '<button class="mini'+(GMAILVIEW==v?' go':'')+'" onclick="gmailView(\''+v+'\')">'+v.charAt(0).toUpperCase()+v.slice(1)+'</button>';}).join('');
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#9993;&#65039; Gmail</b> <span class="sub">'+e2(r.email||'')+'</span>'
+    +'<div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">'+tabs+'<button class="mini go" onclick="gmailCompose()">&#9999;&#65039; Compose</button><button class="mini" onclick="loadGmail()">&#8635;</button></div></div>'
+    +'<div style="margin-top:8px;display:flex;gap:6px"><input id="gmq" placeholder="Search mail…" value="'+e2(GMAILQ)+'" style="flex:1" onkeydown="if(event.key===\'Enter\')gmailSearch()"><button class="mini" onclick="gmailSearch()">Search</button></div></div>';
+  var ms=r.messages||[];
+  if(!ms.length){h+=empty('No messages here.');g.innerHTML=h;return;}
+  h+=ms.map(function(m){return '<div class="card" style="cursor:pointer'+(m.unread?';border-left:3px solid #ea4335':'')+'" onclick="gmailOpen(\''+m.id+'\')">'
+    +'<div style="display:flex;align-items:baseline;gap:8px"><b style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'+(m.unread?'':';font-weight:500')+'">'+(m.starred?'&#11088; ':'')+e2(gFrom(m.from))+'</b><span class="meta" style="flex:0 0 auto">'+gDate(m.date)+'</span></div>'
+    +'<div style="margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'+(m.unread?';font-weight:600':'')+'">'+e2(m.subject)+'</div>'
+    +'<div class="meta" style="margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+e2(m.snippet)+'</div>'
+    +'<div style="margin-top:7px;display:flex;gap:5px" onclick="event.stopPropagation()"><button class="mini" onclick="gmailAct(\''+m.id+'\',\'archive\')">Archive</button>'
+    +'<button class="mini" onclick="gmailAct(\''+m.id+'\',\''+(m.starred?'unstar':'star')+'\')">'+(m.starred?'Unstar':'Star')+'</button>'
+    +'<button class="mini" onclick="gmailAct(\''+m.id+'\',\'trash\')">Trash</button></div></div>';}).join('');
+  g.innerHTML=h;
+}
+function gmailView(v){GMAILVIEW=v;GMAILQ='';loadGmail();}
+function gmailSearch(){GMAILQ=gVal('gmq');loadGmail();}
+async function gmailAct(id,action){toast('…');var r=await(await fetch('/api/google/gmail-modify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,action:action})})).json();if(r&&r.ok!==false&&!r.error){toast(action+' &#10003;');if(GMAILMSG&&action!=='star'&&action!=='unstar')loadGmail();else loadGmail();}else toast('Failed: '+((r||{}).error||'?'),4000);}
+async function gmailOpen(id){
+  var g=document.getElementById("grid");g.innerHTML=empty("Opening…");
+  var m;try{m=await(await fetch('/api/google/gmail-msg?id='+id)).json();}catch(e){g.innerHTML=gErr({error:'network'});return;}
+  if(m.error){g.innerHTML=gErr(m);return;}
+  GMAILMSG=m;
+  var body=(m.body&&m.body.html)?('<iframe sandbox style="width:100%;border:0;background:#fff;border-radius:8px;min-height:440px" srcdoc="'+e2(m.body.html)+'"></iframe>'):('<pre style="white-space:pre-wrap;font:inherit;margin:0">'+e2((m.body&&m.body.text)||'(no text content)')+'</pre>');
+  g.innerHTML='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><button class="mini" onclick="loadGmail()">&#8592; Back</button> <b style="margin-left:6px">'+e2(m.subject)+'</b></div>'
+    +'<div class="meta" style="margin-top:8px"><b>'+e2(gFrom(m.from))+'</b> &middot; '+e2(gAddr(m.from))+' &middot; '+e2(m.date)+'</div>'
+    +'<div class="meta">to '+e2(m.to)+'</div>'
+    +'<div style="margin:10px 0;display:flex;gap:6px"><button class="mini go" onclick="gmailReply()">&#8617;&#65039; Reply</button><button class="mini" onclick="gmailAct(\''+m.id+'\',\'archive\')">Archive</button><button class="mini" onclick="gmailAct(\''+m.id+'\',\'trash\')">Trash</button></div>'
+    +'<div style="margin-top:6px">'+body+'</div></div>';
+}
+function gmailCompose(pre){pre=pre||{};
+  showM('<h2>&#9999;&#65039; Compose</h2>'
+    +'<div class="row"><label>To</label><input id="cTo" value="'+e2(pre.to||'')+'" placeholder="name@example.com"></div>'
+    +'<div class="row"><label>Subject</label><input id="cSub" value="'+e2(pre.subject||'')+'"></div>'
+    +'<div class="row"><label>Message</label><textarea id="cBody" rows="9" style="width:100%">'+e2(pre.body||'')+'</textarea></div>'
+    +'<div class="btns"><button class="btn" onclick="closeM()">Cancel</button><button class="btn go" onclick="gmailDoSend('+(pre.threadId?('\''+pre.threadId+'\''):'null')+')">Send</button></div>');
+}
+function gmailReply(){var m=GMAILMSG;if(!m)return;gmailCompose({to:gAddr(m.from),subject:(/^re:/i.test(m.subject)?'':'Re: ')+m.subject,threadId:m.threadId,body:'\n\n——— '+gFrom(m.from)+' wrote:\n'+(((m.body&&m.body.text)||'').split('\n').map(function(l){return '> '+l;}).join('\n'))});}
+async function gmailDoSend(threadId){
+  var to=gVal('cTo');if(!to){toast('Need a recipient',3000);return;}
+  toast('Sending…');var r=await(await fetch('/api/google/gmail-send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:to,subject:gVal('cSub'),body:gVal('cBody'),threadId:threadId})})).json();
+  if(r&&!r.error){closeM();toast('Sent &#10003;');if(LENS=='gmail')loadGmail();}else toast('Failed: '+((r||{}).error||'?'),5000);
+}
+
+async function loadCalendar(){
+  var g=document.getElementById("grid");g.innerHTML=empty("Loading Calendar…");
+  var days=window.CALDAYS||7;
+  var r;try{r=await(await fetch('/api/google/calendar?days='+days)).json();}catch(e){g.innerHTML=gErr({error:'network'});return;}
+  if(r.error){g.innerHTML=gErr(r);return;}
+  var sel=[1,7,30].map(function(d){return '<button class="mini'+(days==d?' go':'')+'" onclick="calDays('+d+')">'+(d==1?'Today':d+'d')+'</button>';}).join('');
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128197; Calendar</b> <span class="sub">'+e2(r.email||'')+'</span><div style="margin-left:auto;display:flex;gap:6px">'+sel+'<button class="mini go" onclick="calNew()">＋ Event</button><button class="mini" onclick="loadCalendar()">&#8635;</button></div></div></div>';
+  var evs=r.events||[];
+  if(!evs.length){h+=empty('No events in this window.');g.innerHTML=h;return;}
+  var lastDay='';
+  evs.forEach(function(e){var d=new Date(e.start);var key=isNaN(d)?'':d.toDateString();
+    if(key!=lastDay){lastDay=key;h+='<div style="grid-column:1/-1;margin:8px 2px 0;font-weight:700;color:var(--mut)">'+(key?d.toLocaleDateString([],{weekday:'long',month:'short',day:'numeric'}):'')+'</div>';}
+    var t=e.allDay?'all day':(isNaN(d)?'':d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}));
+    h+='<div class="card" style="cursor:default"><div style="display:flex;gap:8px"><b style="flex:0 0 auto;color:var(--acc,#c9a227)">'+t+'</b><b style="flex:1">'+e2(e.summary)+'</b></div>'
+      +(e.location?'<div class="meta" style="margin-top:3px">&#128205; '+e2(e.location)+'</div>':'')
+      +(e.attendees&&e.attendees.length?'<div class="meta" style="margin-top:3px">'+e.attendees.length+' guest(s)</div>':'')
+      +((e.hangout||e.link)?'<div style="margin-top:7px;display:flex;gap:6px">'+(e.hangout?'<a class="mini go" href="'+e2(e.hangout)+'" target="_blank">&#128249; Join</a>':'')+(e.link?'<a class="mini" href="'+e2(e.link)+'" target="_blank">Open</a>':'')+'</div>':'')+'</div>';
+  });
+  g.innerHTML=h;
+}
+function calDays(d){window.CALDAYS=d;loadCalendar();}
+function calNew(){var now=new Date();var pad=function(n){return (n<10?'0':'')+n;};
+  var fmt=function(dt){return dt.getFullYear()+'-'+pad(dt.getMonth()+1)+'-'+pad(dt.getDate())+'T'+pad(dt.getHours())+':'+pad(dt.getMinutes());};
+  showM('<h2>＋ New event</h2>'
+    +'<div class="row"><label>Title</label><input id="evT" placeholder="Event title"></div>'
+    +'<div class="row"><label>Start</label><input id="evS" type="datetime-local" value="'+fmt(new Date(now.getTime()+3600000))+'"></div>'
+    +'<div class="row"><label>End</label><input id="evE" type="datetime-local" value="'+fmt(new Date(now.getTime()+7200000))+'"></div>'
+    +'<div class="row"><label>Location</label><input id="evL" placeholder="optional"></div>'
+    +'<div class="row"><label>Notes</label><textarea id="evD" rows="3" style="width:100%"></textarea></div>'
+    +'<div class="btns"><button class="btn" onclick="closeM()">Cancel</button><button class="btn go" onclick="calDoCreate()">Create</button></div>');
+}
+async function calDoCreate(){
+  var t=gVal('evT'),s=gVal('evS'),e=gVal('evE');if(!t||!s||!e){toast('Title + start + end required',3000);return;}
+  var tz=Intl.DateTimeFormat().resolvedOptions().timeZone;
+  toast('Creating…');var r=await(await fetch('/api/google/calendar-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({summary:t,start:s+':00',end:e+':00',location:gVal('evL'),desc:gVal('evD'),tz:tz})})).json();
+  if(r&&!r.error){closeM();toast('Event created &#10003;');loadCalendar();}else toast('Failed: '+((r||{}).error||'?'),5000);
+}
+
+var DRIVEQ='';
+async function loadDrive(){
+  var g=document.getElementById("grid");g.innerHTML=empty("Loading Drive…");
+  var r;try{r=await(await fetch('/api/google/drive?q='+encodeURIComponent(DRIVEQ))).json();}catch(e){g.innerHTML=gErr({error:'network'});return;}
+  if(r.error){g.innerHTML=gErr(r);return;}
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128450;&#65039; Drive</b> <span class="sub">'+e2(r.email||'')+'</span><div style="margin-left:auto"><button class="mini" onclick="loadDrive()">&#8635;</button></div></div>'
+    +'<div style="margin-top:8px;display:flex;gap:6px"><input id="drq" placeholder="Search Drive…" value="'+e2(DRIVEQ)+'" style="flex:1" onkeydown="if(event.key===\'Enter\')driveSearch()"><button class="mini" onclick="driveSearch()">Search</button></div></div>';
+  var fs=r.files||[];
+  if(!fs.length){h+=empty('No files.');g.innerHTML=h;return;}
+  h+=fs.map(function(f){var ic=f.icon?'<img src="'+e2(f.icon)+'" style="width:16px;height:16px;vertical-align:-3px">':'&#128196;';
+    return '<div class="card" style="cursor:pointer" onclick="window.open(\''+e2(f.link)+'\',\'_blank\')">'
+      +'<div style="display:flex;gap:8px;align-items:baseline"><span style="flex:0 0 auto">'+ic+'</span><b style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+e2(f.name)+'</b></div>'
+      +'<div class="meta" style="margin-top:4px">'+gDate(f.modified)+(f.owner?' &middot; '+e2(f.owner):'')+(f.size?' &middot; '+driveSize(f.size):'')+'</div></div>';
+  }).join('');
+  g.innerHTML=h;
+}
+function driveSearch(){DRIVEQ=gVal('drq');loadDrive();}
+function driveSize(b){b=+b;if(!b)return'';var u=['B','KB','MB','GB'],i=0;while(b>=1024&&i<3){b/=1024;i++;}return b.toFixed(b<10&&i>0?1:0)+u[i];}
+// live unread-in-inbox count on the Gmail tab (reading the label does NOT mark anything read)
+async function gmailBadgePoll(){
+  if(!(window.CC&&window.CC.google))return;
+  var b=document.getElementById('gmailBadge');if(!b)return;
+  try{var r=await(await fetch('/api/google/gmail-unread')).json();var n=(r&&r.count)||0;
+    if(n>0){b.textContent=n>99?'99+':n;b.style.display='';}else b.style.display='none';}catch(e){}
+}
+if(window.CC&&window.CC.google){setInterval(gmailBadgePoll,30000);setTimeout(gmailBadgePoll,2000);}
 async function loadComms(){
   let d={};try{d=await(await fetch('/api/mesh')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load comms.");return;}
   const me=d.self||"me";const peers=(d.peers||[]).filter(p=>p.id!==me);
@@ -6071,7 +6405,7 @@ async function treeResume(id,cwd,fork){const _c=CONVOMAP[id]||{};toast((fork?"Fo
   const r=await(await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({machine:"studio",id:id,cwd:cwd,fork:!!fork,label:_c.label||""})})).json();
   if(!r||!r.ok){toast("Failed: "+((r||{}).error||"?"),5000);return;}
   closeInfo();_openTerm(r);}
-const NAV={portfolio:'Portfolio',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',agency:'Agency',calls:'Calls',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Usage Analytics',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor'};
+const NAV={portfolio:'Portfolio',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',agency:'Agency',calls:'Calls',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Usage Analytics',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive'};
 // ---- Chief of Staff: your office (top-level command + a direct line to me) ----
 function gotoLens(l){const b=document.querySelector('#lens button[data-l="'+l+'"]');if(b)b.click();}
 async function talkChief(){toast("Opening your Chief of Staff…");
@@ -6290,6 +6624,9 @@ function applyPreset(){var L=(window.CC&&window.CC.lenses);if(!L||!L.length)retu
   document.querySelectorAll('#lens button[data-l]').forEach(function(b){if(L.indexOf(b.dataset.l)<0)b.style.display='none';});
   if(!(window.CC&&window.CC.agency)){['agency','calls'].forEach(function(l){var _ab=document.querySelector('#lens button[data-l="'+l+'"]');if(_ab)_ab.style.display='none';});}
   if(!(window.CC&&window.CC.pipeline)){var _pl=document.querySelector('#lens button[data-l="pipeline"]');if(_pl)_pl.style.display='none';}  // Pipeline lens self-hides until the node declares a pipeline manifest
+  // Google lenses self-hide unless the google-workspace extension has a token on this node; when present they
+  // override the preset-hide above (they live outside the preset lens list). See navSeedGoogle() for the folder.
+  ['gmail','calendar','drive'].forEach(function(l){var _gb=document.querySelector('#lens button[data-l="'+l+'"]');if(_gb)_gb.style.display=(window.CC&&window.CC.google)?'':'none';});
   if(!(window.CC&&window.CC.role==='org')){var _pb=document.querySelector('#lens button[data-l="portfolio"]');if(_pb)_pb.style.display='none';}  // Portfolio = ClaudeGrandfather (overseer) only
   LENS=L[0];   // land on the preset's first lens (portfolio for an overseer, sessions for a project)
   document.querySelectorAll('#lens button').forEach(function(b){b.classList.toggle('on',b.dataset.l===LENS);});
@@ -6429,7 +6766,15 @@ function setupNavDnD(){
   });
   nav.addEventListener("dblclick",function(e){var g=e.target.closest('.navgroup');if(g){e.preventDefault();navRenameGrp(g.dataset.g);}});
 }
-setupNavDnD();renderNav();
+function navSeedGoogle(){   // one-time: tuck the live Google lenses into a "Google" category folder
+  if(!(window.CC&&window.CC.google))return;
+  var s=navState();if(s._gseed)return;
+  if(!s.tree||!s.tree.length)s.tree=seedTree();
+  ['gmail','calendar','drive'].forEach(function(l){treeRemoveLens(s.tree,l);});
+  s.tree.unshift({t:"grp",id:"gGoogle",name:"Google",collapsed:false,items:["gmail","calendar","drive"]});
+  s._gseed=true;s.mode="manual";navSave(s);renderNav();
+}
+setupNavDnD();renderNav();navSeedGoogle();
 load();
 if(!restoreFromHash())syncHash(false);   // restore exact place on refresh; else stamp the landing lens as the back-stack baseline (so the first Back lands here, not the overseer)
 // live health: repaint the header strip (+ machines lens) every 60s without a page reload

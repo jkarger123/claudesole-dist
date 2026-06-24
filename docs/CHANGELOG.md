@@ -3,6 +3,23 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.14.0 -- 2026-06-23
+- NEW (Google Workspace -- live embedded client): a real Gmail + Calendar + Drive experience built into the
+  console, auto-grouped under a collapsible "Google" nav category (uses the 0.13.1 categories). The CC server
+  calls Google's REST APIs directly with the refresh token the google-workspace extension already minted
+  (extensions/google-workspace/secrets/tokens/<acct>.json) -- no MCP/agent in the request path. Stdlib only.
+  - GMAIL: inbox/unread/starred/sent views + search; read/triage (archive, star, trash) with one click;
+    open a message (HTML rendered in a sandboxed iframe) and Reply; Compose + send. Live unread-count badge
+    on the tab. **Read/unread is Gmail's REAL state, both ways**: listing uses format=metadata so pulling the
+    inbox NEVER marks anything read; opening here removes the UNREAD label (reads here -> read in Gmail);
+    reading in Gmail shows read here on the next refresh (no local shadow state).
+  - CALENDAR: upcoming events (Today / 7d / 30d) grouped by day with location, guests, Join links; create
+    events (with the browser's timezone).
+  - DRIVE: recent files + search, open in Drive, type icons, sizes.
+  - Self-hides on any node without a Google token (window.CC.google). Endpoints under /api/google/*.
+  - NOTE: AFP has no Google token so this lens is hidden there; AFP stays fine on 0.13.4 (update at leisure,
+    never with remote restart:true).
+
 ## 0.13.4 -- 2026-06-23
 - FIX (boot hang on iCloud nodes -- took AFP down): the server printed its banner then ran
   regen_treemap() (whole-tree walk) + icloud_age_off() (iCloud file moves) BEFORE serve_forever() --
