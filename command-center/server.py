@@ -6535,7 +6535,7 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-sel{font-size:11px}
 
 /* --- reader pane (Quick Look detail) --- */
-.gm-read{display:flex;flex-direction:column;overflow:hidden;background:var(--bg2)}
+.gm-read{display:flex;flex-direction:column;overflow:hidden;background:var(--bg2);min-height:0}
 .gm-rdhead{flex:0 0 auto;padding:11px 14px;border-bottom:1px solid var(--line);background:var(--bg2)}
 .gm-rdsubj{font-size:16px;font-weight:700;line-height:1.3;margin:0 0 4px;display:flex;align-items:center;gap:8px}
 .gm-rdmeta{font-size:11.5px;color:var(--dim)}
@@ -6543,8 +6543,12 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-act{font-size:12px;padding:6px 11px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;font-weight:600;display:inline-flex;align-items:center;gap:5px}
 .gm-act:hover{border-color:var(--accent)}
 .gm-act.go{background:var(--grad);color:#15120a;border:none;font-weight:700}
-.gm-thread{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:7px}
-.gm-msg{border:1px solid var(--line);border-radius:11px;background:var(--bg);overflow:hidden;transition:box-shadow .15s ease,border-color .15s ease}
+/* min-height:0 is REQUIRED: without it a flex item won't shrink below its content, so a tall email makes
+   .gm-thread grow and .gm-read clips it (overflow:hidden) with NO scroll. This is the actual "cut off" bug. */
+.gm-thread{flex:1;min-height:0;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:7px}
+/* flex:0 0 auto is REQUIRED: .gm-thread is a flex column, so without it the message cards SHRINK to fit the
+   pane and overflow:hidden clips the email inside the squashed card -- the real "cut off" cause. */
+.gm-msg{flex:0 0 auto;border:1px solid var(--line);border-radius:11px;background:var(--bg);overflow:hidden;transition:box-shadow .15s ease,border-color .15s ease}
 /* collapsed older replies = clean compact one-line rows (sender + preview); hover highlights. The MIDDLE of
    a long thread is folded behind a "N earlier messages" pill (see gm-earlier) so a 40-message chain stays tidy. */
 .gm-msg:not(.open){cursor:pointer}

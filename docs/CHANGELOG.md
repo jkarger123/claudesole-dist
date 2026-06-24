@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.9 -- 2026-06-24
+- FIX (email cut off — the ACTUAL root cause, finally): it was never the email height. `.gm-thread` is a
+  flex column; its message cards had no `flex-shrink:0`, so a tall email got SHRUNK to fit the pane and
+  `.gm-msg{overflow:hidden}` clipped the body inside the squashed card -- with no scroll. Added
+  `flex:0 0 auto` on `.gm-msg` and `min-height:0` on `.gm-read`/`.gm-thread` (a flex item won't scroll
+  without it). Proven by a headless layout test: the thread pane is now bounded to the pane height and
+  scrollable (clientHeight 507, scrollHeight 3917) instead of clipping. The short iframe had masked this the
+  whole time. Emails now open full-length and the reading pane scrolls like a normal client.
+
 ## 0.21.8 -- 2026-06-24
 - FIX (email cut off — the REAL fix): replaced the per-message iframe (whose height had to be measured, and
   kept getting it short) with a **Shadow DOM** render. The email's CSS is still encapsulated, but the host
