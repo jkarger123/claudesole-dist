@@ -6289,8 +6289,8 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 #sessprev .sb-pvframe{flex:1;min-height:0;width:100%;border:0;display:block;background:#0a0a0f}
 @media(max-width:820px){#sessbar,#sessprev{display:none!important}}
 /* Sessions LENS: focus = ONLY the big terminal (littles removed); in-flow column, never floats over usage. */
-.focusonly{grid-column:1/-1;display:flex;flex-direction:column;
-  height:calc(100vh - 232px);min-height:440px}
+.focusonly{display:flex;flex-direction:column;
+  height:calc(100vh - 300px);min-height:420px}   /* offset accounts for header card + usage strip + the bottom taskbar so the terminal fits without overlapping */
 .focusonly .bigsess{flex:1;min-height:0}
 .focusonly .bigsess .stframe{flex:1;min-height:0}
 @media(max-width:820px){.focusonly{height:auto}.focusonly .bigsess{height:calc(100dvh - 200px);min-height:380px}}
@@ -7277,7 +7277,7 @@ async function refreshTokens(){let d;try{d=await(await fetch('/api/token-usage')
   renderStrip();
   const ss=TOKDATA.sessions||{};for(const nm in ss){const el=document.getElementById('ctx_'+cssid(nm));if(!el)continue;const pct=Math.round(ss[nm].pct),col=ctxCol(pct);el.textContent=pct+'%';el.style.color=col;el.style.borderColor=col+'55';el.title='context: '+fmtTok(ss[nm].used)+' / '+fmtTok(ss[nm].window)+' used · '+pct+'% free';}}
 function setSessView(v){SESSVIEW=v;localStorage.setItem('hpcc_sessview',v);loadSessions(true);syncHash();}
-function sessHint(){return SESSVIEW=='focus'?'One big working terminal + a live dock below. Hover a little to pop it up usable; move away to shrink it back. Click a little to swap it into the big.':
+function sessHint(){return SESSVIEW=='focus'?'One big working terminal. Switch which session is big with the chips above it; the bottom taskbar holds every session (hover to blow one up).':
   SESSVIEW=='grid'?'Equal tiles, all live (auto-refresh). Click a tile header to maximize it into a full terminal.':'Plain list with controls.';}
 // ---- Remote Desktop lens: noVNC over a localhost VNC proxy (mac Screen Sharing) ----
 const VNCURL='/static/novnc/vnc.html?path=wsvnc&resize=scale&reconnect=true&autoconnect=true&show_dot=true&bell=off';
@@ -10291,7 +10291,7 @@ async function loadSessions(quiet){
   else if(SESSVIEW=='list')body=s.map(sessRow).join("");
   else if(SESSVIEW=='grid')body='<div id="desk" class="desk desk-grid">'+s.map((x,i)=>sessTile(x,i)).join("")+'</div>';
   else body=renderFocus(s);
-  document.getElementById("grid").innerHTML=head+body;
+  document.getElementById("grid").innerHTML='<div class="modstack">'+head+body+'</div>';   // clean vertical stack -- usage strip (in head) sits ABOVE the focus block, never overlapped
   unpeekNow(); startSnaps();
 }
 function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span><span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)

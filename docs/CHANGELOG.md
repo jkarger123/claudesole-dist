@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.20.3 -- 2026-06-24
+- FIX (Sessions lens: session chips overlapping the usage strip): the head card (with the metered-usage
+  strip) and the focus block are now wrapped in a clean vertical stack (.modstack) so usage always sits
+  ABOVE the chips + terminal; the focus terminal height now accounts for the header + usage + the bottom
+  taskbar so nothing overlaps. Stale "live dock below" hint updated to the current chips+taskbar model.
+
 ## 0.20.2 -- 2026-06-24
 - FIX (mobile top nav missing): the desktop sessions-taskbar was shrinking #app + had a 900px breakpoint
   that fought the 820px nav breakpoint, clipping the mobile top tab bar. The taskbar + its #app height
