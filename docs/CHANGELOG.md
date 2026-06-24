@@ -3,6 +3,10 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.26 -- 2026-06-24
+- account_wallet added to superadmin set_config allowlist so Mission Control can enable the Claude Accounts
+  lens on a node (e.g. AFP) remotely.
+
 ## 0.21.25 -- 2026-06-24
 - REBUILD (Claude Accounts — now switches the GLOBAL login, live across all sessions): the previous version
   used per-session env tokens (wrong model — switching only affected NEW sessions and fought the native
