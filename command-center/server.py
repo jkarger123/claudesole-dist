@@ -6092,6 +6092,7 @@ async function modLaunch(rel){toast("Launching a session in "+rel+"…");
 // drop into the Sessions lens (Focus view) with this session as the BIG terminal; the previous big
 // becomes a dock little. Beats opening a new browser tab.
 function openInSessions(name){SESSVIEW='focus';localStorage.setItem('hpcc_sessview','focus');SESSBIG=name;
+  if(typeof sbAck==='function')sbAck(name);   // viewing it clears its taskbar gold flash immediately
   gotoLens('sessions');setTimeout(()=>loadSessions(true),1000);}
 // Default: open a session/terminal INLINE in the Sessions tab. New browser tabs ONLY via the arrow icon.
 function _openTerm(r){const n=(r&&(r.session||decodeURIComponent((String(r.term||'').split('name=')[1]||''))))||'';
@@ -9200,15 +9201,19 @@ async function sbPoll(){
   var r; try{ r=await(await fetch('/api/session-bar')).json(); }catch(e){ return; }
   var list=r.sessions||[], names={};
   list.forEach(function(s){ names[s.name]=1;
-    if(SB.prev[s.name]===true && s.busy===false){ SB.done[s.name]=true; }   // busy -> idle = just finished
+    // busy -> idle = just finished -> flag for the gold pulse, UNLESS you're already viewing it big in the
+    // Sessions tab (you've obviously seen it).
+    if(SB.prev[s.name]===true && s.busy===false && !sbViewing(s.name)){ SB.done[s.name]=true; }
     SB.prev[s.name]=s.busy;
   });
   Object.keys(SB.done).forEach(function(n){ if(!names[n]) delete SB.done[n]; });
   Object.keys(SB.prev).forEach(function(n){ if(!names[n]) delete SB.prev[n]; });
   sbRender(list);
 }
+function sbViewing(n){ return LENS==='sessions' && SESSBIG===n; }   // is this session the one open big in the Sessions tab?
 function sbRender(list){
   var bar=document.getElementById('sessbar'); if(!bar)return;
+  if(LENS==='sessions' && SESSBIG && SB.done[SESSBIG]) delete SB.done[SESSBIG];   // viewing it = acknowledged
   var doneCount=list.filter(function(s){return SB.done[s.name];}).length;
   var h='<span class="sb-title">Sessions</span>';
   h+= list.length ? list.map(function(s){

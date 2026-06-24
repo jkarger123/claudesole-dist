@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.16.1 -- 2026-06-24
+- FIX (sessions taskbar): opening/viewing a session big in the Sessions tab now clears that session's gold
+  "done" pulse in the bottom taskbar immediately (you're obviously seeing it) -- and a session that finishes
+  while you're already viewing it big never starts pulsing. (Acknowledge-on-view, in addition to hover/click.)
+
 ## 0.16.0 -- 2026-06-24
 - NEW (global sessions taskbar -- desktop): a Windows-style dock pinned to the bottom of EVERY lens showing
   ALL project sessions. Each tile shows a live state dot (gold blinking = Claude is working). Hover a tile to
