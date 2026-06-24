@@ -3,6 +3,25 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.15.0 -- 2026-06-24
+- REBUILD (Google suite -- "beat Google"): a ground-up rebuild of the Gmail/Calendar/Drive lenses into a
+  premium, keyboard-first client, produced by a 10-agent research+design+build workflow (SOTA study of
+  Superhuman/Shortwave/Notion Calendar/Fantastical/Vimcal/Dropbox/Finder) and integrated surgically.
+  - SHARED SHELL: a ⌘K/Ctrl-K command palette (fuzzy, cross-surface actions + unified search), a global
+    keyboard router, list/detail split-pane layout, skeleton loaders, undo-toasts. One design system
+    (stepped surfaces, gold-only accents; new :root tokens --acc/--el1..3/--hair/--tint/--ring/z-stack).
+  - GMAIL: saved lanes (rail of stored queries), single-key triage (j/k/e/s/u/r/c/x) all optimistic with
+    z-undo, threaded reader (new gmail-thread), operator-chip search, labels, snooze (client+label),
+    HTML compose w/ reply headers. Read/unread invariant preserved (list=metadata never marks read;
+    opening marks read).
+  - CALENDAR: real time-grid (day/week/month/agenda) with a gold now-line + overlap splitting, mini-month
+    navigator, natural-language quick-add as primary create, drag move/resize (new calendar-update/-delete).
+  - DRIVE: Quick Look preview (spacebar, full-screen iframe), real folder nav + breadcrumbs, live filter +
+    sort, grid/list, multi-select batch actions (new drive-modify), thumbnails (server proxy drive-thumb),
+    text/code preview (drive-content).
+  - New endpoints under /api/google/*: gmail-thread, gmail-labels, gmail-label, gmail-snooze-label,
+    calendar-update, calendar-delete, drive-get, drive-modify, drive-thumb, drive-content. Stdlib only.
+
 ## 0.14.0 -- 2026-06-23
 - NEW (Google Workspace -- live embedded client): a real Gmail + Calendar + Drive experience built into the
   console, auto-grouped under a collapsible "Google" nav category (uses the 0.13.1 categories). The CC server

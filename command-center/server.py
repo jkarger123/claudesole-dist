@@ -573,61 +573,307 @@ def gmail_get(mid):
             "cc": hs.get("cc", ""), "subject": hs.get("subject", "(no subject)"), "date": hs.get("date", ""),
             "body": _gmail_body(m.get("payload", {})), "labels": m.get("labelIds", [])}
 
-def gmail_send(to, subject, body, cc="", bcc="", thread_id=None):
-    import base64
-    lines = ["To: " + to]
-    if cc: lines.append("Cc: " + cc)
-    if bcc: lines.append("Bcc: " + bcc)
-    lines += ["Subject: " + subject, "Content-Type: text/plain; charset=utf-8", "", body]
-    raw = base64.urlsafe_b64encode("\r\n".join(lines).encode("utf-8")).decode()
-    payload = {"raw": raw}
-    if thread_id: payload["threadId"] = thread_id
-    return _g_api("POST", GMAIL_BASE + "/messages/send", body=payload)
-
 def gmail_modify(mid, action):
-    if action == "trash": return _g_api("POST", GMAIL_BASE + "/messages/" + mid + "/trash")
-    m = {"archive": {"removeLabelIds": ["INBOX"]}, "read": {"removeLabelIds": ["UNREAD"]},
-         "unread": {"addLabelIds": ["UNREAD"]}, "star": {"addLabelIds": ["STARRED"]},
-         "unstar": {"removeLabelIds": ["STARRED"]}}
+    # superset of the original: adds unarchive + untrash (so z-undo is real),
+    # plus important/spam toggles. INBOX add == unarchive; UNTRASH != trash.
+    if action == "trash":   return _g_api("POST", GMAIL_BASE + "/messages/" + mid + "/trash")
+    if action == "untrash": return _g_api("POST", GMAIL_BASE + "/messages/" + mid + "/untrash")
+    m = {"archive": {"removeLabelIds": ["INBOX"]},      "unarchive": {"addLabelIds": ["INBOX"]},
+         "read": {"removeLabelIds": ["UNREAD"]},        "unread": {"addLabelIds": ["UNREAD"]},
+         "star": {"addLabelIds": ["STARRED"]},          "unstar": {"removeLabelIds": ["STARRED"]},
+         "important": {"addLabelIds": ["IMPORTANT"]},   "unimportant": {"removeLabelIds": ["IMPORTANT"]},
+         "spam": {"addLabelIds": ["SPAM"], "removeLabelIds": ["INBOX"]}, "notspam": {"removeLabelIds": ["SPAM"]}}
     if action not in m: return {"error": "unknown action: " + str(action)}
     r = _g_api("POST", GMAIL_BASE + "/messages/" + mid + "/modify", body=m[action])
     return {"ok": "error" not in r, **({"error": r["error"]} if isinstance(r, dict) and "error" in r else {})}
 
-def calendar_events(days=7):
-    now = time.time()
-    tmin = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 3600))
-    tmax = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + int(days or 7) * 86400))
-    r = _g_api("GET", "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-               params={"timeMin": tmin, "timeMax": tmax, "singleEvents": "true", "orderBy": "startTime", "maxResults": 50})
+def gmail_label(mid, add=None, remove=None):
+    # generic add/remove labels by id -- used by client-side snooze/bundle.
+    body = {}
+    if add:    body["addLabelIds"]    = add    if isinstance(add, list)    else [add]
+    if remove: body["removeLabelIds"] = remove if isinstance(remove, list) else [remove]
+    if not body: return {"error": "no label change"}
+    r = _g_api("POST", GMAIL_BASE + "/messages/" + mid + "/modify", body=body)
+    return {"ok": "error" not in r, **({"error": r["error"]} if isinstance(r, dict) and "error" in r else {})}
+
+def _gmail_ensure_label(name):
+    # find-or-create a user label by name; returns its id (used for snooze lane).
+    r = _g_api("GET", GMAIL_BASE + "/labels")
+    if isinstance(r, dict) and "error" not in r:
+        for l in r.get("labels", []):
+            if l.get("name") == name: return l.get("id")
+    c = _g_api("POST", GMAIL_BASE + "/labels",
+               body={"name": name, "labelListVisibility": "labelShow", "messageListVisibility": "show"})
+    return c.get("id") if isinstance(c, dict) and "error" not in c else None
+
+def gmail_labels():
+    # labels for the rail: all user labels + the few useful system ones.
+    r = _g_api("GET", GMAIL_BASE + "/labels")
+    if not isinstance(r, dict) or "error" in r:
+        return r if isinstance(r, dict) else {"error": "labels failed"}
+    keep_sys = {"STARRED", "IMPORTANT", "SENT", "DRAFT"}
+    out = []
+    for l in r.get("labels", []):
+        if l.get("type") == "system" and l.get("id") not in keep_sys: continue
+        out.append({"id": l.get("id"), "name": l.get("name"),
+                    "unread": l.get("messagesUnread", 0), "total": l.get("messagesTotal", 0)})
+    out.sort(key=lambda x: (x["name"].lower()))
+    return {"labels": out, "email": _GOOGLE_TOK.get("email")}
+
+def _gmail_attachments(payload):
+    # flat list of real attachments (filename + size + attachmentId), skips inline body parts.
+    out = []
+    def walk(p):
+        fn = p.get("filename") or ""
+        bd = p.get("body", {}) or {}
+        if fn and bd.get("attachmentId"):
+            out.append({"filename": fn, "mime": p.get("mimeType", ""),
+                        "size": bd.get("size", 0), "attachmentId": bd.get("attachmentId")})
+        for sub in (p.get("parts") or []): walk(sub)
+    walk(payload or {})
+    return out
+
+def gmail_snooze_label():
+    # ensure & return the snooze lane label id (CC/Snoozed). client snoozes by
+    # adding this label + removing INBOX; a routine can later resurface them.
+    lid = _gmail_ensure_label("CC/Snoozed")
+    return {"id": lid}
+
+def gmail_thread(tid):
+    # full threaded reader payload: every message in the thread, OLDEST->NEWEST
+    # then reversed to NEWEST-FIRST stacked cards. Opening the thread marks it
+    # read (thread modify removes UNREAD) -- listing never does this.
+    t = _g_api("GET", GMAIL_BASE + "/threads/" + tid, params={"format": "full"})
+    if not isinstance(t, dict) or "error" in t:
+        return t if isinstance(t, dict) else {"error": "thread failed"}
+    msgs = []
+    for m in t.get("messages", []):
+        hs = {h["name"].lower(): h["value"] for h in m.get("payload", {}).get("headers", [])}
+        lab = m.get("labelIds", [])
+        msgs.append({"id": m.get("id"), "from": hs.get("from", ""), "to": hs.get("to", ""),
+                     "cc": hs.get("cc", ""), "subject": hs.get("subject", "(no subject)"),
+                     "date": hs.get("date", ""), "messageId": hs.get("message-id", ""),
+                     "references": hs.get("references", ""), "snippet": m.get("snippet", ""),
+                     "body": _gmail_body(m.get("payload", {})),
+                     "attachments": _gmail_attachments(m.get("payload", {})),
+                     "unread": "UNREAD" in lab, "starred": "STARRED" in lab, "labels": lab})
+    msgs.reverse()  # newest first
+    try: _g_api("POST", GMAIL_BASE + "/threads/" + tid + "/modify", body={"removeLabelIds": ["UNREAD"]})
+    except Exception: pass
+    subj = msgs[0]["subject"] if msgs else "(no subject)"
+    return {"id": tid, "subject": subj, "messages": msgs, "count": len(msgs),
+            "email": _GOOGLE_TOK.get("email")}
+
+def gmail_send(to, subject, body, cc="", bcc="", thread_id=None, html="", in_reply_to="", references=""):
+    # REPLACES the original gmail_send: HTML support + proper RFC reply headers
+    # (In-Reply-To / References) so replies thread natively in every mail client.
+    import base64 as _b64
+    is_html = bool(html)
+    content = html if is_html else body
+    headers = ["To: " + to]
+    if cc:  headers.append("Cc: " + cc)
+    if bcc: headers.append("Bcc: " + bcc)
+    headers.append("Subject: " + subject)
+    if in_reply_to:
+        headers.append("In-Reply-To: " + in_reply_to)
+        headers.append("References: " + (references or in_reply_to))
+    elif references:
+        headers.append("References: " + references)
+    headers.append("MIME-Version: 1.0")
+    headers.append("Content-Type: text/%s; charset=utf-8" % ("html" if is_html else "plain"))
+    raw_msg = "\r\n".join(headers) + "\r\n\r\n" + content
+    raw = _b64.urlsafe_b64encode(raw_msg.encode("utf-8")).decode()
+    payload = {"raw": raw}
+    if thread_id: payload["threadId"] = thread_id
+    return _g_api("POST", GMAIL_BASE + "/messages/send", body=payload)
+
+CAL_BASE = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
+
+def calendar_events(days=7, tmin=None, tmax=None):
+    """Visible-window events. Pass tmin/tmax (RFC3339, e.g. 2026-06-22T00:00:00Z)
+    for the week/day grid; falls back to a now-anchored +days window otherwise.
+    Returns colorId/status/description/organizer so the grid can paint + edit."""
+    if not tmin or not tmax:
+        now = time.time()
+        tmin = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 3600))
+        tmax = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + int(days or 7) * 86400))
+    r = _g_api("GET", CAL_BASE,
+               params={"timeMin": tmin, "timeMax": tmax, "singleEvents": "true",
+                       "orderBy": "startTime", "maxResults": 250})
     if "error" in r: return r
     evs = []
     for e in r.get("items", []):
+        if e.get("status") == "cancelled": continue
         st = e.get("start", {}); en = e.get("end", {})
-        evs.append({"id": e.get("id"), "summary": e.get("summary", "(no title)"), "location": e.get("location", ""),
-                    "start": st.get("dateTime") or st.get("date"), "end": en.get("dateTime") or en.get("date"),
-                    "allDay": "date" in st, "link": e.get("htmlLink"), "hangout": e.get("hangoutLink", ""),
-                    "attendees": [a.get("email") for a in e.get("attendees", [])][:8]})
-    return {"events": evs, "days": int(days or 7), "email": _GOOGLE_TOK.get("email")}
+        evs.append({"id": e.get("id"), "summary": e.get("summary", "(no title)"),
+                    "location": e.get("location", ""), "description": e.get("description", ""),
+                    "start": st.get("dateTime") or st.get("date"),
+                    "end": en.get("dateTime") or en.get("date"),
+                    "allDay": "date" in st, "link": e.get("htmlLink"),
+                    "hangout": e.get("hangoutLink", ""), "colorId": e.get("colorId", ""),
+                    "status": e.get("status", "confirmed"),
+                    "recurring": bool(e.get("recurringEventId")),
+                    "organizer": (e.get("organizer") or {}).get("email", ""),
+                    "attendees": [{"email": a.get("email", ""),
+                                   "status": a.get("responseStatus", "")}
+                                  for a in e.get("attendees", [])][:20]})
+    return {"events": evs, "tmin": tmin, "tmax": tmax, "days": int(days or 7),
+            "tz": _GOOGLE_TOK.get("tz") or "", "email": _GOOGLE_TOK.get("email")}
 
-def calendar_create(summary, start, end, desc="", location="", tz=None):
-    s = {"dateTime": start}; en = {"dateTime": end}
-    if tz: s["timeZone"] = tz; en["timeZone"] = tz
-    return _g_api("POST", "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-                  body={"summary": summary, "description": desc, "location": location, "start": s, "end": en})
+def calendar_create(summary, start, end, desc="", location="", tz=None, all_day=False, color=""):
+    if all_day:
+        s = {"date": start}; en = {"date": end}
+    else:
+        s = {"dateTime": start}; en = {"dateTime": end}
+        if tz: s["timeZone"] = tz; en["timeZone"] = tz
+    body = {"summary": summary, "description": desc, "location": location, "start": s, "end": en}
+    if color: body["colorId"] = str(color)
+    return _g_api("POST", CAL_BASE, body=body)
 
-def drive_list(q="", maxn=30):
-    query = (q or "").strip().replace("'", "")
-    qexpr = ("name contains '%s' and trashed=false" % query) if query else "trashed=false"
-    r = _g_api("GET", "https://www.googleapis.com/drive/v3/files",
-               params={"pageSize": min(int(maxn or 30), 100), "orderBy": "modifiedTime desc", "q": qexpr,
-                       "fields": "files(id,name,mimeType,modifiedTime,size,webViewLink,iconLink,owners(displayName))"})
-    if "error" in r: return r
-    fs = []
-    for f in r.get("files", []):
-        fs.append({"id": f["id"], "name": f.get("name", ""), "mime": f.get("mimeType", ""),
-                   "modified": f.get("modifiedTime", ""), "size": f.get("size"), "link": f.get("webViewLink"),
-                   "icon": f.get("iconLink"), "owner": (f.get("owners") or [{}])[0].get("displayName", "")})
-    return {"files": fs, "q": q, "email": _GOOGLE_TOK.get("email")}
+def calendar_update(eid, summary=None, start=None, end=None, desc=None,
+                    location=None, tz=None, all_day=None, color=None):
+    """events.patch — only sends the fields provided (drag/resize sends just start/end)."""
+    if not eid: return {"error": "missing event id"}
+    body = {}
+    if summary is not None:  body["summary"] = summary
+    if desc is not None:     body["description"] = desc
+    if location is not None: body["location"] = location
+    if color is not None:    body["colorId"] = str(color)
+    if start is not None or end is not None:
+        if all_day:
+            if start is not None: body["start"] = {"date": start}
+            if end is not None:   body["end"] = {"date": end}
+        else:
+            if start is not None:
+                body["start"] = {"dateTime": start}
+                if tz: body["start"]["timeZone"] = tz
+            if end is not None:
+                body["end"] = {"dateTime": end}
+                if tz: body["end"]["timeZone"] = tz
+    if not body: return {"error": "nothing to update"}
+    r = _g_api("PATCH", CAL_BASE + "/" + eid, body=body)
+    return {"ok": "error" not in r, "id": r.get("id", eid),
+            **({"error": r["error"]} if isinstance(r, dict) and "error" in r else {})}
+
+def calendar_delete(eid):
+    if not eid: return {"error": "missing event id"}
+    r = _g_api("DELETE", CAL_BASE + "/" + eid)
+    # successful delete returns empty body ({}); HTTPError -> {"error":...}
+    return {"ok": not (isinstance(r, dict) and "error" in r),
+            **({"error": r["error"]} if isinstance(r, dict) and "error" in r else {})}
+
+DRIVE_BASE = "https://www.googleapis.com/drive/v3/files"
+DRIVE_FIELDS = ("id,name,mimeType,modifiedTime,createdTime,size,webViewLink,webContentLink,"
+                "iconLink,thumbnailLink,starred,trashed,shared,parents,owners(displayName),"
+                "lastModifyingUser(displayName),capabilities(canDownload)")
+
+def _drive_row(f):
+    mime = f.get("mimeType", "")
+    return {"id": f["id"], "name": f.get("name", ""), "mime": mime,
+            "folder": mime == "application/vnd.google-apps.folder",
+            "gdoc": mime.startswith("application/vnd.google-apps"),
+            "modified": f.get("modifiedTime", ""), "created": f.get("createdTime", ""),
+            "size": f.get("size"), "link": f.get("webViewLink"),
+            "download": f.get("webContentLink"), "icon": f.get("iconLink"),
+            "thumb": bool(f.get("thumbnailLink")), "starred": bool(f.get("starred")),
+            "shared": bool(f.get("shared")), "parents": f.get("parents", []),
+            "owner": (f.get("owners") or [{}])[0].get("displayName", ""),
+            "editor": (f.get("lastModifyingUser") or {}).get("displayName", ""),
+            "canDownload": (f.get("capabilities") or {}).get("canDownload", True)}
+
+def _drive_crumbs(fid, depth=0):
+    # Resolve the folder chain root -> ... -> fid for the breadcrumb (bounded recursion).
+    if not fid or fid in ("root", "") or depth > 12: return []
+    f = _g_api("GET", DRIVE_BASE + "/" + fid, params={"fields": "id,name,parents"})
+    if not isinstance(f, dict) or "error" in f or not f.get("id"): return []
+    pid = (f.get("parents") or [None])[0]
+    parent = _drive_crumbs(pid, depth + 1) if pid else []
+    return parent + [{"id": f["id"], "name": f.get("name", "?")}]
+
+def drive_list(q="", maxn=300, parent="", kind="", starred="", order=""):
+    clauses = ["trashed=false"]
+    query = (q or "").strip().replace("\\", "").replace("'", "")
+    if query:
+        clauses.append("(name contains '%s' or fullText contains '%s')" % (query, query))
+    elif parent:
+        clauses.append("'%s' in parents" % parent.replace("'", ""))
+    else:
+        clauses.append("'root' in parents")
+    if kind == "folder": clauses.append("mimeType = 'application/vnd.google-apps.folder'")
+    elif kind == "doc": clauses.append("mimeType != 'application/vnd.google-apps.folder'")
+    if starred in ("1", "true", "yes"): clauses.append("starred = true")
+    allowed = {"modifiedTime desc", "modifiedTime", "name", "name desc",
+               "createdTime desc", "createdTime", "quotaBytesUsed desc"}
+    # default: folders first, then name -- nice native ordering; client re-sorts on demand
+    ob = order if order in allowed else ("folder,name" if not query else "modifiedTime desc")
+    r = _g_api("GET", DRIVE_BASE,
+               params={"pageSize": min(int(maxn or 300), 1000), "orderBy": ob,
+                       "q": " and ".join(clauses), "spaces": "drive", "corpora": "user",
+                       "fields": "files(%s)" % DRIVE_FIELDS})
+    if isinstance(r, dict) and "error" in r: return r
+    fs = [_drive_row(f) for f in r.get("files", [])]
+    return {"files": fs, "q": q, "parent": parent,
+            "crumbs": _drive_crumbs(parent) if parent else [],
+            "email": _GOOGLE_TOK.get("email")}
+
+def drive_get(fid):
+    f = _g_api("GET", DRIVE_BASE + "/" + fid, params={"fields": DRIVE_FIELDS})
+    if not isinstance(f, dict) or "error" in f: return f
+    row = _drive_row(f)
+    row["crumbs"] = _drive_crumbs((f.get("parents") or [None])[0]) if f.get("parents") else []
+    return row
+
+def drive_modify(fid, action, value=""):
+    if not fid: return {"error": "no id"}
+    if action == "trash":     r = _g_api("PATCH", DRIVE_BASE + "/" + fid, body={"trashed": True})
+    elif action == "untrash": r = _g_api("PATCH", DRIVE_BASE + "/" + fid, body={"trashed": False})
+    elif action == "star":    r = _g_api("PATCH", DRIVE_BASE + "/" + fid, body={"starred": True})
+    elif action == "unstar":  r = _g_api("PATCH", DRIVE_BASE + "/" + fid, body={"starred": False})
+    elif action == "rename":
+        if not value: return {"error": "no name"}
+        r = _g_api("PATCH", DRIVE_BASE + "/" + fid, body={"name": value})
+    elif action == "copy":
+        r = _g_api("POST", DRIVE_BASE + "/" + fid + "/copy", body=({"name": value} if value else {}))
+    elif action == "move":
+        cur = _g_api("GET", DRIVE_BASE + "/" + fid, params={"fields": "parents"})
+        rmv = ",".join(cur.get("parents", [])) if isinstance(cur, dict) else ""
+        r = _g_api("PATCH", DRIVE_BASE + "/" + fid,
+                   params={"addParents": value, "removeParents": rmv}, body={})
+    else:
+        return {"error": "unknown action: " + str(action)}
+    out = {"ok": not (isinstance(r, dict) and "error" in r)}
+    if isinstance(r, dict) and "error" in r: out["error"] = r["error"]
+    if isinstance(r, dict) and r.get("id"): out["id"] = r["id"]
+    return out
+
+def drive_thumb(fid):
+    # Returns raw image bytes for a file's Drive-hosted thumbnail (Bearer-authed, so it streams
+    # through us instead of the browser hitting an un-authed googleusercontent URL). None on miss.
+    f = _g_api("GET", DRIVE_BASE + "/" + fid, params={"fields": "thumbnailLink"})
+    if not isinstance(f, dict) or not f.get("thumbnailLink"): return None
+    url = f["thumbnailLink"].replace("=s220", "=s400")
+    b = _g_api("GET", url, raw=True)
+    return b if isinstance(b, (bytes, bytearray)) else None
+
+def drive_content(fid):
+    # Text/code Quick Look: fetch (or export, for Google Docs) up to ~2 MB and return UTF-8 text.
+    f = _g_api("GET", DRIVE_BASE + "/" + fid, params={"fields": "mimeType,size,name"})
+    if not isinstance(f, dict) or "error" in f: return f
+    mime = f.get("mimeType", "")
+    try: sz = int(f.get("size") or 0)
+    except Exception: sz = 0
+    if sz > 2000000: return {"error": "too large for inline preview"}
+    if mime.startswith("application/vnd.google-apps"):
+        b = _g_api("GET", DRIVE_BASE + "/" + fid + "/export", params={"mimeType": "text/plain"}, raw=True)
+    else:
+        b = _g_api("GET", DRIVE_BASE + "/" + fid, params={"alt": "media"}, raw=True)
+    if isinstance(b, dict) and "error" in b: return b
+    if not isinstance(b, (bytes, bytearray)): return {"error": "no content"}
+    try: text = b.decode("utf-8")
+    except Exception:
+        try: text = b.decode("latin-1")
+        except Exception: return {"error": "binary content"}
+    return {"text": text[:200000], "name": f.get("name", ""), "mime": mime}
 
 # ---- Dashboard/API authentication (CCR ccr-1782162511858). OFF by default (open) so existing deployments
 # keep working until an operator sets a token; /api/doctor warns loudly while it is off. Enable by setting
@@ -4462,8 +4708,27 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/google/gmail":    return self._s(200, json.dumps(gmail_list(q.get("view", ["inbox"])[0], q.get("q", [""])[0], q.get("max", ["25"])[0])))
         if u.path == "/api/google/gmail-msg":return self._s(200, json.dumps(gmail_get(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-unread": return self._s(200, json.dumps(gmail_unread()))
-        if u.path == "/api/google/calendar": return self._s(200, json.dumps(calendar_events(q.get("days", ["7"])[0])))
-        if u.path == "/api/google/drive":    return self._s(200, json.dumps(drive_list(q.get("q", [""])[0], q.get("max", ["30"])[0])))
+        if u.path == "/api/google/gmail-thread":  return self._s(200, json.dumps(gmail_thread(q.get("id", [""])[0])))
+        if u.path == "/api/google/gmail-labels":  return self._s(200, json.dumps(gmail_labels()))
+        if u.path == "/api/google/calendar":
+            return self._s(200, json.dumps(calendar_events(
+                q.get("days", ["7"])[0],
+                (q.get("tmin", [""])[0] or None),
+                (q.get("tmax", [""])[0] or None))))
+        if u.path == "/api/google/drive":    return self._s(200, json.dumps(drive_list(q.get("q", [""])[0], q.get("max", ["300"])[0], q.get("parent", [""])[0], q.get("kind", [""])[0], q.get("starred", [""])[0], q.get("order", [""])[0])))
+        if u.path == "/api/google/drive-get":
+            return self._s(200, json.dumps(drive_get(q.get("id", [""])[0])))
+        if u.path == "/api/google/drive-content":
+            return self._s(200, json.dumps(drive_content(q.get("id", [""])[0])))
+        if u.path == "/api/google/drive-thumb":
+            b = drive_thumb(q.get("id", [""])[0])
+            if not b: return self._s(404, "")
+            ct = "image/jpeg"
+            if b[:8] == b"\x89PNG\r\n\x1a\n": ct = "image/png"
+            elif b[:4] == b"GIF8": ct = "image/gif"
+            self.send_response(200); self.send_header("Content-Type", ct)
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
         if u.path == "/api/file-get":
             try: ab = projpath(q.get("path", [""])[0])
             except Exception: return self._s(400, "bad path")
@@ -4553,13 +4818,31 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/superadmin-exec":   return self._s(200, json.dumps(superadmin_exec(body)))
         # ---- Google Workspace (live client) writes ----
         if u.path == "/api/google/gmail-send":
-            return self._s(200, json.dumps(gmail_send(body.get("to", ""), body.get("subject", ""), body.get("body", ""),
-                                                       body.get("cc", ""), body.get("bcc", ""), body.get("threadId"))))
+            return self._s(200, json.dumps(gmail_send(
+                body.get("to", ""), body.get("subject", ""), body.get("body", ""),
+                body.get("cc", ""), body.get("bcc", ""), body.get("threadId"),
+                body.get("html", ""), body.get("inReplyTo", ""), body.get("references", ""))))
         if u.path == "/api/google/gmail-modify":
             return self._s(200, json.dumps(gmail_modify(body.get("id", ""), body.get("action", ""))))
+        if u.path == "/api/google/gmail-label":
+            return self._s(200, json.dumps(gmail_label(body.get("id", ""), body.get("add"), body.get("remove"))))
+        if u.path == "/api/google/gmail-snooze-label":
+            return self._s(200, json.dumps(gmail_snooze_label()))
         if u.path == "/api/google/calendar-create":
-            return self._s(200, json.dumps(calendar_create(body.get("summary", ""), body.get("start", ""), body.get("end", ""),
-                                                           body.get("desc", ""), body.get("location", ""), body.get("tz"))))
+            return self._s(200, json.dumps(calendar_create(
+                body.get("summary", ""), body.get("start", ""), body.get("end", ""),
+                body.get("desc", ""), body.get("location", ""), body.get("tz"),
+                bool(body.get("allDay")), body.get("color", ""))))
+        if u.path == "/api/google/calendar-update":
+            return self._s(200, json.dumps(calendar_update(
+                body.get("id", ""),
+                body.get("summary"), body.get("start"), body.get("end"),
+                body.get("desc"), body.get("location"), body.get("tz"),
+                body.get("allDay"), body.get("color"))))
+        if u.path == "/api/google/calendar-delete":
+            return self._s(200, json.dumps(calendar_delete(body.get("id", ""))))
+        if u.path == "/api/google/drive-modify":
+            return self._s(200, json.dumps(drive_modify(body.get("id", ""), body.get("action", ""), body.get("value", ""))))
         if u.path == "/api/superadmin-send":   return self._s(200, json.dumps(superadmin_send(body.get("node", ""), body.get("action", ""), body.get("params") or {}, body.get("ttl") or 120)))
         if u.path == "/api/superadmin-grant":  return self._s(200, json.dumps(superadmin_grant(body.get("node", ""), body.get("action", ""), body.get("params") or {}, body.get("ttl") or 120)))
         if u.path == "/api/superadmin-keygen": return self._s(200, json.dumps(superadmin_keygen()))
@@ -4805,6 +5088,483 @@ header a{color:var(--accent-light);text-decoration:none;font-weight:700}
   #left{flex:none;height:52vh;border-right:none;border-bottom:1px solid var(--line)}
   #right{flex:1;min-width:0;min-height:0}
   .mini{min-height:38px}
+}
+/* ========================================================================
+   SHARED SHELL + DESIGN SYSTEM  (cmdk-* / shell-*)  -- append inside <style>
+   Design tokens go on :root (alias --acc, stepped surfaces, hairlines, z-stack).
+   One system, three surfaces. No shadows on chrome -- stepped surfaces only.
+   Gold ONLY on: selected rail, active tab, focus ring, palette active row,
+   unread dots, one primary action.
+   ======================================================================== */
+:root{
+  --acc:var(--accent);              /* spec: alias acc -> accent (was only used with fallback) */
+  --acc-rgb:var(--accent-rgb);
+  --el1:#16161f;                    /* base row surface */
+  --el2:#1f1f2b;                    /* hover / raised */
+  --el3:#262633;                    /* palette / popover surface */
+  --hair:rgba(255,255,255,.06);     /* white hairline */
+  --hair2:rgba(255,255,255,.10);    /* stronger hairline */
+  --near:#f2f3f7;                   /* near-white unread text */
+  --tint:rgba(var(--accent-rgb),.10);/* faint gold tint */
+  --tint2:rgba(var(--accent-rgb),.16);
+  --ring:0 0 0 2px rgba(var(--accent-rgb),.55); /* gold focus ring */
+  --z-pop:55;                       /* popover / split detail overlay */
+  --z-cmdk:120;                     /* command palette */
+  --z-ql:130;                       /* quick look */
+  --z-toast:140;                    /* toast (above all) */
+}
+.toast{z-index:var(--z-toast)}     /* lift the existing toast above palette + quick look */
+
+/* ---- focus ring: one consistent gold ring, gated to keyboard via :focus-visible ---- */
+.shell-focusable:focus-visible,.cmdk-in:focus-visible,.shell-split:focus-visible{outline:none;box-shadow:var(--ring)}
+
+/* ============ COMMAND PALETTE (⌘K / Ctrl-K) ============ */
+.cmdk-bg{position:fixed;inset:0;z-index:var(--z-cmdk);display:none;align-items:flex-start;justify-content:center;
+  padding:11vh 16px 16px;background:rgba(6,6,10,.62);backdrop-filter:blur(3px)}
+.cmdk-bg.show{display:flex;animation:cmdkfade .12s ease}
+@keyframes cmdkfade{from{opacity:0}to{opacity:1}}
+.cmdk{width:min(680px,96vw);background:var(--el3);border:1px solid var(--hair2);border-radius:16px;overflow:hidden;
+  display:flex;flex-direction:column;max-height:74vh;animation:cmdkpop .14s cubic-bezier(.2,.85,.2,1)}
+@keyframes cmdkpop{from{opacity:0;transform:translateY(-8px) scale(.985)}to{opacity:1;transform:none}}
+.cmdk-top{display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--hair)}
+.cmdk-top .cmdk-mag{font-size:15px;color:var(--dim);flex:0 0 auto}
+.cmdk-in{flex:1;background:transparent;border:0;color:var(--ink);font-size:16px;padding:2px 0;border-radius:0}
+.cmdk-in:focus{border:0;box-shadow:none}
+.cmdk-scope{font-size:10.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--acc);
+  background:var(--tint);border:1px solid rgba(var(--accent-rgb),.3);border-radius:7px;padding:3px 8px;flex:0 0 auto}
+.cmdk-list{overflow-y:auto;padding:6px;scrollbar-width:thin}
+.cmdk-grp{font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);padding:9px 11px 4px}
+.cmdk-row{display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:9px;cursor:pointer;border:1px solid transparent}
+.cmdk-row:hover{background:var(--el2)}
+.cmdk-row.on{background:var(--tint);border-color:rgba(var(--accent-rgb),.32)}
+.cmdk-row .cmdk-ic{flex:0 0 22px;text-align:center;font-size:15px;color:var(--mut)}
+.cmdk-row.on .cmdk-ic{color:var(--acc)}
+.cmdk-row .cmdk-lbl{flex:1;min-width:0;overflow:hidden}
+.cmdk-row .cmdk-lbl b{display:block;font-weight:600;font-size:13.5px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmdk-row .cmdk-lbl span{display:block;font-size:11.5px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmdk-row .cmdk-lbl em{font-style:normal;color:var(--acc)}              /* fuzzy match highlight */
+.cmdk-row .cmdk-kbd{flex:0 0 auto;display:flex;gap:4px}
+.cmdk-kbd kbd{font:600 10.5px/1 ui-monospace,Menlo,monospace;color:var(--mut);background:var(--el1);
+  border:1px solid var(--hair2);border-bottom-width:2px;border-radius:6px;padding:3px 6px;min-width:18px;text-align:center}
+.cmdk-empty{padding:26px 16px;text-align:center;color:var(--dim);font-size:13px}
+.cmdk-foot{display:flex;gap:16px;align-items:center;padding:8px 14px;border-top:1px solid var(--hair);font-size:11px;color:var(--dim)}
+.cmdk-foot span{display:inline-flex;align-items:center;gap:5px}
+.cmdk-foot kbd{font:600 10px/1 ui-monospace,Menlo,monospace;background:var(--el1);border:1px solid var(--hair2);border-radius:5px;padding:2px 5px}
+
+/* ============ SPLIT-PANE (list + detail) reusable container ============ */
+.shell-split{display:grid;grid-template-columns:var(--split-w,minmax(280px,360px)) 1fr;gap:0;grid-column:1/-1;
+  height:calc(100vh - 132px);min-height:420px;border:1px solid var(--hair);border-radius:14px;overflow:hidden;background:var(--bg2)}
+.shell-list{min-width:0;border-right:1px solid var(--hair);overflow-y:auto;background:var(--bg2);scrollbar-width:thin}
+.shell-detail{min-width:0;overflow-y:auto;background:var(--bg);position:relative}
+.shell-detail-empty{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--dim);padding:24px;text-align:center}
+.shell-detail-empty .big{font-size:34px;opacity:.5}
+/* a generic selectable list row (surfaces style their own content inside) */
+.shell-row{display:block;padding:11px 14px;border-bottom:1px solid var(--hair);cursor:pointer;border-left:2px solid transparent;background:var(--el1)}
+.shell-row:hover{background:var(--el2)}
+.shell-row.on{background:var(--tint);border-left-color:var(--acc)}
+.shell-row.unread b,.shell-row.unread .shell-row-ttl{color:var(--near);font-weight:700}
+.shell-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--acc);flex:0 0 auto;box-shadow:0 0 6px rgba(var(--accent-rgb),.6)}
+@media(max-width:820px){
+  .shell-split{grid-template-columns:1fr;height:auto}
+  .shell-list{border-right:0;border-bottom:1px solid var(--hair);max-height:46vh}
+  .shell-split.detail-open .shell-list{display:none}      /* mobile: detail takes over */
+  .shell-split:not(.detail-open) .shell-detail{display:none}
+}
+
+/* ============ SKELETON LOADERS ============ */
+.shell-skel{position:relative;overflow:hidden;background:var(--el1);border-radius:8px}
+.shell-skel::after{content:"";position:absolute;inset:0;transform:translateX(-100%);
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.05),transparent);animation:shellsheen 1.15s ease-in-out infinite}
+@keyframes shellsheen{100%{transform:translateX(100%)}}
+.shell-skel-row{display:flex;flex-direction:column;gap:7px;padding:12px 14px;border-bottom:1px solid var(--hair)}
+.shell-skel-line{height:11px}
+@media(prefers-reduced-motion:reduce){.shell-skel::after{animation:none}}
+
+/* ============ QUICK LOOK (full-surface detail; ← → cycles) ============ */
+.shell-ql{position:fixed;inset:0;z-index:var(--z-ql);display:none;flex-direction:column;background:rgba(6,6,10,.86);backdrop-filter:blur(4px)}
+.shell-ql.show{display:flex;animation:cmdkfade .12s ease}
+.shell-ql-top{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--hair);flex:0 0 auto}
+.shell-ql-ttl{flex:1;min-width:0;font-weight:700;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.shell-ql-body{flex:1;min-height:0;overflow:auto;padding:0}
+.shell-ql-nav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:64px;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;color:var(--mut);font-size:26px;background:rgba(20,20,28,.55);border:1px solid var(--hair);z-index:2}
+.shell-ql-nav:hover{color:var(--ink);background:var(--el2)}
+.shell-ql-nav.prev{left:0;border-radius:0 12px 12px 0;border-left:0}
+.shell-ql-nav.next{right:0;border-radius:12px 0 0 12px;border-right:0}
+
+/* ============ OPTIMISTIC / UNDO TOAST (extends the existing .toast) ============ */
+.shell-undo{margin-left:14px;background:transparent;border:1px solid var(--acc);color:var(--acc);
+  border-radius:7px;padding:4px 11px;font-weight:700;font-size:12px;cursor:pointer}
+.shell-undo:hover{background:var(--tint)}
+.shell-fade{transition:opacity .18s ease,transform .18s ease}
+.shell-fade.gone{opacity:0;transform:translateX(10px)}
+
+/* operator/query chips (shared by gmail operator chips, drive filter chips, calendar pickers) */
+.shell-chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:var(--mut);
+  background:var(--el1);border:1px solid var(--hair2);border-radius:18px;padding:5px 11px;cursor:pointer;white-space:nowrap}
+.shell-chip:hover{border-color:var(--hair2);color:var(--ink);background:var(--el2)}
+.shell-chip.on{background:var(--tint);border-color:rgba(var(--accent-rgb),.4);color:var(--acc)}
+.shell-chips{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+
+/* a tidy surface header used across the three lenses (rail + actions) */
+.shell-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 0 14px;grid-column:1/-1}
+.shell-head .ttl{font-size:16px;font-weight:800;display:flex;align-items:center;gap:8px}
+.shell-head .sp{margin-left:auto}
+
+/* ===================== GMAIL SURFACE v2 (gm-*) ===================== *
+ * One full-bleed child fills the .wrap grid; the surface owns its own
+ * 3-pane layout. No shadows -- stepped surfaces. Gold only on: selected
+ * lane, active triage row, focus ring, unread dot, primary send button. */
+.gm-app{grid-column:1/-1;display:grid;grid-template-columns:200px minmax(320px,1fr) minmax(0,1.25fr);
+  gap:0;height:calc(100vh - 53px - 40px);min-height:520px;border:1px solid var(--line);
+  border-radius:14px;overflow:hidden;background:var(--bg2)}
+.gm-app *{box-sizing:border-box}
+
+/* --- rail (saved lanes) --- */
+.gm-rail{background:#0c0c12;border-right:1px solid var(--line);display:flex;flex-direction:column;overflow-y:auto;padding:10px 8px}
+.gm-rail .gm-acct{font-size:11px;color:var(--dim);font-weight:700;letter-spacing:.4px;padding:4px 8px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gm-lane{display:flex;align-items:center;gap:9px;padding:8px 9px;border-radius:9px;cursor:pointer;color:var(--mut);font-weight:600;font-size:13px;border:1px solid transparent;margin-bottom:1px}
+.gm-lane:hover{background:var(--card);color:var(--ink)}
+.gm-lane.on{background:rgba(var(--accent-rgb),.13);color:var(--ink);border-color:rgba(var(--accent-rgb),.45)}
+.gm-lane .gm-li{flex:0 0 18px;text-align:center;font-style:normal;font-size:14px}
+.gm-lane .gm-ln{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gm-lane .gm-ct{flex:0 0 auto;font-size:10px;font-weight:800;color:var(--dim);background:#0008;border-radius:8px;padding:1px 6px}
+.gm-lane.on .gm-ct{color:var(--accent)}
+.gm-rail .gm-sec{font-size:10px;font-weight:800;letter-spacing:.7px;color:var(--dim);text-transform:uppercase;padding:12px 9px 5px}
+.gm-rail .gm-railfoot{margin-top:auto;padding:8px 4px 2px;font-size:10.5px;color:var(--dim);line-height:1.5}
+.gm-rail .gm-railfoot kbd{background:var(--card2);border:1px solid var(--line);border-radius:4px;padding:0 4px;font:11px ui-monospace,monospace;color:var(--mut)}
+
+/* --- list pane --- */
+.gm-list{border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
+.gm-lhead{flex:0 0 auto;padding:9px 11px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:8px;background:var(--bg2)}
+.gm-lhrow{display:flex;align-items:center;gap:8px}
+.gm-lhrow b{font-size:14px}
+.gm-lhrow .gm-spacer{margin-left:auto}
+.gm-search{flex:1;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:8px 11px;font-size:13px;outline:none}
+.gm-search:focus{border-color:var(--accent);box-shadow:0 0 0 1px rgba(var(--accent-rgb),.5)}
+.gm-chips{display:flex;gap:5px;flex-wrap:wrap}
+.gm-chip{font-size:11px;padding:4px 9px;border-radius:20px;border:1px solid var(--line);background:var(--card);color:var(--mut);cursor:pointer;font-weight:600}
+.gm-chip:hover{color:var(--ink)}
+.gm-chip.on{background:rgba(var(--accent-rgb),.16);border-color:rgba(var(--accent-rgb),.5);color:var(--ink)}
+.gm-rows{flex:1;overflow-y:auto}
+.gm-row{display:grid;grid-template-columns:14px 1fr auto;gap:9px;align-items:start;padding:10px 12px;border-bottom:1px solid #1c1c26;cursor:pointer;position:relative}
+.gm-row:hover{background:var(--card)}
+.gm-row.cur{background:rgba(var(--accent-rgb),.10)}
+.gm-row.cur:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--grad)}
+.gm-row.unread .gm-from,.gm-row.unread .gm-subj{color:#f2f3f7;font-weight:700}
+.gm-dot{width:8px;height:8px;border-radius:50%;margin-top:5px;background:transparent}
+.gm-row.unread .gm-dot{background:var(--accent)}
+.gm-rmid{min-width:0}
+.gm-fromrow{display:flex;align-items:baseline;gap:6px}
+.gm-from{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--mut);font-size:13px}
+.gm-cnt{flex:0 0 auto;font-size:10px;font-weight:800;color:var(--dim);background:#0006;border-radius:8px;padding:0 5px}
+.gm-subj{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--ink);margin-top:1px}
+.gm-snip{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dim);margin-top:2px}
+.gm-rright{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex:0 0 auto}
+.gm-date{font-size:11px;color:var(--dim);white-space:nowrap}
+.gm-star{font-size:13px;color:var(--dim);cursor:pointer;line-height:1}
+.gm-star.on{color:var(--accent)}
+.gm-sel{font-size:11px}
+
+/* --- reader pane (Quick Look detail) --- */
+.gm-read{display:flex;flex-direction:column;overflow:hidden;background:var(--bg2)}
+.gm-rdhead{flex:0 0 auto;padding:11px 14px;border-bottom:1px solid var(--line);background:var(--bg2)}
+.gm-rdsubj{font-size:16px;font-weight:700;line-height:1.3;margin:0 0 4px;display:flex;align-items:center;gap:8px}
+.gm-rdmeta{font-size:11.5px;color:var(--dim)}
+.gm-acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+.gm-act{font-size:12px;padding:6px 11px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;font-weight:600;display:inline-flex;align-items:center;gap:5px}
+.gm-act:hover{border-color:var(--accent)}
+.gm-act.go{background:var(--grad);color:#15120a;border:none;font-weight:700}
+.gm-thread{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:11px}
+.gm-msg{border:1px solid var(--line);border-radius:11px;background:var(--bg);overflow:hidden}
+.gm-mhead{padding:9px 12px;display:flex;align-items:center;gap:9px;cursor:pointer;border-bottom:1px solid transparent}
+.gm-msg.open .gm-mhead{border-bottom-color:var(--line)}
+.gm-avatar{flex:0 0 30px;width:30px;height:30px;border-radius:50%;background:var(--card2);color:var(--mut);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px}
+.gm-mhi{min-width:0;flex:1}
+.gm-mfrom{font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gm-mto{font-size:11px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gm-mdate{flex:0 0 auto;font-size:11px;color:var(--dim)}
+.gm-mbody{padding:0 14px 14px}
+.gm-msg:not(.open) .gm-mbody{display:none}
+.gm-msg:not(.open) .gm-collapsed{display:block;padding:0 12px 9px;font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gm-msg.open .gm-collapsed{display:none}
+.gm-mbody iframe{width:100%;border:0;background:#fff;border-radius:8px;min-height:120px}
+.gm-mbody pre{white-space:pre-wrap;word-break:break-word;font:13px/1.6 -apple-system,sans-serif;margin:0;color:var(--ink)}
+.gm-att{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.gm-attbtn{font-size:11.5px;padding:5px 10px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);text-decoration:none;display:inline-flex;gap:6px;align-items:center}
+.gm-empty{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:var(--dim);text-align:center;padding:24px}
+.gm-empty .gm-big{font-size:38px;opacity:.4}
+
+/* --- batch bar (multi-select) --- */
+.gm-batch{flex:0 0 auto;display:none;align-items:center;gap:8px;padding:8px 11px;border-bottom:1px solid var(--line);background:rgba(var(--accent-rgb),.10)}
+.gm-batch.on{display:flex}
+.gm-batch b{color:var(--accent);font-size:12px}
+
+/* --- compose (full modal-rich) --- */
+.gm-compose .row{margin-bottom:9px}
+.gm-compose textarea{min-height:220px;font:13px/1.6 -apple-system,sans-serif}
+.gm-cc-toggle{font-size:11px;color:var(--accent);cursor:pointer;font-weight:600}
+.gm-sendlater{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--mut);margin-top:6px}
+
+/* --- responsive: collapse to single column on narrow --- */
+@media(max-width:980px){
+  .gm-app{grid-template-columns:1fr;height:auto;min-height:0;border:none;background:transparent}
+  .gm-rail{flex-direction:row;flex-wrap:wrap;border-right:none;border-bottom:1px solid var(--line);border-radius:12px;margin-bottom:10px}
+  .gm-rail .gm-sec,.gm-rail .gm-acct,.gm-rail .gm-railfoot{display:none}
+  .gm-lane{flex:0 0 auto}
+  .gm-list{border-right:none;border:1px solid var(--line);border-radius:12px;margin-bottom:10px;max-height:60vh}
+  .gm-read{border:1px solid var(--line);border-radius:12px;min-height:50vh}
+}
+
+
+/* ===== CALENDAR SURFACE (cal-*) — stepped surfaces, gold only where it earns it ===== */
+.cal-root{grid-column:1/-1;display:flex;flex-direction:column;gap:0;min-height:calc(100vh - 120px);
+  background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.cal-top{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--line);
+  background:var(--card2);flex-wrap:wrap;flex:0 0 auto}
+.cal-title{font-weight:800;font-size:16px;letter-spacing:.2px;min-width:150px}
+.cal-title small{display:block;font-weight:600;font-size:11px;color:var(--dim);letter-spacing:.3px}
+.cal-nav{display:flex;align-items:center;gap:4px}
+.cal-ib{width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;
+  border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:8px;cursor:pointer;
+  font-size:15px;line-height:1}
+.cal-ib:hover{border-color:var(--accent);color:var(--accent-light)}
+.cal-today{padding:0 13px;height:30px;border:1px solid var(--line);background:var(--card);color:var(--ink);
+  border-radius:8px;cursor:pointer;font-weight:700;font-size:12.5px}
+.cal-today:hover{border-color:var(--accent)}
+.cal-vtabs{display:flex;gap:2px;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:2px}
+.cal-vtab{padding:5px 12px;border-radius:7px;cursor:pointer;font-weight:700;font-size:12.5px;color:var(--mut);border:none;background:transparent}
+.cal-vtab.on{background:var(--grad);color:#15120a}
+.cal-spacer{flex:1}
+.cal-add{display:flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--line);
+  border-radius:9px;padding:0 4px 0 10px;height:32px;min-width:220px;max-width:420px;flex:1 1 240px}
+.cal-add .qm{color:var(--accent);font-size:13px;flex:0 0 auto}
+.cal-add input{flex:1;background:transparent;border:none;color:var(--ink);font-size:13px;outline:none;height:100%}
+.cal-add input::placeholder{color:var(--dim)}
+.cal-add .go{flex:0 0 auto}
+.cal-parse{font-size:11px;color:var(--dim);padding:5px 14px;border-bottom:1px solid var(--line);background:var(--card2);min-height:0}
+.cal-parse b{color:var(--accent-light)}
+.cal-parse.ok{color:var(--mut)}
+
+.cal-body{flex:1;display:flex;min-height:0;overflow:hidden}
+.cal-side{flex:0 0 224px;border-right:1px solid var(--line);padding:12px;overflow-y:auto;background:var(--card)}
+@media(max-width:820px){.cal-side{display:none}}
+
+/* mini-month */
+.cal-mini-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.cal-mini-h b{font-size:12.5px;font-weight:800}
+.cal-mini-h .cal-ib{width:24px;height:24px;font-size:13px}
+.cal-mini{display:grid;grid-template-columns:repeat(7,1fr);gap:1px;text-align:center}
+.cal-mini .dw{font-size:9.5px;color:var(--dim);font-weight:700;padding:2px 0}
+.cal-mini .dc{font-size:11.5px;padding:5px 0;border-radius:6px;cursor:pointer;position:relative;color:var(--ink)}
+.cal-mini .dc:hover{background:var(--card2)}
+.cal-mini .dc.oth{color:var(--dim)}
+.cal-mini .dc.today{color:var(--accent-light);font-weight:800}
+.cal-mini .dc.sel{background:var(--grad);color:#15120a;font-weight:800}
+.cal-mini .dc.hasev::after{content:"";position:absolute;bottom:2px;left:50%;transform:translateX(-50%);
+  width:4px;height:4px;border-radius:50%;background:var(--accent)}
+.cal-mini .dc.sel.hasev::after{background:#15120a}
+.cal-side-sec{margin-top:16px}
+.cal-side-sec h4{margin:0 0 7px;font-size:10px;letter-spacing:.6px;color:var(--dim);text-transform:uppercase}
+.cal-up{display:flex;gap:8px;padding:6px 7px;border-radius:8px;cursor:pointer;align-items:flex-start}
+.cal-up:hover{background:var(--card2)}
+.cal-up .bar{flex:0 0 3px;align-self:stretch;border-radius:3px;background:var(--accent);min-height:26px}
+.cal-up .t{font-size:10.5px;color:var(--mut);flex:0 0 auto;width:46px;font-weight:600}
+.cal-up .s{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* time grid */
+.cal-grid-wrap{flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden}
+.cal-allday{display:flex;border-bottom:1px solid var(--line);flex:0 0 auto;max-height:88px;overflow-y:auto}
+.cal-allday .gut{flex:0 0 52px;font-size:9.5px;color:var(--dim);padding:5px 6px;text-align:right;border-right:1px solid var(--line)}
+.cal-allday .cols{flex:1;display:grid}
+.cal-allday .adcell{border-right:1px solid var(--line);padding:3px;min-height:26px;display:flex;flex-direction:column;gap:2px}
+.cal-adchip{font-size:11px;padding:2px 6px;border-radius:5px;background:rgba(var(--accent-rgb),.16);
+  color:var(--ink);cursor:pointer;border-left:3px solid var(--accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cal-daynames{display:flex;border-bottom:1px solid var(--line);flex:0 0 auto;background:var(--card)}
+.cal-daynames .gut{flex:0 0 52px;border-right:1px solid var(--line)}
+.cal-daynames .cols{flex:1;display:grid}
+.cal-dn{text-align:center;padding:7px 2px;border-right:1px solid var(--line);cursor:pointer}
+.cal-dn .dow{font-size:10.5px;color:var(--mut);font-weight:700;letter-spacing:.4px}
+.cal-dn .num{font-size:18px;font-weight:800;line-height:1.1;margin-top:1px}
+.cal-dn.today .num{color:#15120a;background:var(--grad);border-radius:50%;width:30px;height:30px;
+  display:inline-flex;align-items:center;justify-content:center}
+.cal-dn.today .dow{color:var(--accent-light)}
+.cal-scroll{flex:1;overflow-y:auto;position:relative}
+.cal-tgrid{display:flex;position:relative}
+.cal-tgrid .gut{flex:0 0 52px;border-right:1px solid var(--line);position:relative}
+.cal-tgrid .gutslot{height:48px;font-size:10px;color:var(--dim);text-align:right;padding-right:6px;
+  position:relative;top:-7px}
+.cal-cols{flex:1;display:grid;position:relative}
+.cal-col{border-right:1px solid var(--line);position:relative}
+.cal-slot{height:48px;border-bottom:1px solid var(--line);box-sizing:border-box}
+.cal-slot:nth-child(odd){border-bottom-color:rgba(42,42,58,.5)}
+.cal-col.today{background:rgba(var(--accent-rgb),.035)}
+.cal-now{position:absolute;left:0;right:0;height:0;border-top:2px solid var(--accent);z-index:6;pointer-events:none}
+.cal-now::before{content:"";position:absolute;left:-4px;top:-4px;width:7px;height:7px;border-radius:50%;background:var(--accent)}
+.cal-ev{position:absolute;border-radius:7px;padding:3px 6px;overflow:hidden;cursor:pointer;z-index:4;
+  background:rgba(var(--accent-rgb),.16);border-left:3px solid var(--accent);color:var(--ink);
+  font-size:11.5px;line-height:1.25;transition:filter .1s}
+.cal-ev:hover{filter:brightness(1.25);z-index:8}
+.cal-ev.sel{outline:2px solid var(--accent);outline-offset:-1px;z-index:9}
+.cal-ev .ti{font-size:9.5px;color:var(--mut);font-weight:600}
+.cal-ev .tt{font-weight:700;overflow:hidden;text-overflow:ellipsis}
+.cal-ev .rz{position:absolute;left:0;right:0;bottom:0;height:7px;cursor:ns-resize}
+.cal-ev.declined{opacity:.5;text-decoration:line-through}
+.cal-ev.dragging{opacity:.7;box-shadow:0 6px 20px rgba(0,0,0,.5)}
+.cal-ghost{position:absolute;border-radius:7px;background:rgba(var(--accent-rgb),.22);border:1px dashed var(--accent);
+  z-index:7;pointer-events:none;font-size:11px;color:var(--ink);padding:3px 6px}
+
+/* month grid */
+.cal-month{flex:1;display:flex;flex-direction:column;min-width:0}
+.cal-mhead{display:grid;grid-template-columns:repeat(7,1fr);border-bottom:1px solid var(--line);flex:0 0 auto}
+.cal-mhead div{text-align:center;padding:6px;font-size:10.5px;color:var(--mut);font-weight:700;border-right:1px solid var(--line)}
+.cal-mbody{flex:1;display:grid;grid-template-columns:repeat(7,1fr);grid-auto-rows:1fr;overflow:hidden}
+.cal-mcell{border-right:1px solid var(--line);border-bottom:1px solid var(--line);padding:4px 5px;
+  overflow:hidden;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-height:0}
+.cal-mcell:hover{background:var(--card2)}
+.cal-mcell.oth{background:rgba(0,0,0,.18)}
+.cal-mcell .mnum{font-size:12px;font-weight:700;color:var(--mut);flex:0 0 auto;align-self:flex-start}
+.cal-mcell.oth .mnum{color:var(--dim)}
+.cal-mcell.today .mnum{background:var(--grad);color:#15120a;border-radius:50%;width:22px;height:22px;
+  display:inline-flex;align-items:center;justify-content:center}
+.cal-mev{font-size:10.5px;padding:1px 5px;border-radius:4px;background:rgba(var(--accent-rgb),.16);
+  border-left:3px solid var(--accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.cal-mev.allday{background:var(--grad);color:#15120a;border-left:none;font-weight:700}
+.cal-mmore{font-size:10px;color:var(--dim);font-weight:700;cursor:pointer;padding-left:5px}
+
+/* agenda */
+.cal-agenda{flex:1;overflow-y:auto;padding:8px 14px}
+.cal-aday{margin-top:14px}
+.cal-aday:first-child{margin-top:2px}
+.cal-aday h5{margin:0 0 6px;font-size:12px;color:var(--mut);font-weight:800;position:sticky;top:0;
+  background:var(--card);padding:6px 0;border-bottom:1px solid var(--line)}
+.cal-aday h5 .dnum{color:var(--accent-light);margin-right:8px}
+.cal-arow{display:flex;gap:12px;padding:8px 6px;border-radius:9px;cursor:pointer;align-items:center}
+.cal-arow:hover{background:var(--card2)}
+.cal-arow .at{flex:0 0 120px;font-size:12px;color:var(--mut);font-weight:600}
+.cal-arow .abar{flex:0 0 4px;align-self:stretch;border-radius:4px;background:var(--accent)}
+.cal-arow .as{flex:1;font-size:13.5px;font-weight:600}
+.cal-arow .al{font-size:11.5px;color:var(--dim)}
+
+/* popover / detail */
+.cal-pop{position:fixed;z-index:80;width:320px;max-width:92vw;background:var(--card2);
+  border:1px solid var(--line);border-radius:13px;padding:0;box-shadow:0 18px 50px rgba(0,0,0,.55);overflow:hidden}
+.cal-pop .ph{padding:13px 15px 10px;border-left:4px solid var(--accent)}
+.cal-pop .pt{font-size:15px;font-weight:800;line-height:1.25}
+.cal-pop .pm{font-size:12px;color:var(--mut);margin-top:5px;display:flex;gap:7px;align-items:flex-start}
+.cal-pop .pm .ic{flex:0 0 16px;opacity:.8}
+.cal-pop .pbtns{display:flex;gap:6px;padding:11px 15px;border-top:1px solid var(--line);background:var(--card)}
+.cal-pop .pbtns .mini{flex:0 0 auto}
+.cal-pop .pbtns .gap{flex:1}
+.cal-pop .pdesc{font-size:12px;color:var(--mut);max-height:120px;overflow:auto;white-space:pre-wrap;
+  margin-top:4px;line-height:1.45}
+
+/* keyboard hint footer */
+.cal-foot{flex:0 0 auto;display:flex;gap:14px;flex-wrap:wrap;padding:6px 14px;border-top:1px solid var(--line);
+  background:var(--card2);font-size:10.5px;color:var(--dim)}
+.cal-foot kbd{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:0 5px;
+  font:600 10px ui-monospace,Menlo,monospace;color:var(--mut);margin-right:3px}
+.cal-color-dots{display:flex;gap:6px;flex-wrap:wrap}
+.cal-cd{width:22px;height:22px;border-radius:50%;cursor:pointer;border:2px solid transparent}
+.cal-cd.on{border-color:var(--ink)}
+
+/* ===================== DRIVE SURFACE (dr-*) ===================== */
+.dr-wrap{grid-column:1/-1;display:flex;flex-direction:column;min-height:0;gap:12px;margin:-4px 0}
+.dr-bar{display:flex;flex-direction:column;gap:10px;position:sticky;top:0;z-index:5;background:var(--bg);padding-bottom:2px}
+.dr-crumbs{display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:13px}
+.dr-crumb{cursor:pointer;color:var(--mut);padding:3px 9px;border-radius:8px;border:1px solid transparent;white-space:nowrap}
+.dr-crumb:hover{background:var(--card2);color:var(--ink)}
+.dr-crumb.here{color:var(--ink);background:var(--card2);border-color:var(--line);cursor:default}
+.dr-csep{color:var(--dim)}
+.dr-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dr-search{flex:1;min-width:200px;background:var(--card);border:1px solid var(--line);color:var(--ink);border-radius:10px;padding:9px 13px;font-size:13.5px;outline:none}
+.dr-search:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(var(--accent-rgb),.25)}
+.dr-seg{display:flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.dr-segb{background:var(--card);color:var(--mut);border:none;padding:8px 11px;cursor:pointer;font-size:14px}
+.dr-segb.on{background:var(--grad);color:#15120a}
+.dr-chip{background:var(--card);border:1px solid var(--line);color:var(--mut);border-radius:9px;padding:8px 12px;cursor:pointer;font-size:14px}
+.dr-chip.on{color:var(--accent);border-color:var(--accent)}
+.dr-sel{background:var(--card);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:8px 10px;font-size:13px;cursor:pointer}
+.dr-icbtn{background:var(--card);border:1px solid var(--line);color:var(--mut);border-radius:9px;padding:8px 11px;cursor:pointer;font-size:14px}
+.dr-icbtn:hover{color:var(--ink);border-color:var(--accent)}
+.dr-batch{display:flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--accent);border-radius:11px;padding:8px 12px;flex-wrap:wrap}
+.dr-batch b{color:var(--accent);font-size:13px;margin-right:4px}
+.dr-bb{background:var(--card);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:6px 11px;cursor:pointer;font-size:12.5px}
+.dr-bb:hover{border-color:var(--accent)}
+.dr-bb.on{background:var(--grad);color:#15120a;border:none;font-weight:700}
+.dr-bb.danger:hover{border-color:var(--err);color:var(--err)}
+.dr-body{min-height:0}
+.dr-emptybox{padding:30px}
+.dr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:14px}
+.dr-card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;cursor:pointer;display:flex;flex-direction:column;transition:border-color .1s}
+.dr-card:hover{border-color:var(--card2);background:var(--card2)}
+.dr-card:hover .dr-ck,.dr-card:hover .dr-star{opacity:1}
+.dr-card.foc{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.dr-card.sel{border-color:var(--accent);background:rgba(var(--accent-rgb),.08)}
+.dr-card:focus{outline:none}
+.dr-thumb{height:108px;display:flex;align-items:center;justify-content:center;background:var(--bg2);position:relative;overflow:hidden}
+.dr-th{width:100%;height:100%;object-fit:cover;display:block}
+.dr-thumb.noth .dr-th{display:none}
+.dr-ic{font-size:40px;display:none}
+.dr-thumb.noth .dr-ic{display:block}
+.dr-card.fold .dr-thumb{height:76px}
+.dr-card.fold .dr-ic{display:block;font-size:34px}
+.dr-card.fold .dr-th{display:none}
+.dr-name{padding:8px 10px 2px;font-size:12.8px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dr-sub{padding:0 10px 9px;font-size:11px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dr-ck{position:absolute;top:7px;left:7px;z-index:2;opacity:0;transition:opacity .1s}
+.dr-card.sel .dr-ck{opacity:1}
+.dr-ck input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+.dr-star{position:absolute;top:6px;right:8px;z-index:2;cursor:pointer;font-size:15px;color:var(--dim);opacity:0;transition:opacity .1s}
+.dr-star.on{opacity:1;color:var(--accent)}
+.dr-list{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:11px;overflow:hidden}
+.dr-lh,.dr-trow{display:grid;grid-template-columns:34px 1fr 150px 130px 90px;align-items:center;gap:8px;padding:8px 12px}
+.dr-lh{background:var(--card2);font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--mut);font-weight:700;border-bottom:1px solid var(--line)}
+.dr-lh span[onclick]{cursor:pointer}
+.dr-lh span[onclick]:hover{color:var(--ink)}
+.dr-trow{border-bottom:1px solid var(--line);cursor:pointer;font-size:13px}
+.dr-trow:last-child{border-bottom:none}
+.dr-trow:hover{background:var(--card2)}
+.dr-trow.foc{background:rgba(var(--accent-rgb),.10);box-shadow:inset 2px 0 0 var(--accent)}
+.dr-trow.sel{background:rgba(var(--accent-rgb),.08)}
+.dr-lcn{display:flex;align-items:center;gap:9px;min-width:0}
+.dr-ric{flex:0 0 auto;font-size:16px}
+.dr-rname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink);font-weight:500}
+.dr-rstar{color:var(--accent);flex:0 0 auto}
+.dr-lco,.dr-lcm,.dr-lcs{color:var(--mut);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dr-lcs{text-align:right}
+.dr-lck input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
+/* quick look */
+.dr-qlov{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9000;display:none;align-items:center;justify-content:center;padding:34px}
+.dr-ql{width:100%;max-width:1100px;height:100%;max-height:92vh;background:var(--card);border:1px solid var(--line);border-radius:14px;display:flex;flex-direction:column;overflow:hidden;outline:none}
+.dr-qlhead{display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid var(--line);background:var(--card2)}
+.dr-qlnav{background:var(--card);border:1px solid var(--line);color:var(--ink);width:34px;height:34px;border-radius:9px;cursor:pointer;font-size:20px;flex:0 0 auto}
+.dr-qlnav:hover{border-color:var(--accent)}
+.dr-qltitle{flex:1;min-width:0;display:flex;align-items:center;gap:9px}
+.dr-qltitle b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14.5px}
+.dr-qlic{font-size:18px;flex:0 0 auto}
+.dr-qlmeta{display:flex;gap:7px;color:var(--dim);font-size:11.5px;flex:0 0 auto;margin-left:6px}
+.dr-qlmeta span{padding-left:7px;border-left:1px solid var(--line)}
+.dr-qlmeta span:first-child{border-left:none;padding-left:0}
+.dr-qlactions{display:flex;gap:6px;flex:0 0 auto}
+.dr-qlbody{flex:1;min-height:0;display:flex;background:var(--bg)}
+.dr-qlframe{flex:1;width:100%;height:100%;border:none;background:#fff}
+.dr-qltext{flex:1;overflow:auto;padding:0}
+.dr-qltext pre{margin:0;padding:18px;font:12.5px/1.6 ui-monospace,Menlo,Monaco,monospace;color:var(--ink);white-space:pre-wrap;word-break:break-word}
+.dr-qlnoprev{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:var(--mut)}
+.dr-qlbig{font-size:64px}
+/* context menu */
+.dr-ctx{position:fixed;z-index:9500;background:var(--card2);border:1px solid var(--line);border-radius:11px;padding:5px;min-width:196px;box-shadow:0 18px 50px rgba(0,0,0,.55)}
+.dr-ctxi{padding:8px 12px;border-radius:7px;cursor:pointer;font-size:13px;color:var(--ink)}
+.dr-ctxi:hover{background:var(--grad);color:#15120a}
+.dr-ctxsep{height:1px;background:var(--line);margin:4px 6px}
+.dr-modal{min-width:340px}
+@media(max-width:760px){
+  .dr-lh,.dr-trow{grid-template-columns:30px 1fr 86px}
+  .dr-lco,.dr-lcm{display:none}
+  .dr-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
+  .dr-qlov{padding:0}
+  .dr-ql{max-height:100vh;border-radius:0}
 }
 </style></head><body>
 <header>
@@ -5690,117 +6450,1708 @@ function commsSetBadge(n){const b=document.getElementById('commsBadge');if(!b)re
 async function commsBadgePoll(){try{const d=await(await fetch('/api/mesh')).json();const seen=parseInt(localStorage.getItem('comms_seen')||'0');const unread=(d.messages||[]).filter(function(m){return m.dir==='in'&&(m.ts||0)>seen;}).length;const drops=((d.overdue||[]).length)+((d.unanswered||[]).length);if(LENS!=='comms')commsSetBadge(unread+drops);}catch(e){}}  // badge also shows OVERDUE/UNANSWERED (persists until resolved) so a dropped ball surfaces without watching
 setInterval(commsBadgePoll,15000);setTimeout(commsBadgePoll,1500);
 // ============ GOOGLE WORKSPACE LENSES (live Gmail / Calendar / Drive, server-side OAuth) ============
-var GMAILVIEW='inbox',GMAILQ='',GMAILMSG=null;
 function gVal(id){var e=document.getElementById(id);return e?e.value:'';}
 function gFrom(s){s=s||'';var m=s.match(/^(.*?)</);var nm=m?m[1].replace(/"/g,'').trim():s;return nm||s;}
 function gAddr(s){var m=(s||'').match(/<(.*)>/);return m?m[1]:(s||'');}
 function gDate(s){if(!s)return'';try{var d=new Date(s);if(isNaN(d))return e2(s);var n=new Date();return d.toDateString()==n.toDateString()?d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):d.toLocaleDateString([],{month:'short',day:'numeric'});}catch(e){return e2(s)}}
 function gErr(r){return '<div class="card" style="cursor:default;grid-column:1/-1"><b style="color:#f85149">Google error</b><div class="meta" style="margin-top:6px">'+e2((r&&r.error)||'request failed')+'</div><div class="meta" style="margin-top:4px">Check the google-workspace extension token on this node.</div></div>';}
-
-async function loadGmail(){
-  var g=document.getElementById("grid");g.innerHTML=empty("Loading Gmail…");GMAILMSG=null;
-  var r;try{r=await(await fetch('/api/google/gmail?view='+GMAILVIEW+'&q='+encodeURIComponent(GMAILQ))).json();}catch(e){g.innerHTML=gErr({error:'network'});return;}
-  if(r.error){g.innerHTML=gErr(r);return;}
-  var tabs=['inbox','unread','starred','sent'].map(function(v){return '<button class="mini'+(GMAILVIEW==v?' go':'')+'" onclick="gmailView(\''+v+'\')">'+v.charAt(0).toUpperCase()+v.slice(1)+'</button>';}).join('');
-  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#9993;&#65039; Gmail</b> <span class="sub">'+e2(r.email||'')+'</span>'
-    +'<div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">'+tabs+'<button class="mini go" onclick="gmailCompose()">&#9999;&#65039; Compose</button><button class="mini" onclick="loadGmail()">&#8635;</button></div></div>'
-    +'<div style="margin-top:8px;display:flex;gap:6px"><input id="gmq" placeholder="Search mail…" value="'+e2(GMAILQ)+'" style="flex:1" onkeydown="if(event.key===\'Enter\')gmailSearch()"><button class="mini" onclick="gmailSearch()">Search</button></div></div>';
-  var ms=r.messages||[];
-  if(!ms.length){h+=empty('No messages here.');g.innerHTML=h;return;}
-  h+=ms.map(function(m){return '<div class="card" style="cursor:pointer'+(m.unread?';border-left:3px solid #ea4335':'')+'" onclick="gmailOpen(\''+m.id+'\')">'
-    +'<div style="display:flex;align-items:baseline;gap:8px"><b style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'+(m.unread?'':';font-weight:500')+'">'+(m.starred?'&#11088; ':'')+e2(gFrom(m.from))+'</b><span class="meta" style="flex:0 0 auto">'+gDate(m.date)+'</span></div>'
-    +'<div style="margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'+(m.unread?';font-weight:600':'')+'">'+e2(m.subject)+'</div>'
-    +'<div class="meta" style="margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+e2(m.snippet)+'</div>'
-    +'<div style="margin-top:7px;display:flex;gap:5px" onclick="event.stopPropagation()"><button class="mini" onclick="gmailAct(\''+m.id+'\',\'archive\')">Archive</button>'
-    +'<button class="mini" onclick="gmailAct(\''+m.id+'\',\''+(m.starred?'unstar':'star')+'\')">'+(m.starred?'Unstar':'Star')+'</button>'
-    +'<button class="mini" onclick="gmailAct(\''+m.id+'\',\'trash\')">Trash</button></div></div>';}).join('');
-  g.innerHTML=h;
-}
-function gmailView(v){GMAILVIEW=v;GMAILQ='';loadGmail();}
-function gmailSearch(){GMAILQ=gVal('gmq');loadGmail();}
-async function gmailAct(id,action){toast('…');var r=await(await fetch('/api/google/gmail-modify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,action:action})})).json();if(r&&r.ok!==false&&!r.error){toast(action+' &#10003;');if(GMAILMSG&&action!=='star'&&action!=='unstar')loadGmail();else loadGmail();}else toast('Failed: '+((r||{}).error||'?'),4000);}
-async function gmailOpen(id){
-  var g=document.getElementById("grid");g.innerHTML=empty("Opening…");
-  var m;try{m=await(await fetch('/api/google/gmail-msg?id='+id)).json();}catch(e){g.innerHTML=gErr({error:'network'});return;}
-  if(m.error){g.innerHTML=gErr(m);return;}
-  GMAILMSG=m;
-  var body=(m.body&&m.body.html)?('<iframe sandbox style="width:100%;border:0;background:#fff;border-radius:8px;min-height:440px" srcdoc="'+e2(m.body.html)+'"></iframe>'):('<pre style="white-space:pre-wrap;font:inherit;margin:0">'+e2((m.body&&m.body.text)||'(no text content)')+'</pre>');
-  g.innerHTML='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><button class="mini" onclick="loadGmail()">&#8592; Back</button> <b style="margin-left:6px">'+e2(m.subject)+'</b></div>'
-    +'<div class="meta" style="margin-top:8px"><b>'+e2(gFrom(m.from))+'</b> &middot; '+e2(gAddr(m.from))+' &middot; '+e2(m.date)+'</div>'
-    +'<div class="meta">to '+e2(m.to)+'</div>'
-    +'<div style="margin:10px 0;display:flex;gap:6px"><button class="mini go" onclick="gmailReply()">&#8617;&#65039; Reply</button><button class="mini" onclick="gmailAct(\''+m.id+'\',\'archive\')">Archive</button><button class="mini" onclick="gmailAct(\''+m.id+'\',\'trash\')">Trash</button></div>'
-    +'<div style="margin-top:6px">'+body+'</div></div>';
-}
-function gmailCompose(pre){pre=pre||{};
-  showM('<h2>&#9999;&#65039; Compose</h2>'
-    +'<div class="row"><label>To</label><input id="cTo" value="'+e2(pre.to||'')+'" placeholder="name@example.com"></div>'
-    +'<div class="row"><label>Subject</label><input id="cSub" value="'+e2(pre.subject||'')+'"></div>'
-    +'<div class="row"><label>Message</label><textarea id="cBody" rows="9" style="width:100%">'+e2(pre.body||'')+'</textarea></div>'
-    +'<div class="btns"><button class="btn" onclick="closeM()">Cancel</button><button class="btn go" onclick="gmailDoSend('+(pre.threadId?('\''+pre.threadId+'\''):'null')+')">Send</button></div>');
-}
-function gmailReply(){var m=GMAILMSG;if(!m)return;gmailCompose({to:gAddr(m.from),subject:(/^re:/i.test(m.subject)?'':'Re: ')+m.subject,threadId:m.threadId,body:'\n\n——— '+gFrom(m.from)+' wrote:\n'+(((m.body&&m.body.text)||'').split('\n').map(function(l){return '> '+l;}).join('\n'))});}
-async function gmailDoSend(threadId){
-  var to=gVal('cTo');if(!to){toast('Need a recipient',3000);return;}
-  toast('Sending…');var r=await(await fetch('/api/google/gmail-send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:to,subject:gVal('cSub'),body:gVal('cBody'),threadId:threadId})})).json();
-  if(r&&!r.error){closeM();toast('Sent &#10003;');if(LENS=='gmail')loadGmail();}else toast('Failed: '+((r||{}).error||'?'),5000);
-}
-
-async function loadCalendar(){
-  var g=document.getElementById("grid");g.innerHTML=empty("Loading Calendar…");
-  var days=window.CALDAYS||7;
-  var r;try{r=await(await fetch('/api/google/calendar?days='+days)).json();}catch(e){g.innerHTML=gErr({error:'network'});return;}
-  if(r.error){g.innerHTML=gErr(r);return;}
-  var sel=[1,7,30].map(function(d){return '<button class="mini'+(days==d?' go':'')+'" onclick="calDays('+d+')">'+(d==1?'Today':d+'d')+'</button>';}).join('');
-  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128197; Calendar</b> <span class="sub">'+e2(r.email||'')+'</span><div style="margin-left:auto;display:flex;gap:6px">'+sel+'<button class="mini go" onclick="calNew()">＋ Event</button><button class="mini" onclick="loadCalendar()">&#8635;</button></div></div></div>';
-  var evs=r.events||[];
-  if(!evs.length){h+=empty('No events in this window.');g.innerHTML=h;return;}
-  var lastDay='';
-  evs.forEach(function(e){var d=new Date(e.start);var key=isNaN(d)?'':d.toDateString();
-    if(key!=lastDay){lastDay=key;h+='<div style="grid-column:1/-1;margin:8px 2px 0;font-weight:700;color:var(--mut)">'+(key?d.toLocaleDateString([],{weekday:'long',month:'short',day:'numeric'}):'')+'</div>';}
-    var t=e.allDay?'all day':(isNaN(d)?'':d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}));
-    h+='<div class="card" style="cursor:default"><div style="display:flex;gap:8px"><b style="flex:0 0 auto;color:var(--acc,#c9a227)">'+t+'</b><b style="flex:1">'+e2(e.summary)+'</b></div>'
-      +(e.location?'<div class="meta" style="margin-top:3px">&#128205; '+e2(e.location)+'</div>':'')
-      +(e.attendees&&e.attendees.length?'<div class="meta" style="margin-top:3px">'+e.attendees.length+' guest(s)</div>':'')
-      +((e.hangout||e.link)?'<div style="margin-top:7px;display:flex;gap:6px">'+(e.hangout?'<a class="mini go" href="'+e2(e.hangout)+'" target="_blank">&#128249; Join</a>':'')+(e.link?'<a class="mini" href="'+e2(e.link)+'" target="_blank">Open</a>':'')+'</div>':'')+'</div>';
-  });
-  g.innerHTML=h;
-}
-function calDays(d){window.CALDAYS=d;loadCalendar();}
-function calNew(){var now=new Date();var pad=function(n){return (n<10?'0':'')+n;};
-  var fmt=function(dt){return dt.getFullYear()+'-'+pad(dt.getMonth()+1)+'-'+pad(dt.getDate())+'T'+pad(dt.getHours())+':'+pad(dt.getMinutes());};
-  showM('<h2>＋ New event</h2>'
-    +'<div class="row"><label>Title</label><input id="evT" placeholder="Event title"></div>'
-    +'<div class="row"><label>Start</label><input id="evS" type="datetime-local" value="'+fmt(new Date(now.getTime()+3600000))+'"></div>'
-    +'<div class="row"><label>End</label><input id="evE" type="datetime-local" value="'+fmt(new Date(now.getTime()+7200000))+'"></div>'
-    +'<div class="row"><label>Location</label><input id="evL" placeholder="optional"></div>'
-    +'<div class="row"><label>Notes</label><textarea id="evD" rows="3" style="width:100%"></textarea></div>'
-    +'<div class="btns"><button class="btn" onclick="closeM()">Cancel</button><button class="btn go" onclick="calDoCreate()">Create</button></div>');
-}
-async function calDoCreate(){
-  var t=gVal('evT'),s=gVal('evS'),e=gVal('evE');if(!t||!s||!e){toast('Title + start + end required',3000);return;}
-  var tz=Intl.DateTimeFormat().resolvedOptions().timeZone;
-  toast('Creating…');var r=await(await fetch('/api/google/calendar-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({summary:t,start:s+':00',end:e+':00',location:gVal('evL'),desc:gVal('evD'),tz:tz})})).json();
-  if(r&&!r.error){closeM();toast('Event created &#10003;');loadCalendar();}else toast('Failed: '+((r||{}).error||'?'),5000);
-}
-
-var DRIVEQ='';
-async function loadDrive(){
-  var g=document.getElementById("grid");g.innerHTML=empty("Loading Drive…");
-  var r;try{r=await(await fetch('/api/google/drive?q='+encodeURIComponent(DRIVEQ))).json();}catch(e){g.innerHTML=gErr({error:'network'});return;}
-  if(r.error){g.innerHTML=gErr(r);return;}
-  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128450;&#65039; Drive</b> <span class="sub">'+e2(r.email||'')+'</span><div style="margin-left:auto"><button class="mini" onclick="loadDrive()">&#8635;</button></div></div>'
-    +'<div style="margin-top:8px;display:flex;gap:6px"><input id="drq" placeholder="Search Drive…" value="'+e2(DRIVEQ)+'" style="flex:1" onkeydown="if(event.key===\'Enter\')driveSearch()"><button class="mini" onclick="driveSearch()">Search</button></div></div>';
-  var fs=r.files||[];
-  if(!fs.length){h+=empty('No files.');g.innerHTML=h;return;}
-  h+=fs.map(function(f){var ic=f.icon?'<img src="'+e2(f.icon)+'" style="width:16px;height:16px;vertical-align:-3px">':'&#128196;';
-    return '<div class="card" style="cursor:pointer" onclick="window.open(\''+e2(f.link)+'\',\'_blank\')">'
-      +'<div style="display:flex;gap:8px;align-items:baseline"><span style="flex:0 0 auto">'+ic+'</span><b style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+e2(f.name)+'</b></div>'
-      +'<div class="meta" style="margin-top:4px">'+gDate(f.modified)+(f.owner?' &middot; '+e2(f.owner):'')+(f.size?' &middot; '+driveSize(f.size):'')+'</div></div>';
-  }).join('');
-  g.innerHTML=h;
-}
-function driveSearch(){DRIVEQ=gVal('drq');loadDrive();}
+// relocated from the old drive block: Gmail v2 attachments + the Drive surface both call driveSize().
 function driveSize(b){b=+b;if(!b)return'';var u=['B','KB','MB','GB'],i=0;while(b>=1024&&i<3){b/=1024;i++;}return b.toFixed(b<10&&i>0?1:0)+u[i];}
+// shell unified-search entrypoints: the palette calls these id-first; the surfaces are index-based, so bridge here.
+window.gmailOpen=function(id){ if(typeof GM==='undefined'||!GM.msgs)return; var i=GM.msgs.findIndex(function(m){return (m.threadId||m.id)===id||m.id===id;}); if(i>=0){GM.cur=i;gmRenderRows();gmOpen(i);} };
+window.driveQuickLook=function(id){ if(typeof drSorted!=='function')return; var fs=drSorted(); var i=fs.findIndex(function(f){return f.id===id;}); if(i>=0&&!fs[i].folder){drQuickLook(i);} };
+
+/* ===== SHARED SHELL (spliced) ===== */
+/* ========================================================================
+   SHARED SHELL  (window.Shell)  -- vanilla JS, no deps. Drop ABOVE the
+   render-dispatch (anywhere after e2/esc/toast/showM are defined; safe to
+   place right after the `function gErr(...)` Google block ~line 5699, or
+   immediately before loadGmail). Other surfaces call Shell.* into this.
+
+   Reuses existing helpers: e2, esc, empty, showM/closeM, toast, NAV, LENS,
+   the #lens nav buttons, and the /api/google/* endpoints.
+   Namespaced cmdk-* / shell-*. Nothing here renders a lens by itself --
+   it is the spine the gmail/calendar/drive lenses register into.
+   ======================================================================== */
+window.Shell=(function(){
+  "use strict";
+
+  /* ---------- fuzzy scorer: subsequence match, contiguous + word-boundary bonuses ---------- */
+  function fuzzy(q,t){
+    q=(q||"").toLowerCase();t=t||"";var tl=t.toLowerCase();
+    if(!q)return{score:1,hit:[]};
+    var qi=0,score=0,prev=-2,hit=[];
+    for(var i=0;i<tl.length&&qi<q.length;i++){
+      if(tl[i]===q[qi]){
+        var b=1;
+        if(i===prev+1)b+=2;                                   // contiguous run
+        if(i===0||/[\s\-_./@:]/.test(tl[i-1]))b+=3;           // word boundary
+        score+=b;prev=i;hit.push(i);qi++;
+      }
+    }
+    if(qi<q.length)return null;                               // not all chars matched
+    score-=(t.length-q.length)*0.05;                          // mild length penalty
+    return{score:score,hit:hit};
+  }
+  function hilite(t,hit){
+    if(!hit||!hit.length)return e2(t);
+    var s="",set={};hit.forEach(function(i){set[i]=1;});
+    for(var i=0;i<t.length;i++){var c=e2(t[i]);s+=set[i]?("<em>"+c+"</em>"):c;}
+    return s;
+  }
+
+  /* ===================== COMMAND PALETTE ===================== */
+  /* A command = {id,label,hint?,group?,icon?,keys?(array shown right),run(),scope?(lens|'*'),
+     when?()->bool, kind?('cmd'|'jump')}. Surfaces register dynamic providers for jump results. */
+  var staticCmds=[];                 // app-defined commands
+  var providers=[];                  // fn(query) -> [cmd...] (async ok) for live jump results
+  var pal={open:false,sel:0,rows:[],seq:0};
+
+  function registerCommands(list){ list.forEach(function(c){ if(c&&c.id&&!staticCmds.some(function(x){return x.id===c.id;})) staticCmds.push(c); }); }
+  function registerProvider(fn){ if(typeof fn==="function") providers.push(fn); }
+
+  function ensurePalDOM(){
+    if(document.getElementById("cmdkBg"))return;
+    var d=document.createElement("div");
+    d.className="cmdk-bg";d.id="cmdkBg";
+    d.innerHTML=
+      '<div class="cmdk" role="dialog" aria-label="Command palette">'
+      +'<div class="cmdk-top"><span class="cmdk-mag">&#9906;</span>'
+      +'<input class="cmdk-in" id="cmdkIn" placeholder="Type a command, or search mail, files, events…" autocomplete="off" spellcheck="false">'
+      +'<span class="cmdk-scope" id="cmdkScope"></span></div>'
+      +'<div class="cmdk-list" id="cmdkList"></div>'
+      +'<div class="cmdk-foot"><span><kbd>&#8593;</kbd><kbd>&#8595;</kbd> navigate</span>'
+      +'<span><kbd>&#9166;</kbd> run</span><span><kbd>esc</kbd> close</span></div></div>';
+    document.body.appendChild(d);
+    d.addEventListener("click",function(e){ if(e.target===d)closePalette(); });
+    var inp=document.getElementById("cmdkIn");
+    inp.addEventListener("input",function(){ pal.sel=0; refreshPalette(); });
+    inp.addEventListener("keydown",function(e){
+      if(e.key==="ArrowDown"){e.preventDefault();move(1);}
+      else if(e.key==="ArrowUp"){e.preventDefault();move(-1);}
+      else if(e.key==="Enter"){e.preventDefault();runSel();}
+      else if(e.key==="Escape"){e.preventDefault();closePalette();}
+    });
+  }
+  function move(d){ if(!pal.rows.length)return; pal.sel=(pal.sel+d+pal.rows.length)%pal.rows.length; paintPalette(); scrollSel(); }
+  function scrollSel(){ var el=document.querySelector("#cmdkList .cmdk-row.on"); if(el)el.scrollIntoView({block:"nearest"}); }
+  function runSel(){ var c=pal.rows[pal.sel]; if(!c)return; closePalette(); try{c.run&&c.run();}catch(e){toast("Failed: "+(e.message||e),3500);} }
+
+  function openPalette(seed){
+    ensurePalDOM();
+    var bg=document.getElementById("cmdkBg");bg.classList.add("show");pal.open=true;pal.sel=0;
+    var sc=document.getElementById("cmdkScope");var nm=(window.NAV&&NAV[LENS])||LENS||"";
+    sc.textContent=nm;
+    var inp=document.getElementById("cmdkIn");inp.value=seed||"";inp.focus();inp.select();
+    refreshPalette();
+  }
+  function closePalette(){ var bg=document.getElementById("cmdkBg"); if(bg)bg.classList.remove("show"); pal.open=false; }
+  function togglePalette(){ pal.open?closePalette():openPalette(); }
+
+  function baseCommands(q){
+    // 1) static, in-scope commands  2) one "Go to <lens>" command per nav button
+    var out=staticCmds.filter(function(c){
+      if(c.when&&!c.when())return false;
+      if(c.scope&&c.scope!=="*"&&c.scope!==LENS)return false;
+      return true;
+    }).slice();
+    // nav jumps from the live nav buttons (respects hidden ones)
+    [].slice.call(document.querySelectorAll('#lens button[data-l]')).forEach(function(b){
+      if(b.style.display==="none")return;
+      var l=b.dataset.l,nm=(window.NAV&&NAV[l])||l;
+      out.push({id:"go:"+l,group:"Go to",icon:"&#8594;",label:"Go to "+nm,
+        run:function(){ var bb=document.querySelector('#lens button[data-l="'+l+'"]'); if(bb)bb.click(); }});
+    });
+    return out;
+  }
+
+  function refreshPalette(){
+    var q=(document.getElementById("cmdkIn")||{}).value||"";
+    var seq=++pal.seq;
+    // score static/nav
+    var scored=[];
+    baseCommands(q).forEach(function(c){
+      var f=fuzzy(q,c.label);
+      if(f){ scored.push({c:c,score:f.score+(c.group==="Go to"?-1:0),hit:f.hit}); }
+    });
+    scored.sort(function(a,b){return b.score-a.score;});
+    var rows=scored.map(function(s){ s.c._hit=s.hit; return s.c; });
+    pal.rows=rows; paintPalette();
+    // live jump results from providers (async) -- only when there's a query, append below
+    if(q.trim()&&providers.length){
+      Promise.all(providers.map(function(p){ try{return Promise.resolve(p(q));}catch(e){return [];} }))
+        .then(function(lists){
+          if(seq!==pal.seq||!pal.open)return;                 // a newer keystroke superseded this
+          var extra=[];lists.forEach(function(l){ (l||[]).forEach(function(c){ extra.push(c); }); });
+          pal.rows=rows.concat(extra); paintPalette();
+        }).catch(function(){});
+    }
+  }
+
+  function paintPalette(){
+    var list=document.getElementById("cmdkList");if(!list)return;
+    if(!pal.rows.length){ list.innerHTML='<div class="cmdk-empty">No matches.</div>'; return; }
+    if(pal.sel>=pal.rows.length)pal.sel=pal.rows.length-1;
+    var lastG=null,h="";
+    pal.rows.forEach(function(c,i){
+      var g=c.group||(c.kind==="jump"?"Results":"Commands");
+      if(g!==lastG){ h+='<div class="cmdk-grp">'+e2(g)+'</div>'; lastG=g; }
+      var kbd=(c.keys&&c.keys.length)?('<div class="cmdk-kbd">'+c.keys.map(function(k){return '<kbd>'+e2(k)+'</kbd>';}).join('')+'</div>'):'';
+      h+='<div class="cmdk-row'+(i===pal.sel?' on':'')+'" data-i="'+i+'">'
+        +'<span class="cmdk-ic">'+(c.icon||'&#9656;')+'</span>'
+        +'<span class="cmdk-lbl"><b>'+hilite(c.label,c._hit)+'</b>'+(c.hint?('<span>'+e2(c.hint)+'</span>'):'')+'</span>'+kbd+'</div>';
+    });
+    list.innerHTML=h;
+    [].slice.call(list.querySelectorAll(".cmdk-row")).forEach(function(el){
+      el.addEventListener("mousemove",function(){ var i=+el.dataset.i; if(i!==pal.sel){pal.sel=i;paintPalette();} });
+      el.addEventListener("click",function(){ pal.sel=+el.dataset.i; runSel(); });
+    });
+  }
+
+  /* default providers: unified search across the three Google surfaces (only if google enabled) */
+  function installGoogleSearchProviders(){
+    if(!(window.CC&&window.CC.google))return;
+    registerProvider(function(q){
+      return fetch('/api/google/gmail?view=inbox&max=5&q='+encodeURIComponent(q)).then(function(r){return r.json();}).then(function(r){
+        return ((r&&r.messages)||[]).map(function(m){
+          return {kind:"jump",group:"Mail",icon:"&#9993;",label:(m.subject||"(no subject)"),
+            hint:(m.from||"").replace(/<.*/,"").trim(),
+            run:function(){ jumpLens("gmail",function(){ if(window.gmailOpen)gmailOpen(m.id); }); }};
+        });
+      }).catch(function(){return[];});
+    });
+    registerProvider(function(q){
+      return fetch('/api/google/drive?max=5&q='+encodeURIComponent(q)).then(function(r){return r.json();}).then(function(r){
+        return ((r&&r.files)||[]).map(function(f){
+          return {kind:"jump",group:"Drive",icon:"&#128196;",label:f.name,hint:f.owner||"",
+            run:function(){ jumpLens("drive",function(){ if(window.driveQuickLook)driveQuickLook(f.id); else window.open(f.link,'_blank'); }); }};
+        });
+      }).catch(function(){return[];});
+    });
+    registerProvider(function(q){
+      return fetch('/api/google/calendar?days=30').then(function(r){return r.json();}).then(function(r){
+        var ql=q.toLowerCase();
+        return ((r&&r.events)||[]).filter(function(e){return (e.summary||"").toLowerCase().indexOf(ql)>=0;}).slice(0,5).map(function(e){
+          return {kind:"jump",group:"Calendar",icon:"&#128197;",label:e.summary,hint:e.start||"",
+            run:function(){ jumpLens("calendar"); }};
+        });
+      }).catch(function(){return[];});
+    });
+  }
+  function jumpLens(lens,after){
+    var b=document.querySelector('#lens button[data-l="'+lens+'"]');
+    if(b&&LENS!==lens){ b.click(); if(after)setTimeout(after,260); }
+    else if(after)after();
+  }
+
+  /* ===================== GLOBAL KEYBOARD ROUTER ===================== */
+  /* Global keys always live. Per-lens keymaps registered via Shell.registerKeys(lens,{key:fn}).
+     Suppressed while typing in INPUT/TEXTAREA/SELECT/contenteditable (except global ⌘K + Esc). */
+  var lensKeys={};                   // lens -> { 'j':fn, 'k':fn, ... }
+  function registerKeys(lens,map){ lensKeys[lens]=Object.assign(lensKeys[lens]||{},map||{}); }
+  function clearKeys(lens){ delete lensKeys[lens]; }
+  function inField(t){ if(!t)return false; var n=(t.tagName||""); return n==="INPUT"||n==="TEXTAREA"||n==="SELECT"||t.isContentEditable; }
+
+  function onKey(e){
+    var typing=inField(e.target);
+    // ⌘K / Ctrl-K -> palette (works even while typing)
+    if((e.metaKey||e.ctrlKey)&&!e.altKey&&(e.key==="k"||e.key==="K")){ e.preventDefault(); togglePalette(); return; }
+    // Esc closes the topmost overlay (palette > quick look) -- and works while typing
+    if(e.key==="Escape"){
+      if(pal.open){ e.preventDefault(); closePalette(); return; }
+      if(ql.open){ e.preventDefault(); closeQuickLook(); return; }
+    }
+    if(pal.open)return;              // palette owns the keyboard while open
+    // "/" focuses the surface search (universal), unless typing
+    if(!typing&&e.key==="/"){ var s=document.getElementById("search"); if(s){ e.preventDefault(); s.focus(); s.select&&s.select(); return; } }
+    if(typing)return;
+    // quick-look arrow cycling
+    if(ql.open){
+      if(e.key==="ArrowLeft"){ e.preventDefault(); qlStep(-1); return; }
+      if(e.key==="ArrowRight"){ e.preventDefault(); qlStep(1); return; }
+    }
+    // per-lens map
+    var map=lensKeys[LENS];
+    if(map){
+      var k=e.key;
+      // normalize a couple of common aliases
+      var fn=map[k]||map[k.toLowerCase&&k.toLowerCase()]||(e.key===" "?map["Space"]:null)||(e.key==="Enter"?map["Enter"]:null);
+      if(fn){ e.preventDefault(); try{fn(e);}catch(err){toast("Failed: "+(err.message||err),3000);} }
+    }
+  }
+  // install once (capture so we beat surface inputs for global keys)
+  document.addEventListener("keydown",onKey,false);
+
+  /* ===================== SPLIT-PANE CONTAINER ===================== */
+  /* Build into #grid. opts: {head(html), listSkeleton(n)}. Returns refs the surface drives.
+     The surface fills .listEl with rows and .detailEl on selection. */
+  function split(opts){
+    opts=opts||{};
+    var grid=document.getElementById("grid");
+    var head=opts.head?('<div class="shell-head">'+opts.head+'</div>'):'';
+    grid.innerHTML=head
+      +'<div class="shell-split" id="shellSplit" tabindex="-1">'
+      +'<div class="shell-list" id="shellList"></div>'
+      +'<div class="shell-detail" id="shellDetail"><div class="shell-detail-empty"><div class="big">'+(opts.icon||'&#9656;')+'</div><div>'+(opts.emptyDetail||'Select an item.')+'</div></div></div>'
+      +'</div>';
+    var listEl=document.getElementById("shellList"),detailEl=document.getElementById("shellDetail"),wrap=document.getElementById("shellSplit");
+    if(opts.listSkeleton)listEl.innerHTML=skeletonRows(opts.listSkeleton);
+    return {
+      el:wrap,listEl:listEl,detailEl:detailEl,
+      setList:function(html){ listEl.innerHTML=html; },
+      setDetail:function(html){ detailEl.innerHTML=html; wrap.classList.add("detail-open"); },
+      clearDetail:function(html){ detailEl.innerHTML='<div class="shell-detail-empty"><div class="big">'+(opts.icon||'&#9656;')+'</div><div>'+(html||opts.emptyDetail||'Select an item.')+'</div></div>'; wrap.classList.remove("detail-open"); },
+      // mark a row selected by data-id (rows must carry data-id)
+      select:function(id){
+        [].slice.call(listEl.querySelectorAll(".shell-row")).forEach(function(r){ r.classList.toggle("on",r.dataset.id===String(id)); });
+      },
+      backToList:function(){ wrap.classList.remove("detail-open"); }   // mobile back
+    };
+  }
+
+  /* ===================== SKELETON LOADERS ===================== */
+  function skeletonRows(n){
+    n=n||7;var h="";
+    for(var i=0;i<n;i++){ var w=58+Math.round(Math.random()*30);
+      h+='<div class="shell-skel-row"><div class="shell-skel shell-skel-line" style="width:'+w+'%"></div>'
+        +'<div class="shell-skel shell-skel-line" style="width:'+(34+Math.round(Math.random()*40))+'%;height:9px"></div></div>'; }
+    return h;
+  }
+  function skeletonBlock(h){ return '<div class="shell-skel" style="width:100%;height:'+(h||300)+'px;border-radius:12px"></div>'; }
+
+  /* ===================== OPTIMISTIC UI + UNDO ===================== */
+  /* optimistic(commit, undo, opts): applies commit() now, shows a toast with an Undo button.
+     If the user clicks Undo within ttl, undo() runs and commit's server call is cancelled.
+     Otherwise after ttl, opts.persist() (the real server write) fires. Returns a handle. */
+  function optimistic(cfg){
+    cfg=cfg||{};
+    var ttl=cfg.ttl||5200,done=false,undone=false,timer=null;
+    try{cfg.apply&&cfg.apply();}catch(e){}                       // optimistic DOM change now
+    var el=document.getElementById("toast");
+    var id="u"+Date.now();
+    function finish(){ if(done||undone)return; done=true; clearTimeout(timer);
+      if(el)el.style.display="none";
+      if(cfg.persist)Promise.resolve(cfg.persist()).then(function(r){
+        if(r&&(r.error||r.ok===false))toast("Sync failed: "+((r||{}).error||"?"),4000);
+      }).catch(function(e){ toast("Sync failed: "+(e.message||e),4000); }); }
+    function undo(){ if(done||undone)return; undone=true; clearTimeout(timer);
+      if(el)el.style.display="none";
+      try{cfg.undo&&cfg.undo();}catch(e){} if(cfg.onUndo)cfg.onUndo(); }
+    if(el){
+      el.innerHTML=(cfg.label||"Done")+' <button class="shell-undo" id="'+id+'">Undo</button>';
+      el.style.display="block";clearTimeout(el._t);
+      var b=document.getElementById(id);if(b)b.onclick=undo;
+      timer=setTimeout(finish,ttl);
+      el._t=setTimeout(function(){},ttl+50);
+    } else { finish(); }
+    return {finishNow:finish,undo:undo};
+  }
+  // simple confirm-replacement: do action, allow undo via revert()
+  function actWithUndo(label,persistFn,revertFn){
+    return optimistic({label:label,persist:persistFn,undo:revertFn});
+  }
+
+  /* ===================== QUICK LOOK (← → cycling detail) ===================== */
+  var ql={open:false,items:[],idx:0,renderFn:null};
+  function ensureQLDOM(){
+    if(document.getElementById("shellQL"))return;
+    var d=document.createElement("div");d.className="shell-ql";d.id="shellQL";
+    d.innerHTML='<div class="shell-ql-top"><div class="shell-ql-ttl" id="qlTtl"></div>'
+      +'<button class="mini" id="qlClose">Close (esc)</button></div>'
+      +'<div class="shell-ql-nav prev" id="qlPrev">&#8249;</div>'
+      +'<div class="shell-ql-body" id="qlBody"></div>'
+      +'<div class="shell-ql-nav next" id="qlNext">&#8250;</div>';
+    document.body.appendChild(d);
+    document.getElementById("qlClose").onclick=closeQuickLook;
+    document.getElementById("qlPrev").onclick=function(){qlStep(-1);};
+    document.getElementById("qlNext").onclick=function(){qlStep(1);};
+    d.addEventListener("click",function(e){ if(e.target===d)closeQuickLook(); });
+  }
+  // items: array; idx: start; renderFn(item,idx,total)->{title,body(html)} (sync or Promise)
+  function quickLook(items,idx,renderFn){
+    ensureQLDOM();ql.items=items||[];ql.idx=idx||0;ql.renderFn=renderFn;ql.open=true;
+    document.getElementById("shellQL").classList.add("show");qlPaint();
+  }
+  function closeQuickLook(){ var d=document.getElementById("shellQL"); if(d)d.classList.remove("show"); ql.open=false; }
+  function qlStep(d){ if(!ql.items.length)return; ql.idx=(ql.idx+d+ql.items.length)%ql.items.length; qlPaint(); }
+  function qlPaint(){
+    var it=ql.items[ql.idx];if(!it)return;
+    var body=document.getElementById("qlBody"),ttl=document.getElementById("qlTtl");
+    body.innerHTML=skeletonBlock(420);
+    Promise.resolve(ql.renderFn(it,ql.idx,ql.items.length)).then(function(v){
+      if(!ql.open)return; v=v||{}; ttl.innerHTML=e2(v.title||""); body.innerHTML=v.body||"";
+    }).catch(function(e){ body.innerHTML='<div class="shell-detail-empty">'+e2(e.message||String(e))+'</div>'; });
+  }
+
+  /* ===================== INIT ===================== */
+  function init(){
+    ensurePalDOM();ensureQLDOM();
+    installGoogleSearchProviders();
+    // baseline command: open palette (discoverable) + a couple of global utilities
+    registerCommands([
+      {id:"cmd:palette",group:"General",icon:"&#9906;",label:"Command palette",keys:["⌘","K"],run:function(){openPalette();}}
+    ]);
+  }
+
+  return {
+    init:init,
+    // palette
+    openPalette:openPalette,closePalette:closePalette,togglePalette:togglePalette,
+    registerCommands:registerCommands,registerProvider:registerProvider,
+    // keyboard
+    registerKeys:registerKeys,clearKeys:clearKeys,
+    // layout
+    split:split,skeletonRows:skeletonRows,skeletonBlock:skeletonBlock,
+    // optimistic
+    optimistic:optimistic,actWithUndo:actWithUndo,
+    // quick look
+    quickLook:quickLook,closeQuickLook:closeQuickLook,
+    // util re-exports for surfaces
+    fuzzy:fuzzy,hilite:hilite
+  };
+})();
+
+
+/* ===================================================================
+ * GMAIL SURFACE v2 -- keyboard-first, three-pane, threaded.
+ * Self-contained: own keyboard router + Quick Look + optimistic undo.
+ * Reuses shared helpers e2/esc/empty/showM/closeM/toast/gFrom/gAddr/
+ * gVal/gDate/gErr and the /api/google/* endpoints. Namespaced gm-*.
+ * Read-state rule preserved: list uses format=metadata (server side);
+ * only opening a thread marks it read (gmail-thread modify).
+ * =================================================================== */
+
+// ---- state ----
+var GM = {
+  lane: 'inbox',           // active saved-lane key
+  q: '',                   // current Gmail query (lane query + chips + text)
+  text: '',                // free-text portion of the search
+  chips: {},               // operator chips toggled on (is:unread, has:attachment, ...)
+  msgs: [],                // current list rows (thread-collapsed)
+  cur: -1,                 // cursor index into msgs
+  sel: {},                 // multi-select set of row ids
+  labels: [],              // user labels (rail)
+  thread: null,            // open thread payload
+  email: '',
+  snoozeId: null,          // cached CC/Snoozed label id
+  undo: null               // {label, fn} -- one-level undo
+};
+
+// saved lanes (each is a stored Gmail query). Gold rail item == selected.
+var GM_LANES = [
+  {k:'inbox',     i:'\u{1F4E5}', n:'Inbox',     q:'in:inbox'},
+  {k:'unread',    i:'●',    n:'Unread',    q:'in:inbox is:unread'},
+  {k:'important', i:'❗',    n:'Important', q:'is:important in:inbox'},
+  {k:'starred',   i:'★',    n:'Starred',   q:'is:starred'},
+  {k:'vip',       i:'\u{1F451}', n:'VIP',       q:'is:important is:unread'},
+  {k:'receipts',  i:'\u{1F9FE}', n:'Receipts',  q:'(receipt OR invoice OR order OR payment) newer_than:1y'},
+  {k:'feed',      i:'\u{1F4F0}', n:'Feed',      q:'category:updates OR category:promotions OR category:forums'},
+  {k:'snoozed',   i:'⏰',    n:'Snoozed',   q:'label:CC/Snoozed'},
+  {k:'sent',      i:'➤',    n:'Sent',      q:'in:sent'},
+  {k:'all',       i:'\u{1F5C2}', n:'All mail',  q:'in:anywhere'}
+];
+// operator chips (toggle into the query)
+var GM_CHIPS = [
+  {k:'unread',  label:'Unread',     q:'is:unread'},
+  {k:'att',     label:'Has file',   q:'has:attachment'},
+  {k:'star',    label:'Starred',    q:'is:starred'},
+  {k:'fromme',  label:'From me',    q:'from:me'},
+  {k:'7d',      label:'Last 7d',    q:'newer_than:7d'},
+  {k:'big',     label:'Large',      q:'larger:5M'}
+];
+
+function gmLaneQuery(){
+  var lane = GM_LANES.find(function(l){return l.k===GM.lane;}) || GM_LANES[0];
+  var parts = [lane.q];
+  Object.keys(GM.chips).forEach(function(k){ if(GM.chips[k]){ var c=GM_CHIPS.find(function(x){return x.k===k;}); if(c) parts.push(c.q); }});
+  if(GM.text.trim()) parts.push(GM.text.trim());
+  return parts.join(' ');
+}
+
+// ---- entry point (dispatched from render(): LENS=="gmail" -> loadGmail()) ----
+async function loadGmail(){
+  var g=document.getElementById('grid');
+  if(!(window.CC&&window.CC.google)){ g.innerHTML=gErr({error:'Google Workspace not configured on this node.'}); return; }
+  // scaffold shell once
+  g.innerHTML='<div class="gm-app" id="gmApp">'+gmRailHTML()+gmListShell()+gmReadEmpty()+'</div>';
+  gmBindKeys();
+  // labels for the rail (best-effort, async) + first fetch
+  gmFetchLabels();
+  await gmFetchList(true);
+}
+
+function gmRailHTML(){
+  var laneBtn=function(l){
+    var meta = (l.k==='inbox'||l.k==='unread') ? '<span class="gm-ct" id="gmCt_'+l.k+'"></span>' : '';
+    return '<div class="gm-lane'+(GM.lane===l.k?' on':'')+'" onclick="gmSetLane(\''+l.k+'\')" data-lane="'+l.k+'">'
+      +'<i class="gm-li">'+l.i+'</i><span class="gm-ln">'+l.n+'</span>'+meta+'</div>';
+  };
+  var sys=GM_LANES.map(laneBtn).join('');
+  var userLabels=GM.labels.filter(function(x){return x.id.indexOf('Label_')===0||(x.name.indexOf('CATEGORY_')!==0&&['INBOX','SENT','DRAFT','STARRED','IMPORTANT','TRASH','SPAM','UNREAD','CHAT'].indexOf(x.id)<0);})
+    .map(function(x){
+      return '<div class="gm-lane'+(GM.lane==='lbl:'+x.id?' on':'')+'" onclick="gmSetLabelLane(\''+esc(x.id)+'\',\''+esc(x.name)+'\')">'
+        +'<i class="gm-li">\u{1F3F7}</i><span class="gm-ln">'+e2(x.name)+'</span>'
+        +(x.unread?'<span class="gm-ct">'+x.unread+'</span>':'')+'</div>';
+    }).join('');
+  return '<aside class="gm-rail" id="gmRail">'
+    +'<div class="gm-acct">'+e2(GM.email||'')+'</div>'
+    +sys
+    +(userLabels?'<div class="gm-sec">Labels</div>'+userLabels:'')
+    +'<div class="gm-railfoot"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>e</kbd> archive · <kbd>#</kbd> trash · <kbd>s</kbd> star · <kbd>u</kbd> unread · <kbd>c</kbd> compose · <kbd>z</kbd> undo · <kbd>/</kbd> search</div>'
+    +'</aside>';
+}
+
+function gmListShell(){
+  var chips=GM_CHIPS.map(function(c){
+    return '<button class="gm-chip'+(GM.chips[c.k]?' on':'')+'" onclick="gmToggleChip(\''+c.k+'\')">'+e2(c.label)+'</button>';
+  }).join('');
+  return '<section class="gm-list">'
+    +'<div class="gm-lhead">'
+      +'<div class="gm-lhrow"><b id="gmLaneTitle">Inbox</b>'
+        +'<span class="gm-spacer"></span>'
+        +'<button class="gm-act go" onclick="gmCompose()" title="Compose (c)">✎ Compose</button>'
+        +'<button class="gm-act" onclick="gmFetchList(true)" title="Refresh">↻</button></div>'
+      +'<input class="gm-search" id="gmSearch" placeholder="Search all mail…  (/ to focus)" '
+        +'onkeydown="if(event.key===\'Enter\'){GM.text=this.value;gmFetchList(true);}else if(event.key===\'Escape\'){this.blur();}">'
+      +'<div class="gm-chips">'+chips+'</div>'
+    +'</div>'
+    +'<div class="gm-batch" id="gmBatch"></div>'
+    +'<div class="gm-rows" id="gmRows">'+empty('Loading…')+'</div>'
+  +'</section>';
+}
+
+function gmReadEmpty(){
+  return '<section class="gm-read" id="gmRead"><div class="gm-empty"><div class="gm-big">✉️</div>'
+    +'<div>Select a conversation</div><div style="font-size:11px">j/k to move · Enter to open</div></div></section>';
+}
+
+// ---- list fetch + render ----
+async function gmFetchLabels(){
+  try{ var r=await(await fetch('/api/google/gmail-labels')).json();
+    if(r&&!r.error){ GM.labels=r.labels||[]; GM.email=r.email||GM.email;
+      var rail=document.getElementById('gmRail'); if(rail) rail.outerHTML=gmRailHTML(); }
+  }catch(e){}
+}
+
+async function gmFetchList(reset){
+  if(reset){ GM.cur=-1; GM.sel={}; gmPaintBatch(); }
+  GM.q=gmLaneQuery();
+  var rows=document.getElementById('gmRows'); if(rows) rows.innerHTML=empty('Loading…');
+  var lane=GM_LANES.find(function(l){return l.k===GM.lane;});
+  var title=lane?lane.n:(GM.lane.indexOf('lbl:')===0?'Label':'Mail');
+  var t=document.getElementById('gmLaneTitle'); if(t) t.textContent=title;
+  var r;
+  try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q)+'&max=50')).json(); }
+  catch(e){ if(rows) rows.innerHTML=gErr({error:'network'}); return; }
+  if(r.error){ if(rows) rows.innerHTML=gErr(r); return; }
+  GM.email=r.email||GM.email;
+  // collapse to threads: keep first message seen per threadId, count the rest
+  var seen={}, list=[];
+  (r.messages||[]).forEach(function(m){
+    var tid=m.threadId||m.id;
+    if(seen[tid]!==undefined){ list[seen[tid]].count++; if(m.unread) list[seen[tid]].unread=true; return; }
+    seen[tid]=list.length; m.count=1; list.push(m);
+  });
+  GM.msgs=list;
+  gmRenderRows();
+}
+
+function gmRenderRows(){
+  var rows=document.getElementById('gmRows'); if(!rows) return;
+  if(!GM.msgs.length){ rows.innerHTML='<div class="gm-empty"><div class="gm-big">\u{1F389}</div><div>Inbox zero — nothing here.</div></div>'; gmRenderRead(); return; }
+  rows.innerHTML=GM.msgs.map(function(m,i){
+    var checked = !!GM.sel[m.id];
+    return '<div class="gm-row'+(m.unread?' unread':'')+(i===GM.cur?' cur':'')+'" data-i="'+i+'" onclick="gmRowClick(event,'+i+')">'
+      +'<span class="gm-dot"></span>'
+      +'<div class="gm-rmid">'
+        +'<div class="gm-fromrow"><span class="gm-from">'+e2(gFrom(m.from))+'</span>'
+          +(m.count>1?'<span class="gm-cnt">'+m.count+'</span>':'')+'</div>'
+        +'<div class="gm-subj">'+e2(m.subject)+'</div>'
+        +'<div class="gm-snip">'+e2(m.snippet)+'</div>'
+      +'</div>'
+      +'<div class="gm-rright">'
+        +'<span class="gm-date">'+gDate(m.date)+'</span>'
+        +'<span class="gm-star'+(m.starred?' on':'')+'" onclick="event.stopPropagation();gmStar('+i+')" title="Star (s)">'+(m.starred?'★':'☆')+'</span>'
+        +'<input type="checkbox" class="gm-sel" '+(checked?'checked':'')+' onclick="event.stopPropagation();gmToggleSel(\''+m.id+'\')">'
+      +'</div>'
+    +'</div>';
+  }).join('');
+}
+
+function gmRowClick(ev,i){ GM.cur=i; gmRenderRows(); gmOpen(i); gmScrollCur(); }
+
+function gmScrollCur(){
+  var rows=document.getElementById('gmRows'); if(!rows) return;
+  var el=rows.querySelector('.gm-row[data-i="'+GM.cur+'"]'); if(el) el.scrollIntoView({block:'nearest'});
+}
+
+// ---- open + threaded reader ----
+async function gmOpen(i){
+  var m=GM.msgs[i]; if(!m) return;
+  var read=document.getElementById('gmRead'); if(read) read.innerHTML='<div class="gm-empty"><div class="gm-big">⏳</div><div>Opening…</div></div>';
+  var r;
+  try{ r=await(await fetch('/api/google/gmail-thread?id='+encodeURIComponent(m.threadId||m.id))).json(); }
+  catch(e){ if(read) read.innerHTML=gErr({error:'network'}); return; }
+  if(r.error){ if(read) read.innerHTML=gErr(r); return; }
+  GM.thread=r;
+  // listing showed unread; opening marks read -> reflect locally
+  if(GM.msgs[i]){ GM.msgs[i].unread=false; gmRenderRows(); }
+  gmFetchBadge();
+  gmRenderRead();
+}
+
+function gmInitials(s){ var n=gFrom(s)||gAddr(s)||'?'; var p=n.trim().split(/\s+/); return ((p[0]||'?')[0]+((p[1]||'')[0]||'')).toUpperCase(); }
+
+function gmRenderRead(){
+  var read=document.getElementById('gmRead'); if(!read) return;
+  var t=GM.thread;
+  if(!t){ read.innerHTML=gmReadEmptyBody(); return; }
+  var msgs=t.messages||[];
+  var last=msgs.length-1;
+  var head='<div class="gm-rdhead">'
+    +'<div class="gm-rdsubj">'+e2(t.subject)+(msgs.length>1?' <span class="gm-cnt">'+msgs.length+'</span>':'')+'</div>'
+    +'<div class="gm-rdmeta">'+e2(gAddr((msgs[0]||{}).from||''))+' · '+msgs.length+' message'+(msgs.length>1?'s':'')+'</div>'
+    +'<div class="gm-acts">'
+      +'<button class="gm-act go" onclick="gmReply(false)" title="Reply (r)">↩ Reply</button>'
+      +'<button class="gm-act" onclick="gmReply(true)" title="Reply all (a)">↪ Reply all</button>'
+      +'<button class="gm-act" onclick="gmForward()" title="Forward (f)">➤ Forward</button>'
+      +'<button class="gm-act" onclick="gmActCur(\'archive\')" title="Archive (e)">\u{1F5C4} Archive</button>'
+      +'<button class="gm-act" onclick="gmActCur(\'trash\')" title="Trash (#)">\u{1F5D1} Trash</button>'
+      +'<button class="gm-act" onclick="gmSnoozeMenu()" title="Snooze (h)">⏰ Snooze</button>'
+      +'<button class="gm-act" onclick="gmActCur(\'unread\');gmCloseRead()" title="Mark unread (u)">✉ Unread</button>'
+    +'</div>'
+  +'</div>';
+  var body='<div class="gm-thread">'+msgs.map(function(m,idx){
+    var open=(idx===last);
+    var bodyHtml=(m.body&&m.body.html)
+      ? '<iframe sandbox srcdoc="'+e2(gmStyleHtml(m.body.html))+'" onload="gmFitFrame(this)"></iframe>'
+      : '<pre>'+e2((m.body&&m.body.text)||m.snippet||'(no content)')+'</pre>';
+    var atts=(m.attachments&&m.attachments.length)
+      ? '<div class="gm-att">'+m.attachments.map(function(a){
+          return '<span class="gm-attbtn">\u{1F4CE} '+e2(a.filename)+' <span style="color:var(--dim)">'+driveSize(a.size)+'</span></span>';
+        }).join('')+'</div>' : '';
+    return '<div class="gm-msg'+(open?' open':'')+'" data-mi="'+idx+'">'
+      +'<div class="gm-mhead" onclick="gmToggleMsg('+idx+')">'
+        +'<span class="gm-avatar">'+e2(gmInitials(m.from))+'</span>'
+        +'<div class="gm-mhi"><div class="gm-mfrom">'+e2(gFrom(m.from))+(m.starred?' ★':'')+'</div>'
+          +'<div class="gm-mto">to '+e2(gAddr(m.to)||'me')+'</div></div>'
+        +'<span class="gm-mdate">'+e2(gmFullDate(m.date))+'</span>'
+      +'</div>'
+      +'<div class="gm-collapsed">'+e2(m.snippet)+'</div>'
+      +'<div class="gm-mbody">'+bodyHtml+atts+'</div>'
+    +'</div>';
+  }).join('')+'</div>';
+  read.innerHTML=head+body;
+}
+function gmReadEmptyBody(){return '<div class="gm-empty"><div class="gm-big">✉️</div><div>Select a conversation</div><div style="font-size:11px">j/k move · Enter open</div></div>';}
+function gmCloseRead(){ GM.thread=null; gmRenderRead(); }
+function gmToggleMsg(idx){
+  var el=document.querySelector('.gm-msg[data-mi="'+idx+'"]'); if(el) el.classList.toggle('open');
+}
+function gmStyleHtml(h){ // inject a base style so dark-themed mail is readable in the white iframe
+  return '<base target="_blank"><style>body{font:14px/1.55 -apple-system,sans-serif;color:#111;margin:8px;word-break:break-word}img{max-width:100%;height:auto}a{color:#1a56db}</style>'+(h||'');
+}
+function gmFitFrame(f){ try{ var d=f.contentDocument||f.contentWindow.document; f.style.height=Math.min(d.body.scrollHeight+24,900)+'px'; }catch(e){ f.style.height='460px'; } }
+function gmFullDate(s){ try{var d=new Date(s); if(isNaN(d)) return e2(s); return d.toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}catch(e){return e2(s);} }
+
+// ---- triage actions (optimistic + undo) ----
+function gmCurMsg(){ return GM.msgs[GM.cur]; }
+
+function gmStar(i){
+  var m=GM.msgs[i]; if(!m) return;
+  var was=m.starred; m.starred=!was; gmRenderRows();
+  gmPost('/api/google/gmail-modify',{id:m.id,action:was?'unstar':'star'});
+  toast((was?'Unstarred':'Starred')+' · z to undo');
+  GM.undo={label:'star',fn:function(){ m.starred=was; gmRenderRows(); return gmPost('/api/google/gmail-modify',{id:m.id,action:was?'star':'unstar'}); }};
+}
+
+async function gmActCur(action){ // archive/trash/unread/etc on the current row, with undo
+  var m=gmCurMsg(); if(!m){ toast('Nothing selected'); return; }
+  var i=GM.cur;
+  await gmActOn(m,action,i);
+}
+
+async function gmActOn(m,action,i){
+  var undoAction={archive:'unarchive',trash:'untrash',unread:'read',read:'unread',
+                  star:'unstar',unstar:'star',important:'unimportant',unimportant:'important',
+                  spam:'notspam'}[action];
+  var removeFromList = (action==='archive'||action==='trash'||action==='spam') &&
+                       (GM.lane!=='all'&&GM.lane!=='sent');
+  // optimistic remove
+  if(removeFromList && i>=0){ GM.msgs.splice(i,1); if(GM.cur>=GM.msgs.length) GM.cur=GM.msgs.length-1; gmRenderRows(); if(GM.cur>=0){ gmOpen(GM.cur);} else gmCloseRead(); }
+  var r=await gmPost('/api/google/gmail-modify',{id:m.id,action:action});
+  if(r&&r.error){ toast('Failed: '+r.error,4000); gmFetchList(true); return; }
+  if(undoAction){
+    toast(action+' · z to undo');
+    GM.undo={label:action,fn:async function(){
+      await gmPost('/api/google/gmail-modify',{id:m.id,action:undoAction});
+      toast('undone'); return gmFetchList(true);
+    }};
+  } else { toast(action+' ✓'); }
+  gmFetchBadge();
+}
+
+async function gmUndo(){
+  if(!GM.undo){ toast('Nothing to undo'); return; }
+  var u=GM.undo; GM.undo=null; await u.fn();
+}
+
+// ---- snooze (client side: add CC/Snoozed label + remove INBOX) ----
+async function gmSnoozeMenu(){
+  showM('<h2>⏰ Snooze</h2><div class="gm-snooze-opts" style="display:flex;flex-direction:column;gap:8px">'
+    +['Later today','Tomorrow','This weekend','Next week'].map(function(o){
+        return '<button class="btn" onclick="gmDoSnooze()">'+o+'</button>';
+      }).join('')
+    +'</div><div class="btns"><button class="btn" onclick="closeM()">Cancel</button></div>');
+}
+async function gmDoSnooze(){
+  closeM();
+  var m=gmCurMsg(); if(!m) return;
+  if(!GM.snoozeId){
+    var lr=await gmPost('/api/google/gmail-snooze-label',{}); GM.snoozeId=(lr&&lr.id)||null;
+  }
+  if(!GM.snoozeId){ toast('Could not create snooze label',4000); return; }
+  var i=GM.cur;
+  if(GM.lane!=='snoozed'&&i>=0){ GM.msgs.splice(i,1); gmRenderRows(); gmCloseRead(); }
+  await gmPost('/api/google/gmail-label',{id:m.id,add:GM.snoozeId,remove:'INBOX'});
+  toast('Snoozed · z to undo');
+  GM.undo={label:'snooze',fn:async function(){ await gmPost('/api/google/gmail-label',{id:m.id,add:'INBOX',remove:GM.snoozeId}); return gmFetchList(true); }};
+}
+
+// ---- multi-select batch bar ----
+function gmToggleSel(id){ if(GM.sel[id]) delete GM.sel[id]; else GM.sel[id]=true; gmRenderRows(); gmPaintBatch(); }
+function gmSelCount(){ return Object.keys(GM.sel).length; }
+function gmPaintBatch(){
+  var b=document.getElementById('gmBatch'); if(!b) return;
+  var n=gmSelCount();
+  if(!n){ b.className='gm-batch'; b.innerHTML=''; return; }
+  b.className='gm-batch on';
+  b.innerHTML='<b>'+n+' selected</b>'
+    +'<button class="gm-act" onclick="gmBatch(\'archive\')">Archive</button>'
+    +'<button class="gm-act" onclick="gmBatch(\'trash\')">Trash</button>'
+    +'<button class="gm-act" onclick="gmBatch(\'read\')">Read</button>'
+    +'<button class="gm-act" onclick="gmBatch(\'star\')">Star</button>'
+    +'<button class="gm-act" onclick="GM.sel={};gmRenderRows();gmPaintBatch()" style="margin-left:auto">Clear</button>';
+}
+async function gmBatch(action){
+  var ids=Object.keys(GM.sel); if(!ids.length) return;
+  toast(action+' '+ids.length+'…');
+  await Promise.all(ids.map(function(id){ return gmPost('/api/google/gmail-modify',{id:id,action:action}); }));
+  GM.sel={}; toast(action+' ✓'); await gmFetchList(true); gmFetchBadge();
+}
+
+// ---- compose / reply / forward (beautiful, threaded) ----
+function gmCompose(pre){
+  pre=pre||{};
+  var showCc=!!(pre.cc||pre.bcc);
+  showM('<div class="gm-compose"><h2>'+(pre.title||'✎ New message')+'</h2>'
+    +'<div class="row"><label>To</label><input id="gmTo" value="'+e2(pre.to||'')+'" placeholder="name@example.com"></div>'
+    +'<div id="gmCcWrap" style="'+(showCc?'':'display:none')+'">'
+      +'<div class="row"><label>Cc</label><input id="gmCc" value="'+e2(pre.cc||'')+'"></div>'
+      +'<div class="row"><label>Bcc</label><input id="gmBcc" value="'+e2(pre.bcc||'')+'"></div></div>'
+    +'<div class="row"><label>Subject <span class="gm-cc-toggle" onclick="var w=document.getElementById(\'gmCcWrap\');w.style.display=w.style.display===\'none\'?\'block\':\'none\'">Cc/Bcc</span></label>'
+      +'<input id="gmSubj" value="'+e2(pre.subject||'')+'"></div>'
+    +'<div class="row"><label>Message</label><textarea id="gmBody">'+e2(pre.body||'')+'</textarea></div>'
+    +'<div class="gm-sendlater"><label style="font-weight:600">Send later:</label>'
+      +'<input type="datetime-local" id="gmLater" style="flex:0 0 auto"><span style="font-size:11px;color:var(--dim)">(optional)</span></div>'
+    +'<div class="btns"><button class="btn" onclick="closeM()">Discard</button>'
+      +'<button class="btn go" onclick="gmDoSend('
+        +(pre.threadId?('\''+esc(pre.threadId)+'\''):'null')+','
+        +(pre.inReplyTo?('\''+esc(pre.inReplyTo)+'\''):'null')+','
+        +(pre.references?('\''+esc(pre.references)+'\''):'null')+')">Send ➜</button></div>'
+  +'</div>');
+  setTimeout(function(){var t=document.getElementById(pre.to?'gmSubj':'gmTo'); if(t){t.focus();}},60);
+}
+
+function gmLastMsg(){ var m=GM.thread&&GM.thread.messages; return m&&m.length?m[0]:null; } // newest-first -> [0]
+
+function gmReply(all){
+  var m=gmLastMsg(); if(!m){ toast('Open a message first'); return; }
+  var to=gAddr(m.from);
+  var cc='';
+  if(all){
+    var extra=[].concat((m.to||'').split(','),(m.cc||'').split(',')).map(function(x){return x.trim();})
+      .filter(function(x){return x && gAddr(x)!==to && (GM.email?x.indexOf(GM.email)<0:true);});
+    cc=extra.join(', ');
+  }
+  var quote='\n\nOn '+gmFullDate(m.date)+', '+gFrom(m.from)+' wrote:\n'
+    +(((m.body&&m.body.text)||m.snippet||'').split('\n').map(function(l){return '> '+l;}).join('\n'));
+  gmCompose({title:all?'↪ Reply all':'↩ Reply', to:to, cc:cc,
+    subject:(/^re:/i.test(m.subject)?'':'Re: ')+m.subject,
+    threadId:GM.thread.id, inReplyTo:m.messageId, references:(m.references?m.references+' ':'')+m.messageId,
+    body:quote});
+}
+function gmForward(){
+  var m=gmLastMsg(); if(!m){ toast('Open a message first'); return; }
+  var fwd='\n\n---------- Forwarded message ----------\nFrom: '+gFrom(m.from)+'\nDate: '+gmFullDate(m.date)
+    +'\nSubject: '+m.subject+'\nTo: '+m.to+'\n\n'+((m.body&&m.body.text)||m.snippet||'');
+  gmCompose({title:'➤ Forward', subject:(/^fwd:/i.test(m.subject)?'':'Fwd: ')+m.subject, body:fwd});
+}
+
+async function gmDoSend(threadId,inReplyTo,references){
+  var to=gVal('gmTo'); if(!to){ toast('Need a recipient',3000); return; }
+  var later=gVal('gmLater');
+  var payload={to:to, cc:gVal('gmCc'), bcc:gVal('gmBcc'), subject:gVal('gmSubj'), body:gVal('gmBody'),
+    threadId:threadId||undefined, inReplyTo:inReplyTo||'', references:references||''};
+  if(later){
+    // send-later: stash client-side and fire at the chosen time (best-effort; survives while tab is open).
+    var when=new Date(later).getTime()-Date.now();
+    if(when>0){ closeM(); toast('Scheduled for '+new Date(later).toLocaleString());
+      setTimeout(function(){ fetch('/api/google/gmail-send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(){ if(window.toast) toast('Scheduled mail sent ✓'); }); }, when);
+      return; }
+  }
+  toast('Sending…');
+  var r=await gmPost('/api/google/gmail-send',payload);
+  if(r&&!r.error){ closeM(); toast('Sent ✓'); if(GM.thread&&GM.cur>=0) gmOpen(GM.cur); }
+  else toast('Failed: '+((r||{}).error||'?'),5000);
+}
+
+// ---- lane / chip switching ----
+function gmSetLane(k){ GM.lane=k; GM.text=''; var s=document.getElementById('gmSearch'); if(s) s.value=''; gmHighlightRail(); gmFetchList(true); if(k==='snoozed'){} }
+function gmSetLabelLane(id,name){ GM.lane='lbl:'+id; GM.text=''; GM.q='label:'+name.replace(/ /g,'-'); gmHighlightRail(); gmFetchListRaw('label:"'+name+'"'); }
+async function gmFetchListRaw(q){ GM.cur=-1; GM.sel={}; gmPaintBatch(); var rows=document.getElementById('gmRows'); if(rows) rows.innerHTML=empty('Loading…');
+  var r; try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(q)+'&max=50')).json(); }catch(e){ if(rows) rows.innerHTML=gErr({error:'network'}); return; }
+  if(r.error){ if(rows) rows.innerHTML=gErr(r); return; }
+  var seen={},list=[]; (r.messages||[]).forEach(function(m){var tid=m.threadId||m.id; if(seen[tid]!==undefined){list[seen[tid]].count++;return;} seen[tid]=list.length;m.count=1;list.push(m);}); GM.msgs=list; gmRenderRows();
+}
+function gmHighlightRail(){ var rail=document.getElementById('gmRail'); if(rail) rail.outerHTML=gmRailHTML(); }
+function gmToggleChip(k){ GM.chips[k]=!GM.chips[k]; var els=document.querySelectorAll('.gm-chip'); gmFetchList(true);
+  // repaint chip state cheaply
+  var idx=GM_CHIPS.findIndex(function(c){return c.k===k;}); if(els[idx]) els[idx].classList.toggle('on'); }
+
+// ---- nav-badge sync ----
+async function gmFetchBadge(){ if(window.gmailBadgePoll) try{ gmailBadgePoll(); }catch(e){} }
+
+// ---- POST helper ----
+async function gmPost(url,payload){
+  try{ return await(await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json(); }
+  catch(e){ return {error:'network'}; }
+}
+
+// ---- keyboard router (self-contained; only active while LENS=='gmail') ----
+var GM_KEYS_BOUND=false;
+function gmBindKeys(){
+  if(GM_KEYS_BOUND) return; GM_KEYS_BOUND=true;
+  document.addEventListener('keydown', function(ev){
+    if(LENS!=='gmail') return;
+    // never hijack while typing in an input/textarea or while a modal is open
+    var tag=(ev.target&&ev.target.tagName)||''; var typing=/^(INPUT|TEXTAREA|SELECT)$/.test(tag);
+    var modalOpen=document.getElementById('mbg')&&document.getElementById('mbg').style.display==='flex';
+    if(modalOpen) return;
+    if(typing){ if(ev.key==='Escape'){ ev.target.blur(); } return; }
+    var k=ev.key;
+    if(k==='/'){ ev.preventDefault(); var s=document.getElementById('gmSearch'); if(s){s.focus();s.select();} return; }
+    if(k==='j'){ ev.preventDefault(); if(GM.cur<GM.msgs.length-1){GM.cur++;gmRenderRows();gmScrollCur();gmOpen(GM.cur);} return; }
+    if(k==='k'){ ev.preventDefault(); if(GM.cur>0){GM.cur--;gmRenderRows();gmScrollCur();gmOpen(GM.cur);} return; }
+    if(k==='Enter'){ ev.preventDefault(); if(GM.cur<0&&GM.msgs.length){GM.cur=0;gmRenderRows();} if(GM.cur>=0) gmOpen(GM.cur); return; }
+    if(k==='e'){ ev.preventDefault(); gmActCur('archive'); return; }
+    if(k==='#'||k==='Delete'){ ev.preventDefault(); gmActCur('trash'); return; }
+    if(k==='s'){ ev.preventDefault(); if(GM.cur>=0) gmStar(GM.cur); return; }
+    if(k==='u'){ ev.preventDefault(); gmActCur('unread'); gmCloseRead(); return; }
+    if(k==='r'){ ev.preventDefault(); gmReply(false); return; }
+    if(k==='a'){ ev.preventDefault(); gmReply(true); return; }
+    if(k==='f'){ ev.preventDefault(); gmForward(); return; }
+    if(k==='c'){ ev.preventDefault(); gmCompose(); return; }
+    if(k==='h'){ ev.preventDefault(); if(GM.cur>=0) gmSnoozeMenu(); return; }
+    if(k==='x'){ ev.preventDefault(); var m=GM.msgs[GM.cur]; if(m) gmToggleSel(m.id); return; }
+    if(k==='z'){ ev.preventDefault(); gmUndo(); return; }
+    if(k==='Escape'){ if(GM.thread){gmCloseRead();} return; }
+  });
+}
+
+
+
+/* ============================================================================
+   CALENDAR SURFACE (cal-*) — week/day/month/agenda, NL quick-add, drag create/
+   move/resize, mini-month, keyboard nav, popover detail, create/edit/delete.
+   Reuses: e2, esc, empty, showM/closeM, toast, gVal, gErr. Endpoints:
+   /api/google/calendar (GET tmin/tmax), calendar-create / -update / -delete.
+   ========================================================================== */
+var CAL = {
+  view: 'week',                 // week | day | month | agenda
+  anchor: new Date(),           // the focused date
+  sel: new Date(),              // selected day (mini-month + day view)
+  events: [],                   // events for the loaded window
+  miniMonth: new Date(),        // month shown in mini navigator
+  selEvId: null,                // keyboard-selected event id
+  loaded: '',                   // cache key of the loaded window
+  tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  drag: null,                   // active drag state
+  pop: null                     // open popover element
+};
+var CAL_COLORS = {              // Google calendar colorId -> hex (event colors)
+  '':'#c9a227','1':'#7986cb','2':'#33b679','3':'#8e24aa','4':'#e67c73','5':'#f6bf26',
+  '6':'#f4511e','7':'#039be5','8':'#616161','9':'#3f51b5','10':'#0b8043','11':'#d50000'};
+var CAL_DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+var CAL_MON = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+function calPad(n){return (n<10?'0':'')+n;}
+function calYMD(d){return d.getFullYear()+'-'+calPad(d.getMonth()+1)+'-'+calPad(d.getDate());}
+function calSameDay(a,b){return a.getFullYear()==b.getFullYear()&&a.getMonth()==b.getMonth()&&a.getDate()==b.getDate();}
+function calStartOfWeek(d){var x=new Date(d);x.setHours(0,0,0,0);x.setDate(x.getDate()-x.getDay());return x;}
+function calAddDays(d,n){var x=new Date(d);x.setDate(x.getDate()+n);return x;}
+function calLocalISO(d){ // RFC3339 with local offset, e.g. 2026-06-22T14:30:00-04:00
+  var off=-d.getTimezoneOffset(),sg=off>=0?'+':'-',ab=Math.abs(off);
+  return d.getFullYear()+'-'+calPad(d.getMonth()+1)+'-'+calPad(d.getDate())+'T'+calPad(d.getHours())+':'+calPad(d.getMinutes())+':00'+sg+calPad(Math.floor(ab/60))+':'+calPad(ab%60);}
+function calHM(d){return d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});}
+
+// ---- window for the current view -------------------------------------------
+function calWindow(){
+  var s,e;
+  if(CAL.view=='day'){s=new Date(CAL.sel);s.setHours(0,0,0,0);e=calAddDays(s,1);}
+  else if(CAL.view=='week'){s=calStartOfWeek(CAL.anchor);e=calAddDays(s,7);}
+  else if(CAL.view=='agenda'){s=new Date(CAL.anchor);s.setHours(0,0,0,0);e=calAddDays(s,30);}
+  else{ // month — pad to full weeks
+    var first=new Date(CAL.anchor.getFullYear(),CAL.anchor.getMonth(),1);
+    s=calStartOfWeek(first);e=calAddDays(s,42);}
+  return {s:s,e:e};
+}
+
+async function loadCalendar(force){
+  var g=document.getElementById('grid');
+  var w=calWindow();
+  var key=CAL.view+'|'+calYMD(w.s)+'|'+calYMD(w.e);
+  if(!g.querySelector('.cal-root')){g.innerHTML='<div class="cal-root">'+empty('Loading Calendar…')+'</div>';}
+  if(force||key!=CAL.loaded){
+    var tmin=encodeURIComponent(w.s.toISOString()),tmax=encodeURIComponent(w.e.toISOString());
+    var r;try{r=await(await fetch('/api/google/calendar?tmin='+tmin+'&tmax='+tmax)).json();}
+    catch(err){g.innerHTML='<div class="cal-root">'+gErr({error:'network'})+'</div>';return;}
+    if(r.error){g.innerHTML='<div class="cal-root">'+gErr(r)+'</div>';return;}
+    CAL.events=(r.events||[]).map(calNorm);CAL.email=r.email;CAL.loaded=key;
+    if(r.tz)CAL.tz=r.tz;
+  }
+  calRender();
+}
+function calNorm(e){
+  var sd=new Date(e.start),ed=new Date(e.end);
+  e._s=sd;e._e=isNaN(ed)?new Date(sd.getTime()+3600000):ed;
+  e._mine=(e.organizer===CAL.email);
+  return e;
+}
+function calColor(e){return CAL_COLORS[e.colorId||'']||CAL_COLORS[''];}
+function calMyStatus(e){if(!e.attendees)return'';for(var i=0;i<e.attendees.length;i++)if(e.attendees[i].email===CAL.email)return e.attendees[i].status;return'';}
+
+// ---- top-level render -------------------------------------------------------
+function calRender(){
+  var g=document.getElementById('grid');
+  var label=calHeaderLabel();
+  var tabs=['day','week','month','agenda'].map(function(v){
+    return '<button class="cal-vtab'+(CAL.view==v?' on':'')+'" onclick="calSetView(\''+v+'\')">'+v.charAt(0).toUpperCase()+v.slice(1)+'</button>';}).join('');
+  var h='<div class="cal-root" tabindex="0" id="calRoot">'
+    +'<div class="cal-top">'
+      +'<div class="cal-nav"><button class="cal-ib" onclick="calStep(-1)" title="Previous">&#8249;</button>'
+        +'<button class="cal-today" onclick="calToday()">Today</button>'
+        +'<button class="cal-ib" onclick="calStep(1)" title="Next">&#8250;</button></div>'
+      +'<div class="cal-title">'+label+'<small>'+e2(CAL.email||'')+'</small></div>'
+      +'<div class="cal-vtabs">'+tabs+'</div>'
+      +'<div class="cal-add"><span class="qm">&#9889;</span>'
+        +'<input id="calQA" placeholder="Quick add — e.g. Lunch with Sam tomorrow 1pm-2pm @ Cafe" '
+        +'oninput="calParsePreview()" onkeydown="if(event.key===\'Enter\'){event.preventDefault();calQuickAdd();}">'
+        +'<button class="mini go" onclick="calQuickAdd()">Add</button></div>'
+      +'<button class="cal-ib" onclick="loadCalendar(true)" title="Refresh">&#8635;</button>'
+    +'</div>'
+    +'<div class="cal-parse" id="calParse"></div>'
+    +'<div class="cal-body">'+calSidebar()+'<div id="calMain" style="flex:1;display:flex;min-width:0">'+calMainView()+'</div></div>'
+    +'<div class="cal-foot">'
+      +'<span><kbd>T</kbd>today</span><span><kbd>D</kbd><kbd>W</kbd><kbd>M</kbd><kbd>A</kbd>views</span>'
+      +'<span><kbd>&#8592;</kbd><kbd>&#8594;</kbd>navigate</span><span><kbd>C</kbd>create</span>'
+      +'<span><kbd>J</kbd><kbd>K</kbd>pick event</span><span><kbd>Enter</kbd>open</span>'
+      +'<span><kbd>E</kbd>edit</span><span><kbd>&#9003;</kbd>delete</span><span><kbd>/</kbd>quick-add</span>'
+    +'</div></div>';
+  g.innerHTML=h;
+  if(CAL.view=='week'||CAL.view=='day')calScrollToNow();
+  calStartNowTicker();
+}
+function calHeaderLabel(){
+  if(CAL.view=='day')return CAL.sel.toLocaleDateString([],{weekday:'long',month:'long',day:'numeric',year:'numeric'});
+  if(CAL.view=='month')return CAL_MON[CAL.anchor.getMonth()]+' '+CAL.anchor.getFullYear();
+  var w=calWindow(),a=w.s,b=calAddDays(w.e,-1);
+  if(CAL.view=='agenda')return 'Next 30 days';
+  var sm=a.toLocaleDateString([],{month:'short',day:'numeric'});
+  var em=(a.getMonth()==b.getMonth())?b.getDate():b.toLocaleDateString([],{month:'short',day:'numeric'});
+  return sm+' – '+em+', '+b.getFullYear();
+}
+
+// ---- sidebar (mini-month + up next) ----------------------------------------
+function calSidebar(){
+  return '<div class="cal-side">'+calMiniMonth()+calUpNext()+'</div>';
+}
+function calMiniMonth(){
+  var mm=CAL.miniMonth,y=mm.getFullYear(),m=mm.getMonth();
+  var first=new Date(y,m,1),start=calStartOfWeek(first);
+  var today=new Date();
+  var evDays={};CAL.events.forEach(function(e){evDays[calYMD(e._s)]=1;});
+  var h='<div class="cal-mini-h"><button class="cal-ib" onclick="calMiniStep(-1)">&#8249;</button>'
+    +'<b>'+CAL_MON[m].slice(0,3)+' '+y+'</b>'
+    +'<button class="cal-ib" onclick="calMiniStep(1)">&#8250;</button></div><div class="cal-mini">';
+  ['S','M','T','W','T','F','S'].forEach(function(d){h+='<div class="dw">'+d+'</div>';});
+  for(var i=0;i<42;i++){var d=calAddDays(start,i);
+    var cls='dc'+(d.getMonth()!=m?' oth':'')+(calSameDay(d,today)?' today':'')+(calSameDay(d,CAL.sel)?' sel':'')+(evDays[calYMD(d)]?' hasev':'');
+    h+='<div class="'+cls+'" onclick="calMiniPick('+d.getFullYear()+','+d.getMonth()+','+d.getDate()+')">'+d.getDate()+'</div>';}
+  return h+'</div>';
+}
+function calUpNext(){
+  var now=new Date();
+  var up=CAL.events.filter(function(e){return !e.allDay&&e._e>now;}).sort(function(a,b){return a._s-b._s;}).slice(0,6);
+  var h='<div class="cal-side-sec"><h4>Up next</h4>';
+  if(!up.length)h+='<div style="font-size:12px;color:var(--dim)">Nothing scheduled.</div>';
+  up.forEach(function(e){
+    var dl=calSameDay(e._s,now)?calHM(e._s):e._s.toLocaleDateString([],{weekday:'short'})+' '+calHM(e._s);
+    h+='<div class="cal-up" onclick="calOpenEvent(\''+e.id+'\',event)"><span class="bar" style="background:'+calColor(e)+'"></span>'
+      +'<span class="t">'+e2(dl)+'</span><span class="s">'+e2(e.summary)+'</span></div>';});
+  return h+'</div>';
+}
+
+// ---- main view dispatch -----------------------------------------------------
+function calMainView(){
+  if(CAL.view=='month')return calMonthView();
+  if(CAL.view=='agenda')return calAgendaView();
+  return calTimeGrid(); // week or day
+}
+
+// ---- time grid (week/day) ---------------------------------------------------
+function calDays(){
+  if(CAL.view=='day')return [new Date(CAL.sel)];
+  var s=calStartOfWeek(CAL.anchor),a=[];for(var i=0;i<7;i++)a.push(calAddDays(s,i));return a;
+}
+function calTimeGrid(){
+  var days=calDays(),n=days.length,today=new Date();
+  var colTmpl='grid-template-columns:repeat('+n+',1fr)';
+  // all-day band
+  var ad='<div class="cal-allday"><div class="gut">all-day</div><div class="cols" style="'+colTmpl+'">';
+  days.forEach(function(d){
+    var chips=CAL.events.filter(function(e){return e.allDay&&calDayInAllDay(e,d);})
+      .map(function(e){return '<div class="cal-adchip" style="border-left-color:'+calColor(e)+'" onclick="calOpenEvent(\''+e.id+'\',event)">'+e2(e.summary)+'</div>';}).join('');
+    ad+='<div class="adcell">'+chips+'</div>';});
+  ad+='</div></div>';
+  // day-name header
+  var dn='<div class="cal-daynames"><div class="gut"></div><div class="cols" style="'+colTmpl+'">';
+  days.forEach(function(d){
+    dn+='<div class="cal-dn'+(calSameDay(d,today)?' today':'')+'" onclick="calPickDay('+d.getFullYear()+','+d.getMonth()+','+d.getDate()+')">'
+      +'<div class="dow">'+CAL_DOW[d.getDay()].toUpperCase()+'</div><div class="num">'+d.getDate()+'</div></div>';});
+  dn+='</div></div>';
+  // scroll area: gutter + columns
+  var gut='<div class="gut">';
+  for(var hr=0;hr<24;hr++){var lbl=hr===0?'':((hr%12||12)+(hr<12?' AM':' PM'));gut+='<div class="gutslot">'+lbl+'</div>';}
+  gut+='</div>';
+  var cols='<div class="cal-cols" id="calCols" style="'+colTmpl+'">';
+  days.forEach(function(d,ci){
+    var slots='';for(var s=0;s<24;s++)slots+='<div class="cal-slot"></div>';
+    var evs=calLayoutDay(CAL.events.filter(function(e){return !e.allDay&&calDayInTimed(e,d);}),d);
+    var nowLine=calSameDay(d,today)?'<div class="cal-now" id="calNow" style="top:'+((today.getHours()*60+today.getMinutes())/1440*1152)+'px"></div>':'';
+    cols+='<div class="cal-col'+(calSameDay(d,today)?' today':'')+'" data-date="'+calYMD(d)+'" data-col="'+ci+'" '
+      +'onmousedown="calGridMouseDown(event,this)">'+slots+nowLine+evs+'</div>';});
+  cols+='</div>';
+  return '<div class="cal-grid-wrap">'+ad+dn+'<div class="cal-scroll" id="calScroll"><div class="cal-tgrid" style="height:1152px">'+gut+cols+'</div></div></div>';
+}
+function calDayInAllDay(e,d){var s=new Date(e._s);s.setHours(0,0,0,0);var en=new Date(e._e);en.setHours(0,0,0,0);var dd=new Date(d);dd.setHours(0,0,0,0);return dd>=s&&dd<en;}
+function calDayInTimed(e,d){var d0=new Date(d);d0.setHours(0,0,0,0);var d1=calAddDays(d0,1);return e._s<d1&&e._e>d0;}
+// overlap layout: assign columns so concurrent events split side-by-side
+function calLayoutDay(evs,day){
+  evs=evs.slice().sort(function(a,b){return a._s-b._s||b._e-a._e;});
+  var groups=[],cur=[],curEnd=null;
+  evs.forEach(function(e){
+    if(cur.length&&e._s>=curEnd){groups.push(cur);cur=[];curEnd=null;}
+    cur.push(e);var ee=e._e;if(curEnd===null||ee>curEnd)curEnd=ee;});
+  if(cur.length)groups.push(cur);
+  var html='';var d0=new Date(day);d0.setHours(0,0,0,0);var d1=calAddDays(d0,1);
+  groups.forEach(function(grp){
+    var cols=[];
+    grp.forEach(function(e){var placed=false;
+      for(var c=0;c<cols.length;c++){if(cols[c]<=e._s){e._lc=c;cols[c]=e._e;placed=true;break;}}
+      if(!placed){e._lc=cols.length;cols.push(e._e);}});
+    var ncol=cols.length;
+    grp.forEach(function(e){
+      var s=e._s<d0?d0:e._s,en=e._e>d1?d1:e._e;
+      var top=(s.getHours()*60+s.getMinutes())/1440*1152;
+      var hgt=Math.max(18,(en-s)/60000/1440*1152);
+      var w=100/ncol,left=e._lc*w;
+      var st=calMyStatus(e),dec=st=='declined'?' declined':'';
+      var dur=(e._e-e._s)/60000;
+      html+='<div class="cal-ev'+dec+(CAL.selEvId==e.id?' sel':'')+'" data-id="'+e.id+'" '
+        +'style="top:'+top+'px;height:'+hgt+'px;left:calc('+left+'% + 1px);width:calc('+w+'% - 3px);'
+        +'background:'+calColor(e)+'28;border-left-color:'+calColor(e)+'" '
+        +'onclick="calOpenEvent(\''+e.id+'\',event)" onmousedown="calEvMouseDown(event,\''+e.id+'\')">'
+        +'<div class="tt">'+e2(e.summary)+'</div>'
+        +(dur>=40?'<div class="ti">'+e2(calHM(e._s))+(e.location?' · '+e2(e.location):'')+'</div>':'')
+        +'<div class="rz" onmousedown="calResizeStart(event,\''+e.id+'\')"></div></div>';});
+  });
+  return html;
+}
+function calScrollToNow(){var sc=document.getElementById('calScroll');if(!sc)return;
+  var now=new Date();var px=(now.getHours()*60+now.getMinutes())/1440*1152;sc.scrollTop=Math.max(0,px-220);}
+
+// ---- month view -------------------------------------------------------------
+function calMonthView(){
+  var w=calWindow(),start=w.s,m=CAL.anchor.getMonth(),today=new Date();
+  var byDay={};CAL.events.forEach(function(e){
+    var d0=new Date(e._s);d0.setHours(0,0,0,0);var d1=new Date(e._e);if(e.allDay)d1.setHours(0,0,0,0);
+    for(var d=new Date(d0);d<(e.allDay?d1:calAddDays(d0,1));d=calAddDays(d,1)){var k=calYMD(d);(byDay[k]=byDay[k]||[]).push(e);}
+    if(!e.allDay){var k=calYMD(e._s);if(!(byDay[k]||[]).includes(e))(byDay[k]=byDay[k]||[]).push(e);}});
+  var h='<div class="cal-month"><div class="cal-mhead">';
+  CAL_DOW.forEach(function(d){h+='<div>'+d.toUpperCase()+'</div>';});
+  h+='</div><div class="cal-mbody">';
+  for(var i=0;i<42;i++){var d=calAddDays(start,i);var k=calYMD(d);
+    var evs=(byDay[k]||[]).sort(function(a,b){return (b.allDay?1:0)-(a.allDay?1:0)||a._s-b._s;});
+    var cls='cal-mcell'+(d.getMonth()!=m?' oth':'')+(calSameDay(d,today)?' today':'');
+    h+='<div class="'+cls+'" onclick="calMonthCellClick(event,'+d.getFullYear()+','+d.getMonth()+','+d.getDate()+')">'
+      +'<span class="mnum">'+d.getDate()+'</span>';
+    evs.slice(0,3).forEach(function(e){
+      h+='<div class="cal-mev'+(e.allDay?' allday':'')+'" style="'+(e.allDay?'':'border-left-color:'+calColor(e)+';background:'+calColor(e)+'28')+'" onclick="event.stopPropagation();calOpenEvent(\''+e.id+'\',event)">'
+        +(e.allDay?'':'<b style="font-weight:700">'+e2(calHM(e._s))+'</b> ')+e2(e.summary)+'</div>';});
+    if(evs.length>3)h+='<div class="cal-mmore" onclick="event.stopPropagation();calPickDay('+d.getFullYear()+','+d.getMonth()+','+d.getDate()+');calSetView(\'day\')">+'+(evs.length-3)+' more</div>';
+    h+='</div>';}
+  return h+'</div></div>';
+}
+
+// ---- agenda view ------------------------------------------------------------
+function calAgendaView(){
+  var groups={};
+  CAL.events.slice().sort(function(a,b){return a._s-b._s;}).forEach(function(e){
+    var k=calYMD(e._s);(groups[k]=groups[k]||[]).push(e);});
+  var keys=Object.keys(groups).sort();
+  if(!keys.length)return '<div class="cal-agenda">'+empty('No events in the next 30 days.')+'</div>';
+  var today=new Date();
+  var h='<div class="cal-agenda">';
+  keys.forEach(function(k){var d=new Date(k+'T00:00:00');
+    var lbl=calSameDay(d,today)?'Today':(calSameDay(d,calAddDays(today,1))?'Tomorrow':d.toLocaleDateString([],{weekday:'long'}));
+    h+='<div class="cal-aday"><h5><span class="dnum">'+d.getDate()+'</span>'+lbl+' · '+d.toLocaleDateString([],{month:'long'})+'</h5>';
+    groups[k].forEach(function(e){
+      var tm=e.allDay?'all-day':(calHM(e._s)+' – '+calHM(e._e));
+      h+='<div class="cal-arow" onclick="calOpenEvent(\''+e.id+'\',event)"><span class="at">'+e2(tm)+'</span>'
+        +'<span class="abar" style="background:'+calColor(e)+'"></span>'
+        +'<span class="as">'+e2(e.summary)+(e.location?'<span class="al"> · '+e2(e.location)+'</span>':'')+'</span></div>';});
+    h+='</div>';});
+  return h+'</div>';
+}
+
+// ---- navigation -------------------------------------------------------------
+function calSetView(v){CAL.view=v;if(v=='month')CAL.miniMonth=new Date(CAL.anchor);loadCalendar();}
+function calStep(dir){
+  if(CAL.view=='day'){CAL.sel=calAddDays(CAL.sel,dir);CAL.anchor=new Date(CAL.sel);}
+  else if(CAL.view=='week'||CAL.view=='agenda')CAL.anchor=calAddDays(CAL.anchor,dir*7);
+  else CAL.anchor=new Date(CAL.anchor.getFullYear(),CAL.anchor.getMonth()+dir,1);
+  CAL.miniMonth=new Date(CAL.anchor);loadCalendar();
+}
+function calToday(){var n=new Date();CAL.anchor=new Date(n);CAL.sel=new Date(n);CAL.miniMonth=new Date(n);loadCalendar();}
+function calMiniStep(dir){CAL.miniMonth=new Date(CAL.miniMonth.getFullYear(),CAL.miniMonth.getMonth()+dir,1);
+  var s=document.getElementById('calMain');calRefreshSidebar();}
+function calRefreshSidebar(){var sb=document.querySelector('.cal-side');if(sb)sb.innerHTML=calMiniMonth()+calUpNext();}
+function calMiniPick(y,m,d){CAL.sel=new Date(y,m,d);CAL.anchor=new Date(y,m,d);
+  if(CAL.view=='month'){CAL.anchor=new Date(y,m,1);}CAL.miniMonth=new Date(y,m,1);loadCalendar();}
+function calPickDay(y,m,d){CAL.sel=new Date(y,m,d);CAL.anchor=new Date(y,m,d);CAL.view='day';CAL.miniMonth=new Date(y,m,1);loadCalendar();}
+function calMonthCellClick(ev,y,m,d){calCreateAt(new Date(y,m,d,9,0),false);}
+
+// ---- natural-language quick add --------------------------------------------
+function calParse(txt){
+  // returns {summary,start:Date,end:Date,allDay,location} or null
+  var s=(txt||'').trim();if(!s)return null;
+  var loc='';var lm=s.match(/\s+(?:@|at\s+the\s+|in\s+)\s*([A-Za-z0-9][\w '&.,-]*)$/i);
+  // location only if it doesn't look like a time
+  var atm=s.match(/\s@\s*(.+)$/);if(atm){loc=atm[1].trim();s=s.slice(0,atm.index).trim();}
+  var base=new Date();base.setSeconds(0,0);
+  var day=new Date(base);var dayset=false;
+  function setDay(d){day=new Date(d);day.setHours(0,0,0,0);dayset=true;}
+  if(/\btoday\b/i.test(s)){setDay(base);s=s.replace(/\btoday\b/i,'');}
+  else if(/\btomorrow\b/i.test(s)){setDay(calAddDays(base,1));s=s.replace(/\btomorrow\b/i,'');}
+  else{var dm=s.match(/\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*\b/i);
+    if(dm){var want=['sun','mon','tue','wed','thu','fri','sat'].indexOf(dm[1].toLowerCase().slice(0,3));
+      var dd=new Date(base);var add=(want-dd.getDay()+7)%7;if(add===0)add=7;dd=calAddDays(dd,add);setDay(dd);s=s.replace(dm[0],'');}}
+  // explicit date m/d or "jun 22"
+  var md=s.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
+  if(md){var yr=md[3]?(+md[3]<100?2000+ +md[3]:+md[3]):base.getFullYear();setDay(new Date(yr,+md[1]-1,+md[2]));s=s.replace(md[0],'');}
+  var mon=s.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/i);
+  if(mon){var mi=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'].indexOf(mon[1].toLowerCase().slice(0,3));
+    setDay(new Date(base.getFullYear(),mi,+mon[2]));s=s.replace(mon[0],'');}
+  // time range "1pm-2pm" / "13:00 to 14:30" / "1-2pm"
+  function parseTime(t,ampm){var mm=t.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);if(!mm)return null;
+    var hr=+mm[1],mi=mm[2]?+mm[2]:0,ap=(mm[3]||ampm||'').toLowerCase();
+    if(ap=='pm'&&hr<12)hr+=12;if(ap=='am'&&hr==12)hr=0;if(!ap&&hr<8)hr+=0;return {h:hr,m:mi};}
+  var st=null,en=null,allDay=false;
+  var rng=s.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:-|–|to|until|till)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i);
+  if(rng){var ap2=(rng[2].match(/(am|pm)/i)||[])[0];var a=parseTime(rng[1],ap2),b=parseTime(rng[2]);
+    if(a)st=a;if(b)en=b;s=s.replace(rng[0],'');}
+  else{var single=s.match(/\b(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/i)||s.match(/\b(?:at\s+)(\d{1,2}(?::\d{2})?)\b/i);
+    if(single){var a2=parseTime(single[1]);if(a2)st=a2;s=s.replace(single[0],'');}}
+  // duration "for 90m" / "for 2h"
+  var durM=null;var dur=s.match(/\bfor\s+(\d+(?:\.\d+)?)\s*(h(?:ours?|rs?)?|m(?:in(?:utes?)?)?)\b/i);
+  if(dur){var num=parseFloat(dur[1]);durM=/^h/i.test(dur[2])?num*60:num;s=s.replace(dur[0],'');}
+  var summary=s.replace(/\bat\b/gi,'').replace(/\s{2,}/g,' ').trim().replace(/[\s,]+$/,'')||'(untitled)';
+  var startD,endD;
+  if(!st){ // no time -> all-day on chosen day (or today)
+    startD=new Date(day);startD.setHours(0,0,0,0);endD=calAddDays(startD,1);allDay=true;}
+  else{startD=new Date(dayset?day:base);startD.setHours(st.h,st.m,0,0);
+    if(en){endD=new Date(startD);endD.setHours(en.h,en.m,0,0);if(endD<=startD)endD=calAddDays(endD,1);}
+    else if(durM){endD=new Date(startD.getTime()+durM*60000);}
+    else endD=new Date(startD.getTime()+3600000);}
+  return {summary:summary,start:startD,end:endD,allDay:allDay,location:loc};
+}
+function calParsePreview(){
+  var el=document.getElementById('calParse');if(!el)return;
+  var p=calParse(gVal('calQA'));
+  if(!p){el.className='cal-parse';el.innerHTML='';return;}
+  var when=p.allDay?(p.start.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'})+' · all-day')
+    :(p.start.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'})+' · '+calHM(p.start)+' – '+calHM(p.end));
+  el.className='cal-parse ok';
+  el.innerHTML='Will create &nbsp;<b>'+e2(p.summary)+'</b>&nbsp; '+e2(when)+(p.location?' &nbsp;·&nbsp; &#128205; '+e2(p.location):'');
+}
+async function calQuickAdd(){
+  var raw=gVal('calQA');var p=calParse(raw);
+  if(!p){toast('Could not parse — try "Title tomorrow 2pm-3pm"',3500);return;}
+  toast('Creating…');
+  var payload={summary:p.summary,location:p.location,desc:'',tz:CAL.tz,allDay:p.allDay};
+  if(p.allDay){payload.start=calYMD(p.start);payload.end=calYMD(p.end);}
+  else{payload.start=calLocalISO(p.start);payload.end=calLocalISO(p.end);}
+  var r=await(await fetch('/api/google/calendar-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
+  if(r&&!r.error){var qa=document.getElementById('calQA');if(qa)qa.value='';calParsePreview();
+    var nid=r.id;toast('Event created <a style="color:var(--accent-light);cursor:pointer;text-decoration:underline" onclick="calUndoCreate(\''+nid+'\')">undo</a>',5000);
+    loadCalendar(true);}
+  else toast('Failed: '+((r||{}).error||'?'),5000);
+}
+async function calUndoCreate(id){var r=await(await fetch('/api/google/calendar-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})).json();
+  if(r&&r.ok){toast('Removed');loadCalendar(true);}else toast('Undo failed',3000);}
+
+// ---- event popover detail ---------------------------------------------------
+function calOpenEvent(id,ev){
+  if(ev){ev.stopPropagation&&ev.stopPropagation();}
+  CAL.selEvId=id;
+  var e=CAL.events.find(function(x){return x.id==id;});if(!e)return;
+  calClosePop();
+  var when=e.allDay?e._s.toLocaleDateString([],{weekday:'long',month:'long',day:'numeric'})+' · all-day'
+    :e._s.toLocaleDateString([],{weekday:'long',month:'short',day:'numeric'})+'  ·  '+calHM(e._s)+' – '+calHM(e._e);
+  var guests=(e.attendees||[]).filter(function(a){return a.email;});
+  var pop=document.createElement('div');pop.className='cal-pop';
+  pop.innerHTML='<div class="ph" style="border-left-color:'+calColor(e)+'"><div class="pt">'+e2(e.summary)+'</div>'
+    +'<div class="pm"><span class="ic">&#128197;</span><span>'+e2(when)+(e.recurring?' · repeats':'')+'</span></div>'
+    +(e.location?'<div class="pm"><span class="ic">&#128205;</span><span>'+e2(e.location)+'</span></div>':'')
+    +(guests.length?'<div class="pm"><span class="ic">&#128101;</span><span>'+guests.length+' guest'+(guests.length>1?'s':'')+'</span></div>':'')
+    +(e.description?'<div class="pdesc">'+e2(e.description)+'</div>':'')
+    +'</div><div class="pbtns">'
+    +(e.hangout?'<a class="mini go" href="'+e2(e.hangout)+'" target="_blank">&#128249; Join</a>':'')
+    +'<button class="mini" onclick="calEdit(\''+e.id+'\')">Edit</button>'
+    +'<button class="mini" onclick="calDelete(\''+e.id+'\')">Delete</button>'
+    +'<span class="gap"></span>'
+    +(e.link?'<a class="mini" href="'+e2(e.link)+'" target="_blank">Open &#8599;</a>':'')
+    +'<button class="mini" onclick="calClosePop()">&#10005;</button></div>';
+  document.body.appendChild(pop);CAL.pop=pop;
+  // position near the click (or center)
+  var x=window.innerWidth/2-160,y=120;
+  if(ev&&ev.clientX){x=Math.min(ev.clientX+8,window.innerWidth-pop.offsetWidth-12);y=Math.min(ev.clientY+8,window.innerHeight-pop.offsetHeight-12);}
+  pop.style.left=Math.max(12,x)+'px';pop.style.top=Math.max(12,y)+'px';
+  // refresh selected highlight in the grid
+  document.querySelectorAll('.cal-ev.sel').forEach(function(n){n.classList.remove('sel');});
+  var node=document.querySelector('.cal-ev[data-id="'+CSS.escape(id)+'"]');if(node)node.classList.add('sel');
+  setTimeout(function(){document.addEventListener('mousedown',calPopOutside);},0);
+}
+function calPopOutside(e){if(CAL.pop&&!CAL.pop.contains(e.target)&&!(e.target.closest&&e.target.closest('.cal-ev'))){calClosePop();}}
+function calClosePop(){if(CAL.pop){CAL.pop.remove();CAL.pop=null;document.removeEventListener('mousedown',calPopOutside);}}
+
+// ---- create / edit modal ----------------------------------------------------
+function calCreateAt(startDate,allDay){
+  var s=startDate||new Date(Date.now()+3600000);s.setMinutes(s.getMinutes()<30?0:30,0,0);
+  var e=new Date(s.getTime()+3600000);
+  calEventForm(null,{summary:'',_s:s,_e:e,allDay:!!allDay,location:'',description:'',colorId:''});
+}
+function calNew(){calCreateAt(null,false);} // back-compat entry
+function calEdit(id){calClosePop();var e=CAL.events.find(function(x){return x.id==id;});if(e)calEventForm(id,e);}
+function calEventForm(id,e){
+  var fmt=function(d){return d.getFullYear()+'-'+calPad(d.getMonth()+1)+'-'+calPad(d.getDate())+'T'+calPad(d.getHours())+':'+calPad(d.getMinutes());};
+  var dots=Object.keys(CAL_COLORS).map(function(c){
+    return '<span class="cal-cd'+(((e.colorId||'')===c)?' on':'')+'" data-c="'+c+'" style="background:'+CAL_COLORS[c]+'" onclick="calPickColor(this)"></span>';}).join('');
+  showM('<h2>'+(id?'Edit event':'New event')+'</h2>'
+    +'<div class="row"><label>Title</label><input id="evT" placeholder="Event title" value="'+e2(e.summary||'')+'"></div>'
+    +'<div class="row" style="flex-direction:row;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="evAll" style="width:auto" '+(e.allDay?'checked':'')+' onchange="calToggleAllDay()"><label style="margin:0">All day</label></div>'
+    +'<div style="display:flex;gap:10px"><div class="row" style="flex:1"><label>Start</label><input id="evS" type="datetime-local" value="'+fmt(e._s)+'"></div>'
+    +'<div class="row" style="flex:1"><label>End</label><input id="evE" type="datetime-local" value="'+fmt(e._e)+'"></div></div>'
+    +'<div class="row"><label>Location</label><input id="evL" placeholder="optional" value="'+e2(e.location||'')+'"></div>'
+    +'<div class="row"><label>Notes</label><textarea id="evD" rows="3" style="width:100%">'+e2(e.description||'')+'</textarea></div>'
+    +'<div class="row"><label>Color</label><div class="cal-color-dots" id="evC" data-c="'+e2(e.colorId||'')+'">'+dots+'</div></div>'
+    +'<div class="btns" style="display:flex;gap:8px;justify-content:flex-end">'
+    +(id?'<button class="btn" style="margin-right:auto" onclick="calDelete(\''+id+'\')">Delete</button>':'')
+    +'<button class="btn" onclick="closeM()">Cancel</button>'
+    +'<button class="btn go" onclick="calSaveEvent('+(id?'\''+id+'\'':'null')+')">'+(id?'Save':'Create')+'</button></div>');
+}
+function calPickColor(el){var box=document.getElementById('evC');box.querySelectorAll('.cal-cd').forEach(function(n){n.classList.remove('on');});
+  el.classList.add('on');box.setAttribute('data-c',el.getAttribute('data-c'));}
+function calToggleAllDay(){/* visual only — inputs stay datetime-local; we read the checkbox on save */}
+async function calSaveEvent(id){
+  var t=gVal('evT'),s=gVal('evS'),en=gVal('evE');
+  if(!t||!s||!en){toast('Title + start + end required',3000);return;}
+  var allDay=document.getElementById('evAll')&&document.getElementById('evAll').checked;
+  var color=(document.getElementById('evC')||{getAttribute:function(){return'';}}).getAttribute('data-c')||'';
+  var payload={summary:t,location:gVal('evL'),desc:gVal('evD'),tz:CAL.tz,allDay:allDay,color:color};
+  if(allDay){payload.start=s.slice(0,10);
+    var ed=new Date(en.slice(0,10)+'T00:00:00');ed.setDate(ed.getDate()+1);payload.end=calYMD(ed);}
+  else{payload.start=calLocalISO(new Date(s));payload.end=calLocalISO(new Date(en));}
+  toast(id?'Saving…':'Creating…');
+  var url=id?'/api/google/calendar-update':'/api/google/calendar-create';
+  if(id)payload.id=id;
+  var r=await(await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
+  if(r&&!r.error){closeM();toast(id?'Saved &#10003;':'Created &#10003;');loadCalendar(true);}
+  else toast('Failed: '+((r||{}).error||'?'),5000);
+}
+async function calDelete(id){
+  var e=CAL.events.find(function(x){return x.id==id;});var snap=e?JSON.parse(JSON.stringify({summary:e.summary,start:e.allDay?calYMD(e._s):calLocalISO(e._s),end:e.allDay?calYMD(e._e):calLocalISO(e._e),allDay:e.allDay,location:e.location,desc:e.description,color:e.colorId,tz:CAL.tz})):null;
+  closeM();calClosePop();
+  var r=await(await fetch('/api/google/calendar-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})).json();
+  if(r&&r.ok){
+    var undo=snap?' <a style="color:var(--accent-light);cursor:pointer;text-decoration:underline" onclick=\'calUndoDelete('+JSON.stringify(snap).replace(/'/g,"&#39;")+')\'>undo</a>':'';
+    toast('Deleted'+undo,6000);loadCalendar(true);}
+  else toast('Delete failed: '+((r||{}).error||'?'),4000);
+}
+async function calUndoDelete(snap){
+  var r=await(await fetch('/api/google/calendar-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(snap)})).json();
+  if(r&&!r.error){toast('Restored');loadCalendar(true);}else toast('Restore failed',3000);}
+
+// ---- drag to create / move / resize (week & day) ---------------------------
+function calPxToTime(colEl,clientY){
+  var sc=document.getElementById('calScroll');var rect=colEl.getBoundingClientRect();
+  var y=clientY-rect.top;var mins=Math.round((y/1152*1440)/15)*15;mins=Math.max(0,Math.min(1440,mins));
+  var d=new Date(colEl.getAttribute('data-date')+'T00:00:00');d.setMinutes(mins);return d;}
+function calGridMouseDown(ev,colEl){
+  if(ev.button!==0||ev.target.closest('.cal-ev'))return;
+  ev.preventDefault();calClosePop();
+  var startT=calPxToTime(colEl,ev.clientY);
+  CAL.drag={mode:'create',col:colEl,start:startT,cur:startT,ghost:null};
+  document.addEventListener('mousemove',calDragMove);document.addEventListener('mouseup',calDragUp);
+}
+function calEvMouseDown(ev,id){
+  if(ev.button!==0)return;if(ev.target.classList.contains('rz'))return;
+  var node=ev.currentTarget;var col=node.closest('.cal-col');if(!col)return;
+  var e=CAL.events.find(function(x){return x.id==id;});if(!e||e.allDay)return;
+  CAL._mDownX=ev.clientX;CAL._mDownY=ev.clientY;
+  CAL.drag={mode:'pending-move',id:id,node:node,col:col,grabT:calPxToTime(col,ev.clientY),e:e,dur:(e._e-e._s)};
+  document.addEventListener('mousemove',calDragMove);document.addEventListener('mouseup',calDragUp);
+}
+function calResizeStart(ev,id){
+  ev.stopPropagation();if(ev.button!==0)return;
+  var node=ev.target.closest('.cal-ev');var col=node.closest('.cal-col');
+  var e=CAL.events.find(function(x){return x.id==id;});if(!e)return;
+  CAL.drag={mode:'resize',id:id,node:node,col:col,e:e};
+  document.addEventListener('mousemove',calDragMove);document.addEventListener('mouseup',calDragUp);
+}
+function calDragMove(ev){
+  var d=CAL.drag;if(!d)return;
+  if(d.mode=='pending-move'){
+    if(Math.abs(ev.clientX-CAL._mDownX)<4&&Math.abs(ev.clientY-CAL._mDownY)<4)return;
+    d.mode='move';d.node.classList.add('dragging');
+  }
+  // column under cursor (allow cross-day move in week view)
+  var colUnder=document.elementFromPoint(ev.clientX,ev.clientY);
+  colUnder=colUnder&&colUnder.closest?colUnder.closest('.cal-col'):null;
+  var col=colUnder||d.col;
+  if(d.mode=='create'){
+    d.cur=calPxToTime(col,ev.clientY);d.col=col;calDrawGhost(col,d.start,d.cur);
+  }else if(d.mode=='move'){
+    var t=calPxToTime(col,ev.clientY);
+    var ns=new Date(t.getTime()-(d.grabT.getHours()*60+d.grabT.getMinutes())*60000+(d.e._s.getHours()*60+d.e._s.getMinutes())*60000);
+    // snap: new start = pointer time aligned to original offset within event
+    ns=new Date(col.getAttribute('data-date')+'T00:00:00');
+    var mins=Math.round(((ev.clientY-col.getBoundingClientRect().top)/1152*1440)/15)*15;
+    ns.setMinutes(mins);d.newStart=ns;d.newEnd=new Date(ns.getTime()+d.dur);d.col=col;
+    calDrawGhost(col,ns,d.newEnd);
+  }else if(d.mode=='resize'){
+    var te=calPxToTime(col,ev.clientY);if(te<=d.e._s)te=new Date(d.e._s.getTime()+900000);
+    d.newEnd=te;calDrawGhost(d.col,d.e._s,te);
+  }
+}
+function calDrawGhost(col,a,b){
+  document.querySelectorAll('.cal-ghost').forEach(function(n){n.remove();});
+  var s=a<b?a:b,e=a<b?b:a;
+  var top=(s.getHours()*60+s.getMinutes())/1440*1152,h=Math.max(18,(e-s)/60000/1440*1152);
+  var g=document.createElement('div');g.className='cal-ghost';g.style.top=top+'px';g.style.height=h+'px';g.style.left='2px';g.style.right='3px';
+  g.textContent=calHM(s)+' – '+calHM(e);col.appendChild(g);
+}
+async function calDragUp(ev){
+  var d=CAL.drag;CAL.drag=null;
+  document.removeEventListener('mousemove',calDragMove);document.removeEventListener('mouseup',calDragUp);
+  document.querySelectorAll('.cal-ghost').forEach(function(n){n.remove();});
+  if(!d){return;}
+  if(d.node)d.node.classList.remove('dragging');
+  if(d.mode=='pending-move'){calOpenEvent(d.id,ev);return;} // was a click
+  if(d.mode=='create'){
+    var a=d.start,b=d.cur;var s=a<b?a:b,e=a<b?b:a;
+    if((e-s)<300000)e=new Date(s.getTime()+1800000); // min 30m
+    calCreateAt(s,false);
+    setTimeout(function(){var es=document.getElementById('evE');if(es)es.value=e.getFullYear()+'-'+calPad(e.getMonth()+1)+'-'+calPad(e.getDate())+'T'+calPad(e.getHours())+':'+calPad(e.getMinutes());},30);
+    return;
+  }
+  if((d.mode=='move'||d.mode=='resize')&&(d.newStart||d.newEnd)){
+    var payload={id:d.id,tz:CAL.tz};
+    if(d.mode=='move'){payload.start=calLocalISO(d.newStart);payload.end=calLocalISO(d.newEnd);}
+    else{payload.end=calLocalISO(d.newEnd);}
+    toast('Updating…');
+    var r=await(await fetch('/api/google/calendar-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
+    if(r&&r.ok){toast('Moved &#10003;');loadCalendar(true);}else toast('Update failed: '+((r||{}).error||'?'),4000);
+  }
+}
+
+// ---- now-line ticker --------------------------------------------------------
+function calStartNowTicker(){
+  if(CAL._tick)clearInterval(CAL._tick);
+  CAL._tick=setInterval(function(){
+    if(LENS!='calendar'){clearInterval(CAL._tick);CAL._tick=null;return;}
+    var nl=document.getElementById('calNow');if(!nl)return;
+    var now=new Date();nl.style.top=((now.getHours()*60+now.getMinutes())/1440*1152)+'px';
+  },60000);
+}
+
+// ---- keyboard navigation ----------------------------------------------------
+function calOrderedEvents(){return CAL.events.slice().filter(function(e){return !e.allDay;}).sort(function(a,b){return a._s-b._s;});}
+function calKeyHandler(e){
+  if(LENS!='calendar')return;
+  var t=(e.target.tagName||'');if(t=='INPUT'||t=='TEXTAREA')return;
+  if(document.getElementById('mbg').style.display=='flex')return; // modal open
+  var k=e.key;
+  if(k=='/'){e.preventDefault();var q=document.getElementById('calQA');if(q)q.focus();return;}
+  if(k=='t'||k=='T'){e.preventDefault();calToday();return;}
+  if(k=='d'||k=='D'){e.preventDefault();calSetView('day');return;}
+  if(k=='w'||k=='W'){e.preventDefault();calSetView('week');return;}
+  if(k=='m'||k=='M'){e.preventDefault();calSetView('month');return;}
+  if(k=='a'||k=='A'){e.preventDefault();calSetView('agenda');return;}
+  if(k=='ArrowLeft'){e.preventDefault();calStep(-1);return;}
+  if(k=='ArrowRight'){e.preventDefault();calStep(1);return;}
+  if(k=='c'||k=='C'){e.preventDefault();calCreateAt(null,false);return;}
+  if(k=='Escape'){if(CAL.pop){e.preventDefault();calClosePop();}return;}
+  if(k=='j'||k=='k'||k=='J'||k=='K'){
+    e.preventDefault();var ord=calOrderedEvents();if(!ord.length)return;
+    var i=ord.findIndex(function(x){return x.id==CAL.selEvId;});
+    if(k=='j'||k=='J')i=(i<0?0:Math.min(ord.length-1,i+1));else i=(i<0?ord.length-1:Math.max(0,i-1));
+    CAL.selEvId=ord[i].id;
+    document.querySelectorAll('.cal-ev.sel').forEach(function(n){n.classList.remove('sel');});
+    var node=document.querySelector('.cal-ev[data-id="'+CSS.escape(CAL.selEvId)+'"]');
+    if(node){node.classList.add('sel');node.scrollIntoView({block:'nearest'});}
+    return;}
+  if(k=='Enter'){if(CAL.selEvId){e.preventDefault();calOpenEvent(CAL.selEvId,null);}return;}
+  if(k=='e'||k=='E'){if(CAL.selEvId){e.preventDefault();calEdit(CAL.selEvId);}return;}
+  if(k=='Backspace'||k=='Delete'){if(CAL.selEvId){e.preventDefault();calDelete(CAL.selEvId);}return;}
+}
+document.addEventListener('keydown',calKeyHandler);
+
+
+
+/* ===== DRIVE SURFACE v2 (spliced) ===== */
+// ===================== DRIVE SURFACE (dr-*) =====================
+// Replaces the old loadDrive/driveSearch/var DRIVEQ block. KEEP driveSize() -- reused here.
+var DR={parent:'',crumbs:[],files:[],q:'',kind:'',starred:'',order:'',view:(localStorage.getItem('dr_view')||'grid'),sel:{},sortBy:'modified',sortDir:-1,qlIdx:-1,loading:false,email:''};
+var DR_FOCUS=-1;
+var DR_MIME={
+  'application/pdf':{i:'📕',k:'PDF'},
+  'application/vnd.google-apps.folder':{i:'📁',k:'Folder'},
+  'application/vnd.google-apps.document':{i:'📄',k:'Doc'},
+  'application/vnd.google-apps.spreadsheet':{i:'📊',k:'Sheet'},
+  'application/vnd.google-apps.presentation':{i:'📽',k:'Slides'},
+  'application/vnd.google-apps.form':{i:'📝',k:'Form'}
+};
+function drIcon(f){
+  if(f.folder)return '📁';
+  var m=DR_MIME[f.mime];if(m)return m.i;
+  if(/^image\//.test(f.mime))return '🖼️';
+  if(/^video\//.test(f.mime))return '🎬';
+  if(/^audio\//.test(f.mime))return '🎵';
+  if(/zip|compress|tar|rar|7z/.test(f.mime))return '🗜️';
+  if(/^text\/|json|javascript|xml|x-python|x-sh|x-yaml/.test(f.mime))return '📜';
+  return '📄';
+}
+function drKind(f){
+  if(f.folder)return 'Folder';
+  var m=DR_MIME[f.mime];if(m)return m.k;
+  if(/^image\//.test(f.mime))return 'Image';
+  if(/^video\//.test(f.mime))return 'Video';
+  if(/^audio\//.test(f.mime))return 'Audio';
+  if(/^text\//.test(f.mime))return 'Text';
+  var p=(f.name||'').split('.').pop();return (p&&p.length<6&&p!=f.name)?p.toUpperCase():'File';
+}
+function drPreviewable(f){return /^(image|video|audio|text)\//.test(f.mime)||/pdf|json|javascript|xml|x-python|x-sh|csv/.test(f.mime)||f.gdoc;}
+function drIframe(f){return 'https://drive.google.com/file/d/'+f.id+'/preview';}
+function drText(f){return /^text\/|json|javascript|xml|x-python|x-sh|csv|x-yaml|x-c|x-java|markdown/.test(f.mime)&&!f.folder;}
+
+async function loadDrive(){
+  var g=document.getElementById('grid');DR.loading=true;
+  if(!DR.files.length)g.innerHTML=empty('Loading Drive…');
+  var qs='order='+encodeURIComponent(DR.order||'')+'&kind='+DR.kind+'&starred='+DR.starred+'&max=300';
+  if(DR.q)qs+='&q='+encodeURIComponent(DR.q);else if(DR.parent)qs+='&parent='+encodeURIComponent(DR.parent);
+  var r;try{r=await(await fetch('/api/google/drive?'+qs)).json();}catch(e){g.innerHTML=gErr({error:'network'});DR.loading=false;return;}
+  DR.loading=false;
+  if(r.error){g.innerHTML=gErr(r);return;}
+  DR.files=r.files||[];DR.crumbs=r.crumbs||[];DR.email=r.email||'';
+  drRender();
+}
+function drRender(){
+  var g=document.getElementById('grid');var fs=drSorted();var n=drSelCount();
+  var h='<div class="dr-wrap" id="drWrap">';
+  h+='<div class="dr-bar"><div class="dr-crumbs">';
+  h+='<span class="dr-crumb'+(!DR.parent&&!DR.q?' here':'')+'" onclick="drGo(\'\')">🏠 My Drive</span>';
+  (DR.crumbs||[]).forEach(function(c,i){var last=i==DR.crumbs.length-1;
+    h+='<span class="dr-csep">›</span><span class="dr-crumb'+(last&&!DR.q?' here':'')+'" onclick="drGo(\''+c.id+'\')">'+e2(c.name)+'</span>';});
+  if(DR.q)h+='<span class="dr-csep">›</span><span class="dr-crumb here">Search: “'+e2(DR.q)+'”</span>';
+  h+='</div><div class="dr-tools">';
+  h+='<input id="drq" class="dr-search" placeholder="Search all of Drive…  ( / )" value="'+e2(DR.q)+'" oninput="drDebounce()" onkeydown="if(event.key===\'Enter\'){event.preventDefault();drSearchNow();}if(event.key===\'Escape\'){this.value=\'\';drClearSearch();}">';
+  h+='<div class="dr-seg"><button class="dr-segb'+(DR.view=='grid'?' on':'')+'" title="Grid (v)" onclick="drSetView(\'grid\')">▦</button>'
+    +'<button class="dr-segb'+(DR.view=='list'?' on':'')+'" title="List (v)" onclick="drSetView(\'list\')">☰</button></div>';
+  h+='<button class="dr-chip'+(DR.starred?' on':'')+'" onclick="drToggleStarred()" title="Starred only">★</button>';
+  h+='<select class="dr-sel" onchange="DR.kind=this.value;DR.files=[];loadDrive()">'
+    +'<option value=""'+(!DR.kind?' selected':'')+'>All types</option>'
+    +'<option value="folder"'+(DR.kind=='folder'?' selected':'')+'>Folders</option>'
+    +'<option value="doc"'+(DR.kind=='doc'?' selected':'')+'>Files</option></select>';
+  h+='<select class="dr-sel" onchange="drSetSort(this.value)">'
+    +drSortOpt('modified','Last modified')+drSortOpt('name','Name')+drSortOpt('size','Size')+drSortOpt('created','Created')+'</select>';
+  h+='<button class="dr-icbtn" title="Refresh" onclick="DR.files=[];loadDrive()">↻</button>';
+  h+='</div></div>';
+  if(n){
+    h+='<div class="dr-batch"><b>'+n+' selected</b>'
+      +'<button class="dr-bb" onclick="drBatch(\'star\')">★ Star</button>'
+      +'<button class="dr-bb" onclick="drBatch(\'unstar\')">☆ Unstar</button>'
+      +'<button class="dr-bb" onclick="drBatchDownload()">↓ Download</button>'
+      +'<button class="dr-bb danger" onclick="drBatch(\'trash\')">🗑 Trash</button>'
+      +'<span style="flex:1"></span><button class="dr-bb" onclick="drClearSel()">Clear</button></div>';
+  }
+  h+='<div class="dr-body">';
+  if(!fs.length){h+='<div class="dr-emptybox">'+empty(DR.q?('No files match “'+e2(DR.q)+'”.'):'This folder is empty.')+'</div>';}
+  else if(DR.view=='grid'){h+='<div class="dr-grid" id="drList">'+fs.map(drCard).join('')+'</div>';}
+  else{
+    h+='<div class="dr-list" id="drList"><div class="dr-lh">'
+      +'<span class="dr-lck"><input type="checkbox" onclick="drToggleAll(this.checked)"'+(n&&n==fs.length?' checked':'')+'></span>'
+      +'<span class="dr-lcn" onclick="drSetSort(\'name\')">Name'+drSortArrow('name')+'</span>'
+      +'<span class="dr-lco">Owner</span>'
+      +'<span class="dr-lcm" onclick="drSetSort(\'modified\')">Modified'+drSortArrow('modified')+'</span>'
+      +'<span class="dr-lcs" onclick="drSetSort(\'size\')">Size'+drSortArrow('size')+'</span></div>'
+      +fs.map(drRow).join('')+'</div>';
+  }
+  h+='</div></div>';
+  g.innerHTML=h;drBindFocus();
+}
+function drSortOpt(k,l){return '<option value="'+k+'"'+(DR.sortBy==k?' selected':'')+'>'+l+'</option>';}
+function drSortArrow(k){return DR.sortBy==k?(DR.sortDir<0?' ↓':' ↑'):'';}
+function drCard(f,i){
+  var sel=DR.sel[f.id]?' sel':'';
+  var thumb=(!f.folder&&f.thumb)?'<img class="dr-th" loading="lazy" src="/api/google/drive-thumb?id='+f.id+'" onerror="this.parentNode.classList.add(\'noth\')">':'';
+  return '<div class="dr-card'+sel+(f.folder?' fold':'')+'" data-id="'+f.id+'" data-i="'+i+'" tabindex="0" '
+    +'onclick="drClick(event,'+i+')" ondblclick="drOpen('+i+')" onkeydown="drCardKey(event,'+i+')" oncontextmenu="drMenu(event,'+i+');return false;">'
+    +'<div class="dr-ck"><input type="checkbox"'+(DR.sel[f.id]?' checked':'')+' onclick="event.stopPropagation();drCheck(\''+f.id+'\',this.checked)"></div>'
+    +'<div class="dr-star'+(f.starred?' on':'')+'" onclick="event.stopPropagation();drStar('+i+')">'+(f.starred?'★':'☆')+'</div>'
+    +'<div class="dr-thumb '+(thumb?'':'noth')+'">'+thumb+'<span class="dr-ic">'+drIcon(f)+'</span></div>'
+    +'<div class="dr-name" title="'+e2(f.name)+'">'+e2(f.name)+'</div>'
+    +'<div class="dr-sub">'+drKind(f)+(f.size&&!f.folder?' · '+driveSize(f.size):'')+' · '+gDate(f.modified)+'</div>'
+    +'</div>';
+}
+function drRow(f,i){
+  var sel=DR.sel[f.id]?' sel':'';
+  return '<div class="dr-trow'+sel+(f.folder?' fold':'')+'" data-id="'+f.id+'" data-i="'+i+'" tabindex="0" '
+    +'onclick="drClick(event,'+i+')" ondblclick="drOpen('+i+')" onkeydown="drCardKey(event,'+i+')" oncontextmenu="drMenu(event,'+i+');return false;">'
+    +'<span class="dr-lck"><input type="checkbox"'+(DR.sel[f.id]?' checked':'')+' onclick="event.stopPropagation();drCheck(\''+f.id+'\',this.checked)"></span>'
+    +'<span class="dr-lcn"><span class="dr-ric">'+drIcon(f)+'</span><span class="dr-rname" title="'+e2(f.name)+'">'+e2(f.name)+'</span>'
+      +(f.starred?'<span class="dr-rstar" onclick="event.stopPropagation();drStar('+i+')">★</span>':'')+'</span>'
+    +'<span class="dr-lco">'+e2(f.owner||'me')+'</span>'
+    +'<span class="dr-lcm">'+gDate(f.modified)+'</span>'
+    +'<span class="dr-lcs">'+(f.folder?'—':(f.size?driveSize(f.size):'—'))+'</span>'
+    +'</div>';
+}
+function drSorted(){
+  var fs=DR.files.slice(),k=DR.sortBy,d=DR.sortDir;
+  fs.sort(function(a,b){
+    if(a.folder!=b.folder)return a.folder?-1:1;
+    var x,y;
+    if(k=='name'){x=(a.name||'').toLowerCase();y=(b.name||'').toLowerCase();return x<y?-d:x>y?d:0;}
+    if(k=='size'){return ((+a.size||0)-(+b.size||0))*d;}
+    x=a[k=='created'?'created':'modified']||'';y=b[k=='created'?'created':'modified']||'';
+    return x<y?-d:x>y?d:0;
+  });
+  return fs;
+}
+function drSetSort(k){if(DR.sortBy==k)DR.sortDir=-DR.sortDir;else{DR.sortBy=k;DR.sortDir=(k=='name')?1:-1;}drRender();}
+function drSetView(v){DR.view=v;localStorage.setItem('dr_view',v);drRender();}
+function drCycleView(){drSetView(DR.view=='grid'?'list':'grid');}
+function drGo(id){DR.parent=id;DR.q='';DR.sel={};DR.files=[];DR_FOCUS=-1;drCloseQL();loadDrive();}
+function drToggleStarred(){DR.starred=DR.starred?'':'1';DR.files=[];loadDrive();}
+var _drDeb;
+function drDebounce(){clearTimeout(_drDeb);_drDeb=setTimeout(drSearchNow,260);}
+function drSearchNow(){var v=gVal('drq');if(v==DR.q)return;DR.q=v;DR.files=[];loadDrive();}
+function drClearSearch(){DR.q='';DR.files=[];loadDrive();}
+
+// selection
+function drSelCount(){return Object.keys(DR.sel).length;}
+function drCheck(id,on){if(on)DR.sel[id]=1;else delete DR.sel[id];drRender();}
+function drToggleAll(on){DR.sel={};if(on)drSorted().forEach(function(f){DR.sel[f.id]=1;});drRender();}
+function drClearSel(){DR.sel={};drRender();}
+function drClick(ev,i){
+  var f=drSorted()[i];if(!f)return;
+  if(ev.metaKey||ev.ctrlKey){if(DR.sel[f.id])delete DR.sel[f.id];else DR.sel[f.id]=1;drRender();return;}
+  drFocus(i);
+}
+function drFocus(i){DR_FOCUS=i;drBindFocus();}
+function drBindFocus(){
+  document.querySelectorAll('#drList [data-i]').forEach(function(n){n.classList.toggle('foc',+n.dataset.i===DR_FOCUS);});
+  var cur=document.querySelector('#drList [data-i].foc');if(cur)cur.scrollIntoView({block:'nearest'});
+}
+function drOpen(i){var f=drSorted()[i];if(!f)return;if(f.folder){drGo(f.id);return;}drQuickLook(i);}
+function drCardKey(ev,i){if(ev.key=='Enter'){ev.preventDefault();drOpen(i);}}
+
+// star (optimistic)
+async function drStar(i){
+  var f=drSorted()[i];if(!f)return;var was=f.starred;f.starred=!was;drRender();
+  var r=await(await fetch('/api/google/drive-modify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:f.id,action:was?'unstar':'star'})})).json();
+  if(r&&r.error){f.starred=was;drRender();toast('Failed: '+r.error,4000);}
+}
+
+// quick look (full-screen preview, cycle with arrows / space)
+function drQuickLook(i){
+  var fs=drSorted();var f=fs[i];if(!f||f.folder)return;DR.qlIdx=i;
+  var body;
+  if(drText(f)){body='<div class="dr-qltext" id="drqltext">'+empty('Loading…')+'</div>';}
+  else if(drPreviewable(f)){body='<iframe class="dr-qlframe" src="'+drIframe(f)+'" allow="autoplay"></iframe>';}
+  else{body='<div class="dr-qlnoprev"><div class="dr-qlbig">'+drIcon(f)+'</div><div>No inline preview for this type.</div>'
+    +'<button class="dr-bb" onclick="drDownload('+i+')">↓ Download</button></div>';}
+  var info='<div class="dr-qlmeta"><span>'+drKind(f)+'</span>'+(f.size&&!f.folder?'<span>'+driveSize(f.size)+'</span>':'')
+    +'<span>'+gDate(f.modified)+'</span>'+(f.owner?'<span>'+e2(f.owner)+'</span>':'')+'</div>';
+  var html='<div class="dr-ql" id="drQL" tabindex="0"><div class="dr-qlhead">'
+    +'<button class="dr-qlnav" onclick="drQLcycle(-1)" title="Previous (←)">‹</button>'
+    +'<div class="dr-qltitle"><span class="dr-qlic">'+drIcon(f)+'</span><b title="'+e2(f.name)+'">'+e2(f.name)+'</b>'+info+'</div>'
+    +'<button class="dr-qlnav" onclick="drQLcycle(1)" title="Next (→)">›</button>'
+    +'<div class="dr-qlactions">'
+      +'<button class="dr-bb" onclick="window.open(\''+e2(f.link)+'\',\'_blank\')">Open ↗</button>'
+      +'<button class="dr-bb" onclick="drDownload('+i+')">↓</button>'
+      +'<button class="dr-bb" onclick="drStarQL()">'+(f.starred?'★':'☆')+'</button>'
+      +'<button class="dr-bb" onclick="drCloseQL()" title="Close (Esc / Space)">✕</button>'
+    +'</div></div><div class="dr-qlbody">'+body+'</div></div>';
+  var ov=document.getElementById('drQLov');
+  if(!ov){ov=document.createElement('div');ov.id='drQLov';ov.className='dr-qlov';document.body.appendChild(ov);ov.onclick=function(e){if(e.target===ov)drCloseQL();};}
+  ov.innerHTML=html;ov.style.display='flex';
+  setTimeout(function(){var qn=document.getElementById('drQL');if(qn)qn.focus();},10);
+  if(drText(f))drLoadText(f);
+}
+async function drLoadText(f){
+  var box=document.getElementById('drqltext');if(!box)return;
+  try{var r=await(await fetch('/api/google/drive-content?id='+f.id)).json();
+    if(r.error){box.innerHTML=empty('Preview unavailable: '+e2(r.error));return;}
+    box.innerHTML='<pre>'+e2(r.text||'')+'</pre>';
+  }catch(e){box.innerHTML=empty('Preview failed.');}
+}
+function drQLcycle(d){
+  var fs=drSorted();var i=DR.qlIdx;
+  for(var n=0;n<fs.length;n++){i+=d;if(i<0)i=fs.length-1;if(i>=fs.length)i=0;if(!fs[i].folder){drFocus(i);drQuickLook(i);return;}}
+}
+function drCloseQL(){var ov=document.getElementById('drQLov');if(ov)ov.style.display='none';DR.qlIdx=-1;}
+function drStarQL(){if(DR.qlIdx>=0){drStar(DR.qlIdx);drQuickLook(DR.qlIdx);}}
+
+// download / open
+function drDownload(i){
+  var f=drSorted()[i];if(!f)return;
+  if(f.folder){toast('Folders can’t be downloaded.');return;}
+  window.open(f.gdoc?f.link:('https://drive.google.com/uc?export=download&id='+f.id),'_blank');
+}
+function drBatchDownload(){
+  Object.keys(DR.sel).forEach(function(id,n){var f=DR.files.find(function(x){return x.id==id;});
+    if(f&&!f.folder)setTimeout(function(){window.open(f.gdoc?f.link:('https://drive.google.com/uc?export=download&id='+f.id),'_blank');},n*220);});
+}
+
+// batch + undo
+async function drBatch(action){
+  var ids=Object.keys(DR.sel);if(!ids.length)return;
+  var snap=ids.slice();
+  if(action=='trash'){DR.files=DR.files.filter(function(f){return !DR.sel[f.id];});}
+  else if(action=='star'||action=='unstar'){DR.files.forEach(function(f){if(DR.sel[f.id])f.starred=(action=='star');});}
+  DR.sel={};drRender();
+  var ok=0;
+  for(var j=0;j<ids.length;j++){
+    var r=await(await fetch('/api/google/drive-modify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:ids[j],action:action})})).json();
+    if(r&&!r.error)ok++;
+  }
+  if(action=='trash'){
+    drUndoToast(ok+' moved to Trash',function(){
+      snap.forEach(function(id){fetch('/api/google/drive-modify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,action:'untrash'})});});
+      setTimeout(function(){DR.files=[];loadDrive();},400);
+    });
+  }else toast(action+' · '+ok+' ✓');
+}
+function drUndoToast(msg,undo){
+  var e=document.getElementById('toast');if(!e){toast(msg);return;}
+  e.innerHTML=msg+' <a href="#" id="drUndo" style="color:var(--acc,#c9a227);font-weight:700;margin-left:8px">Undo</a>';
+  e.style.display='block';clearTimeout(e._t);
+  var a=document.getElementById('drUndo');if(a)a.onclick=function(ev){ev.preventDefault();e.style.display='none';undo();};
+  e._t=setTimeout(function(){e.style.display='none';},6000);
+}
+
+// context menu
+function drMenu(ev,i){
+  var f=drSorted()[i];if(!f)return;drFocus(i);
+  var old=document.getElementById('drCtx');if(old)old.remove();
+  var m=document.createElement('div');m.id='drCtx';m.className='dr-ctx';
+  var items=[];
+  if(f.folder)items.push(['📂 Open','drGo(\''+f.id+'\')']);
+  else{items.push(['👁 Quick Look','drQuickLook('+i+')']);items.push(['↗ Open in Drive','window.open(\''+e2(f.link)+'\',\'_blank\')']);items.push(['↓ Download','drDownload('+i+')']);}
+  items.push([(f.starred?'☆ Unstar':'★ Star'),'drStar('+i+')']);
+  items.push(['✎ Rename','drRename('+i+')']);
+  items.push(['⧉ Make a copy','drCopy('+i+')']);
+  items.push(['SEP','']);
+  items.push(['🗑 Move to Trash','drTrashOne('+i+')']);
+  m.innerHTML=items.map(function(it){return it[0]=='SEP'?'<div class="dr-ctxsep"></div>':'<div class="dr-ctxi" onclick="drCtxClose();'+it[1].replace(/"/g,'&quot;')+'">'+it[0]+'</div>';}).join('');
+  document.body.appendChild(m);
+  m.style.left=Math.min(ev.clientX,window.innerWidth-220)+'px';
+  m.style.top=Math.min(ev.clientY,window.innerHeight-m.offsetHeight-10)+'px';
+  setTimeout(function(){document.addEventListener('click',drCtxClose,{once:true});},0);
+}
+function drCtxClose(){var m=document.getElementById('drCtx');if(m)m.remove();}
+function drRename(i){
+  var f=drSorted()[i];if(!f)return;
+  showM('<div class="dr-modal"><b>Rename</b><input id="drRenameI" class="dr-search" style="margin-top:10px;width:100%" value="'+e2(f.name)+'">'
+    +'<div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end"><button class="dr-bb" onclick="closeM()">Cancel</button><button class="dr-bb on" onclick="drRenameGo(\''+f.id+'\')">Rename</button></div></div>');
+  setTimeout(function(){var el=document.getElementById('drRenameI');if(el){el.focus();el.select();el.onkeydown=function(e){if(e.key=='Enter')drRenameGo(f.id);};}},20);
+}
+async function drRenameGo(id){
+  var v=gVal('drRenameI');if(!v){closeM();return;}closeM();
+  var f=DR.files.find(function(x){return x.id==id;});var was=f?f.name:'';if(f)f.name=v;drRender();
+  var r=await(await fetch('/api/google/drive-modify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,action:'rename',value:v})})).json();
+  if(r&&r.error){if(f)f.name=was;drRender();toast('Failed: '+r.error,4000);}else toast('Renamed ✓');
+}
+async function drCopy(i){
+  var f=drSorted()[i];if(!f)return;toast('Copying…');
+  var r=await(await fetch('/api/google/drive-modify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:f.id,action:'copy',value:'Copy of '+f.name})})).json();
+  if(r&&r.error)toast('Failed: '+r.error,4000);else{toast('Copied ✓');DR.files=[];loadDrive();}
+}
+async function drTrashOne(i){
+  var f=drSorted()[i];if(!f)return;
+  DR.files=DR.files.filter(function(x){return x.id!=f.id;});drRender();
+  await fetch('/api/google/drive-modify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:f.id,action:'trash'})});
+  drUndoToast('Moved to Trash',function(){fetch('/api/google/drive-modify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:f.id,action:'untrash'})}).then(function(){setTimeout(function(){DR.files=[];loadDrive();},400);});});
+}
+
+// keyboard router (Drive lens only) -- j/k/arrows nav, Enter open, Space quick look, x select, s star, r rename, # trash, v view, / search, Backspace up
+function drKeyRouter(e){
+  if(LENS!='drive')return;
+  var t=(e.target.tagName||'');
+  var qlOpen=document.getElementById('drQLov')&&document.getElementById('drQLov').style.display=='flex';
+  if(qlOpen){
+    if(e.key=='Escape'||e.key==' '){e.preventDefault();drCloseQL();}
+    else if(e.key=='ArrowLeft'){e.preventDefault();drQLcycle(-1);}
+    else if(e.key=='ArrowRight'){e.preventDefault();drQLcycle(1);}
+    return;
+  }
+  if(t=='INPUT'||t=='TEXTAREA'||t=='SELECT'){if(e.key=='Escape'&&t=='INPUT')e.target.blur();return;}
+  if(e.key=='/'){e.preventDefault();var s=document.getElementById('drq');if(s){s.focus();s.select();}return;}
+  var fs=drSorted();if(!fs.length)return;
+  var cols=DR.view=='grid'?drGridCols():1;
+  if(e.key=='j'||e.key=='ArrowDown'){e.preventDefault();DR_FOCUS=Math.min(fs.length-1,(DR_FOCUS<0?0:DR_FOCUS+cols));drBindFocus();}
+  else if(e.key=='k'||e.key=='ArrowUp'){e.preventDefault();DR_FOCUS=Math.max(0,(DR_FOCUS<0?0:DR_FOCUS-cols));drBindFocus();}
+  else if(e.key=='ArrowRight'&&DR.view=='grid'){e.preventDefault();DR_FOCUS=Math.min(fs.length-1,(DR_FOCUS<0?0:DR_FOCUS+1));drBindFocus();}
+  else if(e.key=='ArrowLeft'&&DR.view=='grid'){e.preventDefault();DR_FOCUS=Math.max(0,(DR_FOCUS<0?0:DR_FOCUS-1));drBindFocus();}
+  else if(e.key=='Enter'){e.preventDefault();if(DR_FOCUS>=0)drOpen(DR_FOCUS);}
+  else if(e.key==' '){e.preventDefault();if(DR_FOCUS>=0){if(fs[DR_FOCUS].folder)drGo(fs[DR_FOCUS].id);else drQuickLook(DR_FOCUS);}}
+  else if(e.key=='Backspace'){e.preventDefault();if(DR.q)drClearSearch();else if(DR.crumbs.length>1)drGo(DR.crumbs[DR.crumbs.length-2].id);else if(DR.parent)drGo('');}
+  else if(e.key=='x'){e.preventDefault();if(DR_FOCUS>=0){var id=fs[DR_FOCUS].id;if(DR.sel[id])delete DR.sel[id];else DR.sel[id]=1;drRender();}}
+  else if(e.key=='s'){e.preventDefault();if(DR_FOCUS>=0)drStar(DR_FOCUS);}
+  else if(e.key=='r'){e.preventDefault();if(DR_FOCUS>=0)drRename(DR_FOCUS);}
+  else if(e.key=='#'||e.key=='Delete'){e.preventDefault();if(drSelCount())drBatch('trash');else if(DR_FOCUS>=0)drTrashOne(DR_FOCUS);}
+  else if(e.key=='v'){e.preventDefault();drCycleView();}
+  else if(e.key=='Escape'){drClearSel();}
+}
+function drGridCols(){
+  var grid=document.getElementById('drList');if(!grid)return 4;
+  var first=grid.querySelector('.dr-card');if(!first)return 4;
+  return Math.max(1,Math.round(grid.clientWidth/(first.offsetWidth+14)));
+}
+document.addEventListener('keydown',drKeyRouter);
+// KEEP existing driveSize(b) helper (line ~5803) -- reused above. Do NOT delete it.
 // live unread-in-inbox count on the Gmail tab (reading the label does NOT mark anything read)
 async function gmailBadgePoll(){
   if(!(window.CC&&window.CC.google))return;
@@ -6775,6 +9126,7 @@ function navSeedGoogle(){   // one-time: tuck the live Google lenses into a "Goo
   s._gseed=true;s.mode="manual";navSave(s);renderNav();
 }
 setupNavDnD();renderNav();navSeedGoogle();
+Shell.init();              // shared shell: command palette + keyboard router + quick look
 load();
 if(!restoreFromHash())syncHash(false);   // restore exact place on refresh; else stamp the landing lens as the back-stack baseline (so the first Back lands here, not the overseer)
 // live health: repaint the header strip (+ machines lens) every 60s without a page reload
