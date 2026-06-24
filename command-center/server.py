@@ -118,10 +118,9 @@ def _account_activate(label):
         fd = os.open(ACTIVE_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, tok.encode()); os.close(fd)
         w = _wallet_load(); w["default"] = label; _wallet_save(w); return True
     except Exception: return False
-# spliced into every claude launch prefix (see _CC_ENVP): conditionally export the active OAuth token at launch
-# time. Empty unless the wallet is enabled -> AFP and legacy nodes are completely unaffected until turned on.
-_CC_ENVP = (('[ -s "%s" ] && export CLAUDE_CODE_OAUTH_TOKEN="$(cat "%s")"; ' % (ACTIVE_TOKEN_FILE, ACTIVE_TOKEN_FILE))
-            if ACCOUNT_WALLET else "")
+# spliced into every claude launch prefix. The account WALLET now switches the GLOBAL keychain login (live,
+# all sessions) instead of per-session env tokens, so this injects nothing -- launches use the keychain login.
+_CC_ENVP = ""
 
 def render_page():
     """Serve the dashboard with project/brand injected from cc.config.json (so the SAME framework UI
@@ -2220,104 +2219,106 @@ def _uniq_session(base):
         name = "%s-%d" % (base, i); i += 1
     return name
 
-# ---- Claude account login (setup-token capture) + per-account /usage scrape ----------------------------
-CC_LOGIN_SESSION = "cc-acct-login"
-_CC_AUTH_URL = re.compile(r"https://[^\s\"'<>]+")
-_CC_OAT = re.compile(r"(sk-ant-oat[A-Za-z0-9_-]+)")
+# ---- Claude account switching: snapshot/swap the GLOBAL login (macOS Keychain blob + ~/.claude.json
+#      identity) so a switch is LIVE across EVERY session, exactly like /login -- no per-session env token,
+#      no restart. Each account is captured ONCE into a 0600 wallet; switching just writes it back. ----
+KC_SERVICE = "Claude Code-credentials"
+def _kc_acct(): return os.environ.get("USER") or "user"
+def _home_json(): return os.path.expanduser("~/.claude.json")
+def _kc_read():
+    """Read the current login: keychain OAuth blob + ~/.claude.json oauthAccount identity. None if not logged in."""
+    r = sh(["security", "find-generic-password", "-s", KC_SERVICE, "-w"])
+    if r[0] != 0 or not (r[1] or "").strip(): return None
+    acct = {}
+    try: acct = json.load(open(_home_json())).get("oauthAccount") or {}
+    except Exception: pass
+    return {"blob": r[1].strip(), "account": acct}
+def _current_email():
+    try: return (json.load(open(_home_json())).get("oauthAccount") or {}).get("emailAddress", "")
+    except Exception: return ""
+def _kc_write(blob, account):
+    """Write a stored login back -> the keychain + ~/.claude.json. Backs up the current one first. LIVE switch."""
+    cur = _kc_read()
+    if cur:
+        try:
+            fd = os.open(os.path.join(STATE_DIR, "_kc_backup.json"), os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o600)
+            os.write(fd, json.dumps({"ts": int(time.time()), **cur}).encode()); os.close(fd)
+        except Exception: pass
+    ok = sh(["security", "add-generic-password", "-U", "-s", KC_SERVICE, "-a", _kc_acct(), "-w", blob or ""])[0] == 0
+    if account is not None:
+        try:
+            pth = _home_json(); d = json.load(open(pth)); d["oauthAccount"] = account
+            tmp = pth + ".tmp"; json.dump(d, open(tmp, "w")); os.replace(tmp, pth)
+        except Exception: pass
+    return ok
 
-def claude_login_start(label):
-    """Drive `claude setup-token` in a tmux pty to mint a ~1yr OAuth token for <label>. Returns once started;
-    the operator then opens the URL (claude_login_status) and pastes the code (claude_login_code)."""
-    if not _tok_label_safe(label): return {"ok": False, "error": "bad label"}
-    import shlex
-    sh([TMUX, "kill-session", "-t", CC_LOGIN_SESSION])
-    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; '
-          'export CC_LOGIN_LABEL=%s; claude setup-token; echo CC_LOGIN_DONE; sleep 600' % shlex.quote(label))
-    rc = sh([TMUX, "new-session", "-d", "-s", CC_LOGIN_SESSION, "-x", "900", "-y", "50", cl])[0]
-    return {"ok": rc == 0, "label": label}
-
-def claude_login_status(label=None):
-    """Read the login pty: surface the auth URL, whether it's awaiting a code, or capture the finished token."""
-    if sh([TMUX, "has-session", "-t", CC_LOGIN_SESSION])[0] != 0:
-        return {"state": "idle"}
-    # -J joins wrapped lines so a long OAuth URL isn't truncated mid-querystring (that dropped the `state`
-    # param -> "Invalid OAuth Request: Missing state parameter"). Wide pane (900) further avoids wrapping.
-    txt = sh([TMUX, "capture-pane", "-t", CC_LOGIN_SESSION, "-J", "-p", "-S", "-300"])[1] or ""
-    tok = _CC_OAT.findall(txt)
-    if tok:                                                   # token minted -> store + activate + close
-        lbl = label or _wallet_load().get("_pending") or "account"
-        _tok_write(lbl, tok[-1])
-        w = _wallet_load()
-        if lbl not in [a.get("label") for a in w.get("accounts", [])]:
-            w.setdefault("accounts", []).append({"label": lbl, "added": int(time.time())})
-        w.pop("_pending", None); _wallet_save(w)
-        _account_activate(lbl)
-        sh([TMUX, "send-keys", "-t", CC_LOGIN_SESSION, "C-c"]); sh([TMUX, "kill-session", "-t", CC_LOGIN_SESSION])
-        return {"state": "done", "label": lbl}
-    low = txt.lower()
-    urls = [u for u in _CC_AUTH_URL.findall(txt) if "anthropic" in u or "claude" in u]
-    awaiting_code = ("paste" in low and "code" in low) or "authorization code" in low or "enter the code" in low
-    if urls:
-        return {"state": "awaiting_code" if awaiting_code else "awaiting_auth", "url": urls[-1]}
-    if "error" in low or "failed" in low: return {"state": "error", "tail": txt[-400:]}
-    return {"state": "starting"}
-
-def claude_login_code(code):
-    """Relay the operator-pasted authorization code into the waiting setup-token pty."""
-    code = (code or "").strip()
-    if not code: return {"ok": False, "error": "empty code"}
-    if sh([TMUX, "has-session", "-t", CC_LOGIN_SESSION])[0] != 0: return {"ok": False, "error": "no login in progress"}
-    sh([TMUX, "send-keys", "-t", CC_LOGIN_SESSION, "-l", code]); time.sleep(0.3)
-    sh([TMUX, "send-keys", "-t", CC_LOGIN_SESSION, "Enter"])
+ACCT_WALLET_DIR = os.path.join(CC_HOME, "secrets", "claude_accounts")   # one 0600 json per account
+def _acct_safe(s): return re.sub(r"[^A-Za-z0-9_.@+-]", "_", (s or "").strip())
+def _acct_path(label):
+    s = _acct_safe(label); return os.path.join(ACCT_WALLET_DIR, s + ".json") if s else None
+def account_snapshot(label=None):
+    """Capture the CURRENTLY logged-in account into the wallet (auto-labels by email)."""
+    cur = _kc_read()
+    if not cur: return {"ok": False, "error": "no current login found (the keychain has no Claude credential)"}
+    email = (cur["account"] or {}).get("emailAddress") or ""
+    label = (label or email or ("account-%d" % int(time.time()))).strip()
+    pth = _acct_path(label)
+    if not pth: return {"ok": False, "error": "bad label"}
+    try:
+        os.makedirs(ACCT_WALLET_DIR, exist_ok=True)
+        rec = {"label": label, "email": email, "blob": cur["blob"], "account": cur["account"], "ts": int(time.time())}
+        fd = os.open(pth, os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o600); os.write(fd, json.dumps(rec).encode()); os.close(fd)
+        return {"ok": True, "label": label, "email": email}
+    except Exception as e: return {"ok": False, "error": str(e)[:120]}
+def account_switch(label):
+    pth = _acct_path(label)
+    try: rec = json.load(open(pth))
+    except Exception: return {"ok": False, "error": "account not in wallet"}
+    ok = _kc_write(rec.get("blob"), rec.get("account"))
+    return {"ok": ok, "label": label, "email": rec.get("email"),
+            "note": "live now -- every session uses it on its next request (no restart)"}
+def account_remove(label):
+    pth = _acct_path(label)
+    try:
+        if pth and os.path.isfile(pth): os.remove(pth)
+    except Exception: pass
     return {"ok": True}
+def account_list():
+    cur = _current_email(); out = []
+    try: files = sorted(os.listdir(ACCT_WALLET_DIR))
+    except Exception: files = []
+    for fn in files:
+        if not fn.endswith(".json"): continue
+        try:
+            r = json.load(open(os.path.join(ACCT_WALLET_DIR, fn)))
+            out.append({"label": r.get("label"), "email": r.get("email"), "ts": r.get("ts"),
+                        "active": bool(r.get("email") and r.get("email") == cur)})
+        except Exception: pass
+    return {"enabled": ACCOUNT_WALLET, "current_email": cur,
+            "current_saved": any(a["active"] for a in out), "accounts": out}
 
 def _parse_usage(text):
-    """Parse the three windows out of `/usage` output: pct used + reset time."""
+    """Parse the three windows out of `/usage`: pct used + reset time (None if that layout isn't shown)."""
     def grab(lbl):
         m = re.search(re.escape(lbl) + r"[^\n]*\n[^\n]*?(\d+)%\s*used[^\n]*\n\s*Resets ([^\n(]+)", text)
         if not m: m = re.search(re.escape(lbl) + r".{0,160}?(\d+)%\s*used.{0,120}?Resets ([^\n(]+)", text, re.S)
         return {"pct": int(m.group(1)), "resets": m.group(2).strip()} if m else None
     return {"session": grab("Current session"), "week": grab("Current week (all models)"),
             "week_sonnet": grab("Current week (Sonnet")}
-
-def claude_usage_scrape(label):
-    """Spawn a brief claude session with <label>'s token, run /usage, parse + cache the windows."""
-    tok = _tok_read(label)
-    if not tok: return {"error": "no token for " + str(label)}
-    import shlex
+def account_usage_current():
+    """Run /usage in a brief session (uses the CURRENT keychain login) and parse the windows. Reflects whichever
+    account is active right now (switching is global, so 'current account usage' is the meaningful view)."""
     sess = "cc-acct-usage"
     sh([TMUX, "kill-session", "-t", sess])
-    cl = ('export CLAUDE_CODE_OAUTH_TOKEN=%s; export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude'
-          % shlex.quote(tok))
-    if sh([TMUX, "new-session", "-d", "-s", sess, "-x", "220", "-y", "50", cl])[0] != 0:
+    cl = 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude'
+    if sh([TMUX, "new-session", "-d", "-s", sess, "-x", "200", "-y", "50", cl])[0] != 0:
         return {"error": "could not start session"}
     time.sleep(7)
     sh([TMUX, "send-keys", "-t", sess, "/usage"]); time.sleep(1.2); sh([TMUX, "send-keys", "-t", sess, "Enter"])
     time.sleep(7)
-    txt = sh([TMUX, "capture-pane", "-t", sess, "-p", "-S", "-120"])[1] or ""
+    txt = sh([TMUX, "capture-pane", "-t", sess, "-J", "-p", "-S", "-120"])[1] or ""
     sh([TMUX, "send-keys", "-t", sess, "C-c"]); sh([TMUX, "kill-session", "-t", sess])
-    u = _parse_usage(txt); rec = {"label": label, "usage": u, "ts": int(time.time())}
-    try: _wallet_save_usage(label, rec)
-    except Exception: pass
-    return rec
-
-def _usage_cache_path(label): return os.path.join(STATE_DIR, "_usage_" + _tok_label_safe(label) + ".json")
-def _wallet_save_usage(label, rec):
-    try: json.dump(rec, open(_usage_cache_path(label), "w"))
-    except Exception: pass
-def _usage_cached(label):
-    try: return json.load(open(_usage_cache_path(label)))
-    except Exception: return None
-
-def claude_accounts():
-    """Wallet state for the Accounts panel: each account + its (cached) usage; the active/default; gate flag."""
-    w = _wallet_load(); active = w.get("default", "")
-    accts = []
-    for a in w.get("accounts", []):
-        lbl = a.get("label")
-        accts.append({"label": lbl, "added": a.get("added"), "active": lbl == active,
-                      "usage": (_usage_cached(lbl) or {}).get("usage"), "usage_ts": (_usage_cached(lbl) or {}).get("ts")})
-    return {"enabled": ACCOUNT_WALLET, "accounts": accts, "default": active}
+    return {"email": _current_email(), "usage": _parse_usage(txt), "ts": int(time.time())}
 
 def launch(target, name, cid=None, rel=None):
     """Create a tmux session ON THE STUDIO. studio target runs Claude locally in the pillar dir;
@@ -5901,8 +5902,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/google/gmail-msg":return self._s(200, json.dumps(gmail_get(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-unread": return self._s(200, json.dumps(gmail_unread()))
         if u.path == "/api/session-bar":   return self._s(200, json.dumps(session_bar()))
-        if u.path == "/api/claude-accounts": return self._s(200, json.dumps(claude_accounts()))
-        if u.path == "/api/claude-login/status": return self._s(200, json.dumps(claude_login_status(q.get("label", [""])[0] or None)))
+        if u.path == "/api/claude-accounts": return self._s(200, json.dumps(account_list()))
         if u.path == "/api/google/gmail-thread":  return self._s(200, json.dumps(gmail_thread(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-att":
             b, err = gmail_attachment_bytes(q.get("id", [""])[0], q.get("att", [""])[0])
@@ -6003,25 +6003,14 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(launch(body.get("target", "studio"), body.get("name", "session"), body.get("component"))))
         if u.path == "/api/close-session":
             return self._s(200, json.dumps(close_session(body["name"], body.get("force", False))))
-        if u.path == "/api/claude-login/start":
-            w = _wallet_load(); w["_pending"] = body.get("label", ""); _wallet_save(w)
-            return self._s(200, json.dumps(claude_login_start(body.get("label", ""))))
-        if u.path == "/api/claude-login/code":
-            return self._s(200, json.dumps(claude_login_code(body.get("code", ""))))
-        if u.path == "/api/claude-account/activate":
-            ok = _account_activate(body.get("label", "")); return self._s(200, json.dumps({"ok": ok, "default": _wallet_load().get("default", "")}))
-        if u.path == "/api/claude-account/usage":
-            return self._s(200, json.dumps(claude_usage_scrape(body.get("label", ""))))
+        if u.path == "/api/claude-account/snapshot":
+            return self._s(200, json.dumps(account_snapshot(body.get("label") or None)))
+        if u.path == "/api/claude-account/switch":
+            return self._s(200, json.dumps(account_switch(body.get("label", ""))))
         if u.path == "/api/claude-account/remove":
-            lbl = body.get("label", ""); w = _wallet_load()
-            w["accounts"] = [a for a in w.get("accounts", []) if a.get("label") != lbl]
-            if w.get("default") == lbl: w["default"] = ""
-            _wallet_save(w)
-            try:
-                tp = _tok_path(lbl);  os.remove(tp) if tp and os.path.isfile(tp) else None
-                up = _usage_cache_path(lbl); os.remove(up) if os.path.isfile(up) else None
-            except Exception: pass
-            return self._s(200, json.dumps({"ok": True}))
+            return self._s(200, json.dumps(account_remove(body.get("label", ""))))
+        if u.path == "/api/claude-account/usage":
+            return self._s(200, json.dumps(account_usage_current()))
         if u.path == "/api/term-mouse":     # per-session tmux mouse: on=wheel-scroll, off=drag-select+copy
             nm = re.sub(r"[^A-Za-z0-9_-]", "", body.get("name", ""))[:48]
             on = bool(body.get("on", True))
@@ -11263,78 +11252,63 @@ async function proposeSend(){const t=document.getElementById("pr_t");if(!t.value
 
 // ---- Settings lens: set this node's Tier (ClaudeFather/ClaudeGrandfather) + Type (Project/Agency) ----
 let SETTINGS={};
-// ===== Claude Accounts lens: account wallet (login once -> 1yr token), one-click switch, per-account /usage =====
-var ACCT_POLL=null;
+// ===== Claude Accounts lens: switch the GLOBAL Claude login (keychain) in one click -- live across every
+// session, exactly like /login. Capture each account once ("Snapshot current login"), then switch instantly. =====
 function uBar(u){ if(!u) return '<span class="sub">—</span>';
   var p=Math.max(0,Math.min(100,u.pct||0)); var col=p>=90?'#f85149':p>=70?'#d29922':'var(--accent)';
   return '<div style="display:flex;align-items:center;gap:8px"><div style="flex:1;height:9px;border-radius:5px;background:#0006;overflow:hidden"><div style="height:100%;width:'+p+'%;background:'+col+'"></div></div>'
-    +'<span class="sub" style="white-space:nowrap;min-width:120px">'+p+'% · resets '+e2(u.resets||'?')+'</span></div>'; }
+    +'<span class="sub" style="white-space:nowrap;min-width:130px">'+p+'% · resets '+e2(u.resets||'?')+'</span></div>'; }
 async function loadAccounts(){
-  var g=document.getElementById("grid");
-  g.innerHTML=empty("Loading accounts…");
+  var g=document.getElementById("grid"); g.innerHTML=empty("Loading accounts…");
   var d={}; try{ d=await(await fetch("/api/claude-accounts")).json(); }catch(e){ g.innerHTML=empty("Couldn't load accounts."); return; }
-  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🪪 Claude Accounts</b> <span class="sub">log in once per account (~1yr token) · one-click switch · usage per account</span>'
-    +'<div style="margin-left:auto"><button class="mini go" onclick="acctAddStart()">+ Add account</button></div></div>'
-    +'<div class="sub" style="margin-top:6px">Sessions on THIS node launch with the <b>active</b> account. Switching is one click; new sessions use it immediately (running sessions keep their account until relaunched).</div></div>';
-  if(!(d.accounts||[]).length){ h+=empty("No accounts yet — click + Add account. You'll open a link in your browser (signed into the account you want), paste back the code, and that's it for ~a year."); }
+  var cur=d.current_email||'(unknown)';
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🪪 Claude Accounts</b> <span class="sub">switch the Claude login for ALL sessions in one click — like /login, but instant from your saved accounts</span></div>'
+    +'<div style="margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+    +'<div>Currently logged in (all sessions): <b>'+e2(cur)+'</b></div>'
+    +(d.current_saved?'':'<button class="mini go" onclick="acctSnapshot()">＋ Save this account to the wallet</button>')
+    +'<button class="mini" onclick="acctUsage(this)">↻ check usage</button></div>'
+    +'<div id="acctUsageBox" style="margin-top:10px"></div>'
+    +'<div class="sub" style="margin-top:8px">To add another account: log into it (here or in a terminal with <code>/login</code>), then come back and <b>Save this account</b>. After that, switching between saved accounts is one click and applies to every session live.</div></div>';
+  if(!(d.accounts||[]).length){ h+=empty("No saved accounts yet. You're logged in as "+e2(cur)+" — click 'Save this account to the wallet' above to capture it, then log into your other accounts and save each once."); }
   (d.accounts||[]).forEach(function(a){
-    var u=a.usage||{};
-    h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>'+(a.active?'🟢 ':'⚪ ')+e2(a.label)+'</span>'+(a.active?'<span class="badge" style="background:#3fb95022;color:#3fb950">active</span>':'')+'</h3>'
-      +'<div style="margin-top:8px;display:flex;flex-direction:column;gap:7px">'
-      +'<div><div class="sub">5-hour session</div>'+uBar(u.session)+'</div>'
-      +'<div><div class="sub">This week (all models)</div>'+uBar(u.week)+'</div>'
-      +'<div><div class="sub">This week (Sonnet)</div>'+uBar(u.week_sonnet)+'</div></div>'
-      +'<div class="meta sub" style="margin-top:6px">'+(a.usage_ts?('usage checked '+tago(a.usage_ts)):'usage not checked yet')+'</div>'
+    h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>'+(a.active?'🟢 ':'⚪ ')+e2(a.email||a.label)+'</span>'+(a.active?'<span class="badge" style="background:#3fb95022;color:#3fb950">active — all sessions</span>':'')+'</h3>'
+      +'<div class="meta sub">saved '+(a.ts?tago(a.ts):'?')+(a.label&&a.label!==a.email?(' · label: '+e2(a.label)):'')+'</div>'
       +'<div class="btns" style="margin-top:9px">'
-      +(a.active?'':'<button class="mini go" onclick="acctActivate(\''+esc(a.label)+'\')">▶ make active</button>')
-      +'<button class="mini" onclick="acctUsage(\''+esc(a.label)+'\',this)">↻ refresh usage</button>'
-      +'<button class="mini" onclick="acctAddStart(\''+esc(a.label)+'\')">re-authenticate</button>'
+      +(a.active?'<span class="sub">this is the live account</span>':'<button class="mini go" onclick="acctSwitch(\''+esc(a.label)+'\',\''+esc(a.email||a.label)+'\')">▶ switch all sessions to this</button>')
       +'<button class="mini" style="color:#f85149" onclick="acctRemove(\''+esc(a.label)+'\')">remove</button>'
       +'</div></div>';
   });
   g.innerHTML='<div class="modstack">'+h+'</div>';
 }
-async function acctActivate(label){ toast('Switching active account to '+label+'…'); await fetch('/api/claude-account/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})}); toast('Active account: '+label+' — new sessions use it now.',5000); loadAccounts(); }
-async function acctUsage(label,btn){ if(btn){btn.disabled=true;btn.textContent='checking…';} toast('Checking '+label+' usage (spawns a quick session)…',4000);
-  try{ await fetch('/api/claude-account/usage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})}); }catch(e){}
-  loadAccounts(); }
-async function acctRemove(label){ if(!confirm('Remove account "'+label+'"? (its stored token is deleted; you can re-add it)'))return;
-  await fetch('/api/claude-account/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})}); loadAccounts(); }
-function acctAddStart(relabel){
-  var label=relabel||prompt("Label for this account (e.g. james / getcalibrated / sarah):","");
-  if(label===null||!label.trim())return; label=label.trim();
-  fetch('/api/claude-login/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})}).then(function(){ acctLoginModal(label); });
+async function acctSnapshot(){
+  toast('Saving the current login to the wallet…');
+  var r={}; try{ r=await(await fetch('/api/claude-account/snapshot',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json(); }catch(e){}
+  if(r&&r.ok){ toast('Saved '+(r.email||r.label),4000); } else { toast('Save failed: '+((r&&r.error)||'?'),5000); }
+  loadAccounts();
 }
-function acctLoginModal(label){
-  showM('<div class="cchelp"><div class="cchtop"><div class="cchicon"><i class="ph-light ph-sign-in"></i></div><div class="cchtt"><span class="ccheye">Log in</span><h2>'+e2(label)+'</h2></div></div>'
-    +'<div class="cchbody" id="acctLoginBody"><p>Starting…</p></div>'
-    +'<div class="cchfoot"><button class="btn" onclick="acctLoginStop()">Cancel</button></div></div>');
-  if(ACCT_POLL)clearInterval(ACCT_POLL);
-  ACCT_POLL=setInterval(function(){ acctLoginPoll(label); },2000); acctLoginPoll(label);
+async function acctSwitch(label,email){
+  if(!confirm('Switch the Claude login for EVERY session to '+email+'?\\n\\nThis is live — all running sessions use it on their next request (no restart). Your current account stays saved in the wallet.'))return;
+  toast('Switching all sessions to '+email+'…',4000);
+  var r={}; try{ r=await(await fetch('/api/claude-account/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})})).json(); }catch(e){}
+  if(r&&r.ok){ toast('✓ Now logged in as '+(r.email||email)+' across all sessions',6000); } else { toast('Switch failed: '+((r&&r.error)||'?'),5000); }
+  loadAccounts();
 }
-function acctLoginStop(){ if(ACCT_POLL){clearInterval(ACCT_POLL);ACCT_POLL=null;} closeM(); }
-async function acctLoginPoll(label){
-  var b=document.getElementById('acctLoginBody'); if(!b){ if(ACCT_POLL){clearInterval(ACCT_POLL);ACCT_POLL=null;} return; }
-  var r={}; try{ r=await(await fetch('/api/claude-login/status?label='+encodeURIComponent(label))).json(); }catch(e){ return; }
-  if(r.state==='done'){ if(ACCT_POLL){clearInterval(ACCT_POLL);ACCT_POLL=null;} b.innerHTML='<p>✓ <b>Logged in as '+e2(r.label||label)+'</b> — token saved (~1 year). It is now the active account.</p>'; b.dataset.form='done'; toast('Logged in: '+(r.label||label),5000); setTimeout(function(){closeM();loadAccounts();},1400); return; }
-  if(r.state==='error'){ if(b.dataset.form!=='err'){ b.innerHTML='<p style="color:#f85149">Login error.</p><pre class="snap" style="white-space:pre-wrap">'+e2(r.tail||'')+'</pre>'; b.dataset.form='err'; } return; }
-  if(r.url){
-    // Render the URL + code form ONCE. Do NOT rewrite it on later polls -- that was wiping the code you pasted
-    // before you could submit. We keep polling (to catch 'done' after you submit) but leave the input alone.
-    if(b.dataset.form==='url') return;
-    b.innerHTML='<p><b>1.</b> Open this in a browser <b>signed into the Claude account "'+e2(label)+'"</b> (pick the right Google/Chrome profile):</p>'
-      +'<p><a href="'+e2(r.url)+'" target="_blank" rel="noopener" class="btn go" style="text-decoration:none;display:inline-block">Open authorization page ↗</a></p>'
-      +'<p style="font-size:11px;word-break:break-all;color:var(--dim)">'+e2(r.url)+'</p>'
-      +'<p><b>2.</b> Authorize, copy the <b>code</b> it gives you, paste it here:</p>'
-      +'<p style="display:flex;gap:8px"><input id="acctCode" placeholder="paste authorization code" style="flex:1;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:8px 11px"><button class="btn go" onclick="acctSubmitCode()">Submit</button></p>'
-      +'<p class="sub" id="acctCodeHint">Paste the code and click Submit.</p>';
-    b.dataset.form='url';
-  } else { if(b.dataset.form!=='start'){ b.innerHTML='<p>Starting the login… opening the authorization link in a moment.</p>'; b.dataset.form='start'; } }
+async function acctRemove(label){
+  if(!confirm('Remove "'+label+'" from the wallet? (the stored credential is deleted; the LIVE login is unchanged. You can re-save it while logged into it.)'))return;
+  await fetch('/api/claude-account/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})}); loadAccounts();
 }
-async function acctSubmitCode(){ var el=document.getElementById('acctCode'); var c=el?el.value.trim():''; if(!c){toast('Paste the code first');return;}
-  var h=document.getElementById('acctCodeHint'); if(h)h.textContent='Submitting the code… finishing login (a few seconds).';
-  try{ await fetch('/api/claude-login/code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:c})}); }catch(e){}
-  toast('Code submitted — finishing…',3000); }
+async function acctUsage(btn){
+  var box=document.getElementById('acctUsageBox'); if(box)box.innerHTML='<span class="sub">checking the current account\'s usage (spawns a quick session, ~15s)…</span>';
+  if(btn){btn.disabled=true;}
+  var r={}; try{ r=await(await fetch('/api/claude-account/usage',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json(); }catch(e){}
+  if(btn){btn.disabled=false;}
+  if(!box)return; var u=(r&&r.usage)||{};
+  if(!u.session&&!u.week){ box.innerHTML='<span class="sub">No usage windows shown for '+e2((r&&r.email)||'this account')+' (its /usage layout differs, or no current usage).</span>'; return; }
+  box.innerHTML='<div style="display:flex;flex-direction:column;gap:7px">'
+    +'<div><div class="sub">5-hour session</div>'+uBar(u.session)+'</div>'
+    +'<div><div class="sub">This week (all models)</div>'+uBar(u.week)+'</div>'
+    +'<div><div class="sub">This week (Sonnet)</div>'+uBar(u.week_sonnet)+'</div></div>';
+}
 async function loadSettings(){
   const g=document.getElementById("grid");
   try{SETTINGS=await(await fetch("/api/settings")).json();}catch(e){SETTINGS={};}

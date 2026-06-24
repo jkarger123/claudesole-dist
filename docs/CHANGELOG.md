@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.25 -- 2026-06-24
+- REBUILD (Claude Accounts — now switches the GLOBAL login, live across all sessions): the previous version
+  used per-session env tokens (wrong model — switching only affected NEW sessions and fought the native
+  /login). Replaced with keychain snapshot/swap: "Save this account" captures the current login (macOS keychain
+  OAuth blob + ~/.claude.json identity) into a 0600 wallet; "switch" writes a saved one back -> EVERY session
+  picks it up on its next request, no restart — exactly like /login but one click from saved accounts. Verified
+  the keychain round-trip is safe (login intact after write-back). Removed the env-token injection entirely.
+
 ## 0.21.24 -- 2026-06-24
 - FIX (Claude Accounts login: pasted code vanished before you could submit): the login modal re-rendered on
   every 2s status poll, wiping the code input. The URL+code form now renders ONCE and the poll leaves your
