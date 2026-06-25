@@ -1915,7 +1915,18 @@ def _icloud_status():
 # deliverables live on plain local disk (the SSD), never in the evictable iCloud container. This is the fix
 # for headless boxes where iCloud evicts files (full internal disk) and can't fault them back: downloads then
 # always work because the bytes are simply local. (Operator gets files onto iCloud by downloading them here.)
-DELIV_LOCAL_ROOT = (CC.get("deliverables_root") or "").strip() or None
+# SELF-CONTAINED default (portable-install model): deliverables live UNDER the install root so the whole
+# bundle is relocatable -- move the install to another drive/server and its output travels with it. The
+# per-module deliverables/ stays a symlink INTO this one store, so it shows as a single clean branch in the
+# tree. Precedence: explicit deliverables_root (point it at a dedicated drive) > legacy iCloud tiered mode
+# (only while storage_mode includes icloud and no root is set) > self-contained <install>/deliverables.
+_deliv_root_cfg = (CC.get("deliverables_root") or "").strip()
+if _deliv_root_cfg:
+    DELIV_LOCAL_ROOT = os.path.expanduser(_deliv_root_cfg)
+elif "icloud" in STORAGE_MODE:
+    DELIV_LOCAL_ROOT = None
+else:
+    DELIV_LOCAL_ROOT = os.path.join(CC_HOME, "deliverables")
 ICLOUD_MODE = ("icloud" in STORAGE_MODE) and not DELIV_LOCAL_ROOT
 ICLOUD_DELIV_ROOT = os.path.join(ICLOUD_ROOT, "ClaudeFather", PROJECT_NAME)        # legacy iCloud hot container
 DELIV_ARCHIVE_ROOT = os.path.join(PROJECT, ".deliverables_archive")                # TIER 2 cold (SSD)

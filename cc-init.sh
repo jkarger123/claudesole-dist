@@ -25,8 +25,12 @@ echo "  project_root: $ROOT"
 echo "  brand:        $BRAND"
 echo "  framework:    $CC_HOME"
 
-# 1) framework dirs
-mkdir -p "$CC_HOME/agents" "$CC_HOME/bin" "$CC_HOME/data"
+# 1) framework dirs -- a ClaudeFather install is a SELF-CONTAINED, relocatable bundle: code + config + state
+#    + deliverables all under $CC_HOME, so you can move the whole folder to a dedicated drive / new server.
+#    deliverables/ is the single clean branch where the system saves the files it makes (each module's
+#    deliverables/ symlinks into it). Override its location with cc.config "deliverables_root" to put it on a
+#    dedicated drive without moving the rest of the install.
+mkdir -p "$CC_HOME/agents" "$CC_HOME/bin" "$CC_HOME/data" "$CC_HOME/deliverables"
 
 # 2) write/merge config (preserve agents list + chief_brief if already present)
 python3 - "$CFG" "$NAME" "$ROOT" "$BRAND" "$STORAGE" <<'PY'
@@ -78,3 +82,6 @@ echo
 echo "Done. Restart the dashboard to operate on the new project:"
 echo "  TMUX_TMPDIR=/tmp /opt/homebrew/bin/tmux kill-session -t hpcc"
 echo "Control center now targets: $ROOT"
+echo "Deliverables (files the system makes) land in: ${CC_HOME}/deliverables  (self-contained; the whole"
+echo "  install can be moved to a dedicated drive. To put just deliverables on another drive, set"
+echo "  cc.config \"deliverables_root\".)"

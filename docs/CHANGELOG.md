@@ -3,7 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
-## 0.21.26 -- 2026-06-24
+## 0.21.27 -- 2026-06-24
+- PORTABILITY (self-contained installs — deliverables travel with the bundle): a ClaudeFather install is now a
+  relocatable unit — its deliverables default to `<install>/deliverables` (under CC_HOME), so the whole folder
+  can be moved to a dedicated drive / new server and the files it makes go with it. The system saves
+  deliverables into ONE clean consolidated branch (each module's `deliverables/` is a symlink into the store),
+  not scattered — so the Files lens shows real deliverable files cleanly. Precedence: explicit
+  `deliverables_root` (point it at a dedicated drive) > legacy iCloud tiered mode (storage_mode includes icloud
+  + no root) > self-contained `<install>/deliverables`. `cc-init` now creates `deliverables/` and prints where
+  output lands. The Studio nodes (control-plane on internal, project on SSD) set `deliverables_root` to an SSD
+  path OUTSIDE their project tree — same clean branch, honoring the disk-full rule + avoiding a store/module
+  self-reference. We push dedicated drives as the recommended (not required) model: totally portable, files
+  where they belong, easy to move.
 - account_wallet added to superadmin set_config allowlist so Mission Control can enable the Claude Accounts
   lens on a node (e.g. AFP) remotely.
 
