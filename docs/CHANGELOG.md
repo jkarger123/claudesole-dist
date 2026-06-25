@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.26.0 -- 2026-06-25
+- FIX (provisioned node couldn't start: tailnet serve port collided with the local port): auto-expose used
+  `tailscale serve --https=<port>` with the SAME number as the local server, but the server binds
+  0.0.0.0:<port> (which includes the tailnet IP) -> EADDRINUSE, the node failed to (re)bind after a restart.
+  The tailnet port is now offset (+1000, e.g. 8802 -> tailnet 9802), matching how the other nodes already use
+  a distinct tailnet port. (shopos was repaired live: serve moved 8802->9802, registry/peers updated.)
+- FIX (login bounced you to Portfolio): an expired session 302'd to /login, losing the #lens hash, so after
+  sign-in you always landed on the default lens. The login form is now served INLINE at the requested URL
+  (hash preserved) and sign-in does location.reload() -> you land back where you were.
+
 ## 0.25.2 -- 2026-06-25
 - FIX (mobile session header: ↗ open-in-new-tab button pushed off-screen): the location chip was
   flex:0 0 auto / max 280px, so on a phone it filled the bar and shoved the ↗ / end / kill buttons past the

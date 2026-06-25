@@ -3747,10 +3747,14 @@ def instance_provision(p, do_launch=False, dry=False):
                 stj = subprocess.run([TS, "status", "--json"], capture_output=True, text=True, timeout=10)
                 tnhost = (json.loads(stj.stdout).get("Self", {}).get("DNSName") or "").rstrip(".") if stj.returncode == 0 else ""
                 if tnhost:
-                    sv = subprocess.run([TS, "serve", "--bg", "--https=%d" % int(port), "http://127.0.0.1:%d" % int(port)],
+                    # the tailnet serve port MUST differ from the local server port: tailscale serve binds the
+                    # tailnet IP at that port, and the server binds 0.0.0.0:<port> (which includes the tailnet
+                    # IP) -> same number = EADDRINUSE, the server can't start. Offset by 1000 (8802 -> 9802).
+                    tnport = int(port) + 1000
+                    sv = subprocess.run([TS, "serve", "--bg", "--https=%d" % tnport, "http://127.0.0.1:%d" % int(port)],
                                         capture_output=True, text=True, timeout=20)
                     if sv.returncode == 0:
-                        final_url = "https://%s:%s" % (tnhost, port); res["tailnet_url"] = final_url
+                        final_url = "https://%s:%s" % (tnhost, tnport); res["tailnet_url"] = final_url
                     else:
                         res["tailnet_warn"] = (sv.stderr or sv.stdout or "").strip()[-200:]
             except Exception as e:
@@ -6485,7 +6489,7 @@ button{width:100%;margin-top:12px;background:#238636;border:0;color:#fff;border-
 <button type=submit>Sign in</button><div class=err id=e></div></form>
 <script>async function go(ev){ev.preventDefault();var t=document.getElementById('t').value;
 var r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t})});
-if(r.ok){location.href='/';}else{document.getElementById('e').textContent='Invalid token.';}return false;}</script></body></html>"""
+if(r.ok){location.reload();}else{document.getElementById('e').textContent='Invalid token.';}return false;}</script></body></html>"""
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -6508,8 +6512,9 @@ class H(BaseHTTPRequestHandler):
         """True if the request may proceed; else writes a 401 (API) or 302->/login (browser) and returns False."""
         if self._authed() or path in AUTH_EXEMPT or path in AUTH_MESH_INGRESS or path.startswith("/static/"): return True
         if self.command == "GET" and "text/html" in (self.headers.get("Accept", "") or ""):
-            self.send_response(302); self.send_header("Location", "/login")
-            self.send_header("Content-Length", "0"); self.end_headers()
+            # serve the login form INLINE at the requested URL (instead of 302 -> /login) so the address bar
+            # keeps the #lens hash / query -> after sign-in a reload lands back where you were, not Portfolio.
+            self._s(200, LOGIN_PAGE, "text/html; charset=utf-8")
         else:
             self._s(401, json.dumps({"ok": False, "error": "auth required"}))
         return False
