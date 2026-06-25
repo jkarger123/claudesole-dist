@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.22.1 -- 2026-06-25
+- UX (clearer provisioning wizard buttons): the "Add a ClaudeFather" actions were ambiguous ("Stage bundle"
+  vs "Stage & launch"). Renamed to 👁 Preview plan / 📦 Create (no start) / 🚀 Create & start now, each with a
+  tooltip, plus a one-line legend under the buttons explaining exactly what each does.
+
 ## 0.22.0 -- 2026-06-25
 - FEATURE ("+ Add a ClaudeFather" -- one-click provisioning of a new instance): the overseer Portfolio lens
   now has an "➕ Add a ClaudeFather" button + wizard. It provisions a NEW, self-contained, PORTABLE bundle --

@@ -11590,9 +11590,10 @@ function cfAddWizard(){
    +cfSel('storage','Storage',[['github','github'],['icloud','icloud'],['icloud+github','icloud+github']])
    +cfF('agents','Agents','default: security,backup,usage,ideas,routines')
    +'</div>'
-   +'<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap"><button class="mini" onclick="cfPlan()">👁 Preview plan</button>'
-   +'<button class="mini go" onclick="cfProvision(false)">📦 Stage bundle</button>'
-   +'<button class="mini go" onclick="cfProvision(true)">🚀 Stage &amp; launch</button></div>'
+   +'<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap"><button class="mini" onclick="cfPlan()" title="Just show what would be created — writes nothing">👁 Preview plan</button>'
+   +'<button class="mini go" onclick="cfProvision(false)" title="Create the instance folder, but do NOT start it running">📦 Create (no start)</button>'
+   +'<button class="mini go" onclick="cfProvision(true)" title="Create the instance AND bring its dashboard online right now">🚀 Create &amp; start now</button></div>'
+   +'<div class="sub" style="margin-top:8px;font-size:11px;line-height:1.5">👁 <b>Preview</b> — show the plan only, nothing is written. &nbsp; 📦 <b>Create</b> — build the instance folder, but it stays off. &nbsp; 🚀 <b>Create &amp; start</b> — build it and bring its dashboard online now (you can make it survive reboots afterward).</div>'
    +'<pre id="cfout" class="pj-md" style="margin-top:12px;display:none;white-space:pre-wrap"></pre></div>');
 }
 function cfVals(){var g={};['id','name','brand','preset','dest','port','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
