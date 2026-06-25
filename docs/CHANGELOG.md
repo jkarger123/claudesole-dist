@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.37 -- 2026-06-24
+- FEATURE (brand title in a display font that ACTUALLY renders for every user): self-hosted Cinzel Decorative
+  (SIL OFL 1.1 -- commercial-OK + redistributable) via @font-face from /static/brand, applied to the brand
+  wordmark (Mission Control / AFP / text2tune / per-node brand). Self-hosting means it renders on every
+  browser, not just machines that happen to have the font. (The requested 1001fonts "Godfather" face is
+  personal-use-only / non-commercial / non-redistributable, so it can't ship here; Cinzel Decorative gives the
+  same epic film-title feel, license-clean.)
+
 ## 0.21.36 -- 2026-06-24
 - FIX (taskbar hover-peek): removed the duplicate Exit/Kill/New-tab buttons (the embedded terminal already has
   end/kill/copy/compact/dashboard) -- peek now keeps only Usage + Focus. Added the 📍 launch-location before the
