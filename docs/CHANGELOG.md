@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.36.1 -- 2026-06-25
+- FIX (the cold-cache-after-restart spinner -- disk-persist the Google caches): SWR fixed staleness, but a
+  RESTART left the cache cold, and a cold fetch during an uplink flap times out ~40s = 'stuck loading'. Now
+  the Gmail/Calendar/Drive caches persist to disk (_google_cache.json) on every refresh and LOAD ON BOOT, so
+  the cache is warm immediately after a restart and SWR serves it instantly -- no cold window. PROVEN:
+  populate -> restart -> first fetch 0.00s from disk. (Only the very first fetch ever, before any disk cache
+  exists, can still wait during an active outage.)
+
 ## 0.36.0 -- 2026-06-25
 - FIX (the REAL 'Google stuck loading' fix -- stale-while-revalidate): the cache served instantly only while
   FRESH (<60s); once stale it BLOCKED on a live fetch, which during an uplink flap takes 7-30s = the spinner.

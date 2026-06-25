@@ -698,6 +698,7 @@ def gmail_list(view="inbox", q="", maxn=25, fresh=False, page_token=""):
     live = _gmail_list_live(view, q, maxn)   # cold cache (or an explicit Refresh) -> must fetch live
     if isinstance(live, dict) and "error" not in live:
         with _GM_LOCK: _GM_CACHE[key] = {"data": live, "at": now, "ok": True}
+        _persist_gcache()
         d = dict(live); d["_synced"] = now; d["_cached"] = False; return d
     if ent and ent.get("ok"):    # forced-fresh failed -> still fall back to last good
         d = dict(ent["data"]); d["_synced"] = ent["at"]; d["_cached"] = True; d["_stale"] = True
@@ -718,6 +719,7 @@ def _gmail_sync_loop():
                 live = _gmail_list_live(view, qq, int(mx))
                 if isinstance(live, dict) and "error" not in live:
                     with _GM_LOCK: _GM_CACHE[k] = {"data": live, "at": time.time(), "ok": True}
+            _persist_gcache()   # keep the on-disk cache fresh so it survives a restart
         except Exception:
             pass
 
@@ -741,6 +743,7 @@ def _g_cached(key, fetch, ttl=60, fresh=False):
     live = fetch()
     if isinstance(live, dict) and "error" not in live:
         with _GC_LOCK: _GC_CACHE[key] = {"data": live, "at": now, "ok": True}
+        _persist_gcache()
         d = dict(live); d["_synced"] = now; d["_cached"] = False; return d
     if ent and ent.get("ok"):    # live failed -> serve last good, flagged stale (no spinner during a flap)
         d = dict(ent["data"]); d["_synced"] = ent["at"]; d["_cached"] = True; d["_stale"] = True
@@ -761,8 +764,29 @@ def _gc_sync_loop():
                     if isinstance(live, dict) and "error" not in live:
                         with _GC_LOCK: _GC_CACHE[k] = {"data": live, "at": time.time(), "ok": True}
                 except Exception: pass
+            _persist_gcache()
         except Exception:
             pass
+
+# ---- Persist the Google caches to disk so they SURVIVE A RESTART. Without this, every restart leaves the
+# cache cold; a cold fetch during an uplink flap times out (~40s) = "stuck loading". With it, the cache loads
+# warm on boot and stale-while-revalidate serves it instantly even right after a restart mid-flap. ----
+_GCACHE_FILE = os.path.join(STATE_DIR, "_google_cache.json")
+def _persist_gcache():
+    try:
+        with _GM_LOCK: gm = dict(_GM_CACHE)
+        with _GC_LOCK: gc = dict(_GC_CACHE)
+        tmp = _GCACHE_FILE + ".tmp"
+        with open(tmp, "w") as f: json.dump({"gm": gm, "gc": gc}, f)
+        os.replace(tmp, _GCACHE_FILE)
+    except Exception: pass
+def _load_gcache():
+    try:
+        d = json.load(open(_GCACHE_FILE))
+        with _GM_LOCK: _GM_CACHE.update(d.get("gm") or {})
+        with _GC_LOCK: _GC_CACHE.update(d.get("gc") or {})
+    except Exception: pass
+_load_gcache()   # warm the caches from disk at boot -> no cold window after a restart
 
 def gmail_unread():
     # exact unread-in-inbox count for the nav badge. Reading the label does NOT mark anything read.
