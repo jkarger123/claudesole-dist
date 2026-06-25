@@ -19,6 +19,17 @@ except Exception:
 HOME = os.path.expanduser("~")
 BASE = os.path.dirname(os.path.abspath(__file__))                   # this command-center dir (SELF-LOCATING)
 CC_HOME = os.path.dirname(BASE)                                      # framework root -- PORTABLE: wherever installed
+# ---- Prefer IPv4 for ALL outbound. A dead/flaky IPv6 route (seen on this host) makes stdlib urllib BLOCK
+# ~60s on the AAAA address before falling back to IPv4 -- Gmail/Drive "stuck loading", mesh stalls, even git.
+# curl does happy-eyeballs; urllib does not. Return IPv4 addrinfo when present (fall back to whatever exists,
+# so IPv6-only hosts still work). Safe: Google/GitHub/tailnet (100.x) all have IPv4. Disable with CC_IPV6=1.
+if not os.environ.get("CC_IPV6"):
+    _orig_getaddrinfo = socket.getaddrinfo
+    def _getaddrinfo_v4first(*args, **kwargs):
+        res = _orig_getaddrinfo(*args, **kwargs)
+        v4 = [r for r in res if r[0] == socket.AF_INET]
+        return v4 or res
+    socket.getaddrinfo = _getaddrinfo_v4first
 # PORTABILITY BOUNDARY: project-specific settings come from cc.config.json, NOT hardcode. To point the
 # control center at a different project, run `cc init` (or edit the deployment cc.config.json).
 # NESTABLE: each ClaudeFather instance points at its OWN config via CC_CONFIG (children get their own).
