@@ -1772,6 +1772,15 @@ def usage_payload(ttl=20):
                     if slf:
                         s = a["self"]; s["total"] += tot; s["bill"] += bill; s["cost"] += cost; s["calls"] += 1
             totals[k] = a
+        # rolling AVERAGE per window: a typical window of this length over the trailing 30 days (the baseline
+        # the UI tints against). ratio = current/avg -> >1 over your average (warm), <1 under (cool).
+        _m = totals.get("month", {}); _mspan = wins["month"]
+        _rate = (_m.get("total", 0) / _mspan) if _mspan else 0
+        _crate = (_m.get("cost", 0.0) / _mspan) if _mspan else 0.0
+        _brate = (_m.get("bill", 0) / _mspan) if _mspan else 0
+        for k, span in wins.items():
+            a = totals[k]; a["avg"] = _rate * span; a["avg_cost"] = _crate * span; a["avg_bill"] = _brate * span
+            a["ratio"] = (a["total"] / a["avg"]) if a["avg"] > 0 else 0.0
         def series(span, n):
             step = span / n; start = now - span; buf = [{"tok": 0, "out": 0, "cost": 0.0} for _ in range(n)]
             for ev, p, slf in evs:
@@ -1795,7 +1804,14 @@ def usage_payload(ttl=20):
         comp = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
         for ev, p, slf in evs:
             comp["input"] += ev[2]; comp["output"] += ev[3]; comp["cache_write"] += ev[4]; comp["cache_read"] += ev[5]
-        data = {"totals": totals, "series": ser,
+        # per-ACCOUNT inventory (30d): attribute each event to the Claude account live at its timestamp
+        _alog = _acct_log_load(); ba = {}
+        for ev, p, slf in evs:
+            acct = _acct_active_at(ev[0], _alog)
+            d = ba.setdefault(acct, {"account": acct, "total": 0, "output": 0, "cost": 0.0, "calls": 0})
+            d["total"] += ev[2] + ev[3] + ev[4] + ev[5]; d["output"] += ev[3]; d["cost"] += _ev_cost(ev); d["calls"] += 1
+        by_account = sorted([v for v in ba.values() if v["total"] > 0], key=lambda x: -x["total"])
+        data = {"totals": totals, "series": ser, "by_account": by_account,
                 "by_model": sorted([v for v in bm.values() if v["total"] > 0], key=lambda x: -x["total"]),
                 "by_project": sorted([v for v in bp.values() if v["total"] > 0], key=lambda x: -x["total"])[:14],
                 "composition": comp, "calls": len(evs),
@@ -2292,7 +2308,38 @@ def _kc_write(blob, account):
             pth = _home_json(); d = json.load(open(pth)); d["oauthAccount"] = account
             tmp = pth + ".tmp"; json.dump(d, open(tmp, "w")); os.replace(tmp, pth)
         except Exception: pass
+    if ok: _acct_log_active((account or {}).get("emailAddress"))   # record the switch for per-account usage
     return ok
+
+# ---- Per-account usage attribution: transcripts don't record WHICH Claude account was active, so we keep a
+# tiny activity log (append on every account switch + a baseline at boot) and attribute each token event to
+# the account live at its timestamp -> inventory BY account, not just overall. ----
+_ACCT_LOG = os.path.join(STATE_DIR, "_account_log.json")
+_ACCT_LOG_LOCK = threading.Lock()
+def _acct_log_load():
+    try:
+        d = json.load(open(_ACCT_LOG)); return d if isinstance(d, list) else []
+    except Exception:
+        return []
+def _acct_log_active(email):
+    """Record that `email` is the active account as of now -- append only when it changes."""
+    email = (email or "").strip()
+    if not email: return
+    with _ACCT_LOG_LOCK:
+        log = _acct_log_load()
+        if log and log[-1].get("email") == email: return
+        log.append({"ts": int(time.time()), "email": email}); log = log[-500:]
+        try:
+            tmp = _ACCT_LOG + ".tmp"; json.dump(log, open(tmp, "w")); os.replace(tmp, _ACCT_LOG)
+        except Exception: pass
+def _acct_active_at(ts, log):
+    """The account email active at time ts (latest entry with entry.ts <= ts; else the earliest known)."""
+    if not log: return "unknown"
+    act = log[0].get("email")
+    for e in log:
+        if e.get("ts", 0) <= ts: act = e.get("email")
+        else: break
+    return act or "unknown"
 
 ACCT_WALLET_DIR = os.path.join(CC_HOME, "secrets", "claude_accounts")   # one 0600 json per account
 def _acct_safe(s): return re.sub(r"[^A-Za-z0-9_.@+-]", "_", (s or "").strip())
@@ -8696,7 +8743,8 @@ function ctxChip(name){const c=(TOKDATA.sessions||{})[name];if(!c)return '';cons
   return '<span class="ctxchip" id="ctx_'+cssid(name)+'" title="context: '+fmtTok(c.used)+' / '+fmtTok(c.window)+' used · '+pct+'% free" style="color:'+col+';border-color:'+col+'55">'+pct+'%</span>';}
 function totalsStrip(){const t=TOKDATA.totals;if(!t)return '';
   // All windows visible at once (no selecting) -- the strip mirrors the Usage lens token cards, compact.
-  const cell=(lbl,o)=>{o=o||{};return '<span class="tkcell" title="'+fmtTok(o.total||0)+' tok processed · '+fmtTok(o.bill||0)+' billable · in '+fmtTok(o.input||0)+' · out '+fmtTok(o.output||0)+' · cache '+fmtTok(o.cache||0)+'"><b>'+fmtUSD(o.cost||0)+'</b><i>'+lbl+'</i></span>';};
+  const cell=(lbl,o)=>{o=o||{};var rt=o.ratio||0,over=rt>1,x=over?rt:(rt>0?1/rt:0),g=rt>0?('<em style="font-style:normal;color:'+(over?'#ff8f73':'#5fd07a')+'"> '+(over?'▲':'▼')+x.toFixed(x>=10?0:1)+'×</em>'):'';
+    return '<span class="tkcell" style="'+uTint(rt)+'" title="'+fmtUSD(o.cost||0)+' · '+fmtTok(o.total||0)+' tok · avg '+fmtUSD(o.avg_cost||0)+' / '+fmtTok(o.avg||0)+' tok'+(rt?(' ('+(over?'over':'under')+' your 30-day average)'):'')+' · in '+fmtTok(o.input||0)+' out '+fmtTok(o.output||0)+'"><b>'+fmtUSD(o.cost||0)+'</b><i>'+lbl+g+'</i></span>';};
   return '<div class="tkstrip"><span>💰 metered</span>'
     +cell('1hr',t.hour)+cell('5hr',t['5h'])+cell('24hr',t.day)+cell('week',t.week)+cell('month',t.month)
     +'<span id="sparkwrap" class="sparkwrap" title="last 24h — tap for full analytics" onclick="gotoLens(\'usage\')">'+sparkSVG((TOKDATA.series||{})['24h']||TOKDATA.spark||[])+'</span>'
@@ -8747,10 +8795,15 @@ function ustat(big,lbl,sub){return '<div class="ucard"><div class="ucbig">'+big+
 function uwin(lbl,o){return '<div class="ucard"><div class="ucl" style="margin-bottom:5px">'+lbl+'</div><div class="ucbig" style="font-size:21px">'+fmtTok(o.total)+'</div><div class="ucsub">'+fmtUSD(o.cost)+' · '+(o.calls||0).toLocaleString()+' calls · '+fmtTok(o.output)+' out</div></div>';}
 function useg(v,total,col,lbl){const p=v/total*100;return p<0.3?'':'<div class="useg" style="width:'+p.toFixed(2)+'%;background:'+col+'" title="'+lbl+': '+fmtTok(v)+' ('+p.toFixed(1)+'%)"></div>';}
 function uleg(col,lbl,v){return '<span class="ulegi"><span class="uled" style="background:'+col+'"></span>'+lbl+' <b>'+fmtTok(v)+'</b></span>';}
-function tokCard(r){const o=(USAGE.totals[r.tot]||{total:0,bill:0,cost:0,calls:0}),sp=(USAGE.series[r.k]||[]).map(b=>b.cost||0);
-  return '<div class="tokcard'+(USAGERANGE==r.k?' on':'')+'" onclick="setURange(\''+r.k+'\')" title="'+r.desc+' — metered API value · click to drive the charts below">'
-    +'<div class="tklbl">'+r.lbl+'</div><div class="tknum">'+fmtUSD(o.cost)+'</div>'
+// over/under-average tinting: ratio = this window vs a typical window of the same length over the last 30d.
+// >1 = burning faster than average (warm/red wash), <1 = cooler than average (green wash); intensity scales.
+function uTint(ratio){if(!ratio||ratio<=0)return '';var over=ratio>1,mag=Math.min(1,Math.abs(Math.log(ratio))/Math.log(3)),a=(0.10+mag*0.30).toFixed(3),bo=(0.30+mag*0.5).toFixed(3),c=over?'248,81,73':'63,185,80';return 'border-color:rgba('+c+','+bo+');box-shadow:inset 0 0 60px rgba('+c+','+a+')';}
+function uTintTxt(ratio){if(!ratio||ratio<=0)return '';var over=ratio>1,x=over?ratio:1/ratio;return '<span style="color:'+(over?'#ff8f73':'#5fd07a')+';font-weight:800">'+(over?'▲':'▼')+x.toFixed(x>=10?0:1)+'×</span>';}
+function tokCard(r){const o=(USAGE.totals[r.tot]||{total:0,bill:0,cost:0,calls:0,avg:0,avg_cost:0,ratio:0}),sp=(USAGE.series[r.k]||[]).map(b=>b.cost||0);
+  return '<div class="tokcard'+(USAGERANGE==r.k?' on':'')+'" style="'+uTint(o.ratio)+'" onclick="setURange(\''+r.k+'\')" title="'+r.desc+' — '+(o.ratio?((o.ratio>1?'above':'below')+' your 30-day average'):'metered API value')+' · click to drive the charts below">'
+    +'<div class="tklbl">'+r.lbl+' '+uTintTxt(o.ratio)+'</div><div class="tknum">'+fmtUSD(o.cost)+'</div>'
     +'<div class="tksub">'+fmtTok(o.total)+' tok · '+(o.calls||0).toLocaleString()+' calls</div>'
+    +'<div class="tksub" style="opacity:.65">avg '+fmtUSD(o.avg_cost||0)+' · '+fmtTok(o.avg||0)+' tok</div>'
     +'<div class="tkspark">'+sparkSVG(sp,260,22,'tk_'+r.k)+'</div></div>';}
 function heroBanner(cur){const u=USAGE,t=u.totals,nd=u.node||{},cw=(t[cur.tot]||{cost:0,self:{cost:0}}),
   sub=nd.sub_monthly||0,monthAll=((t.month||{}).cost)||0,lev=sub>0?monthAll/sub:0,
@@ -8783,6 +8836,10 @@ function renderUsage(){if(!USAGE)return;const u=USAGE,t=u.totals,cur=uRange(),se
     +'<div class="uleg">'+uleg('#58a6ff','input',c.input)+uleg('#f85149','output',c.output)+uleg('#e8c547','cache write',c.cache_write)+uleg('#3fb950','cache read',c.cache_read)+'</div>'
     +'<div class="ucsub" style="margin-top:8px">cache reads are billed at ~10% of input — most of the raw token count, little of the cost.</div></div>';
   h+='<div class="modgrid">'+mid+'</div>';
+  if(u.by_account&&u.by_account.length){const amax=Math.max(1,...u.by_account.map(a=>a.total));
+    h+='<div class="card" style="cursor:default"><h3><span>By Claude account</span> <span class="sub">all tracked · 30d · which login burned what</span></h3>'
+      +u.by_account.map(a=>hbar(a.account==='unknown'?'(before tracking)':('👤 '+a.account),a.total/amax*100,fmtUSD(a.cost)+' · '+fmtTok(a.total)+' · '+(a.calls||0).toLocaleString()+' calls','#bc8cff')).join('')
+      +'<div class="ucsub" style="margin-top:8px">attributed by which account was logged in at the time of each call — switch accounts in the Claude Accounts lens.</div></div>';}
   const pmax=Math.max(1,...u.by_project.map(p=>p.total));
   h+='<div class="card" style="cursor:default"><h3><span>By project / folder</span> <span class="sub">all tracked · 30d · '+u.by_project.length+' active · ▸ = part of this node</span></h3>'+u.by_project.map(p=>hbar((p.self?'▸ ':'')+p.name,p.total/pmax*100,fmtUSD(p.cost)+' · '+fmtTok(p.total)+' · '+(p.calls||0).toLocaleString()+' calls',p.self?'#e8c547':'#6f6a3f')).join('')+'</div>';
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
@@ -13107,6 +13164,8 @@ if __name__ == "__main__":
     # minutes -- which printed the banner but never reached serve_forever(), so the server "came up" yet
     # accepted no connections (this took AFP down). Run it all in a daemon thread; serve immediately.
     def _boot_housekeeping():
+        try: _acct_log_active(((_kc_read() or {}).get("account") or {}).get("emailAddress"))  # baseline the active account
+        except Exception: pass
         try: regen_treemap(force=True)   # stamp the whole-tree module map into the root CLAUDE.md
         except Exception: pass
         try: seed_framework_blocks()     # stamp framework governance (CCR policy) into project nodes' CLAUDE.md

@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.30.0 -- 2026-06-25
+- FEATURE (usage by account + over/under-average tinting): usage is now attributed to the Claude account that
+  was logged in at the time of each call (a switch-activity log records account changes; events are bucketed
+  by the account live at their timestamp) -> a new "By Claude account" inventory in the Usage lens, on top of
+  the existing by-model/by-project. Each window (1hr/5hr/24hr/week/month) now also carries a rolling AVERAGE
+  (a typical window of that length over the trailing 30 days) + a ratio; the window cards (Usage lens) AND the
+  sessions usage strip TINT warm when you're over your average and cool when under (intensity scales), show a
+  ▲/▼N× glyph, and display the average number. The sessions strip stays combined totals. Backend: usage_payload
+  adds totals[*].avg/avg_cost/ratio + by_account; account log wired into the keychain switch + a boot baseline.
+
 ## 0.29.0 -- 2026-06-25
 - FEATURE (Type: Product vs Agency in the Add-a-ClaudeFather wizard): the wizard previously relied on
   auto-detect for install type. Now there's an explicit Type selector -- Product (a single product/operation)
