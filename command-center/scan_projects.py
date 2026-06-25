@@ -25,6 +25,58 @@ if os.path.isdir(base):
                 pass
 files.sort(key=lambda t: -t[0])
 
+
+def tail_preview(path, maxlines=15, maxbytes=24000):
+    """A terminal-style tail of a conversation: the most recent user/assistant text turns (+ tool-use
+    markers), flattened to lines, last `maxlines`. Cheap: reads only the final chunk of the transcript."""
+    try:
+        sz = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if sz > maxbytes:
+                fh.seek(sz - maxbytes)
+            chunk = fh.read().decode("utf-8", "replace")
+    except Exception:
+        return []
+    lines = []
+    for ln in chunk.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            o = json.loads(ln)          # a chunk-truncated first line just fails json -> skipped
+        except Exception:
+            continue
+        m = o.get("message", {}) or {}
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        c = m.get("content")
+        parts = []
+        if isinstance(c, str):
+            parts.append(c)
+        elif isinstance(c, list):
+            for x in c:
+                if not isinstance(x, dict):
+                    continue
+                t = x.get("type")
+                if t == "text":
+                    parts.append(x.get("text", ""))
+                elif t == "tool_use":
+                    parts.append("⏵ " + str(x.get("name", "tool")))
+                # tool_result content is large/noisy -> omit from the peek
+        txt = "\n".join(p for p in parts if p and p.strip())
+        if not txt.strip():
+            continue
+        pfx = "> " if role == "user" else ""
+        for sub in txt.splitlines():
+            sub = sub.rstrip()
+            if not sub:
+                continue
+            lines.append((pfx + sub)[:160])
+            pfx = ""
+    return lines[-maxlines:]
+
+
 # 2) parse the head of only the most-recent `limit` files
 out = []
 for mt, f, slug in files[:limit]:
@@ -63,5 +115,6 @@ for mt, f, slug in files[:limit]:
         "label": label or "(no opening message)",
         "mtime": mt,
         "branch": branch or "",
+        "preview": "\n".join(tail_preview(f)),
     })
 print(json.dumps(out))

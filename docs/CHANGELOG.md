@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.30 -- 2026-06-24
+- FEATURE (History lens: mini-terminal preview per conversation): each past conversation now shows a small
+  terminal-styled peek of its last ~15 message lines (user turns + assistant text + `⏵ tool` markers), so you
+  can recognize a conversation at a glance without resuming. `scan_projects.py` extracts the tail cheaply (reads
+  only the final chunk of each transcript); search now also matches preview text.
+
 ## 0.21.29 -- 2026-06-24
 - FIX (portability: History lens showed another deployment's machines): the History lens hardcoded the HP
   Tuners fleet tabs (studio/T490/T480), so EVERY deployment (e.g. AFP) showed James's Windows dev/RE boxes --

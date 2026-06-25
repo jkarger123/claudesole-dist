@@ -6532,6 +6532,16 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .stbtns{display:flex;gap:3px;flex:0 0 auto}.stbtns .mini{padding:2px 6px}
 .snap{flex:1;margin:0;padding:8px;overflow:hidden;font:10.5px/1.32 ui-monospace,Menlo,monospace;color:#ccccdd;background:#0a0a0f;white-space:pre-wrap;word-break:break-word}
 .stframe{flex:1;border:0;width:100%;background:#0a0a0f}
+/* History mini-terminal preview: a peek at a conversation's last ~15 lines, styled like a term pane */
+.mtwrap{margin-top:9px;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#0a0a0f}
+.mtbar{display:flex;align-items:center;gap:5px;padding:5px 9px;background:var(--card2);border-bottom:1px solid var(--line)}
+.mtbar i{width:9px;height:9px;border-radius:50%;display:inline-block}
+.mtd1{background:#ff5f57}.mtd2{background:#febc2e}.mtd3{background:#28c840}
+.mtbar span{margin-left:6px;font-size:10.5px;color:var(--mut);font-family:ui-monospace,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mtbody{margin:0;padding:9px 11px;max-height:188px;overflow:hidden;font:11px/1.45 ui-monospace,Menlo,Monaco,monospace;color:#c9d1d9;background:#0a0a0f;white-space:pre-wrap;word-break:break-word;
+  -webkit-mask-image:linear-gradient(180deg,#000 72%,transparent);mask-image:linear-gradient(180deg,#000 72%,transparent)}
+.mtbody .u{color:#7fd1b9}.mtbody .t{color:#c9a227}
+.mtempty{padding:9px 11px;font:11px/1.4 ui-monospace,Menlo,monospace;color:var(--mut)}
 /* FOCUS view: one big terminal + a live dock + hover-peek */
 .focuswrap{display:flex;flex-direction:column;gap:10px;height:calc(100vh - 272px);min-height:430px}
 .bigsess{flex:1;min-height:0;display:flex;flex-direction:column;border:1px solid var(--accent);border-radius:12px;overflow:hidden;box-shadow:var(--glow)}
@@ -10869,14 +10879,25 @@ async function loadHistory(){
   }
   renderHist();
 }
+function mtRender(prev){
+  if(!prev||!prev.trim()) return '<div class="mtwrap"><div class="mtbar"><i class="mtd1"></i><i class="mtd2"></i><i class="mtd3"></i><span>conversation</span></div><div class="mtempty">(no preview available)</div></div>';
+  const body=prev.split("\n").map(function(l){
+    var e=esc(l);
+    if(l.indexOf("> ")===0) return '<span class="u">'+e+'</span>';
+    if(l.indexOf("⏵ ")===0) return '<span class="t">'+e+'</span>';
+    return e;
+  }).join("\n");
+  return '<div class="mtwrap"><div class="mtbar"><i class="mtd1"></i><i class="mtd2"></i><i class="mtd3"></i><span>last messages</span></div><pre class="mtbody">'+body+'</pre></div>';
+}
 function renderHist(){
   const q=(document.getElementById("search")||{value:""}).value.toLowerCase();
-  const rows=HISTDATA.filter(c=>!q||((c.label||"")+" "+(c.cwd||"")).toLowerCase().includes(q));
+  const rows=HISTDATA.filter(c=>!q||((c.label||"")+" "+(c.cwd||"")+" "+(c.preview||"")).toLowerCase().includes(q));
   const msg=document.getElementById("histmsg"); if(msg)msg.textContent=rows.length+(q?" of "+HISTDATA.length:"")+" past conversations"+(q?" matching":" (newest first)");
   const list=document.getElementById("histlist"); if(!list)return;
   list.innerHTML=rows.map(c=>
     '<div class="card" style="cursor:default"><h3><span>'+esc(c.label||"(no opening message)")+'</span></h3>'+
     '<div class="meta">launched from <code>'+esc(c.cwd)+'</code>'+(c.branch?' · '+esc(c.branch):'')+' · '+new Date(c.mtime*1000).toLocaleString()+'</div>'+
+    mtRender(c.preview)+
     '<div class="btns" style="margin-top:8px"><button class="mini go" onclick="resumeConv(\''+esc(c.id)+'\',false)">▶ resume</button>'
     +'<button class="mini" title="branch this conversation into an independent copy (shares history, then diverges)" onclick="resumeConv(\''+esc(c.id)+'\',true)">⑂ fork</button></div></div>'
   ).join("")||empty(q?"No past conversations match \""+esc(q)+"\".":"No past conversations found on "+histLabel(HISTMACHINE)+".");
