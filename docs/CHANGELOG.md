@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.23.0 -- 2026-06-25
+- FEATURE (self-completing provisioning + Setup agent): "Create & start" now finishes a new node end-to-end
+  so the operator never has to hand-run launchd or edit peers. A "Make it permanent & join the mesh" checkbox
+  (default on) makes instance_provision() install the per-user LaunchAgent server-side (same-user; cross-user
+  reports the one command to run as that user) AND add the node to peers.json. New agents/setup charter: a
+  guided onboarding agent that runs INSIDE the new instance and walks the operator through configuring it
+  (purpose -> project CLAUDE.md scaffold from a pasted spec -> agents -> extensions -> first goals -> hand off
+  to the Chief). Wizard result now shows running/permanent/mesh status and points to the Setup agent instead
+  of dumping manual commands. Dedicated "setup" entry in the Projects tree; docs/PROVISIONING.md updated.
+
 ## 0.22.2 -- 2026-06-25
 - FIX (provisioned node now appears in Portfolio): a new instance was registered into the engine's
   default-config registry (state_dir of cc.config.json), which is NOT necessarily the registry the calling

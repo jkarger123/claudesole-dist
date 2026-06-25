@@ -54,18 +54,22 @@ operator-approved steps (printed at the end; `--json` also emits a machine-reada
 `--storage github|icloud|icloud+github` · `--agents a,b,c` · `--project-root` · `--user` ·
 `--json` (machine summary) · `--dry-run` (plan only, writes nothing).
 
-## The flow, with approval gates
+## The flow (self-completing — the operator shouldn't need Mission Control)
+The wizard checkbox **"Make it permanent & join the mesh"** (default on) means **Create & start** finishes
+the node end-to-end; the operator's only remaining job is to open it and run its **Setup agent**.
 1. **Preview** — wizard "Preview plan" / `--dry-run`: shows exactly what will be created. Confirm.
-2. **Stage** — builds the bundle. Still nothing running. The new dashboard `auth_token` is shown once
-   (store it — it's a brand-new node's initial credential, not a change to an existing one).
-3. **Launch** (gate) — brings it up on the **brain tmux server** (required for SSD/TCC access; bare launchd
-   EPERMs on `/Volumes/...`) and verifies the port answers `401` (alive + auth on).
-4. **Persist** (gate, operator's hands) — a per-user LaunchAgent only runs when that user has a live login
-   session. Install it **as the hosting user**:
-   `cp <bundle>/launchd/com.claudefather.<id>.plist ~/Library/LaunchAgents/ && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claudefather.<id>.plist`
-   (Agents have no TTY → pre-type into the Admin shell per `SESSIONS_AND_SUDO.md`.)
-5. **Mesh** (gate) — to let the *other* nodes reach the newcomer, append
-   `{"id":"<id>","url":"<tailnet-or-127.0.0.1:port>"}` to each family node's `peers.json`.
+2. **Create** — builds the bundle. (📦 "Create (no start)" stops here.) The new dashboard `auth_token` is
+   shown once (store it — a brand-new node's initial credential, not a change to an existing one).
+3. **Start** — 🚀 brings it up on the **brain tmux server** (required for SSD/TCC access; bare launchd EPERMs
+   on `/Volumes/...`) and verifies the port answers `401` (alive + auth on).
+4. **Persist (automatic, same-user)** — `instance_provision()` installs the per-user LaunchAgent server-side
+   (`launchctl bootstrap gui/<uid>`) so it survives reboot. For a **cross-user** host (e.g. AFP on
+   `sarahaios`) it can't (a per-user agent needs that user's login session) → it reports the one command to
+   run as that user (pre-type into the Admin shell per `SESSIONS_AND_SUDO.md`).
+5. **Mesh (automatic)** — the new node is added to this node's `peers.json` so the fleet can reach it.
+6. **Setup agent** — open the new instance and run **Agents → setup**: a guided walkthrough that configures
+   the project (purpose → CLAUDE.md scaffold from a pasted spec → agents → extensions → first goals), then
+   hands off to the instance's Chief of Staff. This is where a node goes from "running" to "useful."
 
 ## Security invariants
 - New node carries the **family** mesh token and gets a **fresh** auth token. The fresh token is printed

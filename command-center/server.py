@@ -3653,7 +3653,7 @@ def instance_provision(p, do_launch=False, dry=False):
     which keeps every node portable + updatable. Overseer-only. dry=True returns the plan without writing.
     do_launch=True is the approval-gated step: bring it up on THIS brain tmux server (SSD/TCC context) and
     verify the port. launchd persistence + cross-node mesh registration stay with the operator."""
-    import subprocess, re, urllib.request, urllib.error
+    import subprocess, re, urllib.request, urllib.error, getpass, shutil as _shutil
     eng = os.path.join(CC_HOME, "cc-newinstance.sh")
     if not os.path.exists(eng):
         return {"ok": False, "error": "engine missing: %s" % eng}
@@ -3702,6 +3702,32 @@ def instance_provision(p, do_launch=False, dry=False):
         except Exception:
             code = 0
         res["launched"] = True; res["http"] = code; res["alive"] = code in (200, 401, 403)
+        # auto-PERSIST (survive reboot): install the per-user launchd plist server-side when the new node is
+        # hosted by THIS user (same-user). Removes the manual "make permanent" step the operator shouldn't need.
+        host = (str(p.get("user")).strip() if p.get("user") else "")
+        if p.get("persist") and summ.get("plist"):
+            if host and host != getpass.getuser():
+                res["persisted"] = False; res["persist_note"] = "cross-user host '%s' — install launchd as that user (no TTY here)" % host
+            else:
+                try:
+                    la = os.path.expanduser("~/Library/LaunchAgents"); os.makedirs(la, exist_ok=True)
+                    dst = os.path.join(la, "com.claudefather.%s.plist" % iid)
+                    _shutil.copyfile(summ["plist"], dst)
+                    subprocess.run(["launchctl", "bootstrap", "gui/%d" % os.getuid(), dst],
+                                   capture_output=True, text=True, timeout=15)
+                    res["persisted"] = True
+                except Exception as e:
+                    res["persisted"] = False; res["persist_warn"] = str(e)
+        # auto-MESH: add the new node to this node's family peers so the fleet can reach it (default on).
+        if p.get("mesh", True):
+            try:
+                pl = json.load(open(PEERS_FILE)) if os.path.exists(PEERS_FILE) else []
+                pl = [x for x in pl if x.get("id") != iid]
+                pl.append({"id": iid, "url": summ.get("url") or ("http://127.0.0.1:%s" % port)})
+                json.dump(pl, open(PEERS_FILE, "w"), indent=2); os.chmod(PEERS_FILE, 0o600)
+                res["meshed"] = True
+            except Exception as e:
+                res["meshed"] = False; res["mesh_warn"] = str(e)
     return res
 
 def portfolio():
@@ -11592,10 +11618,11 @@ function cfAddWizard(){
    +cfSel('storage','Storage',[['github','github'],['icloud','icloud'],['icloud+github','icloud+github']])
    +cfF('agents','Agents','default: security,backup,usage,ideas,routines')
    +'</div>'
-   +'<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap"><button class="mini" onclick="cfPlan()" title="Just show what would be created — writes nothing">👁 Preview plan</button>'
+   +'<label style="display:flex;align-items:center;gap:7px;margin-top:13px;font-size:12px;color:var(--ink)"><input type="checkbox" id="cf_persist" checked> <b>Make it permanent &amp; join the mesh</b> &mdash; on Create &amp; start, install it to survive reboots and add it to the fleet automatically (no manual steps)</label>'
+   +'<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><button class="mini" onclick="cfPlan()" title="Just show what would be created — writes nothing">👁 Preview plan</button>'
    +'<button class="mini go" onclick="cfProvision(false)" title="Create the instance folder, but do NOT start it running">📦 Create (no start)</button>'
-   +'<button class="mini go" onclick="cfProvision(true)" title="Create the instance AND bring its dashboard online right now">🚀 Create &amp; start now</button></div>'
-   +'<div class="sub" style="margin-top:8px;font-size:11px;line-height:1.5">👁 <b>Preview</b> — show the plan only, nothing is written. &nbsp; 📦 <b>Create</b> — build the instance folder, but it stays off. &nbsp; 🚀 <b>Create &amp; start</b> — build it and bring its dashboard online now (you can make it survive reboots afterward).</div>'
+   +'<button class="mini go" onclick="cfProvision(true)" title="Create the instance, start it, and (if checked) make it permanent + join the mesh">🚀 Create &amp; start now</button></div>'
+   +'<div class="sub" style="margin-top:8px;font-size:11px;line-height:1.5">👁 <b>Preview</b> — show the plan only, nothing is written. &nbsp; 📦 <b>Create</b> — build the instance folder, but it stays off. &nbsp; 🚀 <b>Create &amp; start</b> — build it, bring its dashboard online, and finish setup automatically. Then open it and run its <b>Setup agent</b> to configure the project.</div>'
    +'<pre id="cfout" class="pj-md" style="margin-top:12px;display:none;white-space:pre-wrap"></pre></div>');
 }
 function cfVals(){var g={};['id','name','brand','preset','dest','port','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
@@ -11608,15 +11635,18 @@ async function cfPost(extra){
 }
 async function cfPlan(){var r=await cfPost({dry:true});if(!r)return;var o=document.getElementById('cfout');o.textContent=r.ok?r.plan:('ERROR: '+(r.error||'?'));}
 async function cfProvision(launch){
-  if(!confirm('Provision'+(launch?' AND launch':'')+' this ClaudeFather now?'))return;
-  var r=await cfPost({launch:launch});if(!r)return;var o=document.getElementById('cfout');
+  if(!confirm(launch?'Create AND start this ClaudeFather now?':'Create this ClaudeFather (without starting it)?'))return;
+  var pc=document.getElementById('cf_persist'); var persist=!!(launch && pc && pc.checked);
+  var r=await cfPost({launch:launch, persist:persist, mesh:persist});if(!r)return;var o=document.getElementById('cfout');
   if(!r.ok){o.textContent='ERROR: '+(r.error||'?');return;}
   var s=r.summary||{}, NL=String.fromCharCode(10);
-  var txt='✅ Bundle staged: '+(s.bundle||'?')+NL+'port: '+(s.port||'?')+'   role: '+(s.role||'?')+NL+'dashboard: '+(s.url||'?')+NL+NL+'Initial auth token (store it — this is a brand-new token, not a change):'+NL+'  '+(s.auth_token||'?')+NL;
-  if(r.launched)txt+=NL+'Launch: '+(r.alive?('✅ alive (HTTP '+r.http+')'):('⚠ not responding (HTTP '+r.http+') — check /tmp/cc-'+(s.id||'')+'.err'))+NL;
-  txt+=NL+'Persist across reboot (run as the hosting user):'+NL+'  cp '+(s.plist||'')+' ~/Library/LaunchAgents/'+NL+'  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claudefather.'+(s.id||'')+'.plist'+NL;
-  txt+=NL+'Mesh: add {"id":"'+(s.id||'')+'","url":"'+(s.url||'')+'"} to the peers.json of the other family nodes so they can reach it.';
-  o.textContent=txt; toast('Provisioned '+(s.id||'')); setTimeout(loadPortfolio,1600);
+  var txt=(r.launched?'✅ Created & started: ':'✅ Created (not started): ')+(s.bundle||'?')+NL+'port: '+(s.port||'?')+'   role: '+(s.role||'?')+NL+'dashboard: '+(s.url||'?')+NL+NL+'Initial auth token (store it — brand-new token):'+NL+'  '+(s.auth_token||'?')+NL;
+  if(r.launched)txt+=NL+'Running: '+(r.alive?('✅ alive (HTTP '+r.http+')'):('⚠ not responding (HTTP '+r.http+')'))+NL;
+  if('persisted' in r)txt+='Permanent: '+(r.persisted?'✅ installed — survives reboot':('⚠ '+(r.persist_note||r.persist_warn||'not installed')))+NL;
+  if('meshed' in r)txt+='Mesh: '+(r.meshed?'✅ added to the fleet peers':('⚠ '+(r.mesh_warn||'not added')))+NL;
+  if(!r.launched)txt+=NL+'It is staged but OFF. Re-run with Create & start to bring it online.'+NL;
+  txt+=NL+'➡ Next: open the '+(s.id||'')+' dashboard ('+(s.url||'')+') and run its Setup agent (Agents → setup) to configure the project.';
+  o.textContent=txt; toast((r.launched?'Started ':'Created ')+(s.id||'')); setTimeout(loadPortfolio,1600);
 }
 async function chiefComms(){var t=document.getElementById('chieftarget'),m=document.getElementById('chiefmsg'),rd=document.getElementById('chiefreplies');
   var msg=((m&&m.value)||'').trim(); if(!msg){toast('Type a message first.');return;}

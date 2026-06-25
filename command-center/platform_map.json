@@ -241,6 +241,12 @@
           "claude_md": "/Users/hptuner/hptuners-control/agents/security/CLAUDE.md"
         },
         {
+          "name": "setup",
+          "path": "/Users/hptuner/hptuners-control/agents/setup",
+          "summary": "New-instance onboarding: runs INSIDE a freshly-created node and walks the operator through configuring it (purpose -> project CLAUDE.md scaffold from a pasted spec -> agents -> extensions -> first goals -> hand off to the Chief). Provisioning already created/started/persisted/meshed the node; this is everything after. Idle on already-configured nodes; leaf-node domain only (platform changes -> CCR).",
+          "claude_md": "/Users/hptuner/hptuners-control/agents/setup/CLAUDE.md"
+        },
+        {
           "name": "usage",
           "path": "/Users/hptuner/hptuners-control/agents/usage",
           "summary": "Token + cost analytics and token-waste detection from Claude Code transcripts. Aggregation in server.py (_scan_tok/token_totals/usage_payload, /api/usage), rendered in the Usage lens. Cost figures are estimates.",
