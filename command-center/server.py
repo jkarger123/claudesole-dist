@@ -7297,6 +7297,11 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-msg:not(.open){cursor:pointer}
 .gm-msg:not(.open):hover{border-color:var(--accent);background:var(--card)}
 .gm-msg:not(.open) .gm-mhead{padding:7px 12px}
+/* Gmail-style reply UX: per-message reply/forward on each open message + a reply bar under the newest */
+.gm-mreply{display:inline-flex;gap:4px;margin-left:10px;flex:0 0 auto}
+.gm-mrbtn{background:transparent;border:1px solid var(--line);color:var(--mut);border-radius:6px;padding:2px 8px;font-size:12.5px;cursor:pointer;line-height:1.35}
+.gm-mrbtn:hover{border-color:var(--accent);color:var(--accent);background:var(--card)}
+.gm-replybar{display:flex;gap:8px;flex-wrap:wrap;padding:13px 2px 2px;margin-top:6px;border-top:1px dashed var(--line)}
 .gm-msg:not(.open) .gm-collapsed{padding:0 12px 7px}
 .gm-earlier{align-self:center;margin:1px 0 5px;background:var(--card);border:1px solid var(--line);color:var(--mut);border-radius:16px;padding:6px 16px;font-size:12px;font-weight:600;cursor:pointer;transition:all .14s}
 .gm-earlier:hover{border-color:var(--accent);color:var(--ink)}
@@ -9079,15 +9084,13 @@ function gmRenderRead(){
   var t=GM.thread;
   if(!t){ read.innerHTML=gmReadEmptyBody(); return; }
   var msgs=(t.messages||[]).slice().reverse();   // thread arrives newest-first; show it CHRONOLOGICALLY (oldest at top, newest at bottom) like a normal mail client
+  GM.disp=msgs;                                   // chronological array -> per-message reply/forward index into this
   var last=msgs.length-1;
   var head='<div class="gm-rdhead">'
     +'<div class="gm-rdsubj">'+e2(t.subject)+(msgs.length>1?' <span class="gm-cnt">'+msgs.length+'</span>':'')+'</div>'
     +'<div class="gm-rdmeta">'+e2(gAddr((msgs[0]||{}).from||''))+' · '+msgs.length+' message'+(msgs.length>1?'s':'')+(t.drafts?' · <span style="color:var(--accent)">'+t.drafts+' draft'+(t.drafts>1?'s':'')+' in Drafts</span>':'')+'</div>'
     +'<div class="gm-acts">'
-      +'<button class="gm-act go" onclick="gmReply(false)" title="Reply (r)">↩ Reply</button>'
-      +'<button class="gm-act" onclick="gmReply(true)" title="Reply all (a)">↪ Reply all</button>'
       +(fxOn()?'<button class="gm-act fx-hist" onclick="fxSenderHistory()" title="What you know about this sender">\u{1F50E} Sender history</button>':'')
-      +'<button class="gm-act" onclick="gmForward()" title="Forward (f)">➤ Forward</button>'
       +'<button class="gm-act" onclick="gmActCur(\'archive\')" title="Archive (e)">\u{1F5C4} Archive</button>'
       +'<button class="gm-act" onclick="gmActCur(\'trash\')" title="Trash (#)">\u{1F5D1} Trash</button>'
       +'<button class="gm-act" onclick="gmSnoozeMenu()" title="Snooze (h)">⏰ Snooze</button>'
@@ -9115,6 +9118,11 @@ function gmRenderRead(){
         +'<div class="gm-mhi"><div class="gm-mfrom">'+e2(gFrom(m.from))+(m.starred?' ★':'')+'</div>'
           +'<div class="gm-mto">to '+e2(gAddr(m.to)||'me')+'</div></div>'
         +'<span class="gm-mdate">'+e2(gmFullDate(m.date))+'</span>'
+        +(open?('<span class="gm-mreply" onclick="event.stopPropagation()">'
+          +'<button class="gm-mrbtn" title="Reply to THIS message" onclick="event.stopPropagation();gmReply(false,'+idx+')">↩</button>'
+          +'<button class="gm-mrbtn" title="Reply all to THIS message" onclick="event.stopPropagation();gmReply(true,'+idx+')">↪</button>'
+          +'<button class="gm-mrbtn" title="Forward THIS message" onclick="event.stopPropagation();gmForward('+idx+')">➤</button>'
+          +'</span>'):'')
       +'</div>'
       +'<div class="gm-collapsed">'+e2(m.snippet||'(no preview)')+'</div>'
       +'<div class="gm-mbody">'+bodyHtml+atts+'</div>'
@@ -9128,7 +9136,11 @@ function gmRenderRead(){
     }
     cards.push(gmMsgCard(m,idx));
   });
-  read.innerHTML=head+'<div class="gm-thread">'+cards.join('')+'</div>';
+  var replybar='<div class="gm-replybar">'
+    +'<button class="gm-act go" onclick="gmReply(false)" title="Reply (r)">↩ Reply</button>'
+    +'<button class="gm-act" onclick="gmReply(true)" title="Reply all (a)">↪ Reply all</button>'
+    +'<button class="gm-act" onclick="gmForward()" title="Forward (f)">➤ Forward</button></div>';
+  read.innerHTML=head+'<div class="gm-thread">'+cards.join('')+replybar+'</div>';
   gmMountBodies(read, msgs);
 }
 // mount each HTML body into a Shadow DOM: encapsulates the email's own CSS, renders at full natural height
@@ -9723,8 +9735,9 @@ function gmcQuoteHtml(m){
     +'<blockquote style="margin:0 0 0 8px;padding:4px 0 4px 12px;border-left:2px solid #ccc;color:#555">'+inner+'</blockquote>';
 }
 
-function gmReply(all){
-  var m=gmLastMsg(); if(!m){ toast('Open a message first'); return; }
+function gmMsgAt(idx){ var d=GM.disp||[]; return (idx===undefined||idx===null||!d[idx])?gmLastMsg():d[idx]; }  // a specific message in the chain, else the newest
+function gmReply(all,idx){
+  var m=gmMsgAt(idx); if(!m){ toast('Open a message first'); return; }
   var to=gAddr(m.from);
   var cc='';
   if(all){
@@ -9737,8 +9750,8 @@ function gmReply(all){
     threadId:GM.thread.id, inReplyTo:m.messageId, references:(m.references?m.references+' ':'')+m.messageId,
     bodyHtml:gmcQuoteHtml(m)});
 }
-function gmForward(){
-  var m=gmLastMsg(); if(!m){ toast('Open a message first'); return; }
+function gmForward(idx){
+  var m=gmMsgAt(idx); if(!m){ toast('Open a message first'); return; }
   var head='<div style="color:#555">---------- Forwarded message ----------<br>From: '+e2(gFrom(m.from))
     +'<br>Date: '+e2(gmFullDate(m.date))+'<br>Subject: '+e2(m.subject)+'<br>To: '+e2(m.to)+'</div>';
   var inner=(m.body&&m.body.html)? gmcSanitizePaste(m.body.html) : '<pre style="white-space:pre-wrap">'+e2((m.body&&m.body.text)||m.snippet||'')+'</pre>';
