@@ -7342,10 +7342,7 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-msg:not(.open):hover{border-color:var(--accent);background:var(--card)}
 .gm-msg:not(.open) .gm-mhead{padding:7px 12px}
 /* Gmail-style reply UX: per-message reply/forward on each open message + a reply bar under the newest */
-.gm-mreply{display:inline-flex;gap:5px;margin-left:10px;flex:0 0 auto}
-.gm-msg:not(.open) .gm-mreply{opacity:0;transition:opacity .12s}        /* collapsed: reveal on hover (Gmail-style) */
-.gm-msg:not(.open):hover .gm-mreply{opacity:1}
-.gm-msg.open .gm-mreply{opacity:1}
+.gm-mreply{display:inline-flex;gap:5px;margin-left:10px;flex:0 0 auto}   /* ALWAYS visible on every message in the chain */
 .gm-mrbtn{background:transparent;border:1px solid var(--line);color:var(--mut);border-radius:6px;padding:2px 9px;font-size:11.5px;font-weight:600;cursor:pointer;line-height:1.4;white-space:nowrap}
 .gm-mrbtn:hover{border-color:var(--accent);color:var(--accent);background:var(--card)}
 .gm-replybar{display:flex;gap:8px;flex-wrap:wrap;padding:13px 2px 2px;margin-top:6px;border-top:1px dashed var(--line)}

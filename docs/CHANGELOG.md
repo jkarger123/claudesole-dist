@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.47 -- 2026-06-25
+- FIX (per-message reply buttons visible on EVERY message): removed the hover-reveal opacity gate -- Reply /
+  Reply all / Forward now show on every message in the chain, always, so you can reply back in the chain
+  without hunting. (The earlier fix had shipped to carsearch+repos but AFP was held at 0.21.44, so it looked
+  unfixed there; now pushed everywhere.)
+
 ## 0.21.46 -- 2026-06-25
 - FIX (smart reply respects WHICH message you reply to): replying to an OLDER message in the chain now scopes
   the agent to THAT message + the thread UP TO it only -- it never sees messages sent after it (which may have
