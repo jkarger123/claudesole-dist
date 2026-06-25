@@ -1,10 +1,11 @@
 {
   "product": "ClaudeFather",
   "former_name": "Claudesole",
-  "version": "0.21.27",
+  "version": "0.21.28",
   "description": "Manifest that defines which paths are FRAMEWORK (ship + propagate to every ClaudeFather deployment on update) vs PRESERVE (per-deployment config/data/secrets/learnings -- never overwritten by an update).",
   "framework_paths": [
     "command-center/server.py",
+    "command-center/scan_projects.py",
     "command-center/granola.py",
     "command-center/mesh_stop_hook.py",
     "command-center/cc-session-watchdog.py",

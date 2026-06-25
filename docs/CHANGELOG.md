@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.28 -- 2026-06-24
+- FIX (History lens broken on fresh/external nodes): `command-center/scan_projects.py` -- which powers the
+  History lens + per-client "past conversations" (it scans ~/.claude/projects) -- was NOT in framework_paths,
+  so cc-update never shipped it. Any node installed without it (e.g. AFP) silently got an empty History (the
+  server ran a missing script). Added to framework_paths so every node has it and it survives updates.
+
 ## 0.21.27 -- 2026-06-24
 - PORTABILITY (self-contained installs — deliverables travel with the bundle): a ClaudeFather install is now a
   relocatable unit — its deliverables default to `<install>/deliverables` (under CC_HOME), so the whole folder
