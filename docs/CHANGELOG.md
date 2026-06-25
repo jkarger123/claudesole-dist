@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.34.4 -- 2026-06-25
+- FIX (mobile session dock was empty/black): sbPoll() did `if(!sbDesktop()){bar.innerHTML='';return;}` -- it
+  WIPED the dock and bailed on any non-desktop width, so the constant mobile dock showed as an empty black
+  bar. Now it populates at all widths (tap a tile = switch); the hover-blowup preview stays desktop-only.
+- UX (mobile nav: flatten categories): collapsible tab CATEGORIES don't fit the horizontal mobile tab strip,
+  so on mobile the nav now lists every tab flat (no folders). Categories remain a desktop-only feature.
+
 ## 0.34.3 -- 2026-06-25
 - FIX+FEATURE (mobile session dock made constant): ROOT CAUSE of 'mobile sessions looked unchanged' -- every
   session mobile feature was gated behind body.cf-sessions, which is set in lensTopbar() via render(), but the

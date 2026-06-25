@@ -13231,6 +13231,13 @@ function treeRemoveLens(tree,l){for(var i=tree.length-1;i>=0;i--){var n=tree[i];
 // ---- render
 function renderNav(){
   var s=navState();
+  if(window.matchMedia("(max-width:820px)").matches){
+    // mobile: categories don't fit the horizontal tab strip -> always FLATTEN (list every tab, no folders).
+    // Categories remain a desktop-only feature (the +category UI is hidden on mobile anyway).
+    var nav=document.getElementById("lens");if(nav)nav.querySelectorAll(".navgroup").forEach(function(x){x.remove();});
+    navBtns().forEach(function(b){b.classList.remove("grouped","ghide");b.removeAttribute("draggable");});
+    applyNavOrder();paintNavMode();return;
+  }
   if(s.mode!=="manual"&&!navHasGrp(s)){
     var nav=document.getElementById("lens");if(nav)nav.querySelectorAll(".navgroup").forEach(function(x){x.remove();});
     navBtns().forEach(function(b){b.classList.remove("grouped","ghide");b.setAttribute("draggable","true");});
@@ -13350,7 +13357,8 @@ SB.protected={}; SB.holdT=null;
 function sbDesktop(){return window.matchMedia('(min-width:901px)').matches;}
 async function sbPoll(){
   var bar=document.getElementById('sessbar'); if(!bar)return;
-  if(!sbDesktop()){bar.innerHTML='';return;}
+  // (was: cleared + bailed on non-desktop -> that left the mobile dock an empty black bar). Populate at ALL
+  // widths now; the hover-blowup preview stays desktop-only (event-driven; #sessprev is display:none on mobile).
   var r; try{ r=await(await fetch('/api/session-bar')).json(); }catch(e){ return; }
   var list=r.sessions||[], names={};
   SB.list=list;
