@@ -637,7 +637,7 @@ def _g_parallel(fns):
     return out
 
 GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
-def gmail_list(view="inbox", q="", maxn=25):
+def _gmail_list_live(view="inbox", q="", maxn=25):
     query = (q or "").strip()
     if not query:
         query = {"inbox": "in:inbox", "unread": "is:unread", "sent": "in:sent",
@@ -656,6 +656,49 @@ def gmail_list(view="inbox", q="", maxn=25):
                 "snippet": m.get("snippet", ""), "unread": "UNREAD" in lab, "starred": "STARRED" in lab}
     msgs = [x for x in _g_parallel([(lambda i=i: fetch(i)) for i in ids]) if x]
     return {"messages": msgs, "view": view, "q": q, "email": _GOOGLE_TOK.get("email")}
+
+# ---- Gmail list cache + background sync. Was: a full live Gmail pull on EVERY browser refresh (two users =
+# 2x the work, and a flaky uplink = spin forever). Now: a short-TTL per-view cache served to every browser
+# (one sync serves everyone), kept warm by a background loop for recently-viewed lists, and -- the key part --
+# OUTAGE-RESILIENT: if a live fetch fails, serve the LAST good inbox flagged stale instead of erroring.
+GM_TTL = 60                  # serve cache up to this old; the background loop refreshes active views ~every 50s
+_GM_CACHE = {}               # key -> {"data":..., "at":ts, "ok":True}
+_GM_ACTIVE = {}              # key -> last-requested ts (only these are kept warm; idle views stop polling)
+_GM_LOCK = threading.Lock()
+def _gm_key(view, q, maxn): return "%s|%s|%s" % (view, (q or "").strip(), int(maxn or 25))
+def gmail_list(view="inbox", q="", maxn=25, fresh=False):
+    """Cached, background-synced, outage-resilient Gmail list. fresh=True forces a live pull ('Refresh now')."""
+    key = _gm_key(view, q, maxn); now = time.time()
+    with _GM_LOCK:
+        _GM_ACTIVE[key] = now
+        ent = _GM_CACHE.get(key)
+    if not fresh and ent and ent.get("ok") and (now - ent["at"]) < GM_TTL:
+        d = dict(ent["data"]); d["_synced"] = ent["at"]; d["_cached"] = True; return d
+    live = _gmail_list_live(view, q, maxn)
+    if isinstance(live, dict) and "error" not in live:
+        with _GM_LOCK: _GM_CACHE[key] = {"data": live, "at": now, "ok": True}
+        d = dict(live); d["_synced"] = now; d["_cached"] = False; return d
+    if ent and ent.get("ok"):    # live failed -> serve the last good copy (don't strand the user on a spinner)
+        d = dict(ent["data"]); d["_synced"] = ent["at"]; d["_cached"] = True; d["_stale"] = True
+        d["_error"] = (live.get("error") if isinstance(live, dict) else "fetch failed"); return d
+    return live                  # no cache to fall back on -> surface the real error
+def _gmail_sync_loop():
+    """Keep recently-viewed Gmail lists warm so refreshes are instant + one sync serves everyone. Only polls
+    views requested in the last 5 min (nobody looking -> no API calls)."""
+    while True:
+        try:
+            time.sleep(50)
+            if not google_configured(): continue
+            now = time.time()
+            with _GM_LOCK:
+                keys = [k for k, t in _GM_ACTIVE.items() if now - t < 300]
+            for k in keys[:6]:
+                view, qq, mx = k.split("|", 2)
+                live = _gmail_list_live(view, qq, int(mx))
+                if isinstance(live, dict) and "error" not in live:
+                    with _GM_LOCK: _GM_CACHE[k] = {"data": live, "at": time.time(), "ok": True}
+        except Exception:
+            pass
 
 def gmail_unread():
     # exact unread-in-inbox count for the nav badge. Reading the label does NOT mark anything read.
@@ -6775,7 +6818,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/browse":       return self._s(200, json.dumps(browse_dir(q.get("rel", [""])[0])))
         # ---- Google Workspace (live client) ----
         if u.path == "/api/google/status":   return self._s(200, json.dumps(google_status()))
-        if u.path == "/api/google/gmail":    return self._s(200, json.dumps(gmail_list(q.get("view", ["inbox"])[0], q.get("q", [""])[0], q.get("max", ["25"])[0])))
+        if u.path == "/api/google/gmail":    return self._s(200, json.dumps(gmail_list(q.get("view", ["inbox"])[0], q.get("q", [""])[0], q.get("max", ["25"])[0], fresh=(q.get("fresh", [""])[0] in ("1", "true")))))
         if u.path == "/api/google/gmail-msg":return self._s(200, json.dumps(gmail_get(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-unread": return self._s(200, json.dumps(gmail_unread()))
         if u.path == "/api/session-bar":   return self._s(200, json.dumps(session_bar()))
@@ -7814,6 +7857,7 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-list{border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
 .gm-lhead{flex:0 0 auto;padding:9px 11px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:8px;background:var(--bg2)}
 .gm-lhrow{display:flex;align-items:center;gap:8px}
+.gm-sync{font-size:11px;color:var(--mut);white-space:nowrap;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}
 .gm-lhrow b{font-size:14px}
 .gm-lhrow .gm-spacer{margin-left:auto}
 .gm-search{flex:1;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:8px 11px;font-size:13px;outline:none}
@@ -9492,6 +9536,7 @@ async function loadGmail(){
   gmFetchLabels();
   await gmFetchList(true);
   clearInterval(window.GMTIMER); window.GMTIMER=setInterval(function(){ if(LENS!=='gmail'){clearInterval(window.GMTIMER);return;} gmAutoRefresh(); }, 45000);  // pull in new mail
+  clearInterval(window.GMSYNCT); window.GMSYNCT=setInterval(function(){ if(LENS!=='gmail'){clearInterval(window.GMSYNCT);return;} gmSyncBadge(); }, 15000);  // keep the "synced Xs ago" badge ticking
 }
 
 // ---- b0: persisted list|reading split + resizer ----
@@ -9631,9 +9676,10 @@ function gmListShell(){
   return '<section class="gm-list">'
     +'<div class="gm-lhead">'
       +'<div class="gm-lhrow"><b id="gmLaneTitle">Inbox</b>'
+        +'<span id="gmSync" class="gm-sync" title="how fresh this list is — the node keeps it synced in the background"></span>'
         +'<span class="gm-spacer"></span>'
         +'<button class="gm-act go" onclick="gmCompose()" title="Compose (c)">✎ Compose</button>'
-        +'<button class="gm-act" onclick="gmFetchList(true)" title="Refresh">↻</button></div>'
+        +'<button class="gm-act" onclick="gmFetchList(true,true)" title="Refresh now (live pull)">↻</button></div>'
       +'<input class="gm-search" id="gmSearch" placeholder="Search all mail…  (/ to focus)" '
         +'onkeydown="if(event.key===\'Enter\'){GM.text=this.value;gmFetchList(true);}else if(event.key===\'Escape\'){this.blur();}">'
       +'<div class="gm-chips">'+chips+'</div>'
@@ -9656,7 +9702,13 @@ async function gmFetchLabels(){
   }catch(e){}
 }
 
-async function gmFetchList(reset){
+function gmSyncBadge(){var el=document.getElementById('gmSync');if(!el)return;
+  if(!GM._synced){el.textContent='';return;}
+  var ago=Math.max(0,Math.round(Date.now()/1000-GM._synced));
+  var t=ago<60?ago+'s':ago<3600?Math.round(ago/60)+'m':Math.round(ago/3600)+'h';
+  if(GM._stale){el.innerHTML='⚠ offline · synced '+t+' ago';el.style.color='#f0a35e';}
+  else{el.innerHTML='✓ synced '+t+' ago';el.style.color='var(--mut)';}}
+async function gmFetchList(reset,forceFresh){
   if(reset){ GM.cur=-1; GM.sel={}; gmPaintBatch(); }
   GM.q=gmLaneQuery();
   var rows=document.getElementById('gmRows'); if(rows) rows.innerHTML=empty('Loading…');
@@ -9664,10 +9716,11 @@ async function gmFetchList(reset){
   var title=lane?lane.n:(GM.lane.indexOf('lbl:')===0?'Label':'Mail');
   var t=document.getElementById('gmLaneTitle'); if(t) t.textContent=title;
   var r;
-  try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q)+'&max=50')).json(); }
+  try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q)+'&max=50'+(forceFresh?'&fresh=1':''))).json(); }
   catch(e){ if(rows) rows.innerHTML=gErr({error:'network'}); return; }
   if(r.error){ if(rows) rows.innerHTML=gErr(r); return; }
   GM.email=r.email||GM.email;
+  GM._synced=r._synced; GM._stale=!!r._stale; gmSyncBadge();
   // collapse to threads: keep first message seen per threadId, count the rest
   var seen={}, list=[];
   (r.messages||[]).forEach(function(m){
@@ -13201,6 +13254,7 @@ if __name__ == "__main__":
     threading.Thread(target=_boot_housekeeping, daemon=True).start()
     threading.Thread(target=_autoapprove_loop, daemon=True).start()   # keep agents off the permission-prompt wall
     threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
+    threading.Thread(target=_gmail_sync_loop, daemon=True).start()      # keep recently-viewed Gmail lists warm (cache + outage fallback)
     # Bind host: default 0.0.0.0 (existing nodes unchanged). Provisioned standalone bundles set bind_host
     # "127.0.0.1" so the ONLY tailnet-visible surface is the TLS `tailscale serve` URL -- no raw plain-HTTP
     # port on the tailnet for a browser to hit and get ERR_SSL_PROTOCOL_ERROR.

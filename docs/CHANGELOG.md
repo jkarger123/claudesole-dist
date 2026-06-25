@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.31.0 -- 2026-06-25
+- FEATURE (Gmail list: server-side cache + background sync + outage resilience): the inbox was a full live
+  Gmail pull on EVERY browser refresh (two users = 2x the work; a flaky uplink = spin forever). Now each node
+  serves a short-TTL (60s) per-view cache to every browser (one sync serves everyone -> fewer API calls,
+  instant refreshes), kept warm by a background loop that only polls views requested in the last 5 min (idle =
+  no calls). KEY: if a live fetch fails, it serves the LAST good inbox flagged stale instead of erroring, so a
+  flaky uplink shows the last-synced inbox, not a dead spinner (would have softened today's incident). The
+  Gmail header shows a "✓ synced Xs ago" badge (turns "⚠ offline · synced Xs ago" when serving stale), and the
+  ↻ button now forces a live pull (fresh=1). Verified on a live mailbox: cache hit 0.002s vs live 0.4s.
+
+## 0.30.1 -- 2026-06-25
+- FIX (prefer IPv4 for outbound): a dead/flaky IPv6 leg made stdlib urllib block ~60s on the AAAA address
+  before falling back to IPv4 (Gmail/Drive stuck loading, mesh stalls). The server now returns IPv4 addrinfo
+  when present so a dead IPv6 route can't hang it (disable with CC_IPV6=1). Surfaced during the network incident.
+
 ## 0.30.0 -- 2026-06-25
 - FEATURE (usage by account + over/under-average tinting): usage is now attributed to the Claude account that
   was logged in at the time of each call (a switch-activity log records account changes; events are bucketed
