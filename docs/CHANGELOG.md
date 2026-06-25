@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.34.3 -- 2026-06-25
+- FIX+FEATURE (mobile session dock made constant): ROOT CAUSE of 'mobile sessions looked unchanged' -- every
+  session mobile feature was gated behind body.cf-sessions, which is set in lensTopbar() via render(), but the
+  LANDING lens (Sessions) doesn't route through render() at boot, so the class was never set and nothing
+  applied. Fix: loadSessions() sets the class directly. Then, per request, the bottom session taskbar is now
+  CONSTANT across EVERY mobile lens (like the desktop dock) -- tap a tile to switch session from anywhere.
+  Reserved its space fleet-wide (--cf-dock-h, #main padding-bottom); the Gmail full-screen reader + compose
+  FAB now sit above it; the focus terminal is much taller (usage strip + hint dropped on mobile sessions).
+
 ## 0.34.2 -- 2026-06-25
 - FIX (mobile sessions: no way to switch sessions): the desktop bottom session taskbar (#sessbar) was
   display:none on mobile, so you were stuck on the one open session. It now shows on mobile ON THE SESSIONS

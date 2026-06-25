@@ -7941,11 +7941,15 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 #sessprev .sb-pvframe{flex:1;min-height:0;width:100%;border:0;display:block;background:#0a0a0f}
 @media(max-width:820px){
   #sessprev{display:none!important}                                  /* hover-blowup is desktop-only (no touch hover) */
-  #sessbar{display:none!important}                                   /* hidden on every lens EXCEPT Sessions... */
-  body.cf-sessions #sessbar{display:flex!important;height:auto;min-height:48px;padding-top:5px;padding-bottom:calc(5px + env(safe-area-inset-bottom));z-index:60}  /* ...where it's the touch session switcher (tap a tile = switch). Tall tap target + safe area. */
-  body.cf-sessions #sessbar .sb-tile{height:36px;max-width:150px}
-  body.cf-sessions #grid{padding-bottom:calc(56px + env(safe-area-inset-bottom))}                          /* clear the fixed dock (grid/list views) */
-  body.cf-sessions .focusonly .bigsess{height:calc(100dvh - 200px - 60px)}                                /* ...and shrink the focus terminal so the dock doesn't cover it */
+  :root{--cf-dock-h:calc(46px + env(safe-area-inset-bottom))}        /* the constant bottom dock's height (used to reserve space fleet-wide on mobile) */
+  /* CONSTANT bottom session dock across EVERY mobile lens (like the desktop taskbar). Tap a tile = switch session. */
+  #sessbar{display:flex!important;height:auto;min-height:46px;padding-top:5px;padding-bottom:calc(5px + env(safe-area-inset-bottom));z-index:60}
+  #sessbar .sb-tile{height:36px;max-width:150px}
+  #main{padding-bottom:var(--cf-dock-h)}                             /* reserve the dock's space so no lens hides content behind it */
+  /* sessions lens: drop the usage strip + hint and maximize the focus terminal between the nav and the dock */
+  body.cf-sessions #tkstripwrap, body.cf-sessions .cf-sesshint{display:none!important}
+  body.cf-sessions .focusonly{height:auto}
+  body.cf-sessions .focusonly .bigsess{height:calc(100dvh - 104px - var(--cf-dock-h))!important;min-height:0!important}   /* nav + compact header + dock -> rest = terminal */
 }
 /* Sessions LENS: focus = ONLY the big terminal (littles removed); in-flow column, never floats over usage. */
 .focusonly{display:flex;flex-direction:column;
@@ -8217,7 +8221,7 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-back{display:none;align-items:center;gap:3px;background:transparent;border:none;color:var(--accent);font-size:15px;font-weight:600;cursor:pointer;padding:2px 8px 8px 0}
 .gm-railbg{display:none}
 .gm-fab{display:none}   /* desktop: hidden (compose lives in the list header). Mobile: floating compose button. */
-@media(max-width:760px){.gm-fab{display:flex;align-items:center;justify-content:center;position:fixed;right:18px;bottom:calc(18px + env(safe-area-inset-bottom));width:58px;height:58px;border-radius:50%;background:var(--grad,linear-gradient(135deg,#e8c547,#c9a227));color:#15120a;font-size:26px;border:none;box-shadow:0 8px 22px rgba(0,0,0,.45),var(--glow);z-index:45;cursor:pointer}.gm-fab:active{transform:scale(.94)}}
+@media(max-width:760px){.gm-fab{display:flex;align-items:center;justify-content:center;position:fixed;right:18px;bottom:calc(14px + var(--cf-dock-h,0px));width:58px;height:58px;border-radius:50%;background:var(--grad,linear-gradient(135deg,#e8c547,#c9a227));color:#15120a;font-size:26px;border:none;box-shadow:0 8px 22px rgba(0,0,0,.45),var(--glow);z-index:62;cursor:pointer}.gm-fab:active{transform:scale(.94)}}
 
 /* --- responsive: collapse to single column on narrow --- */
 @media(max-width:980px){
@@ -8255,8 +8259,8 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
   .gm-railbg{display:block;position:fixed;inset:0;z-index:79;background:rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .26s}
   .gm-app.gm-rail-open .gm-railbg{opacity:1;pointer-events:auto}
   /* reader = full-screen slide-in overlay (z below the compose modal so reply sheets sit on top) */
-  .gm-read{position:fixed !important;inset:0;z-index:40;transform:translateX(100%);
-    transition:transform .28s cubic-bezier(.2,.85,.2,1);border:none !important;border-radius:0 !important;min-height:0 !important;background:var(--bg2)}
+  .gm-read{position:fixed !important;top:0;left:0;right:0;bottom:var(--cf-dock-h,0px);z-index:40;transform:translateX(100%);
+    transition:transform .28s cubic-bezier(.2,.85,.2,1);border:none !important;border-radius:0 !important;min-height:0 !important;background:var(--bg2)}   /* full-screen reader sits ABOVE the constant dock (reply bar stays visible) */
   .gm-app.gm-reading .gm-read{transform:none}
   .gm-rdhead{padding-top:calc(11px + env(safe-area-inset-top))}
   .gm-back{display:inline-flex !important}
@@ -12366,6 +12370,7 @@ function renderBackup(){if(!BACKUP)return;const b=BACKUP,st=b.state||{},lv=b.liv
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
 }
 async function loadSessions(quiet){
+  document.body.classList.add("cf-sessions");document.body.classList.remove("cf-glens");   // set directly here (the landing lens may not route through render()/lensTopbar) -> mobile session dock + layout apply
   if(!quiet)document.getElementById("grid").innerHTML=empty("Loading sessions…");
   let s=[],tok={};
   try{const[a,b]=await Promise.all([fetch("/api/sessions"),fetch("/api/token-usage")]);s=await a.json();tok=await b.json();}catch(e){}
@@ -12378,7 +12383,7 @@ async function loadSessions(quiet){
   SESSDATA=s;
   const modes=[['focus','⊞ Focus'],['grid','▦ Grid'],['list','☰ List']].map(m=>'<button class="mini'+(SESSVIEW==m[0]?' go':'')+'" onclick="setSessView(\''+m[0]+'\')">'+m[1]+'</button>').join("");
   let head='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🟢 Sessions</b> <span class="sub">'+s.length+' live</span><div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">'+modes+'<button class="mini" title="a plain shell in this project for sudo / interactive commands -- type your password here" onclick="openAdminShell()">🔑 Admin shell</button><button class="mini go" onclick="openLaunch(\'studio\',\'\')">＋ New</button></div></div>'
-    +'<div class="meta" style="margin-top:6px">'+sessHint()+'</div><div id="tkstripwrap">'+totalsStrip()+'</div></div>';
+    +'<div class="meta cf-sesshint" style="margin-top:6px">'+sessHint()+'</div><div id="tkstripwrap">'+totalsStrip()+'</div></div>';
   let body;
   if(!s.length)body=empty("No live sessions — click ＋ New to start one.");
   else if(SESSVIEW=='list')body=s.map(sessRow).join("");
