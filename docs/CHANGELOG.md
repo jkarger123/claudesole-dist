@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.34.0 -- 2026-06-25
+- UX/MOBILE (maximize real estate): on phones the chrome now gets out of the way. SCROLL-AWAY top chrome --
+  the global nav (#side) + topbar slide up as you scroll into content and reveal on any scroll-up (iOS
+  Safari/Gmail pattern), reclaiming ~180px so Gmail/Calendar/Drive use the full 100dvh while reading; tabs
+  are one swipe-up away. SEARCH-ON-DEMAND -- the always-on search rows (topbar filter, Gmail search, Drive
+  search, Calendar quick-add) are replaced by a tap-to-reveal minimal field (🔍/⚡ toggle) that collapses
+  after, instead of permanently eating a row. Transform/CSS-only, strictly mobile-gated (≤820/760px) -- zero
+  desktop/tablet change. Note: Calendar's internal time-grid scroll doesn't trigger scroll-away (acceptable).
+
 ## 0.33.0 -- 2026-06-25
 - FEATURE (mobile Google): Gmail/Calendar/Drive lenses rebuilt for phones (iPhone-Google-app style) behind
   @media(max-width:760px) so desktop is untouched. Gmail = single-pane: full-width list -> tap -> full-screen

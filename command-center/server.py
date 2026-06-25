@@ -7858,7 +7858,7 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--mut)}.dot.ok{background:var(--ok)}.dot.bad{background:var(--err)}
 @media (max-width:820px){
   #app{flex-direction:column;height:auto;min-height:100dvh;overflow:visible}
-  #side{flex:none;width:auto;flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px;border-right:none;border-bottom:1px solid var(--line);padding:9px 12px;position:sticky;top:0;z-index:8;background:#0c0c12}
+  #side{flex:none;width:auto;flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px;border-right:none;border-bottom:1px solid var(--line);padding:9px 12px;position:sticky;top:0;z-index:8;background:#0c0c12;transition:transform .26s cubic-bezier(.2,.85,.2,1);will-change:transform}
   .brand{padding:0;flex:0 0 auto}.brand small{display:none}.brand .cfmark{height:26px}.brand .bword{font-size:14px}
   /* tabs wrap to their OWN full-width scroll row -- never share the line with brand/navmode (that squeezed them to a sliver) */
   .lens{flex-direction:row;flex:1 1 100%;order:3;width:100%;overflow-x:auto;overflow-y:visible;gap:5px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
@@ -7868,8 +7868,15 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
   #navmode{display:none}            /* drag-to-reorder is a desktop affordance; on mobile it stole the tab row */
   .health{display:none}
   #main{overflow-x:hidden;overflow-y:visible;max-width:100%}
-  .topbar{padding:11px 14px;gap:9px;position:sticky;top:92px;background:var(--bg);z-index:6}  /* clears the 2-row mobile #side (brand row + full-width tab row) */
-  .topbar h2{font-size:16px;width:100%}.topbar #search{max-width:none;flex:1}
+  .topbar{padding:11px 14px;gap:9px;position:sticky;top:var(--cf-side-h,92px);background:var(--bg);z-index:6;transition:transform .26s cubic-bezier(.2,.85,.2,1);will-change:transform}  /* top offset = measured #side height (brand row + full-width tab row); set by cfShowChrome() */
+  .topbar h2{font-size:16px;flex:1 1 auto;min-width:0}
+  /* ===== scroll-away chrome: nav + topbar slide off on scroll-down, return on scroll-up (cf-chrome-off set by the mobile scroll handler) ===== */
+  body.cf-chrome-off #side{transform:translateY(-100%)}
+  body.cf-chrome-off .topbar{transform:translateY(calc(-100% - var(--cf-side-h,92px)))}
+  /* ===== search reveal-on-demand: the always-on filter field is hidden; the 🔍 toggle reveals it as its own full-width row ===== */
+  #searchTog{display:inline-flex;align-items:center;justify-content:center;min-height:40px}
+  .topbar #search{display:none;order:9;flex:1 1 100%;max-width:none;min-width:0}
+  body.cf-search-open .topbar #search{display:block}
   .wrap{overflow:visible;padding:13px;gap:11px;grid-template-columns:minmax(0,1fr);max-width:100%}
   .card{min-width:0;overflow:hidden}.card .meta,.card .brief{overflow-wrap:anywhere}
   .btn{min-height:40px;white-space:nowrap}
@@ -8215,6 +8222,10 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
   .gm-lhead{position:sticky;top:0;z-index:5;background:var(--bg2)}
   .gm-row{padding:13px 12px}
   .gm-burger{display:inline-flex !important}
+  /* search reveal-on-demand: collapse the always-on mail search to a 🔍 in the header row; reveal in place on tap */
+  .gm-list .gm-search{display:none}
+  .gm-list.cf-srch .gm-search{display:block}
+  .gm-list .cf-srbtn{display:inline-flex;align-items:center;justify-content:center}
   /* labels/folders rail -> left drawer with backdrop (restores the column layout the ≤980 rule flattened) */
   .gm-rail{position:fixed !important;top:0;left:0;bottom:0;width:84%;max-width:310px;z-index:80;
     flex-direction:column !important;flex-wrap:nowrap !important;border:none !important;border-right:1px solid var(--line) !important;
@@ -8407,7 +8418,10 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
   .cal-title small{font-size:10px}
   .cal-vtabs{order:4;flex:1 1 100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
   .cal-vtab{flex:1 0 auto;white-space:nowrap;min-height:38px}
-  .cal-add{order:5;flex:1 1 100%;min-width:0;max-width:none}
+  /* quick-add reveal-on-demand: collapse the always-on quick-add bar to a ⚡ in the header; reveal as its own row on tap */
+  .cal-top .cal-add{display:none}
+  .cal-top.cf-srch .cal-add{display:flex;order:5;flex:1 1 100%;min-width:0;max-width:none}
+  .cal-top .cf-srbtn{display:inline-flex;align-items:center;justify-content:center}
   .cal-foot{display:none}
   .cal-tgrid .gut,.cal-daynames .gut,.cal-allday .gut{flex-basis:46px}
   .cal-dn .num{font-size:16px}
@@ -8440,6 +8454,9 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .dr-sel{background:var(--card);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:8px 10px;font-size:13px;cursor:pointer}
 .dr-icbtn{background:var(--card);border:1px solid var(--line);color:var(--mut);border-radius:9px;padding:8px 11px;cursor:pointer;font-size:14px}
 .dr-icbtn:hover{color:var(--ink);border-color:var(--accent)}
+/* mobile-only search-reveal toggle buttons (global 🔍 + per-lens). Hidden on desktop; the mobile media blocks
+   re-show them at higher specificity. Placed AFTER .gm-act/.cal-ib (which set display) so the desktop tie resolves to hidden. */
+.cf-srbtn{display:none}
 .dr-batch{display:flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--accent);border-radius:11px;padding:8px 12px;flex-wrap:wrap}
 .dr-batch b{color:var(--accent);font-size:13px;margin-right:4px}
 .dr-bb{background:var(--card);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:6px 11px;cursor:pointer;font-size:12.5px}
@@ -8519,7 +8536,10 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
   .dr-lco,.dr-lcm{display:none}
   .dr-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
   .dr-tools{gap:7px}
-  .dr-search{flex:1 1 100%;min-width:0;padding:11px 13px}
+  /* search reveal-on-demand: collapse the always-on Drive search to a 🔍 in the tools row; reveal in place on tap */
+  .dr-tools .dr-search{display:none}
+  .dr-tools.cf-srch .dr-search{display:block;flex:1 1 100%;min-width:0;padding:11px 13px}
+  .dr-tools .cf-srbtn{display:inline-flex;align-items:center;justify-content:center}
   .dr-segb,.dr-chip,.dr-icbtn{min-height:42px}
   .dr-trow{padding:12px;font-size:13.5px}
   .dr-lcs{font-size:11.5px}
@@ -8781,7 +8801,7 @@ body.gm-resizing iframe{pointer-events:none}
 <div class="health" id="svchealth"></div>
 </aside>
 <main id="main">
-<div class="topbar"><h2 id="viewtitle">Sessions</h2><button class="btn" id="refreshBtn" title="Refresh" onclick="location.reload()" style="padding:7px 11px">⟳</button><button class="btn" id="helpBtn" title="How this works" onclick="ccHelp(LENS)" style="padding:7px 11px">?</button><input id="search" placeholder="Search…"><button class="btn" id="agentBtn" style="display:none" onclick="openAgent(LENS)">🤖 Agent</button><button class="btn" id="addBtn" onclick="openAdd()">＋ Add</button><button class="btn go" id="newSessBtn" onclick="openLaunch()">▶ New session</button><button class="btn go" id="cfTopBtn" style="display:none" onclick="cfAddWizard()">➕ Add a ClaudeFather</button></div>
+<div class="topbar"><h2 id="viewtitle">Sessions</h2><button class="btn" id="refreshBtn" title="Refresh" onclick="location.reload()" style="padding:7px 11px">⟳</button><button class="btn" id="helpBtn" title="How this works" onclick="ccHelp(LENS)" style="padding:7px 11px">?</button><button class="btn cf-srbtn" id="searchTog" title="Search" onclick="cfTopSearch()" style="padding:7px 11px">🔍</button><input id="search" placeholder="Search…"><button class="btn" id="agentBtn" style="display:none" onclick="openAgent(LENS)">🤖 Agent</button><button class="btn" id="addBtn" onclick="openAdd()">＋ Add</button><button class="btn go" id="newSessBtn" onclick="openLaunch()">▶ New session</button><button class="btn go" id="cfTopBtn" style="display:none" onclick="cfAddWizard()">➕ Add a ClaudeFather</button></div>
 <div class="wrap" id="grid"></div>
 </main>
 </div>
@@ -10014,6 +10034,7 @@ function gmListShell(){
       +'<div class="gm-lhrow"><button class="gm-burger" onclick="gmRailOpen()" title="Folders & labels">☰</button><b id="gmLaneTitle">Inbox</b>'
         +'<span id="gmSync" class="gm-sync" title="how fresh this list is — the node keeps it synced in the background"></span>'
         +'<span class="gm-spacer"></span>'
+        +'<button class="gm-act cf-srbtn" onclick="cfReveal(\'.gm-list\',\'gmSearch\')" title="Search mail">🔍</button>'
         +'<button class="gm-act go" onclick="gmCompose()" title="Compose (c)">✎ Compose</button>'
         +'<button class="gm-act" onclick="gmFetchList(true,true)" title="Refresh now (live pull)">↻</button></div>'
       +'<input class="gm-search" id="gmSearch" placeholder="Search all mail…  (/ to focus)" '
@@ -10938,6 +10959,7 @@ function calRender(){
         +'<button class="cal-ib" onclick="calStep(1)" title="Next">&#8250;</button></div>'
       +'<div class="cal-title">'+label+'<small>'+e2(CAL.email||'')+'</small></div>'
       +'<div class="cal-vtabs">'+tabs+'</div>'
+      +'<button class="cal-ib cf-srbtn" title="Quick add event" onclick="cfReveal(\'.cal-top\',\'calQA\')">&#9889;</button>'
       +'<div class="cal-add"><span class="qm">&#9889;</span>'
         +'<input id="calQA" placeholder="Quick add — e.g. Lunch with Sam tomorrow 1pm-2pm @ Cafe" '
         +'oninput="calParsePreview()" onkeydown="if(event.key===\'Enter\'){event.preventDefault();calQuickAdd();}">'
@@ -11623,6 +11645,7 @@ function drRender(){
     h+='<span class="dr-csep">›</span><span class="dr-crumb'+(last&&!DR.q?' here':'')+'" onclick="drGo(\''+c.id+'\')">'+e2(c.name)+'</span>';});
   if(DR.q)h+='<span class="dr-csep">›</span><span class="dr-crumb here">Search: “'+e2(DR.q)+'”</span>';
   h+='</div><div class="dr-tools">';
+  h+='<button class="dr-icbtn cf-srbtn" title="Search Drive" onclick="cfReveal(\'.dr-tools\',\'drq\')">🔍</button>';
   h+='<input id="drq" class="dr-search" placeholder="Search all of Drive…  ( / )" value="'+e2(DR.q)+'" oninput="drDebounce()" onkeydown="if(event.key===\'Enter\'){event.preventDefault();drSearchNow();}if(event.key===\'Escape\'){this.value=\'\';drClearSearch();}">';
   h+='<div class="dr-seg"><button class="dr-segb'+(DR.view=='grid'?' on':'')+'" title="Grid (v)" onclick="drSetView(\'grid\')">▦</button>'
     +'<button class="dr-segb'+(DR.view=='list'?' on':'')+'" title="List (v)" onclick="drSetView(\'list\')">☰</button></div>';
@@ -13018,7 +13041,7 @@ async function settingsSave(){
     loadSettings();
   }else toast("Failed: "+((r||{}).error||"?"),5000);
 }
-document.getElementById("lens").addEventListener("click",e=>{const btn=e.target.closest('button[data-l]');if(!btn)return;if(navDragged)return;LENS=btn.dataset.l;[...document.querySelectorAll("#lens button")].forEach(b=>b.classList.toggle("on",b==btn));const vt=document.getElementById("viewtitle");if(vt)vt.textContent=NAV[LENS]||LENS;refreshAgentBtn();if(LENS=="modules")MODREL="";navBump(LENS);render();syncHash(true);var hb=document.getElementById("helpBtn");if(hb)hb.style.display=HELP[LENS]?"":"none";ccHelpAuto(LENS);});
+document.getElementById("lens").addEventListener("click",e=>{const btn=e.target.closest('button[data-l]');if(!btn)return;if(navDragged)return;LENS=btn.dataset.l;[...document.querySelectorAll("#lens button")].forEach(b=>b.classList.toggle("on",b==btn));const vt=document.getElementById("viewtitle");if(vt)vt.textContent=NAV[LENS]||LENS;refreshAgentBtn();if(LENS=="modules")MODREL="";navBump(LENS);render();syncHash(true);var hb=document.getElementById("helpBtn");if(hb)hb.style.display=HELP[LENS]?"":"none";ccHelpAuto(LENS);document.body.classList.remove("cf-search-open");if(window.cfShowChrome)cfShowChrome();window.scrollTo(0,0);});
 function syncHash(push){let s=LENS;
   if(LENS=="modules"){if(MODREL)s+=":"+encodeURIComponent(MODREL);}
   else if(LENS=="sessions"){s+=":"+SESSVIEW+(SESSBIG?":"+encodeURIComponent(SESSBIG):"");}
@@ -13040,6 +13063,47 @@ function restoreFromHash(){const h=location.hash.slice(1);if(!h)return false;
 window.addEventListener("popstate",()=>{if(!document.getElementById("cinfo"))restoreFromHash();});  // Back/Forward = rebuild the view in place, no page reload (don't fall out to the overseer)
 document.addEventListener("keydown",e=>{if(LENS!="modules")return;const t=(e.target.tagName||"");if(t=="INPUT"||t=="TEXTAREA")return;if(e.key=="Backspace"){if(MODREL){e.preventDefault();loadModules(MODREL.split("/").slice(0,-1).join("/"));}}else if(e.key=="Escape"){if(MODREL)loadModules("");}});
 document.getElementById("search").addEventListener("input",render);
+// ===== MOBILE chrome: scroll-away nav/topbar + search reveal-on-demand (all gated to <=820px; desktop/tablet untouched) =====
+// Maximizes content height: the nav (#side) + lens chrome (.topbar) slide off on scroll-down and return on
+// scroll-up (the native-app pattern), so content gets ~full viewport while reading; tabs are one swipe-up away.
+(function(){
+  var MQ=window.matchMedia("(max-width:820px)");
+  var last=0, ticking=false, off=false;
+  function sideH(){var s=document.getElementById("side");return s?s.offsetHeight:92;}
+  function setVar(){document.documentElement.style.setProperty("--cf-side-h",sideH()+"px");}
+  function show(){if(off){document.body.classList.remove("cf-chrome-off");off=false;}}
+  function hide(){if(!off){document.body.classList.add("cf-chrome-off");off=true;}}
+  window.cfShowChrome=function(){show();setVar();};
+  function onScroll(){
+    if(!MQ.matches){show();return;}
+    var y=window.pageYOffset||document.documentElement.scrollTop||0, d=y-last;
+    if(document.body.classList.contains("cf-search-open")){last=y;return;}  // never hide chrome while the search field is open
+    if(y<=8) show();
+    else if(d>6 && y>sideH()+12) hide();   // scrolling down, past the nav -> tuck chrome away
+    else if(d<-6) show();                   // any scroll-up -> bring it back
+    last=y;
+  }
+  function tick(){if(!ticking){ticking=true;requestAnimationFrame(function(){onScroll();ticking=false;});}}
+  window.addEventListener("scroll",tick,{passive:true});
+  window.addEventListener("resize",function(){setVar();if(!MQ.matches)show();},{passive:true});
+  setVar();
+})();
+// Global topbar search: hidden on mobile, revealed as its own full-width row by the 🔍 toggle; closing clears the filter.
+function cfTopSearch(){
+  var open=document.body.classList.toggle("cf-search-open"), s=document.getElementById("search");
+  if(open){ if(window.cfShowChrome)cfShowChrome(); if(s)setTimeout(function(){s.focus();},30); }
+  else if(s){ s.value=""; if(typeof render==="function")render(); }
+}
+// Per-lens search/quick-add reveal (Gmail / Drive / Calendar): toggle .cf-srch on the container, focus the field.
+function cfReveal(sel,inputId){
+  var c=document.querySelector(sel); if(!c)return;
+  var on=c.classList.toggle("cf-srch");
+  if(window.cfShowChrome)cfShowChrome();
+  if(on){var i=document.getElementById(inputId); if(i)setTimeout(function(){i.focus();i.select&&i.select();},30);}
+}
+// Escape inside the global search closes + clears it.
+(function(){var s=document.getElementById("search"); if(s)s.addEventListener("keydown",function(e){
+  if(e.key==="Escape"){document.body.classList.remove("cf-search-open");s.value="";if(typeof render==="function")render();s.blur();}});})();
 function applyPreset(){var L=(window.CC&&window.CC.lenses);if(!L||!L.length)return;
   document.querySelectorAll('#lens button[data-l]').forEach(function(b){if(L.indexOf(b.dataset.l)<0)b.style.display='none';});
   if(!(window.CC&&window.CC.agency)){['agency','calls'].forEach(function(l){var _ab=document.querySelector('#lens button[data-l="'+l+'"]');if(_ab)_ab.style.display='none';});}
