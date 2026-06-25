@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.49 -- 2026-06-25
+- FEATURE (Tasks Phase 2): (1) DAILY-MORNING auto-scan -- programmatic sweep + AI scan run automatically ~6am
+  so the operator sits down to a fresh list (cc.config tasks_morning_scan/_ai/_hour; default on). (2) Calendar
+  suggestions now CREATE the real Google Calendar event on accept ("📅 Add to calendar"), timed or all-day.
+  (3) Agent task_propose -- agents add suggestions via the new `command-center/cc-task` helper (in every agent
+  brief now). (4) Granola call notes (CC:CALLS) folded into the AI scan. Endpoints: /api/task-calendar,
+  /api/task-propose. Nothing auto-commits -- all suggestions still require approval.
+
 ## 0.21.48 -- 2026-06-25
 - FEATURE (Tasks -- the "Morning Command Center"): a new Tasks tab. (1) FREE programmatic suggestions from
   recent email in+out (requests TO you + commitments YOU made + natural-language deadlines, balanced signal, no

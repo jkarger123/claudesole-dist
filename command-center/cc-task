@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# cc-task "<short task>"  -- propose a to-do. It lands as a SUGGESTION in the operator's Tasks tab (they
+# approve it; nothing is auto-added). For agents AND humans. Resolves this node's port + token from its
+# cc.config.json (via CC_CONFIG if set, else next to this script, else the default control-plane config).
+set -uo pipefail
+TITLE="$*"
+[ -z "${TITLE// }" ] && { echo "usage: cc-task \"task title\""; exit 1; }
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
+[ -f "$CFG" ] || CFG="$HOME/hptuners-control/cc.config.json"
+PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
+TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
+BODY="$(python3 -c "import json,sys;print(json.dumps({'title':sys.argv[1]}))" "$TITLE")"
+if curl -s -X POST "http://127.0.0.1:${PORT}/api/task-propose" \
+     -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODY" >/dev/null 2>&1; then
+  echo "✓ proposed to the To-Do list (suggestion): $TITLE"
+else
+  echo "could not reach the dashboard on port ${PORT}"
+fi

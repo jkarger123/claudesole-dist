@@ -3245,6 +3245,9 @@ def roster_text():
     if sk: bits.append("Skills here (Claude auto-invokes when a description matches, or /<name>): " + ", ".join(sk) + ".")
     if ag: bits.append("Agent-tools (scoped helpers in the Agents lens): " + ", ".join(ag) + ".")
     if tm: bits.append("Teams (rung-4 coordinating rosters in the Teams lens): " + ", ".join(tm) + ".")
+    bits.append("TO-DO: if you spot a task the operator should do (or a date they should put on their calendar), "
+                "propose it by running:  bash " + os.path.join(CC_HOME, "command-center", "cc-task") + " \"<short task>\""
+                "  -- it lands as a SUGGESTION in their Tasks tab for them to approve (never auto-added).")
     if not bits: return ""
     return "CAPABILITIES -- " + " ".join(bits) + " Author/maintain per the ClaudeFather docs/MEMORY_SKILLS_AGENTS.md."
 
@@ -5893,7 +5896,22 @@ def tasks_ai_scan(maxn=30):
         for m in (r.get("messages", []) if isinstance(r, dict) else []):
             chunks.append("[%s] %s | from %s | %s" % (lab, m.get("date", ""), m.get("from", ""), m.get("subject", "")))
             if m.get("snippet"): chunks.append("   " + (m["snippet"] or "")[:240])
-    material = ("\n".join(chunks))[:70000]
+    # Granola call notes (CC:CALLS regions across client folders) -- bounded walk, the meeting-action-item source
+    try:
+        seen = 0
+        for root, dirs, files in os.walk(PROJECT):
+            seen += 1
+            if seen > 2000: break
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "deliverables")]
+            if "CLAUDE.md" in files:
+                try:
+                    cur = open(os.path.join(root, "CLAUDE.md"), encoding="utf-8", errors="replace").read()
+                    mm = re.search(re.escape(granola.CALLS_B) + r"(.*?)" + re.escape(granola.CALLS_E), cur, re.S)
+                    if mm and mm.group(1).strip():
+                        chunks.append("[CALL NOTES -- %s]\n%s" % (os.path.relpath(root, PROJECT), mm.group(1).strip()[:1200]))
+                except Exception: pass
+    except Exception: pass
+    material = ("\n".join(chunks))[:75000]
     if not material.strip(): return {"ok": False, "error": "no recent mail to scan"}
     out = _claude_json(TASK_AI_PROMPT % material, timeout=220)
     if not isinstance(out, dict) or out.get("error"):
@@ -5951,6 +5969,56 @@ def task_launch(tid):
         return {"ok": False, "error": "could not start session"}
     task_update(tid, status="doing", session=name)
     return {"ok": True, "session": name, "term": "/term?name=" + urllib.parse.quote(name)}
+
+def task_propose(title, detail="", client=""):
+    """Agent-facing: an agent that spots something actionable proposes it as a SUGGESTION (user approves)."""
+    return task_add((title or "").strip(), detail=detail, client=client, source="agent", status="suggested", confidence=0.6)
+
+def task_calendar_create(tid):
+    """Accept a 📅 calendar SUGGESTION -> actually create the Google Calendar event (timed if a time was found,
+    else all-day), then mark the task done. This is the 'added only after acknowledgement' step."""
+    t = next((x for x in tasks_load() if x.get("id") == tid), None)
+    if not t: return {"ok": False, "error": "task not found"}
+    if not google_configured(): return {"ok": False, "error": "Google Workspace not configured"}
+    date = t.get("due")
+    if not date: return {"ok": False, "error": "no date on this suggestion"}
+    title = re.sub(r"^\U0001F4C5\s*", "", t.get("title", "")).strip() or "Event"
+    detail = t.get("detail", "") or ""
+    atts = re.findall(r"[\w.+-]+@[\w.-]+\.[\w-]+", detail)[:5] or None
+    mt = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", detail)
+    try:
+        if mt:
+            start = "%sT%02d:%02d:00" % (date, int(mt.group(1)), int(mt.group(2)))
+            end = (_dt.datetime.fromisoformat(start) + _dt.timedelta(hours=1)).isoformat()
+            r = calendar_create(title, start, end, desc=detail, attendees=atts)
+        else:
+            nd = (_dt.date.fromisoformat(date) + _dt.timedelta(days=1)).isoformat()
+            r = calendar_create(title, date, nd, desc=detail, all_day=True, attendees=atts)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+    if isinstance(r, dict) and r.get("error"): return {"ok": False, "error": r["error"]}
+    task_update(tid, status="done", scheduled=True)
+    return {"ok": True, "event": (r.get("id") if isinstance(r, dict) else None), "title": title, "date": date}
+
+_TASKS_SCHED = {"last": ""}
+def _tasks_morning_loop():
+    """Daily-morning auto-scan so the operator sits down to a fresh list. Programmatic sweep (free) + the AI scan
+    (if enabled). Configurable: cc.config tasks_morning_scan (default on), tasks_morning_ai (default on),
+    tasks_morning_hour (default 6). Checks every 15 min; dedup by date (task_add fingerprints prevent dupes)."""
+    while True:
+        try:
+            if google_configured() and CC.get("tasks_morning_scan", True):
+                now = _dt.datetime.now(); today = now.date().isoformat()
+                if now.hour == int(CC.get("tasks_morning_hour") or 6) and _TASKS_SCHED["last"] != today:
+                    _TASKS_SCHED["last"] = today
+                    try: tasks_sweep_programmatic()
+                    except Exception: pass
+                    if CC.get("tasks_morning_ai", True):
+                        try: tasks_ai_scan()
+                        except Exception: pass
+                    print("tasks: morning auto-scan ran for", today)
+        except Exception: pass
+        time.sleep(900)
 
 def ideas_list(): return load(IDEAS, {"ideas": []}).get("ideas", [])
 def idea_add(body):
@@ -6616,6 +6684,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/task-launch":   return self._s(200, json.dumps(task_launch(body.get("id", ""))))
         if u.path == "/api/tasks-sweep":   return self._s(200, json.dumps(tasks_sweep_programmatic()))
         if u.path == "/api/tasks-ai-scan": return self._s(200, json.dumps(tasks_ai_scan()))
+        if u.path == "/api/task-calendar": return self._s(200, json.dumps(task_calendar_create(body.get("id", ""))))
+        if u.path == "/api/task-propose":  return self._s(200, json.dumps(task_propose(body.get("title", ""), body.get("detail", ""), body.get("client", ""))))
         if u.path == "/api/idea-add":      return self._s(200, json.dumps(idea_add(body)))
         if u.path == "/api/idea-update":   return self._s(200, json.dumps(idea_update(body)))
         if u.path == "/api/idea-delete":   return self._s(200, json.dumps(idea_delete(body.get("id", ""))))
@@ -11844,7 +11914,9 @@ function tkCard(t){
   var sug=(t.status==='suggested'), cl=tkClientName(t.client);
   var conf=(sug&&t.confidence)?('<span class="tk-conf">'+Math.round(t.confidence*100)+'%</span>'):'';
   var acts;
-  if(sug){ acts='<button class="mini go" onclick="tkAccept(\''+t.id+'\')">✓ Accept</button><button class="mini" onclick="tkLaunch(\''+t.id+'\')">▶ Start</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕ Dismiss</button>'; }
+  if(sug){ acts=(t.kind==='calendar')
+      ? '<button class="mini go" onclick="tkCalendar(\''+t.id+'\')">📅 Add to calendar</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕ Dismiss</button>'
+      : '<button class="mini go" onclick="tkAccept(\''+t.id+'\')">✓ Accept</button><button class="mini" onclick="tkLaunch(\''+t.id+'\')">▶ Start</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕ Dismiss</button>'; }
   else if(t.status==='done'){ acts='<button class="mini" onclick="tkStatus(\''+t.id+'\',\'open\')">↺ Reopen</button>'; }
   else { acts='<button class="mini go" onclick="tkLaunch(\''+t.id+'\')">▶ Start</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'done\')">✓ Done</button><button class="mini" onclick="tkSnooze(\''+t.id+'\')">⏰ Snooze</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕</button>'; }
   return '<div class="card tk-card'+(sug?' tk-sug':'')+'" style="cursor:default;grid-column:1/-1">'
@@ -11874,6 +11946,7 @@ async function tkSnooze(id){ var d=new Date(); d.setDate(d.getDate()+1); await f
 async function tkLaunch(id){ busyOn('▶ Launching an agent on this task…','opening the right folder + briefing it'); var r=null; try{ r=await(await fetch('/api/task-launch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})).json(); }catch(e){} busyOff(); if(!r||!r.ok){ toast('Launch failed: '+esc((r&&r.error)||'?'),6000); return; } toast('Agent launched ✓'); if(typeof _openTerm==='function') _openTerm(r); loadTasks(); }
 function tkAdd(){ showM('<h2>＋ New task</h2><div class="row"><label>Task</label><input id="tkT" placeholder="What needs doing?"></div><div class="row"><label>Due (optional)</label><input id="tkD" type="date"></div><div class="btns"><button class="btn" onclick="closeM()">Cancel</button><button class="btn go" onclick="tkAddGo()">Add</button></div>'); setTimeout(function(){var e=document.getElementById("tkT");if(e)e.focus();},60); }
 async function tkAddGo(){ var t=((document.getElementById("tkT")||{}).value)||''; var d=((document.getElementById("tkD")||{}).value)||null; if(!t.trim()){toast("Enter a task");return;} await fetch('/api/task-add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,due:d})}); closeM(); loadTasks(); }
+async function tkCalendar(id){ busyOn('📅 Adding to your calendar…'); var r=null; try{ r=await(await fetch('/api/task-calendar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})).json(); }catch(e){} busyOff(); if(!r||!r.ok){ toast('Calendar: '+esc((r&&r.error)||'failed'),6000); return; } toast('📅 Added to calendar: '+esc(r.title||'')+' · '+esc(r.date||''),5000); loadTasks(); }
 async function tkSweep(){ busyOn('🔄 Scanning recent email for action items…','free — no AI'); var r=null; try{ r=await(await fetch('/api/tasks-sweep',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json(); }catch(e){} busyOff(); toast(r&&r.ok?('Found '+(r.added||0)+' new suggestion'+((r.added===1)?'':'s')):'Scan failed',5000); loadTasks(); }
 async function tkAiScan(){ if(!confirm('Run an AI scan of your recent email + notes for todos and calendar suggestions?\n\nUses tokens (one batched pass). Everything lands as suggestions you accept.')) return; busyOn('✨ AI scanning your recent correspondence…','finding todos + calendar items — about a minute'); var r=null; try{ r=await(await fetch('/api/tasks-ai-scan',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json(); }catch(e){} busyOff(); if(!r||!r.ok){ toast('AI scan: '+esc((r&&r.error)||'failed'),6000); return;} toast('✨ '+(r.tasks||0)+' todos + '+(r.events||0)+' calendar suggestions added',6000); loadTasks(); }
 async function loadIdeas(){
@@ -12692,4 +12765,5 @@ if __name__ == "__main__":
             except Exception: pass
     threading.Thread(target=_boot_housekeeping, daemon=True).start()
     threading.Thread(target=_autoapprove_loop, daemon=True).start()   # keep agents off the permission-prompt wall
+    threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
