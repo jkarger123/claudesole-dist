@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.51 -- 2026-06-25
+- IMPROVE (Tasks AI scan reads FULL email bodies): the AI scan already covered email both directions (incoming +
+  sent) + Granola notes, but only fed subject+preview snippets. Now it reads the FULL message bodies (quoted
+  chains stripped, fetched in parallel) so it catches action items buried deeper -- still ONE batched call.
+
 ## 0.21.50 -- 2026-06-25
 - FIX (Tasks tab was hidden): applyPreset() hides any nav tab not in the node's preset lens list, so the new
   Tasks tab never showed on preset nodes (AFP/carsearch). Tasks now gets an always-on override (like the Google

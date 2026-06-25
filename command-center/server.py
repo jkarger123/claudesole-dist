@@ -5893,9 +5893,12 @@ def tasks_ai_scan(maxn=30):
     for view, lab in (("inbox", "INCOMING"), ("sent", "OUTGOING (you sent)")):
         try: r = gmail_list(view=view, maxn=maxn)
         except Exception: r = {}
-        for m in (r.get("messages", []) if isinstance(r, dict) else []):
-            chunks.append("[%s] %s | from %s | %s" % (lab, m.get("date", ""), m.get("from", ""), m.get("subject", "")))
-            if m.get("snippet"): chunks.append("   " + (m["snippet"] or "")[:240])
+        msgs = r.get("messages", []) if isinstance(r, dict) else []
+        bodies = _g_parallel([(lambda i=(mm.get("id", "")): _gmail_full_text(i)) for mm in msgs])   # FULL bodies, in parallel
+        for mm, bod in zip(msgs, bodies):
+            chunks.append("[%s] %s | from %s | %s" % (lab, mm.get("date", ""), mm.get("from", ""), mm.get("subject", "")))
+            body = _strip_quoted(bod or "") or (mm.get("snippet", "") or "")   # full message, quoted chains stripped
+            if body: chunks.append("   " + body[:1400])
     # Granola call notes (CC:CALLS regions across client folders) -- bounded walk, the meeting-action-item source
     try:
         seen = 0
@@ -5911,7 +5914,7 @@ def tasks_ai_scan(maxn=30):
                         chunks.append("[CALL NOTES -- %s]\n%s" % (os.path.relpath(root, PROJECT), mm.group(1).strip()[:1200]))
                 except Exception: pass
     except Exception: pass
-    material = ("\n".join(chunks))[:75000]
+    material = ("\n".join(chunks))[:110000]   # headroom for full bodies (in+out) + Granola notes in one batched call
     if not material.strip(): return {"ok": False, "error": "no recent mail to scan"}
     out = _claude_json(TASK_AI_PROMPT % material, timeout=220)
     if not isinstance(out, dict) or out.get("error"):
