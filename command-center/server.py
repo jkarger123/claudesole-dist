@@ -565,6 +565,14 @@ GOOGLE_SECRETS_DIR = os.path.join(CC_HOME, "extensions", "google-workspace", "se
 GOOGLE_TOKENS_DIR = os.path.join(GOOGLE_SECRETS_DIR, "tokens")
 _GOOGLE_TOK = {"access": None, "exp": 0, "email": None, "scopes": []}
 _GOOGLE_LOCK = threading.Lock()
+# Bounded timeouts so a FLAPPING uplink fails FAST instead of hanging the user. The LIST endpoints
+# (gmail/calendar/drive list) use the SHORT timeout: a cold fetch that can't complete in ~9s bails out
+# -> stale-while-revalidate serves last-good (or the frontend shows "offline, retrying") instead of a
+# ~40s spinner. Mutations (send/modify/upload) keep the longer _g_api default (30s). The token refresh
+# is bounded too (it runs under _GOOGLE_LOCK, so an unbounded refresh would serialize EVERY google call
+# behind it during a flap). All overridable via cc.config.json. (config-driven, no hardcoding.)
+GOOGLE_LIST_TIMEOUT = int(CC.get("google_list_timeout") or 9)
+GOOGLE_TOKEN_TIMEOUT = int(CC.get("google_token_timeout") or 10)
 
 def _google_token_file():
     acct = CC.get("google_account")
@@ -598,7 +606,7 @@ def _google_access_token():
             data = urllib.parse.urlencode({"client_id": d["client_id"], "client_secret": d["client_secret"],
                 "refresh_token": d["refresh_token"], "grant_type": "refresh_token"}).encode()
             req = urllib.request.Request(d.get("token_uri", "https://oauth2.googleapis.com/token"), data=data)
-            r = json.loads(urllib.request.urlopen(req, timeout=20).read())
+            r = json.loads(urllib.request.urlopen(req, timeout=GOOGLE_TOKEN_TIMEOUT).read())
             _GOOGLE_TOK.update(access=r["access_token"], exp=now + int(r.get("expires_in", 3600)),
                                email=os.path.basename(tf)[:-5], scopes=d.get("scopes", []))
             return _GOOGLE_TOK["access"]
@@ -652,12 +660,13 @@ def _gmail_list_live(view="inbox", q="", maxn=25, page_token=""):
                  "starred": "is:starred", "important": "is:important"}.get(view, "in:inbox")
     params = {"maxResults": min(int(maxn or 25), 50), "q": query}
     if page_token: params["pageToken"] = page_token
-    r = _g_api("GET", GMAIL_BASE + "/messages", params=params)
+    r = _g_api("GET", GMAIL_BASE + "/messages", params=params, timeout=GOOGLE_LIST_TIMEOUT)  # short timeout: fail fast on a cold flap
     if "error" in r: return r
     ids = [m["id"] for m in r.get("messages", [])]
     def fetch(mid):
         m = _g_api("GET", GMAIL_BASE + "/messages/" + mid,
-                   params={"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]})
+                   params={"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]},
+                   timeout=GOOGLE_LIST_TIMEOUT)
         if not isinstance(m, dict) or "error" in m: return None
         hs = {h["name"].lower(): h["value"] for h in m.get("payload", {}).get("headers", [])}
         lab = m.get("labelIds", [])
@@ -788,9 +797,49 @@ def _load_gcache():
     except Exception: pass
 _load_gcache()   # warm the caches from disk at boot -> no cold window after a restart
 
+def _warm_default_views():
+    """Boot-warm the EXACT default views the frontend lands on, so the very first load after a fresh
+    deploy (empty disk cache) is covered ASAP -- without this, the warmer loops only touch keys requested
+    in the last 5 min, so a brand-new node serves a cold (~slow) first fetch. We (1) register the default
+    keys into the warmer's active sets so they stay warm, and (2) do ONE immediate non-blocking fetch to
+    populate the cache now (rather than waiting up to ~50s for the first loop tick). This also primes the
+    OAuth access token in the background, so the user's first real fetch isn't stuck behind a token refresh.
+
+    Keys MUST match what the UI requests verbatim or the seeded entry won't be served:
+      - Gmail: view=inbox q='in:inbox' max=50  -> _gm_key('inbox','in:inbox',50)   (exact match)
+      - Drive: default root listing            -> 'drv||300||||'                    (exact match)
+      - Calendar: the window is computed client-side (tz/locale week-start), so we can't pre-match the
+        exact key; we warm a 7-day-from-now window which primes the token + Calendar API path. (best-effort)
+    Runs in a daemon thread; never blocks boot."""
+    try:
+        if not google_configured(): return
+        now = time.time()
+        # Gmail default inbox (the key loadGmail/gmFetchList uses: view=inbox, q='in:inbox', max=50)
+        gk = _gm_key("inbox", "in:inbox", 50)
+        with _GM_LOCK: _GM_ACTIVE[gk] = now
+        if gk not in _GM_CACHE:
+            live = _gmail_list_live("inbox", "in:inbox", 50)
+            if isinstance(live, dict) and "error" not in live:
+                with _GM_LOCK: _GM_CACHE[gk] = {"data": live, "at": time.time(), "ok": True}
+        # Drive default root listing (the key the drive route builds for the UI's default qs)
+        dk = "drv||300||||"
+        with _GC_LOCK: _GC_ACTIVE[dk] = {"at": now, "fetch": (lambda: drive_list("", 300, "", "", "", ""))}
+        if dk not in _GC_CACHE:
+            live = drive_list("", 300, "", "", "", "")
+            if isinstance(live, dict) and "error" not in live:
+                with _GC_LOCK: _GC_CACHE[dk] = {"data": live, "at": time.time(), "ok": True}
+        # Calendar 7d window (best-effort: primes token + API path; exact UI key is tz/locale dependent)
+        ck = "cal|7|boot7d"
+        with _GC_LOCK: _GC_ACTIVE[ck] = {"at": now, "fetch": (lambda: calendar_events(7, None, None))}
+        _persist_gcache()
+    except Exception:
+        pass
+
 def gmail_unread():
     # exact unread-in-inbox count for the nav badge. Reading the label does NOT mark anything read.
-    r = _g_api("GET", GMAIL_BASE + "/labels/INBOX")
+    # Short timeout: this polls every 30s in the background -> a flap must not tie up a server thread
+    # for 30s; a miss just leaves the badge at its last value (fails soft, see the JS poll's catch).
+    r = _g_api("GET", GMAIL_BASE + "/labels/INBOX", timeout=GOOGLE_LIST_TIMEOUT)
     if not isinstance(r, dict) or "error" in r: return {"count": 0}
     return {"count": r.get("messagesUnread", 0)}
 
@@ -1078,7 +1127,8 @@ def calendar_events(days=7, tmin=None, tmax=None):
         tmax = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + int(days or 7) * 86400))
     r = _g_api("GET", CAL_BASE,
                params={"timeMin": tmin, "timeMax": tmax, "singleEvents": "true",
-                       "orderBy": "startTime", "maxResults": 250})
+                       "orderBy": "startTime", "maxResults": 250},
+               timeout=GOOGLE_LIST_TIMEOUT)   # short timeout: fail fast on a cold flap -> stale-while-revalidate
     if "error" in r: return r
     evs = []
     for e in r.get("items", []):
@@ -1107,6 +1157,18 @@ def calendar_events(days=7, tmin=None, tmax=None):
                                   for a in e.get("attendees", [])][:50]})
     return {"events": evs, "tmin": tmin, "tmax": tmax, "days": int(days or 7),
             "tz": _GOOGLE_TOK.get("tz") or "", "email": _GOOGLE_TOK.get("email")}
+
+def calendar_get(eid):
+    """A single event by id (the drag-to-session resolver needs details for an event not in the loaded window)."""
+    if not eid: return {"error": "no id"}
+    e = _g_api("GET", CAL_BASE + "/" + eid)
+    if not isinstance(e, dict) or "error" in e: return e if isinstance(e, dict) else {"error": "event failed"}
+    st = e.get("start", {}); en = e.get("end", {})
+    return {"id": e.get("id"), "summary": e.get("summary", "(no title)"),
+            "location": e.get("location", ""), "description": e.get("description", ""),
+            "start": st.get("dateTime") or st.get("date"), "end": en.get("dateTime") or en.get("date"),
+            "link": e.get("htmlLink"), "organizer": (e.get("organizer") or {}).get("email", ""),
+            "attendees": [{"email": a.get("email", "")} for a in e.get("attendees", [])][:50]}
 
 def _cal_attendees(arr):
     out = []
@@ -1257,7 +1319,8 @@ def drive_list(q="", maxn=300, parent="", kind="", starred="", order=""):
     r = _g_api("GET", DRIVE_BASE,
                params={"pageSize": min(int(maxn or 300), 1000), "orderBy": ob,
                        "q": " and ".join(clauses), "spaces": "drive", "corpora": "user",
-                       "fields": "files(%s)" % DRIVE_FIELDS})
+                       "fields": "files(%s)" % DRIVE_FIELDS},
+               timeout=GOOGLE_LIST_TIMEOUT)   # short timeout: fail fast on a cold flap -> stale-while-revalidate
     if isinstance(r, dict) and "error" in r: return r
     fs = [_drive_row(f) for f in r.get("files", [])]
     return {"files": fs, "q": q, "parent": parent,
@@ -1297,10 +1360,12 @@ def drive_modify(fid, action, value=""):
 def drive_thumb(fid):
     # Returns raw image bytes for a file's Drive-hosted thumbnail (Bearer-authed, so it streams
     # through us instead of the browser hitting an un-authed googleusercontent URL). None on miss.
-    f = _g_api("GET", DRIVE_BASE + "/" + fid, params={"fields": "thumbnailLink"})
+    # Short timeouts: one <img> fires per file in the grid; on a flap a slow thumb must not tie up a
+    # server thread for 30s (the browser <img onerror> already degrades gracefully to a generic icon).
+    f = _g_api("GET", DRIVE_BASE + "/" + fid, params={"fields": "thumbnailLink"}, timeout=GOOGLE_LIST_TIMEOUT)
     if not isinstance(f, dict) or not f.get("thumbnailLink"): return None
     url = f["thumbnailLink"].replace("=s220", "=s400")
-    b = _g_api("GET", url, raw=True)
+    b = _g_api("GET", url, raw=True, timeout=GOOGLE_LIST_TIMEOUT)
     return b if isinstance(b, (bytes, bytearray)) else None
 
 def drive_content(fid):
@@ -5580,6 +5645,22 @@ def session_upload(session, filename, mime, b64data, note="", enter=False):
     cap = _session_upload_cap_mb() * 1024 * 1024
     if len(raw) > cap:
         return {"ok": False, "error": "file exceeds %d MB limit" % _session_upload_cap_mb()}
+    return _deliver_to_session(sess, filename, mime, raw, note, enter)
+
+def _inject_path_into_session(sess, path, note="", enter=False):
+    """tmux send-keys an ABSOLUTE path (+ optional inline note) into a session so Claude reads it BY PATH.
+    Trailing space lets the operator append an instruction; Enter is OFF by default (operator reviews first).
+    This is THE primitive that 'hands the agent a thing' -- both uploads and resolved sendables end here."""
+    n = (note or "").strip()
+    msg = (path + " " + n) if n else (path + " ")   # trailing space -> operator can append an instruction inline
+    sh([TMUX, "send-keys", "-t", sess, "-l", msg])   # literal: handles any chars in the path safely
+    if enter: sh([TMUX, "send-keys", "-t", sess, "Enter"])
+    return {"ok": True, "path": path, "name": os.path.basename(path), "session": sess, "entered": bool(enter)}
+
+def _deliver_to_session(sess, filename, mime, raw, note="", enter=False):
+    """Write RAW bytes under SESSION_UPLOAD_ROOT with a safe, unique, extension-preserving name, then inject
+    its path into the session. The ONE place bytes -> path -> session happens (file uploads AND resolved
+    sendables share it). `sess` is assumed already validated to exist."""
     fn = _ensure_ext(_sanitize_filename(filename or "upload"), mime)   # reuse the attachment helpers: keep the type
     stem, ext = os.path.splitext(fn)
     uniq = "%s_%s%s" % (stem[:60] or "file", secrets.token_hex(4), ext)   # unique -> never clobbers a prior upload
@@ -5591,12 +5672,159 @@ def session_upload(session, filename, mime, b64data, note="", enter=False):
         with open(dest, "wb") as f: f.write(raw)
     except Exception as e:
         return {"ok": False, "error": str(e)[:120]}
-    n = (note or "").strip()
-    msg = (dest + " " + n) if n else (dest + " ")   # trailing space -> operator can append an instruction inline
-    sh([TMUX, "send-keys", "-t", sess, "-l", msg])   # literal: handles any chars in the path safely
-    if enter: sh([TMUX, "send-keys", "-t", sess, "Enter"])
-    return {"ok": True, "path": dest, "name": os.path.basename(dest), "session": sess,
-            "bytes": len(raw), "entered": bool(enter)}
+    out = _inject_path_into_session(sess, dest, note, enter)
+    out["bytes"] = len(raw)
+    return out
+
+# ======================================================================================================
+# GENERIC "sendable -> session" pipeline (the drag-ANYTHING feature). Drag any portal item -- a Drive file,
+# an email, a calendar event, a deliverable, a Granola transcript, or any future extension item -- onto a
+# session and the agent RECEIVES it. A draggable item carries a tiny descriptor {kind, id, ...}; the route
+# POST /api/session-send resolves that descriptor to content the agent can read, then injects it via the
+# SAME path-injection used by uploads. EXTENSIBLE BY DESIGN: a new kind registers ONE resolver
+# (register_sendable) -- no per-type branching in the route. A resolver(desc) returns EITHER
+#   {"ok":True,"path":<abs path>}                          -> inject an existing file IN PLACE (no copy)
+#   {"ok":True,"filename":..,"mime":..,"data":<bytes|str>} -> materialize to the uploads dir, then inject
+# plus an optional "note" (a one-line hint typed alongside the path). Errors: {"error":"..."}. Resolvers
+# MUST be read-only + secret-clean; payload size is bounded by the same upload cap.
+# ======================================================================================================
+SESSION_SEND_RESOLVERS = {}
+def register_sendable(kind, fn):
+    """Register a resolver for a sendable kind (idempotent -- extensions can re-register on reload)."""
+    if kind and callable(fn): SESSION_SEND_RESOLVERS[str(kind)] = fn
+
+def _sendable_cap(): return _session_upload_cap_mb() * 1024 * 1024
+
+# --- built-in resolvers --------------------------------------------------------------------------------
+def _send_deliverable(d):
+    """A file already on disk in the project tree (Files lens) -- inject its path IN PLACE (no copy)."""
+    rel = d.get("id") or d.get("rel") or ""
+    try: ab = projpath(rel)
+    except Exception: return {"error": "bad path"}
+    if _path_has_secret(ab): return {"error": "refusing to send a secret file"}
+    real = os.path.realpath(ab)
+    st = _icloud_state(real)
+    if st == "absent": return {"error": "file not found"}
+    if st == "evicted" and not _materialize_icloud(real):   # fault iCloud bytes back before the agent reads
+        return {"error": "file is in iCloud and could not be downloaded"}
+    if not os.path.isfile(real): return {"error": "not a file"}
+    return {"ok": True, "path": real, "note": (d.get("note") or "")}
+
+# Google-native docs have no downloadable bytes -- export them to a format the agent can actually read.
+_GDRIVE_EXPORT = {"application/vnd.google-apps.document": ("text/plain", ".txt"),
+                  "application/vnd.google-apps.spreadsheet": ("text/csv", ".csv"),
+                  "application/vnd.google-apps.presentation": ("application/pdf", ".pdf"),
+                  "application/vnd.google-apps.drawing": ("image/png", ".png")}
+def _send_drive(d):
+    """A Google Drive file -- download its bytes (exporting Google-native docs) to the uploads dir."""
+    if not google_configured(): return {"error": "Google is not configured on this node"}
+    fid = d.get("id") or ""
+    if not fid: return {"error": "no Drive id"}
+    f = _g_api("GET", DRIVE_BASE + "/" + fid, params={"fields": "name,mimeType,size,capabilities"})
+    if not isinstance(f, dict) or "error" in f: return {"error": "Drive lookup failed"}
+    if f.get("mimeType") == "application/vnd.google-apps.folder": return {"error": "can't send a folder"}
+    if not (f.get("capabilities") or {}).get("canDownload", True): return {"error": "file is not downloadable"}
+    name = f.get("name") or "drive-file"; mime = f.get("mimeType", "")
+    try: sz = int(f.get("size") or 0)
+    except Exception: sz = 0
+    if sz and sz > _sendable_cap(): return {"error": "file exceeds %d MB limit" % _session_upload_cap_mb()}
+    if mime.startswith("application/vnd.google-apps"):
+        exp_mime, ext = _GDRIVE_EXPORT.get(mime, ("application/pdf", ".pdf"))
+        b = _g_api("GET", DRIVE_BASE + "/" + fid + "/export", params={"mimeType": exp_mime}, raw=True)
+        if not isinstance(b, (bytes, bytearray)): return {"error": "Drive export failed"}
+        if not name.lower().endswith(ext): name += ext
+        mime = exp_mime
+    else:
+        b = _g_api("GET", DRIVE_BASE + "/" + fid, params={"alt": "media"}, raw=True)
+        if not isinstance(b, (bytes, bytearray)): return {"error": "Drive download failed"}
+    if len(b) > _sendable_cap(): return {"error": "file exceeds %d MB limit" % _session_upload_cap_mb()}
+    return {"ok": True, "filename": name, "mime": mime, "data": bytes(b), "note": "(Drive file: %s)" % name}
+
+def _send_gmail(d):
+    """An email -- save the message (or, with full=1, the whole thread) as a readable .md, inject its path."""
+    if not google_configured(): return {"error": "Google is not configured on this node"}
+    mid = d.get("id") or ""; tid = d.get("thread") or ""
+    def _md(m):
+        body = m.get("body") or {}
+        text = (body.get("text") or "").strip() or _html_to_text(body.get("html") or "")
+        return ("Subject: %s\nFrom: %s\nTo: %s\nDate: %s\n\n%s\n" %
+                (m.get("subject", ""), m.get("from", ""), m.get("to", ""), m.get("date", ""), text))
+    if d.get("full") and tid:
+        t = gmail_thread(tid)
+        if not isinstance(t, dict) or "error" in t: return {"error": "could not load thread"}
+        parts = [_md(m) for m in (t.get("messages") or [])]
+        if not parts: return {"error": "empty thread"}
+        subj = t.get("subject") or "email-thread"
+        md = ("# Email thread: %s (%d messages)\n\n" % (subj, len(parts))) + "\n---\n\n".join(parts)
+        return {"ok": True, "filename": (_sanitize_filename(subj)[:60] or "thread") + ".md",
+                "mime": "text/markdown", "data": md, "note": "(email thread: %s)" % subj}
+    m = gmail_get(mid) if mid else None
+    if (not isinstance(m, dict) or "error" in m) and tid:   # fall back to the thread's latest message
+        t = gmail_thread(tid)
+        if isinstance(t, dict) and t.get("messages"): m = t["messages"][0]
+    if not isinstance(m, dict) or "error" in m or not m.get("subject"):
+        return {"error": "could not load email"}
+    subj = m.get("subject") or "email"
+    return {"ok": True, "filename": (_sanitize_filename(subj)[:60] or "email") + ".md", "mime": "text/markdown",
+            "data": _md(m), "note": "(email from %s)" % (m.get("from", "") or "?")}
+
+def _send_calendar(d):
+    """A calendar event -- write its details to a small .md and inject the path."""
+    if not google_configured(): return {"error": "Google is not configured on this node"}
+    eid = d.get("id") or ""
+    if not eid: return {"error": "no event id"}
+    e = calendar_get(eid)
+    if not isinstance(e, dict) or "error" in e: return {"error": "could not load event"}
+    att = ", ".join([a.get("email", "") for a in (e.get("attendees") or [])]) or "(none)"
+    md = ("# %s\n\nWhen: %s -> %s\nWhere: %s\nOrganizer: %s\nAttendees: %s\nLink: %s\n\n%s\n" %
+          (e.get("summary", "(no title)"), e.get("start", ""), e.get("end", ""),
+           e.get("location", "") or "(none)", e.get("organizer", "") or "(none)", att,
+           e.get("link", "") or "", e.get("description", "") or ""))
+    return {"ok": True, "filename": (_sanitize_filename(e.get("summary", "event"))[:60] or "event") + ".md",
+            "mime": "text/markdown", "data": md, "note": "(calendar event: %s)" % e.get("summary", "")}
+
+def _send_granola(d):
+    """A Granola call transcript -- inject its text (best-effort; needs the granola extension configured)."""
+    mid = d.get("id") or ""
+    if not mid: return {"error": "no transcript id"}
+    try: tx = granola.get_transcript(mid)
+    except Exception as e: return {"error": "transcript unavailable: " + str(e)[:80]}
+    if not tx: return {"error": "no transcript text"}
+    return {"ok": True, "filename": "granola-" + re.sub(r"[^A-Za-z0-9_-]", "", mid)[:40] + ".md",
+            "mime": "text/markdown", "data": "# Call transcript\n\n" + tx, "note": "(call transcript)"}
+
+register_sendable("deliverable", _send_deliverable)
+register_sendable("drive", _send_drive)
+register_sendable("gmail", _send_gmail)
+register_sendable("calendar", _send_calendar)
+register_sendable("granola", _send_granola)
+
+def session_send(session, kind, desc, note="", enter=False):
+    """Resolve a {kind,id,...} descriptor to content and hand it to a session (the drag-ANYTHING endpoint).
+    Reuses the upload path-injection: existing files inject in place; resolved bytes materialize to uploads."""
+    sess = re.sub(r"[^A-Za-z0-9_-]", "", session or "")[:64]
+    if not sess: return {"ok": False, "error": "no session given"}
+    if sh([TMUX, "has-session", "-t", sess])[0] != 0:
+        return {"ok": False, "error": "session not found (it may have closed)"}
+    fn = SESSION_SEND_RESOLVERS.get(str(kind or ""))
+    if not fn: return {"ok": False, "error": "don't know how to send '%s'" % kind}
+    desc = desc if isinstance(desc, dict) else {}
+    try: out = fn(desc)
+    except Exception as e: return {"ok": False, "error": "resolve failed: " + str(e)[:140]}
+    if not isinstance(out, dict) or out.get("error") or not out.get("ok", True):
+        return {"ok": False, "error": (out or {}).get("error", "could not resolve item")}
+    extra = (note or "").strip(); rnote = (out.get("note") or "").strip()
+    full_note = (rnote + ((" " + extra) if extra else "")).strip()
+    if out.get("path"):   # inject an existing file in place (no copy)
+        real = out["path"]
+        if _path_has_secret(real): return {"ok": False, "error": "refusing to send a secret file"}
+        r = _inject_path_into_session(sess, real, full_note, enter); r["kind"] = kind; return r
+    raw = out.get("data")
+    if isinstance(raw, str): raw = raw.encode("utf-8")
+    if not isinstance(raw, (bytes, bytearray)): return {"ok": False, "error": "resolver returned no content"}
+    if len(raw) > _sendable_cap(): return {"ok": False, "error": "item exceeds %d MB limit" % _session_upload_cap_mb()}
+    r = _deliver_to_session(sess, out.get("filename", "item"), out.get("mime", ""), bytes(raw), full_note, enter)
+    r["kind"] = kind; return r
 
 # ======================================================================================================
 # AGENTIC LEVERAGE LAYER -- vertical slice 1 (Action Queue + "Smart Reply with 360 context").
@@ -7218,6 +7446,10 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(session_upload(
                 body.get("session", ""), body.get("filename", ""), body.get("mime", ""),
                 body.get("data", ""), body.get("note", ""), bool(body.get("enter", False)))))
+        if u.path == "/api/session-send":     # drag ANYTHING -> session: resolve a {kind,id,...} descriptor + hand it over
+            return self._s(200, json.dumps(session_send(
+                body.get("session", ""), body.get("kind", ""), body,   # the whole body IS the descriptor (id/thread/full/rel/...)
+                body.get("note", ""), bool(body.get("enter", False)))))
         if u.path == "/api/compact-session":  # handoff -> /compact -> re-read handoff (preserve agent memory)
             return self._s(200, json.dumps(compact_session(body.get("name", ""))))
         if u.path == "/api/resume":
@@ -8024,6 +8256,20 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .sb-tile.done .sb-dot{background:var(--accent)}
 @keyframes sbblink{0%,100%{opacity:1}50%{opacity:.35}}
 @keyframes sbpulse{0%,100%{box-shadow:0 0 0 0 rgba(var(--accent-rgb),0);background:var(--card)}50%{box-shadow:0 0 16px 2px rgba(var(--accent-rgb),.6);background:rgba(var(--accent-rgb),.18)}}
+/* ===== ss-* : drag ANYTHING -> session. Dock tiles glow as drop targets while a sendable is in flight. ===== */
+body.ss-dragging #sessbar{box-shadow:0 -2px 22px rgba(var(--accent-rgb),.35)}
+body.ss-dragging .sb-tile{border-color:rgba(var(--accent-rgb),.55)}
+.sb-tile.ss-over{border-color:var(--accent)!important;background:rgba(var(--accent-rgb),.22)!important;box-shadow:0 0 14px 2px rgba(var(--accent-rgb),.6);transform:translateY(-2px)}
+[data-ss][draggable]{cursor:grab;-webkit-touch-callout:none}   /* suppress the iOS long-press save/callout menu so our pick-up gesture owns it */
+.ss-btn{background:transparent;border:1px solid var(--line);color:var(--mut);border-radius:6px;padding:1px 7px;font-size:12px;font-weight:700;cursor:pointer;line-height:1.5;flex:0 0 auto}
+.ss-btn:hover{color:var(--accent);border-color:var(--accent);background:rgba(var(--accent-rgb),.12)}
+.ss-ghost{position:fixed;z-index:9999;pointer-events:none;transform:translate(-50%,-130%);
+  background:var(--accent);color:#10100a;font-size:12px;font-weight:800;padding:6px 11px;border-radius:9px;
+  box-shadow:0 10px 30px rgba(0,0,0,.5);max-width:60vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ss-pick{display:flex;flex-direction:column;gap:7px;max-height:50vh;overflow:auto}
+.ss-pickb{text-align:left;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;
+  padding:10px 12px;font-size:14px;font-weight:600;cursor:pointer}
+.ss-pickb:hover{border-color:var(--accent);background:rgba(var(--accent-rgb),.14)}
 /* ===== Sessions taskbar blow-up hover panel (sb-*) — live interactive terminal + actions ===== */
 #sessprev{position:fixed;z-index:61;display:none;flex-direction:column;
   background:var(--card);border:1px solid var(--accent);border-radius:12px;
@@ -9404,9 +9650,10 @@ function renderFiles(){
   else{let lastG=null;
     fs.forEach(f=>{const g=fileGroup(f.mtime);if(g!==lastG){h+='<div class="card" style="cursor:default;grid-column:1/-1;background:transparent;border:none;padding:8px 2px 0"><b style="font-size:14px;color:#e8c547">'+g+'</b></div>';lastG=g;}
       const t=TIER[f.tier]||TIER.local;
-      h+='<div class="card" style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+      h+='<div class="card" '+ssAttr({kind:'deliverable',id:f.rel,name:f.name})+' style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
         +'<span style="flex:1;min-width:220px"><a href="/api/file-get?b64='+b64u(f.rel)+'" target="_blank" rel="noopener" style="color:inherit;font-weight:700" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'
         +'<div class="sub" style="margin-top:2px">'+(f.module?('&#128194; '+esc(f.module)+' &middot; '):'')+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</div></span>'
+        +ssBtn()
         +'<button class="mini go" title="download to THIS device (works on your phone)" onclick="dlFile(\''+esc(f.rel)+'\',\''+esc(f.name)+'\')">&#8595; Download</button>'
         +'</div></div>';});
   }
@@ -9419,7 +9666,8 @@ function renderBrowse(){const b=BROWSE||{};
   if(!b.ok){h+=empty('Could not browse: '+esc(b.error||'?'));document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';return;}
   if(BROWSEREL!==''){h+='<div class="card" style="cursor:pointer;grid-column:1/-1" onclick="loadBrowse(\''+esc(b.parent||'')+'\')"><b>&#11014; ..</b> <span class="sub">up a level</span></div>';}
   (b.dirs||[]).forEach(d=>{h+='<div class="card" style="cursor:pointer;grid-column:1/-1" onclick="loadBrowse(\''+esc(d.rel)+'\')"><b>&#128193; '+esc(d.name)+'</b> <span class="sub">folder</span></div>';});
-  (b.files||[]).forEach(f=>{const url='/api/file-get?b64='+b64u(f.rel);h+='<div class="card" style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="flex:1;min-width:200px"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="sub">&middot; '+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</span></span>'
+  (b.files||[]).forEach(f=>{const url='/api/file-get?b64='+b64u(f.rel);h+='<div class="card" '+ssAttr({kind:'deliverable',id:f.rel,name:f.name})+' style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="flex:1;min-width:200px"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="sub">&middot; '+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</span></span>'
+    +ssBtn()
     +'<button class="mini go" title="download to THIS device" onclick="dlFile(\''+esc(f.rel)+'\',\''+esc(f.name)+'\')">&#8595; Download</button>'
     +'</div></div>';});
   if(!(b.dirs||[]).length&&!(b.files||[]).length){h+=empty('Empty folder (or only hidden/secret files).');}
@@ -9582,6 +9830,15 @@ function gFrom(s){s=s||'';var m=s.match(/^(.*?)</);var nm=m?m[1].replace(/"/g,''
 function gAddr(s){var m=(s||'').match(/<(.*)>/);return m?m[1]:(s||'');}
 function gDate(s){if(!s)return'';try{var d=new Date(s);if(isNaN(d))return e2(s);var n=new Date();return d.toDateString()==n.toDateString()?d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):d.toLocaleDateString([],{month:'short',day:'numeric'});}catch(e){return e2(s)}}
 function gErr(r){return '<div class="card" style="cursor:default;grid-column:1/-1"><b style="color:#f85149">Google error</b><div class="meta" style="margin-top:6px">'+e2((r&&r.error)||'request failed')+'</div><div class="meta" style="margin-top:4px">Check the google-workspace extension token on this node.</div></div>';}
+// Shared "synced Xs ago / offline" freshness badge (Gmail has its own gmSyncBadge; Calendar + Drive use
+// this to render the same honest indicator inline at render time). synced = epoch seconds, stale = bool.
+function gSyncText(synced,stale){
+  if(!synced){ return stale?'<span style="color:#f0a35e">'+String.fromCharCode(9888)+' offline '+String.fromCharCode(183)+' retrying</span>':''; }
+  var ago=Math.max(0,Math.round(Date.now()/1000-synced));
+  var t=ago<60?ago+'s':ago<3600?Math.round(ago/60)+'m':Math.round(ago/3600)+'h';
+  if(stale) return '<span style="color:#f0a35e">'+String.fromCharCode(9888)+' offline '+String.fromCharCode(183)+' synced '+t+' ago</span>';
+  return '<span style="color:var(--mut)">'+String.fromCharCode(10003)+' synced '+t+' ago</span>';
+}
 // relocated from the old drive block: Gmail v2 attachments + the Drive surface both call driveSize().
 function driveSize(b){b=+b;if(!b)return'';var u=['B','KB','MB','GB'],i=0;while(b>=1024&&i<3){b/=1024;i++;}return b.toFixed(b<10&&i>0?1:0)+u[i];}
 // shell unified-search entrypoints: the palette calls these id-first; the surfaces are index-based, so bridge here.
@@ -10187,7 +10444,7 @@ async function gmFetchLabels(){
 }
 
 function gmSyncBadge(){var el=document.getElementById('gmSync');if(!el)return;
-  if(!GM._synced){el.textContent='';return;}
+  if(!GM._synced){ if(GM._stale){el.innerHTML='⚠ offline · retrying';el.style.color='#f0a35e';} else {el.textContent='';} return; }
   var ago=Math.max(0,Math.round(Date.now()/1000-GM._synced));
   var t=ago<60?ago+'s':ago<3600?Math.round(ago/60)+'m':Math.round(ago/3600)+'h';
   if(GM._stale){el.innerHTML='⚠ offline · synced '+t+' ago';el.style.color='#f0a35e';}
@@ -10195,14 +10452,20 @@ function gmSyncBadge(){var el=document.getElementById('gmSync');if(!el)return;
 async function gmFetchList(reset,forceFresh){
   if(reset){ GM.cur=-1; GM.sel={}; gmPaintBatch(); }
   GM.q=gmLaneQuery();
-  var rows=document.getElementById('gmRows'); if(rows) rows.innerHTML=empty('Loading…');
+  var rows=document.getElementById('gmRows');
+  // NEVER blank to a spinner once content exists for THIS view. Only show "Loading…" on a genuinely new
+  // view (lane/chip/search changed the query) with nothing already on screen, or the very first paint. A
+  // slow/flaky refetch of the SAME view keeps the current mail visible (the sync badge flips to "offline").
+  var sameView = (GM._lastQ===GM.q) && GM.msgs && GM.msgs.length;
+  if(rows && !sameView) rows.innerHTML=empty('Loading…');
+  GM._lastQ=GM.q;
   var lane=GM_LANES.find(function(l){return l.k===GM.lane;});
   var title=lane?lane.n:(GM.lane.indexOf('lbl:')===0?'Label':'Mail');
   var t=document.getElementById('gmLaneTitle'); if(t) t.textContent=title;
   var r;
   try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q)+'&max=50'+(forceFresh?'&fresh=1':''))).json(); }
-  catch(e){ if(rows) rows.innerHTML=gErr({error:'network'}); return; }
-  if(r.error){ if(rows) rows.innerHTML=gErr(r); return; }
+  catch(e){ if(rows && !(GM.msgs&&GM.msgs.length)) rows.innerHTML=gErr({error:'network'}); GM._stale=true; gmSyncBadge(); return; }
+  if(r.error){ if(rows && !(GM.msgs&&GM.msgs.length)) rows.innerHTML=gErr(r); GM._stale=true; gmSyncBadge(); return; }
   GM.email=r.email||GM.email;
   GM._synced=r._synced; GM._stale=!!r._stale; gmSyncBadge();
   GM.msgs=[]; GM._seen={};                 // fresh list -> reset accumulator + thread dedupe
@@ -10243,7 +10506,7 @@ function gmRenderRows(){
   if(!GM.msgs.length){ rows.innerHTML='<div class="gm-empty"><div class="gm-big">\u{1F389}</div><div>Inbox zero — nothing here.</div></div>'; gmRenderRead(); return; }
   rows.innerHTML=GM.msgs.map(function(m,i){
     var checked = !!GM.sel[m.id];
-    return '<div class="gm-row'+(m.unread?' unread':'')+(i===GM.cur?' cur':'')+'" data-i="'+i+'" onclick="gmRowClick(event,'+i+')">'
+    return '<div class="gm-row'+(m.unread?' unread':'')+(i===GM.cur?' cur':'')+'" data-i="'+i+'" '+ssAttr({kind:'gmail',id:m.id,thread:m.threadId,name:m.subject})+' onclick="gmRowClick(event,'+i+')">'
       +'<span class="gm-dot"></span>'
       +'<div class="gm-rmid">'
         +'<div class="gm-fromrow"><span class="gm-from">'+e2(gFrom(m.from))+'</span>'
@@ -10253,6 +10516,7 @@ function gmRenderRows(){
       +'</div>'
       +'<div class="gm-rright">'
         +'<span class="gm-date">'+gDate(m.date)+'</span>'
+        +ssBtn()   // descriptor comes from the row's data-ss (ssDesc climbs to closest)
         +'<span class="gm-star'+(m.starred?' on':'')+'" onclick="event.stopPropagation();gmStar('+i+')" title="Star (s)">'+(m.starred?'★':'☆')+'</span>'
         +'<input type="checkbox" class="gm-sel" '+(checked?'checked':'')+' onclick="event.stopPropagation();gmToggleSel(\''+m.id+'\')">'
       +'</div>'
@@ -10302,6 +10566,7 @@ function gmRenderRead(){
       +'<button class="gm-act" onclick="gmActCur(\'trash\')" title="Trash (#)">\u{1F5D1} Trash</button>'
       +'<button class="gm-act" onclick="gmSnoozeMenu()" title="Snooze (h)">⏰ Snooze</button>'
       +'<button class="gm-act" onclick="gmActCur(\'unread\');gmCloseRead()" title="Mark unread (u)">✉ Unread</button>'
+      +'<button class="gm-act" onclick="ssPickThread()" title="Send this whole thread to a session (drag a list row to send a single message)">➔ To session</button>'
     +'</div>'
     +mlReaderChip()
   +'</div>';
@@ -11041,7 +11306,9 @@ var CAL = {
   loaded: '',                   // cache key of the loaded window
   tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
   drag: null,                   // active drag state
-  pop: null                     // open popover element
+  pop: null,                    // open popover element
+  _synced: 0,                   // last successful sync (epoch s) -> "synced Xs ago" badge
+  _stale: false                 // last fetch served stale/offline -> badge flips to "offline"
 };
 var CAL_COLORS = {              // Google calendar colorId -> hex (event colors)
   '':'#c9a227','1':'#7986cb','2':'#33b679','3':'#8e24aa','4':'#e67c73','5':'#f6bf26',
@@ -11080,9 +11347,12 @@ async function loadCalendar(force){
   if(force||key!=CAL.loaded){
     var tmin=encodeURIComponent(w.s.toISOString()),tmax=encodeURIComponent(w.e.toISOString());
     var r;try{r=await(await fetch('/api/google/calendar?tmin='+tmin+'&tmax='+tmax)).json();}
-    catch(err){g.innerHTML='<div class="cal-root">'+gErr({error:'network'})+'</div>';return;}
-    if(r.error){g.innerHTML='<div class="cal-root">'+gErr(r)+'</div>';return;}
+    // Keep the calendar on screen if we already have events; only show a full error card on a truly cold
+    // first load (no events yet). On a slow/offline refetch we keep the grid and flip the badge to offline.
+    catch(err){ if(!CAL.events.length){g.innerHTML='<div class="cal-root">'+gErr({error:'network'})+'</div>';return;} CAL._stale=true; calRender(); return; }
+    if(r.error){ if(!CAL.events.length){g.innerHTML='<div class="cal-root">'+gErr(r)+'</div>';return;} CAL._stale=true; calRender(); return; }
     CAL.email=r.email;if(r.tz)CAL.tz=r.tz;CAL.events=(r.events||[]).map(calNorm);CAL.loaded=key;
+    CAL._synced=r._synced||(Date.now()/1000); CAL._stale=!!r._stale;
   }
   calRender();
 }
@@ -11114,6 +11384,7 @@ function calRender(){
         +'oninput="calParsePreview()" onkeydown="if(event.key===\'Enter\'){event.preventDefault();calQuickAdd();}">'
         +'<button class="mini go" onclick="calQuickAdd()">Add</button></div>'
       +'<button class="cal-ib" onclick="loadCalendar(true)" title="Refresh">&#8635;</button>'
+      +'<span class="gm-sync" id="calSync" title="how fresh this calendar is — the node keeps it synced in the background">'+gSyncText(CAL._synced,CAL._stale)+'</span>'
     +'</div>'
     +'<div class="cal-parse" id="calParse"></div>'
     +'<div class="cal-body">'+calSidebar()+'<div id="calMain" style="flex:1;display:flex;min-width:0">'+calMainView()+'</div></div>'
@@ -11447,6 +11718,7 @@ function calOpenEvent(id,ev){
     +'</div><div class="pbtns">'
     +(e.hangout?'<a class="mini go" href="'+e2(e.hangout)+'" target="_blank">&#128249; Join</a>':'')
     +'<button class="mini" onclick="calEdit(\''+e.id+'\')">Edit</button>'
+    +'<button class="mini" onclick="calClosePop();ssPickEvent(\''+e.id+'\')" title="Send this event to a session">&#10148; To session</button>'
     +'<button class="mini" onclick="calDelete(\''+e.id+'\')">Delete</button>'
     +'<span class="gap"></span>'
     +(e.link?'<a class="mini" href="'+e2(e.link)+'" target="_blank">Open &#8599;</a>':'')
@@ -11741,7 +12013,7 @@ document.addEventListener('keydown',calKeyHandler);
 /* ===== DRIVE SURFACE v2 (spliced) ===== */
 // ===================== DRIVE SURFACE (dr-*) =====================
 // Replaces the old loadDrive/driveSearch/var DRIVEQ block. KEEP driveSize() -- reused here.
-var DR={parent:'',crumbs:[],files:[],q:'',kind:'',starred:'',order:'',view:(localStorage.getItem('dr_view')||'grid'),sel:{},sortBy:'modified',sortDir:-1,qlIdx:-1,loading:false,email:''};
+var DR={parent:'',crumbs:[],files:[],q:'',kind:'',starred:'',order:'',view:(localStorage.getItem('dr_view')||'grid'),sel:{},sortBy:'modified',sortDir:-1,qlIdx:-1,loading:false,email:'',_synced:0,_stale:false};
 var DR_FOCUS=-1;
 var DR_MIME={
   'application/pdf':{i:'📕',k:'PDF'},
@@ -11779,10 +12051,13 @@ async function loadDrive(){
   if(!DR.files.length)g.innerHTML=empty('Loading Drive…');
   var qs='order='+encodeURIComponent(DR.order||'')+'&kind='+DR.kind+'&starred='+DR.starred+'&max=300';
   if(DR.q)qs+='&q='+encodeURIComponent(DR.q);else if(DR.parent)qs+='&parent='+encodeURIComponent(DR.parent);
-  var r;try{r=await(await fetch('/api/google/drive?'+qs)).json();}catch(e){g.innerHTML=gErr({error:'network'});DR.loading=false;return;}
+  // Keep the file grid on screen if we already have files; only show a full error card on a truly cold
+  // first load (nothing listed yet). A slow/offline refetch keeps the listing and flips the badge to offline.
+  var r;try{r=await(await fetch('/api/google/drive?'+qs)).json();}catch(e){ DR.loading=false; if(!DR.files.length){g.innerHTML=gErr({error:'network'});return;} DR._stale=true; drRender(); return; }
   DR.loading=false;
-  if(r.error){g.innerHTML=gErr(r);return;}
+  if(r.error){ if(!DR.files.length){g.innerHTML=gErr(r);return;} DR._stale=true; drRender(); return; }
   DR.files=r.files||[];DR.crumbs=r.crumbs||[];DR.email=r.email||'';
+  DR._synced=r._synced||(Date.now()/1000); DR._stale=!!r._stale;
   drRender();
 }
 function drRender(){
@@ -11806,6 +12081,7 @@ function drRender(){
   h+='<select class="dr-sel" onchange="drSetSort(this.value)">'
     +drSortOpt('modified','Last modified')+drSortOpt('name','Name')+drSortOpt('size','Size')+drSortOpt('created','Created')+'</select>';
   h+='<button class="dr-icbtn" title="Refresh" onclick="DR.files=[];loadDrive()">↻</button>';
+  h+='<span class="gm-sync" id="drSync" style="margin-left:6px" title="how fresh this listing is — the node keeps it synced in the background">'+gSyncText(DR._synced,DR._stale)+'</span>';
   h+='</div></div>';
   if(n){
     h+='<div class="dr-batch"><b>'+n+' selected</b>'
@@ -11834,8 +12110,9 @@ function drSortOpt(k,l){return '<option value="'+k+'"'+(DR.sortBy==k?' selected'
 function drSortArrow(k){return DR.sortBy==k?(DR.sortDir<0?' ↓':' ↑'):'';}
 function drCard(f,i){
   var sel=DR.sel[f.id]?' sel':'';
-  var thumb=(!f.folder&&f.thumb)?'<img class="dr-th" loading="lazy" src="/api/google/drive-thumb?id='+f.id+'" onerror="this.parentNode.classList.add(\'noth\')">':'';
-  return '<div class="dr-card'+sel+(f.folder?' fold':'')+'" data-id="'+f.id+'" data-i="'+i+'" tabindex="0" '
+  var thumb=(!f.folder&&f.thumb)?'<img class="dr-th" draggable="false" loading="lazy" src="/api/google/drive-thumb?id='+f.id+'" onerror="this.parentNode.classList.add(\'noth\')">':'';
+  var ss=f.folder?'':' '+ssAttr({kind:'drive',id:f.id,name:f.name});   // folders aren't sendable
+  return '<div class="dr-card'+sel+(f.folder?' fold':'')+'" data-id="'+f.id+'" data-i="'+i+'" tabindex="0"'+ss+' '
     +'onclick="drClick(event,'+i+')" ondblclick="drOpen('+i+')" onkeydown="drCardKey(event,'+i+')" oncontextmenu="drMenu(event,'+i+');return false;">'
     +'<div class="dr-ck"><input type="checkbox"'+(DR.sel[f.id]?' checked':'')+' onclick="event.stopPropagation();drCheck(\''+f.id+'\',this.checked)"></div>'
     +'<div class="dr-star'+(f.starred?' on':'')+'" onclick="event.stopPropagation();drStar('+i+')">'+(f.starred?'★':'☆')+'</div>'
@@ -11846,7 +12123,8 @@ function drCard(f,i){
 }
 function drRow(f,i){
   var sel=DR.sel[f.id]?' sel':'';
-  return '<div class="dr-trow'+sel+(f.folder?' fold':'')+'" data-id="'+f.id+'" data-i="'+i+'" tabindex="0" '
+  var ss=f.folder?'':' '+ssAttr({kind:'drive',id:f.id,name:f.name});
+  return '<div class="dr-trow'+sel+(f.folder?' fold':'')+'" data-id="'+f.id+'" data-i="'+i+'" tabindex="0"'+ss+' '
     +'onclick="drClick(event,'+i+')" ondblclick="drOpen('+i+')" onkeydown="drCardKey(event,'+i+')" oncontextmenu="drMenu(event,'+i+');return false;">'
     +'<span class="dr-lck"><input type="checkbox"'+(DR.sel[f.id]?' checked':'')+' onclick="event.stopPropagation();drCheck(\''+f.id+'\',this.checked)"></span>'
     +'<span class="dr-lcn"><span class="dr-ric">'+drIcon(f)+'</span><span class="dr-rname" title="'+e2(f.name)+'">'+e2(f.name)+'</span>'
@@ -11988,7 +12266,7 @@ function drMenu(ev,i){
   var m=document.createElement('div');m.id='drCtx';m.className='dr-ctx';
   var items=[];
   if(f.folder)items.push(['📂 Open','drGo(\''+f.id+'\')']);
-  else{items.push(['👁 Quick Look','drQuickLook('+i+')']);items.push(['↗ Open in Drive','window.open(\''+e2(f.link)+'\',\'_blank\')']);items.push(['↓ Download','drDownload('+i+')']);}
+  else{items.push(['👁 Quick Look','drQuickLook('+i+')']);items.push(['↗ Open in Drive','window.open(\''+e2(f.link)+'\',\'_blank\')']);items.push(['↓ Download','drDownload('+i+')']);items.push(['➔ Send to session','ssPickDrive('+i+')']);}
   items.push([(f.starred?'☆ Unstar':'★ Star'),'drStar('+i+')']);
   items.push(['✎ Rename','drRename('+i+')']);
   items.push(['⧉ Make a copy','drCopy('+i+')']);
@@ -12533,8 +12811,12 @@ function ccWireDropzones(){
     var z=ov.closest('[data-ccsess]');var name=z&&z.getAttribute('data-ccsess');
     (function(ov,name){
       ov.addEventListener('dragover',function(e){e.preventDefault();e.stopPropagation();try{e.dataTransfer.dropEffect='copy';}catch(_){ }});
-      ov.addEventListener('drop',function(e){e.preventDefault();e.stopPropagation();ccShowDrops(false);
-        var dt=e.dataTransfer;if(dt&&dt.files&&dt.files.length)ccUploadFile(name,dt.files[0]);});
+      ov.addEventListener('drop',function(e){e.preventDefault();e.stopPropagation();ccShowDrops(false);if(typeof ssHi==='function')ssHi(false);
+        var dt=e.dataTransfer;
+        if(dt&&dt.files&&dt.files.length){ccUploadFile(name,dt.files[0]);return;}   // a real OS file -> upload
+        var d=(typeof SSDRAG!=='undefined'&&SSDRAG)||null;                          // an in-portal sendable -> resolve + send
+        if(!d&&dt){try{d=JSON.parse(dt.getData('application/x-cc-sendable'));}catch(_){}}
+        if(d&&typeof ssSend==='function')ssSend(name,d);});
     })(ov,name);
   }
 }
@@ -12791,8 +13073,9 @@ function ccHelpAuto(k){ if(HELP[k] && !ccHelpSeen(k)) setTimeout(function(){ if(
 // ---- Gmail auto-refresh: pull new mail without yanking the list while you're reading ----
 async function gmAutoRefresh(){
   if(LENS!=='gmail' || !document.getElementById('gmApp')) return;
-  var r; try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q||gmLaneQuery())+'&max=50')).json(); }catch(e){ return; }
-  if(!r || r.error) return;
+  var r; try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q||gmLaneQuery())+'&max=50')).json(); }catch(e){ GM._stale=true; gmSyncBadge(); return; }
+  if(!r || r.error){ GM._stale=true; gmSyncBadge(); return; }
+  GM._synced=r._synced; GM._stale=!!r._stale; gmSyncBadge();   // keep the "synced Xs ago / offline" badge honest on auto-refresh
   var seen={}, list=[];
   (r.messages||[]).forEach(function(m){var tid=m.threadId||m.id; if(seen[tid]!==undefined){list[seen[tid]].count++; if(m.unread)list[seen[tid]].unread=true; return;} seen[tid]=list.length; m.count=1; list.push(m);});
   var have={}; GM.msgs.forEach(function(m){have[m.threadId||m.id]=1;});
@@ -13558,6 +13841,108 @@ function sbOpen(name){ sbAck(name); var p=document.getElementById('sessprev'); i
 sbPoll(); setInterval(sbPoll,4000);
 
 // ====================================================================================================
+// ss-* : DRAG ANYTHING -> SESSION. A generic "sendable" pipeline -- drag a Drive file, an email, a
+// calendar event, a deliverable, or a Granola transcript onto a session (the bottom dock tiles, or the
+// focused terminal) and the agent RECEIVES it. Each draggable item/button carries
+//   data-ss='{"kind":"...","id":"...",...}'  (e.g. {"kind":"drive","id":"<fileId>","name":"plan.pdf"}).
+// Desktop: native HTML5 drag (delegated). Mobile: long-press to "pick up" -> a floating ghost follows the
+// finger -> drop on a dock tile; PLUS a reliable "send to session" picker (ssPick) on every item.
+// On drop -> POST /api/session-send {session, ...descriptor}. Adding a new kind = add data-ss + a backend
+// resolver (register_sendable); no per-type code here. Builds the attr/button via ssAttr()/ssBtn().
+// ====================================================================================================
+var SSDRAG=null;            // descriptor currently being dragged (desktop)
+function ssAttr(d){ return 'draggable="true" data-ss="'+e2(JSON.stringify(d))+'"'; }   // splice into an item's tag
+function ssBtn(d){ var a=d?(' data-ss="'+e2(JSON.stringify(d))+'"'):''; return '<button class="ss-btn"'+a+' title="Send to a session (drag me onto a session tile, or tap)" onclick="event.stopPropagation();ssPick(ssDesc(this))">&#10148;</button>'; }
+function ssDesc(el){ try{ var n=el&&el.closest&&el.closest('[data-ss]'); return n?JSON.parse(n.getAttribute('data-ss')):null; }catch(e){ return null; } }
+function ssLabel(d){ return (d&&(d.name||d.kind))||'item'; }
+function ssDockTiles(){ return document.querySelectorAll('#sessbar .sb-tile'); }
+function ssHi(on){ document.body.classList.toggle('ss-dragging',!!on); if(!on) ssDockTiles().forEach(function(t){t.classList.remove('ss-over');}); }
+async function ssSend(session,d,note){
+  if(!session||!d) return;
+  toast('Sending '+esc(ssLabel(d))+' to '+esc(session)+'…',3500);
+  try{
+    var body=Object.assign({session:session,note:note||''},d);
+    var r=await(await fetch('/api/session-send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+    if(r&&r.ok) toast('&#10148; Sent '+esc(d.name||r.name||'item')+' to '+esc(session)+' &mdash; path typed in. Review &amp; press Enter.',6500);
+    else toast('Send failed: '+((r||{}).error||'?'),6000);
+  }catch(e){ toast('Send failed.',5000); }
+}
+// --- desktop: native HTML5 drag (delegated, wired once) ---
+function ssWire(){
+  if(ssWire._done) return; ssWire._done=true;
+  document.addEventListener('dragstart',function(e){
+    var n=e.target&&e.target.closest&&e.target.closest('[data-ss][draggable]'); if(!n) return;
+    SSDRAG=ssDesc(n); if(!SSDRAG) return;
+    try{ e.dataTransfer.setData('application/x-cc-sendable',JSON.stringify(SSDRAG)); e.dataTransfer.effectAllowed='copy'; }catch(_){}
+    ssHi(true); if(typeof ccShowDrops==='function') ccShowDrops(true);   // also light up the focused terminal overlay
+  },true);
+  document.addEventListener('dragend',function(){ SSDRAG=null; ssHi(false); if(typeof ccShowDrops==='function') ccShowDrops(false); });
+  var bar=document.getElementById('sessbar');
+  if(bar){   // the dock is ONE persistent element -> delegate dragover/drop onto its tiles
+    bar.addEventListener('dragover',function(e){ if(!SSDRAG) return; e.preventDefault(); try{e.dataTransfer.dropEffect='copy';}catch(_){}
+      var t=e.target&&e.target.closest&&e.target.closest('.sb-tile'); ssDockTiles().forEach(function(x){x.classList.toggle('ss-over',x===t);}); });
+    bar.addEventListener('dragleave',function(e){ var t=e.target&&e.target.closest&&e.target.closest('.sb-tile'); if(t)t.classList.remove('ss-over'); });
+    bar.addEventListener('drop',function(e){
+      var t=e.target&&e.target.closest&&e.target.closest('.sb-tile'); if(!t) return;
+      e.preventDefault(); e.stopPropagation();
+      var d=SSDRAG; if(!d){ try{ d=JSON.parse(e.dataTransfer.getData('application/x-cc-sendable')); }catch(_){} }
+      ssHi(false); var name=t.getAttribute('data-n'); if(name&&d) ssSend(name,d);
+    });
+  }
+}
+// --- mobile: long-press to pick up -> floating ghost -> drop on a dock tile ---
+var SST={timer:null,ghost:null,desc:null,active:false,sx:0,sy:0};
+function ssGhostMake(label){ ssGhostKill(); var g=document.createElement('div'); g.className='ss-ghost'; g.textContent='➔ '+label; document.body.appendChild(g); SST.ghost=g; }
+function ssGhostMove(x,y){ if(SST.ghost){ SST.ghost.style.left=x+'px'; SST.ghost.style.top=y+'px'; } }
+function ssGhostKill(){ if(SST.ghost){ try{document.body.removeChild(SST.ghost);}catch(_){} SST.ghost=null; } document.body.classList.remove('ss-dragging'); ssDockTiles().forEach(function(t){t.classList.remove('ss-over');}); }
+function ssTileUnder(x,y){ var el=document.elementFromPoint(x,y); var tile=el&&el.closest&&el.closest('#sessbar .sb-tile'); ssDockTiles().forEach(function(t){t.classList.toggle('ss-over',t===tile);}); return tile; }
+function ssTouchWire(){
+  if(ssTouchWire._done) return; ssTouchWire._done=true;
+  document.addEventListener('touchstart',function(e){
+    if(e.touches.length!==1) return;
+    var n=e.target&&e.target.closest&&e.target.closest('[data-ss]'); if(!n) return;
+    if(e.target.closest&&e.target.closest('.ss-btn')) return;   // the explicit button handles its own tap
+    var d=ssDesc(n); if(!d) return;
+    var t=e.touches[0]; SST.sx=t.clientX; SST.sy=t.clientY; SST.desc=d; SST.active=false;
+    clearTimeout(SST.timer); SST.timer=setTimeout(function(){ ssTouchPickup(d); },420);
+  },{passive:true});
+  document.addEventListener('touchmove',function(e){
+    if(!SST.active){ var t=e.touches[0]; if(t&&(Math.abs(t.clientX-SST.sx)>10||Math.abs(t.clientY-SST.sy)>10)) clearTimeout(SST.timer); return; }
+    e.preventDefault();   // we own the gesture now (stop the page scrolling)
+    var t=e.touches[0]; if(t){ ssGhostMove(t.clientX,t.clientY); ssTileUnder(t.clientX,t.clientY); }
+  },{passive:false});
+  document.addEventListener('touchend',function(e){
+    clearTimeout(SST.timer); if(!SST.active) return;
+    var t=(e.changedTouches&&e.changedTouches[0])||null;
+    var tile=t?ssTileUnder(t.clientX,t.clientY):null; ssGhostKill();
+    if(tile){ var name=tile.getAttribute('data-n'); if(name&&SST.desc) ssSend(name,SST.desc); }
+    SST.active=false; SST.desc=null;
+  });
+  document.addEventListener('touchcancel',function(){ clearTimeout(SST.timer); ssGhostKill(); SST.active=false; SST.desc=null; });
+}
+function ssTouchPickup(d){ SST.active=true; SST.desc=d; if(navigator.vibrate){ try{navigator.vibrate(15);}catch(_){} }
+  ssGhostMake(ssLabel(d)); document.body.classList.add('ss-dragging'); ssGhostMove(SST.sx,SST.sy); }
+// --- universal fallback: a session picker sheet (works everywhere; the reliable path) ---
+var SS_PICK=null;
+function ssPick(d){
+  if(typeof d==='string'){ try{ d=JSON.parse(d); }catch(e){ return; } }
+  if(!d) return;
+  var list=(window.SB&&SB.list)||[];
+  if(!list.length){ toast('No open sessions to send to.',4000); return; }
+  var h='<h3 style="margin:0 0 10px">&#10148; Send &ldquo;'+e2(ssLabel(d))+'&rdquo; to a session</h3>';
+  h+='<div class="ss-pick">'+list.slice().sort(function(a,b){var x=(a.label||a.name),y=(b.label||b.name);return x<y?-1:x>y?1:0;}).map(function(s){
+    return '<button class="ss-pickb" onclick="ssPickGo(\''+esc(s.name)+'\')">'+(s.chief?'&#11088; ':'')+e2(s.label||s.name)+'</button>';
+  }).join('')+'</div>';
+  h+='<div style="margin-top:12px;text-align:right"><button class="mini" onclick="closeM()">Cancel</button></div>';
+  SS_PICK=d; showM(h);
+}
+function ssPickGo(name){ var d=SS_PICK; SS_PICK=null; closeM(); if(d) ssSend(name,d); }
+function ssPickDrive(i){ var f=(typeof drSorted==='function')&&drSorted()[i]; if(f) ssPick({kind:'drive',id:f.id,name:f.name}); }   // Drive context-menu entry
+function ssPickThread(){ if(typeof GM!=='undefined'&&GM.thread) ssPick({kind:'gmail',thread:GM.thread.id,full:1,name:GM.thread.subject}); }   // email reader: send the whole thread
+function ssPickEvent(id,name){ if(!id) return; if(!name&&typeof CAL!=='undefined'&&CAL.events){ var e=CAL.events.find(function(x){return x.id==id;}); if(e) name=e.summary; } ssPick({kind:'calendar',id:id,name:name||'event'}); }   // calendar event modal
+ssWire(); ssTouchWire();
+
+// ====================================================================================================
 // fx-* : AGENTIC LEVERAGE -- "Smart reply with 360 context" + "Sender history" + Action Queue.
 // Lives ON the open thread (reuses GM.thread + the existing composer gmCompose). HARD INVARIANT: the
 // smart-reply path NEVER sends -- it stages a real Gmail draft + a pending action, then prefills the
@@ -14011,6 +14396,7 @@ if __name__ == "__main__":
     threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
     threading.Thread(target=_gmail_sync_loop, daemon=True).start()      # keep recently-viewed Gmail lists warm (cache + outage fallback)
     threading.Thread(target=_gc_sync_loop, daemon=True).start()         # same for Calendar/Drive (resilient cache)
+    threading.Thread(target=_warm_default_views, daemon=True).start()   # boot-warm the UI's default views + prime the OAuth token (non-blocking)
     # Bind host: default 0.0.0.0 (existing nodes unchanged). Provisioned standalone bundles set bind_host
     # "127.0.0.1" so the ONLY tailnet-visible surface is the TLS `tailscale serve` URL -- no raw plain-HTTP
     # port on the tailnet for a browser to hit and get ERR_SSL_PROTOCOL_ERROR.

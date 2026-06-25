@@ -3,6 +3,43 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.37.0 -- 2026-06-25
+- FEATURE (drag ANYTHING into a session/agent): a generic "sendable -> session" pipeline. Drag a Drive file,
+  an email, a calendar event, or a deliverable onto a session (the bottom dock tiles, or the focused
+  terminal) and the agent RECEIVES it -- the item is resolved to readable content and its path is typed into
+  the session (review + Enter, like the existing file attach). NEW endpoint POST /api/session-send {session,
+  kind, id, ...} + a RESOLVER REGISTRY (register_sendable): each kind registers ONE resolver, so
+  calendar/granola/future extensions are a one-line addition, no per-type branching. Resolvers return either
+  an existing path (inject in place, e.g. a deliverable -- no copy) or bytes/text (materialize to the uploads
+  dir, then inject); emails/events become a readable .md, Google-native Docs/Sheets export to txt/csv/pdf.
+  Built-in kinds: deliverable, drive, gmail (message or whole thread), calendar, granola. UX: desktop uses
+  native HTML5 drag (items are draggable; dock tiles + the terminal overlay are drop targets, highlighted on
+  hover); mobile uses long-press to "pick up" -> a floating ghost follows the finger -> drop on a dock tile,
+  PLUS a reliable "send to session" (->) picker on every item (and in the Drive context menu / email reader /
+  calendar event popover). Self-hides Google kinds when Google isn't configured; read-only + secret-clean;
+  bounded by the existing upload size cap; stdlib-only. Reuses + refactors the session-upload path-injection
+  (new _deliver_to_session / _inject_path_into_session shared by uploads and sendables).
+
+## 0.36.2 -- 2026-06-25
+- HARDEN (kill EVERY remaining flaky-uplink spinner on Google -- fail fast, keep content, warm on boot):
+  - LIST fetches now use a SHORT timeout (cc.config google_list_timeout, default 9s) instead of the 30s
+    _g_api default, so a cold Gmail/Calendar/Drive list during an uplink flap BAILS in ~9s -> SWR serves
+    last-good (or the UI shows 'offline, retrying' + auto-retries) instead of a ~40s hang. Mutations
+    (send/modify/upload) keep the 30s default. Also applied to the unread-badge poll + Drive thumbnails so
+    a flap can't tie up server threads.
+  - TOKEN refresh is now bounded (google_token_timeout, default 10s, was 20s). The refresh runs under the
+    google lock, so an unbounded refresh during a flap serialized EVERY google call behind it -> cascade of
+    spinners. Now bounded; access token still cached to ~90s-before-expiry and only refreshed when expired.
+  - FRONTEND keeps content on a slow/stale/offline refetch: Gmail no longer blanks to 'Loading...' when a
+    refetch of the SAME view is slow/errors (only a genuinely new view or first paint shows the spinner);
+    Calendar + Drive likewise keep the grid/listing on screen and flip a freshness badge to 'offline'
+    instead of replacing everything with an error card. Extended the Gmail 'synced Xs ago' badge to
+    Calendar + Drive (shared gSyncText helper).
+  - BOOT-WARM the UI's exact default views (gmail inbox max=50, drive root) into the cache + warmer active
+    set on startup (non-blocking), and prime the OAuth token, so the first load after a fresh deploy is
+    covered ASAP rather than serving a cold fetch. (Calendar's window is computed client-side from
+    tz/locale, so its exact key can't be pre-matched; we warm a 7d window to prime the token/API path.)
+
 ## 0.36.1 -- 2026-06-25
 - FIX (the cold-cache-after-restart spinner -- disk-persist the Google caches): SWR fixed staleness, but a
   RESTART left the cache cold, and a cold fetch during an uplink flap times out ~40s = 'stuck loading'. Now
