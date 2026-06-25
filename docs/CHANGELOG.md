@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.39 -- 2026-06-25
+- FEATURE (VoiceMatch smart-reply engine): smart reply now (1) learns the owner's writing voice from their Sent
+  mail ("Learn my voice" button -> per-node style profile: tone, punctuation incl. em-dash habit, greetings,
+  sign-offs), (2) weights HEAVILY toward how the owner actually writes to THIS recipient (per-recipient samples)
+  and escalates to the most-formal register on multi-recipient threads, (3) pulls richer context -- past mail
+  with the sender (capped), the client/project CLAUDE.md, Granola call notes, and calendar availability when the
+  email is about scheduling, (4) returns 2-3 variants (concise/warm/detailed) you switch between in the composer,
+  (5) kills AI tells (no em-dashes unless you use them, no stock filler) and auto-retries the occasional refusal.
+  New: /api/voice/build, /api/voice/profile; flex/context + stage-reply take rel_override + source toggles.
+
 ## 0.21.38 -- 2026-06-24
 - FEATURE (adjustable terminal font size): the session terminal toolbar now has A-/A+ controls (with the
   current size shown) that live-resize the xterm font and re-fit; the choice persists in localStorage and
