@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.34.1 -- 2026-06-25
+- FIX/UX (mobile chrome + Gmail): (1) the topbar no longer leaves a gap under the nav -- it's now flush in
+  normal flow (not sticky-with-measured-offset) and slides up under the nav as you scroll, no content
+  overlap. (2) The generic topbar (title + Add/New-session) is hidden on Gmail/Calendar/Drive (they have
+  their own headers) -- whole bar hidden on mobile, the irrelevant buttons hidden everywhere. (3) Mobile
+  Gmail now has a Compose FAB (circular bottom-right). (4) Gmail load-more: scrolling near the bottom pages
+  the next batch (Gmail pageToken) and appends -- backend page_token (bypasses cache), client-side thread
+  collapse/append, scroll-near-bottom trigger on both the desktop list-pane and mobile window scroll.
+
 ## 0.34.0 -- 2026-06-25
 - UX/MOBILE (maximize real estate): on phones the chrome now gets out of the way. SCROLL-AWAY top chrome --
   the global nav (#side) + topbar slide up as you scroll into content and reveal on any scroll-up (iOS

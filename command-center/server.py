@@ -645,12 +645,14 @@ def _g_parallel(fns):
     return out
 
 GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
-def _gmail_list_live(view="inbox", q="", maxn=25):
+def _gmail_list_live(view="inbox", q="", maxn=25, page_token=""):
     query = (q or "").strip()
     if not query:
         query = {"inbox": "in:inbox", "unread": "is:unread", "sent": "in:sent",
                  "starred": "is:starred", "important": "is:important"}.get(view, "in:inbox")
-    r = _g_api("GET", GMAIL_BASE + "/messages", params={"maxResults": min(int(maxn or 25), 50), "q": query})
+    params = {"maxResults": min(int(maxn or 25), 50), "q": query}
+    if page_token: params["pageToken"] = page_token
+    r = _g_api("GET", GMAIL_BASE + "/messages", params=params)
     if "error" in r: return r
     ids = [m["id"] for m in r.get("messages", [])]
     def fetch(mid):
@@ -663,7 +665,7 @@ def _gmail_list_live(view="inbox", q="", maxn=25):
                 "subject": hs.get("subject", "(no subject)"), "date": hs.get("date", ""),
                 "snippet": m.get("snippet", ""), "unread": "UNREAD" in lab, "starred": "STARRED" in lab}
     msgs = [x for x in _g_parallel([(lambda i=i: fetch(i)) for i in ids]) if x]
-    return {"messages": msgs, "view": view, "q": q, "email": _GOOGLE_TOK.get("email")}
+    return {"messages": msgs, "view": view, "q": q, "email": _GOOGLE_TOK.get("email"), "nextPage": r.get("nextPageToken", "")}
 
 # ---- Gmail list cache + background sync. Was: a full live Gmail pull on EVERY browser refresh (two users =
 # 2x the work, and a flaky uplink = spin forever). Now: a short-TTL per-view cache served to every browser
@@ -674,8 +676,14 @@ _GM_CACHE = {}               # key -> {"data":..., "at":ts, "ok":True}
 _GM_ACTIVE = {}              # key -> last-requested ts (only these are kept warm; idle views stop polling)
 _GM_LOCK = threading.Lock()
 def _gm_key(view, q, maxn): return "%s|%s|%s" % (view, (q or "").strip(), int(maxn or 25))
-def gmail_list(view="inbox", q="", maxn=25, fresh=False):
-    """Cached, background-synced, outage-resilient Gmail list. fresh=True forces a live pull ('Refresh now')."""
+def gmail_list(view="inbox", q="", maxn=25, fresh=False, page_token=""):
+    """Cached, background-synced, outage-resilient Gmail list. fresh=True forces a live pull ('Refresh now').
+    page_token set = a paged 'load more' -> always live (never cached; appended client-side)."""
+    if page_token:
+        live = _gmail_list_live(view, q, maxn, page_token)
+        if isinstance(live, dict) and "error" not in live:
+            d = dict(live); d["_synced"] = time.time(); d["_cached"] = False; return d
+        return live
     key = _gm_key(view, q, maxn); now = time.time()
     with _GM_LOCK:
         _GM_ACTIVE[key] = now
@@ -6996,7 +7004,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/browse":       return self._s(200, json.dumps(browse_dir(q.get("rel", [""])[0])))
         # ---- Google Workspace (live client) ----
         if u.path == "/api/google/status":   return self._s(200, json.dumps(google_status()))
-        if u.path == "/api/google/gmail":    return self._s(200, json.dumps(gmail_list(q.get("view", ["inbox"])[0], q.get("q", [""])[0], q.get("max", ["25"])[0], fresh=(q.get("fresh", [""])[0] in ("1", "true")))))
+        if u.path == "/api/google/gmail":    return self._s(200, json.dumps(gmail_list(q.get("view", ["inbox"])[0], q.get("q", [""])[0], q.get("max", ["25"])[0], fresh=(q.get("fresh", [""])[0] in ("1", "true")), page_token=q.get("page", [""])[0])))
         if u.path == "/api/google/gmail-msg":return self._s(200, json.dumps(gmail_get(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-unread": return self._s(200, json.dumps(gmail_unread()))
         if u.path == "/api/session-bar":   return self._s(200, json.dumps(session_bar()))
@@ -7868,11 +7876,12 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
   #navmode{display:none}            /* drag-to-reorder is a desktop affordance; on mobile it stole the tab row */
   .health{display:none}
   #main{overflow-x:hidden;overflow-y:visible;max-width:100%}
-  .topbar{padding:11px 14px;gap:9px;position:sticky;top:var(--cf-side-h,92px);background:var(--bg);z-index:6;transition:transform .26s cubic-bezier(.2,.85,.2,1);will-change:transform}  /* top offset = measured #side height (brand row + full-width tab row); set by cfShowChrome() */
+  .topbar{padding:11px 14px;gap:9px;background:var(--bg)}  /* mobile: NOT sticky -- flush in normal flow directly under the sticky nav (no measured-offset gap, no content overlap); slides up under the nav as you scroll, then the nav scroll-aways. Hidden entirely on Google lenses (below). */
+  body.cf-glens .topbar{display:none}   /* Gmail/Calendar/Drive have their own headers -- the generic title + Add/New-session bar doesn't belong; reclaim the row on mobile */
   .topbar h2{font-size:16px;flex:1 1 auto;min-width:0}
   /* ===== scroll-away chrome: nav + topbar slide off on scroll-down, return on scroll-up (cf-chrome-off set by the mobile scroll handler) ===== */
   body.cf-chrome-off #side{transform:translateY(-100%)}
-  body.cf-chrome-off .topbar{transform:translateY(calc(-100% - var(--cf-side-h,92px)))}
+  /* topbar is static now (scrolls with content), so only the nav needs the scroll-away transform */
   /* ===== search reveal-on-demand: the always-on filter field is hidden; the 🔍 toggle reveals it as its own full-width row ===== */
   #searchTog{display:inline-flex;align-items:center;justify-content:center;min-height:40px}
   .topbar #search{display:none;order:9;flex:1 1 100%;max-width:none;min-width:0}
@@ -8200,6 +8209,8 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-burger{display:none;flex:0 0 auto;width:34px;height:34px;align-items:center;justify-content:center;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:9px;font-size:16px;cursor:pointer}
 .gm-back{display:none;align-items:center;gap:3px;background:transparent;border:none;color:var(--accent);font-size:15px;font-weight:600;cursor:pointer;padding:2px 8px 8px 0}
 .gm-railbg{display:none}
+.gm-fab{display:none}   /* desktop: hidden (compose lives in the list header). Mobile: floating compose button. */
+@media(max-width:760px){.gm-fab{display:flex;align-items:center;justify-content:center;position:fixed;right:18px;bottom:calc(18px + env(safe-area-inset-bottom));width:58px;height:58px;border-radius:50%;background:var(--grad,linear-gradient(135deg,#e8c547,#c9a227));color:#15120a;font-size:26px;border:none;box-shadow:0 8px 22px rgba(0,0,0,.45),var(--glow);z-index:45;cursor:pointer}.gm-fab:active{transform:scale(.94)}}
 
 /* --- responsive: collapse to single column on narrow --- */
 @media(max-width:980px){
@@ -8818,10 +8829,12 @@ function refreshAgentBtn(){const b=document.getElementById("agentBtn");if(!b)ret
 // On the overseer Portfolio, the generic ＋Add / ▶New-session don't apply -- swap in the primary action
 // (Add a ClaudeFather) so it lives in the always-visible topbar, not buried in a scrolling card.
 function lensTopbar(){var isPf=(LENS=="portfolio");
+  var isG=(LENS=="gmail"||LENS=="calendar"||LENS=="drive");   // Google lenses: their own headers; the generic bar doesn't belong
+  document.body.classList.toggle("cf-glens",isG);             // -> CSS hides the whole topbar on mobile for these lenses
   var cb=document.getElementById("cfTopBtn"),ab=document.getElementById("addBtn"),nb=document.getElementById("newSessBtn");
   if(cb)cb.style.display=isPf?"":"none";
-  if(ab)ab.style.display=isPf?"none":"";
-  if(nb)nb.style.display=isPf?"none":"";}
+  if(ab)ab.style.display=(isPf||isG)?"none":"";               // Add / New-session are meaningless in Gmail/Calendar/Drive
+  if(nb)nb.style.display=(isPf||isG)?"none":"";}
 const CST={production:["Production","#3fb950"],live:["Live","#3fb950"],stable:["Stable","#58a6ff"],wip:["WIP","#d29922"],building:["Building","#d29922"],blocked:["Blocked","#f85149"],idea:["Idea","#a371f7"],running:["Running","#3fb950"],paused:["Paused","#a0a0b0"],done:["Done","#3fb950"]};
 function badge(s){const x=CST[s]||[s||"?","#a0a0b0"];return '<span class="badge" style="background:'+x[1]+'22;color:'+x[1]+'">'+x[0]+'</span>';}
 function esc(s){return (s||"").replace(/'/g,"").replace(/</g,"&lt;");}
@@ -9885,12 +9898,14 @@ async function loadGmail(){
     +'<div class="gm-grip" id="gmGrip" title="Drag to resize · double-click to reset"></div>'
     +gmReadEmpty()
     +'<div class="gm-railbg" id="gmRailBg" onclick="gmRailClose()"></div>'   // mobile: tap-to-close drawer backdrop (display:none on desktop)
+    +'<button class="gm-fab" onclick="gmCompose()" title="Compose" aria-label="Compose">'+String.fromCharCode(9998)+'</button>'   // mobile compose FAB (display:none on desktop)
   +'</div>';
   gmApplySplit();
   gmInitResizer();
   gmBindKeys();
   gmFetchLabels();
   await gmFetchList(true);
+  gmWireLoadMore();   // scroll-near-bottom -> load the next page of mail (append)
   clearInterval(window.GMTIMER); window.GMTIMER=setInterval(function(){ if(LENS!=='gmail'){clearInterval(window.GMTIMER);return;} gmAutoRefresh(); }, 45000);  // pull in new mail
   clearInterval(window.GMSYNCT); window.GMSYNCT=setInterval(function(){ if(LENS!=='gmail'){clearInterval(window.GMSYNCT);return;} gmSyncBadge(); }, 15000);  // keep the "synced Xs ago" badge ticking
 }
@@ -10078,15 +10093,37 @@ async function gmFetchList(reset,forceFresh){
   if(r.error){ if(rows) rows.innerHTML=gErr(r); return; }
   GM.email=r.email||GM.email;
   GM._synced=r._synced; GM._stale=!!r._stale; gmSyncBadge();
-  // collapse to threads: keep first message seen per threadId, count the rest
-  var seen={}, list=[];
-  (r.messages||[]).forEach(function(m){
-    var tid=m.threadId||m.id;
-    if(seen[tid]!==undefined){ list[seen[tid]].count++; if(m.unread) list[seen[tid]].unread=true; return; }
-    seen[tid]=list.length; m.count=1; list.push(m);
-  });
-  GM.msgs=list;
+  GM.msgs=[]; GM._seen={};                 // fresh list -> reset accumulator + thread dedupe
+  gmCollapseInto(r.messages);
+  GM.nextPage=r.nextPage||"";              // pagination cursor for load-more
   gmRenderRows();
+}
+// collapse messages into GM.msgs by thread (dedupe via GM._seen) -- used for page 1 AND appended pages
+function gmCollapseInto(messages){
+  GM.msgs=GM.msgs||[]; GM._seen=GM._seen||{};
+  (messages||[]).forEach(function(m){
+    var tid=m.threadId||m.id;
+    if(GM._seen[tid]!==undefined){ GM.msgs[GM._seen[tid]].count++; if(m.unread) GM.msgs[GM._seen[tid]].unread=true; return; }
+    GM._seen[tid]=GM.msgs.length; m.count=1; GM.msgs.push(m);
+  });
+}
+// load the next page of mail (Gmail pageToken) and append -- triggered on scroll-near-bottom
+async function gmLoadMore(){
+  if(GM._loadingMore || !GM.nextPage) return;
+  GM._loadingMore=true;
+  try{
+    var r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q||'')+'&max=50&page='+encodeURIComponent(GM.nextPage))).json();
+    if(r && !r.error){ gmCollapseInto(r.messages); GM.nextPage=r.nextPage||""; gmRenderRows(); }
+  }catch(e){}
+  GM._loadingMore=false;
+}
+// attach a scroll-near-bottom listener (works for the desktop list-pane scroll AND the mobile window scroll)
+function gmWireLoadMore(){
+  if(GM._lmWired) return; GM._lmWired=true;
+  var onScroll=function(el){ if(!el) return; if((el.scrollTop+el.clientHeight) >= (el.scrollHeight-600)) gmLoadMore(); };
+  var rows=document.getElementById('gmRows'); if(rows) rows.addEventListener('scroll',function(){onScroll(rows);},{passive:true});
+  var list=document.querySelector('.gm-list'); if(list) list.addEventListener('scroll',function(){onScroll(list);},{passive:true});
+  window.addEventListener('scroll',function(){ if(LENS==='gmail'){ var d=document.scrollingElement||document.documentElement; onScroll(d); } },{passive:true});
 }
 
 function gmRenderRows(){
@@ -10824,10 +10861,10 @@ function gmForward(idx){
 function gmToggleLabels(){ GM.labelsOpen=!GM.labelsOpen; var w=document.getElementById('gmLabelWrap'); if(w) w.style.display=GM.labelsOpen?'block':'none'; var c=document.getElementById('gmLblChev'); if(c) c.textContent=GM.labelsOpen?'▾':'▸'; }
 function gmSetLane(k){ GM.lane=k; GM.text=''; var s=document.getElementById('gmSearch'); if(s) s.value=''; gmHighlightRail(); gmFetchList(true); gmRailClose(); if(k==='snoozed'){} }
 function gmSetLabelLane(id,name){ GM.lane='lbl:'+id; GM.text=''; GM.labelQuery='label:"'+name+'"'; gmHighlightRail(); gmFetchList(true); gmRailClose(); }
-async function gmFetchListRaw(q){ GM.cur=-1; GM.sel={}; gmPaintBatch(); var rows=document.getElementById('gmRows'); if(rows) rows.innerHTML=empty('Loading…');
+async function gmFetchListRaw(q){ GM.cur=-1; GM.sel={}; gmPaintBatch(); GM.q=q; var rows=document.getElementById('gmRows'); if(rows) rows.innerHTML=empty('Loading…');
   var r; try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(q)+'&max=50')).json(); }catch(e){ if(rows) rows.innerHTML=gErr({error:'network'}); return; }
   if(r.error){ if(rows) rows.innerHTML=gErr(r); return; }
-  var seen={},list=[]; (r.messages||[]).forEach(function(m){var tid=m.threadId||m.id; if(seen[tid]!==undefined){list[seen[tid]].count++;return;} seen[tid]=list.length;m.count=1;list.push(m);}); GM.msgs=list; gmRenderRows();
+  GM.msgs=[]; GM._seen={}; gmCollapseInto(r.messages); GM.nextPage=r.nextPage||""; gmRenderRows();   // reset accumulator + cursor so load-more paginates the search too
 }
 function gmHighlightRail(){ var rail=document.getElementById('gmRail'); if(rail) rail.outerHTML=gmRailHTML(); }
 function gmToggleChip(k){ GM.chips[k]=!GM.chips[k]; var els=document.querySelectorAll('.gm-chip'); gmFetchList(true);
