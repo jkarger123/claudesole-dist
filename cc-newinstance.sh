@@ -72,8 +72,9 @@ lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1 && die "port $PORT is already 
 
 # carry the FAMILY mesh token (shared badge) from the parent so the new node joins this family's mesh
 MESH_TOKEN="$(python3 -c "import json;print(json.load(open('$SRC/cc.config.json')).get('mesh_token') or '')" 2>/dev/null || echo '')"
-# fresh per-node dashboard auth token (a NEW node's initial token -- not a change to an existing one)
-AUTH_TOKEN="$(python3 -c "import secrets;print(secrets.token_hex(16))")"
+# A new node starts with NO login token (open on the private tailnet). On first open the dashboard invites
+# the operator to set their OWN token -- better than auto-generating one they must copy down or be locked out.
+AUTH_TOKEN=""
 
 cat <<PLAN
 == provision plan ==
@@ -142,8 +143,8 @@ d={
  "role": role,
  "preset": preset,
  "deliverables_root": deliv,
- "auth_token": auth,
 }
+if auth: d["auth_token"]=auth   # usually empty -> node starts open; operator sets a token on first open
 if mesh: d["mesh_token"]=mesh
 json.dump(d,open(cfg,"w"),indent=2)
 print("  wrote",cfg)
@@ -216,8 +217,8 @@ NEXT (operator-approved):
   3) Mesh: add this node to the OTHER family nodes' peers (so they can reach it), e.g. append
        {"id":"$ID","url":"http://127.0.0.1:$PORT"}  (or the tailnet URL) to each peers.json.
 
-  Initial dashboard auth token for '$ID' (store it; this is a brand-new token, not a change):
-       $AUTH_TOKEN
+  Login: this node starts with NO token (open on your private tailnet). Open it and the dashboard will
+  invite you to set your OWN login token on first launch (changeable anytime in Settings -> Login token).
 DONE
 
 if [ -n "$JSON" ]; then

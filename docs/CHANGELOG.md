@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.28.0 -- 2026-06-25
+- UX (no more copy-the-auto-token-or-be-locked-out): a provisioned node now starts with NO login token (open
+  on the private tailnet, which is already access-gated by Tailscale). On first open the dashboard shows a
+  "Set a login token" prompt where the operator picks their OWN token (PIN or passphrase, or 🎲 generate),
+  with a note that it's changeable anytime in Settings → Login token. Dismissible ("Skip for now"); only
+  nags while the node is still open. The wizard no longer prints a token to write down. (window.CC.authOn
+  drives the prompt; setting it re-issues the session cookie so you're never locked out.)
+
 ## 0.27.0 -- 2026-06-25
 - FIX (no more raw-port SSL footgun + full e2e-verified provisioning): provisioned nodes now set
   cc.config bind_host "127.0.0.1" (server.py honors bind_host/HPCC_HOST, default 0.0.0.0 so existing nodes

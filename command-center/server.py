@@ -129,7 +129,7 @@ def render_page():
     except Exception: _lenses = None
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
-        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "google": google_configured(), "accountWallet": ACCOUNT_WALLET,
+        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "authOn": bool(AUTH_TOKEN),
         "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md", "MASTER_HANDOFF.md",
             "FILE_SYSTEM_GOVERNANCE.md", "TEXT2TUNE_ARCHITECTURE.md", "ENTERPRISE_MIGRATION.md",
             "BRIDGE_MIGRATION.md"]})
@@ -3712,10 +3712,11 @@ def instance_provision(p, do_launch=False, dry=False):
         res["launched"] = True; res["http"] = code; res["alive"] = code in (200, 401, 403)
         # warm the Chief of Staff so the new node's "Talk to me" works immediately (no cold-start "can't find
         # session" race -- an enterprise node should boot with a live Chief, not start one on first click).
-        if res["alive"] and summ.get("auth_token"):
+        if res["alive"]:
             try:
-                creq = urllib.request.Request("http://127.0.0.1:%s/api/chief-open" % port, data=b"{}",
-                       headers={"X-CC-Token": summ["auth_token"], "Content-Type": "application/json"}, method="POST")
+                _h = {"Content-Type": "application/json"}
+                if summ.get("auth_token"): _h["X-CC-Token"] = summ["auth_token"]   # new nodes start open (no token)
+                creq = urllib.request.Request("http://127.0.0.1:%s/api/chief-open" % port, data=b"{}", headers=_h, method="POST")
                 cr = json.loads(urllib.request.urlopen(creq, timeout=35).read().decode())
                 res["chief_started"] = bool(cr.get("ok"))
                 if not cr.get("ok"): res["chief_warn"] = cr.get("error", "")
@@ -11754,7 +11755,7 @@ async function cfProvision(launch){
   var r=await cfPost({launch:launch, persist:persist, mesh:persist});if(!r)return;var o=document.getElementById('cfout');
   if(!r.ok){o.textContent='ERROR: '+(r.error||'?');return;}
   var s=r.summary||{}, NL=String.fromCharCode(10);
-  var txt=(r.launched?'✅ Created & started: ':'✅ Created (not started): ')+(s.bundle||'?')+NL+'port: '+(s.port||'?')+'   role: '+(s.role||'?')+NL+'dashboard: '+(s.url||'?')+NL+NL+'Initial auth token (store it — brand-new token):'+NL+'  '+(s.auth_token||'?')+NL;
+  var txt=(r.launched?'✅ Created & started: ':'✅ Created (not started): ')+(s.bundle||'?')+NL+'port: '+(s.port||'?')+'   role: '+(s.role||'?')+NL+'dashboard: '+(s.url||'?')+NL+NL+'Login: no token yet — when you open it, the dashboard will ask you to set your own (changeable later in Settings → Login token).'+NL;
   if(r.launched)txt+=NL+'Running: '+(r.alive?('✅ alive (HTTP '+r.http+')'):('⚠ not responding (HTTP '+r.http+')'))+NL;
   if('persisted' in r)txt+='Permanent: '+(r.persisted?'✅ installed — survives reboot':('⚠ '+(r.persist_note||r.persist_warn||'not installed')))+NL;
   if('meshed' in r)txt+='Mesh: '+(r.meshed?'✅ added to the fleet peers':('⚠ '+(r.mesh_warn||'not added')))+NL;
@@ -12525,6 +12526,28 @@ function applyPreset(){var L=(window.CC&&window.CC.lenses);if(!L||!L.length)retu
   document.querySelectorAll('#lens button').forEach(function(b){b.classList.toggle('on',b.dataset.l===LENS);});
   var vt=document.getElementById('viewtitle');if(vt)vt.textContent=NAV[LENS]||LENS;}
 applyPreset();   // preset hides project-only lenses on an org instance + lands on the first allowed lens
+// First-run security nudge: a freshly provisioned node has NO login token (open on your private tailnet).
+// Invite the operator to set their OWN one (not auto-generated -> nothing to copy down or get locked out by).
+if(window.CC && !window.CC.authOn && !sessionStorage.getItem('cf_tok_dismissed')){ setTimeout(firstRunToken, 2300); }
+function firstRunToken(){
+  if(window.CC && window.CC.authOn) return;
+  showM('<div class="cfw"><div class="vshead"><h2>🔒 Set a login token</h2><button class="mini" onclick="frtSkip()">Skip for now</button></div>'
+   +'<div class="sub" style="margin-bottom:11px">This node has <b>no login token yet</b> — anyone on your tailnet can open it. Set one now (a PIN or a passphrase — your choice). You can change or remove it anytime in <b>Settings → Login token</b>.</div>'
+   +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><input id="frt_tok" class="mini" style="flex:1;min-width:200px" placeholder="choose a token (min 4 chars)" autocomplete="off">'
+   +'<button class="mini" onclick="document.getElementById(\'frt_tok\').value=cfRandTok()">🎲 Generate</button>'
+   +'<button class="mini go" onclick="frtSet()">Set token</button></div>'
+   +'<div id="frt_out" style="margin-top:11px;display:none;font-size:12.5px;line-height:1.5"></div></div>');
+}
+function frtSkip(){ try{sessionStorage.setItem('cf_tok_dismissed','1');}catch(e){} closeM(); }
+async function frtSet(){
+  var v=(document.getElementById('frt_tok').value||'').trim();
+  if(v.length<4){toast('Use at least 4 characters (or 🎲 Generate one).',4000);return;}
+  var r;try{r=await(await fetch('/api/auth-token-set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:v})})).json();}catch(e){toast('Request failed');return;}
+  if(!r||!r.ok){toast('Failed: '+((r||{}).error||'?'),5000);return;}
+  if(window.CC)window.CC.authOn=true;
+  var o=document.getElementById('frt_out'); if(o){o.style.display='block';o.innerHTML='✅ Token set — you\'re still logged in here. Other devices will need it. Change it anytime in Settings → Login token.';}
+  toast('Login token set ✓',3500); setTimeout(closeM,2300);
+}
 
 // ---- Smart-sort nav: tabs auto-rank by how often you click them (most-used first). Drag a tab to pin a
 // custom static order; create CATEGORIES (collapsible folders) and drag tabs in to tuck away ones you rarely
