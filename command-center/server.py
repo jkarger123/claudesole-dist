@@ -8195,6 +8195,19 @@ body.gm-resizing iframe{pointer-events:none}
 .pj-cname{font-weight:600;font-size:12.5px}
 .pj-csum{margin-top:4px;font-size:11px;color:var(--mut);line-height:1.45}
 .modal:has(.pj-view){width:min(860px,95vw)}
+/* ===== Add-a-ClaudeFather wizard (responsive, overflow-safe) ===== */
+.modal:has(.cfw){width:min(640px,96vw)}
+.cfw .vshead{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px}
+.cfw .vshead h2{margin:0;font-size:18px}
+.cfw .cfgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:8px}
+.cfw label.cff{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--mut);min-width:0}
+.cfw .cff input,.cfw .cff select{width:100%;box-sizing:border-box;max-width:100%}
+.cfw .cfpersist{display:flex;align-items:flex-start;gap:9px;margin-top:14px;padding:11px 13px;background:var(--card2);border:1px solid var(--line);border-radius:10px;font-size:12.5px;line-height:1.45;color:var(--ink)}
+.cfw .cfpersist input{margin-top:3px;flex:0 0 auto;width:auto}
+.cfw .cfacts{display:flex;gap:8px;flex-wrap:wrap;margin-top:15px}
+.cfw .cflegend{margin-top:10px;font-size:11px;line-height:1.55;color:var(--mut)}
+.cfw #cfout{margin-top:13px;display:none;white-space:pre-wrap;overflow-wrap:anywhere;max-height:46vh;overflow:auto;background:#0d0d14;border:1px solid var(--line);border-radius:9px;padding:12px;font-size:12px;line-height:1.5}
+@media(max-width:820px){.modal-bg{padding:10px}.modal{padding:18px 15px 15px;width:96vw;max-height:92dvh}.cfw .cfgrid{grid-template-columns:1fr}.cfw .cfacts .mini{flex:1 1 140px;min-height:42px;justify-content:center}}
 .pj-view{width:100%}.pj-view .vshead{display:flex;align-items:center;gap:10px;margin-bottom:10px}.pj-view .vshead h2{flex:1;margin:0;font-size:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pj-md{max-height:70vh;overflow:auto;background:#0a0a0f;border:1px solid var(--line);border-radius:10px;padding:14px;font:12px/1.6 ui-monospace,Menlo,monospace;color:#c9d1d9;white-space:pre-wrap;word-break:break-word}
 /* fx-* : agentic leverage (smart reply 360 + sender history dossier) */
@@ -8263,7 +8276,7 @@ body.gm-resizing iframe{pointer-events:none}
 <div class="health" id="svchealth"></div>
 </aside>
 <main id="main">
-<div class="topbar"><h2 id="viewtitle">Sessions</h2><button class="btn" id="refreshBtn" title="Refresh" onclick="location.reload()" style="padding:7px 11px">⟳</button><button class="btn" id="helpBtn" title="How this works" onclick="ccHelp(LENS)" style="padding:7px 11px">?</button><input id="search" placeholder="Search…"><button class="btn" id="agentBtn" style="display:none" onclick="openAgent(LENS)">🤖 Agent</button><button class="btn" id="addBtn" onclick="openAdd()">＋ Add</button><button class="btn go" onclick="openLaunch()">▶ New session</button></div>
+<div class="topbar"><h2 id="viewtitle">Sessions</h2><button class="btn" id="refreshBtn" title="Refresh" onclick="location.reload()" style="padding:7px 11px">⟳</button><button class="btn" id="helpBtn" title="How this works" onclick="ccHelp(LENS)" style="padding:7px 11px">?</button><input id="search" placeholder="Search…"><button class="btn" id="agentBtn" style="display:none" onclick="openAgent(LENS)">🤖 Agent</button><button class="btn" id="addBtn" onclick="openAdd()">＋ Add</button><button class="btn go" id="newSessBtn" onclick="openLaunch()">▶ New session</button><button class="btn go" id="cfTopBtn" style="display:none" onclick="cfAddWizard()">➕ Add a ClaudeFather</button></div>
 <div class="wrap" id="grid"></div>
 </main>
 </div>
@@ -8277,6 +8290,13 @@ let AGENT_SLUGS=new Set();
 fetch("/api/agents").then(r=>r.json()).then(a=>{AGENT_SLUGS=new Set(a.slugs||[]);refreshAgentBtn();}).catch(()=>{});
 function refreshAgentBtn(){const b=document.getElementById("agentBtn");if(!b)return;
   if(AGENT_SLUGS.has(LENS)){b.style.display="";b.textContent="🤖 Talk to "+(NAV[LENS]||LENS)+" agent";}else{b.style.display="none";}}
+// On the overseer Portfolio, the generic ＋Add / ▶New-session don't apply -- swap in the primary action
+// (Add a ClaudeFather) so it lives in the always-visible topbar, not buried in a scrolling card.
+function lensTopbar(){var isPf=(LENS=="portfolio");
+  var cb=document.getElementById("cfTopBtn"),ab=document.getElementById("addBtn"),nb=document.getElementById("newSessBtn");
+  if(cb)cb.style.display=isPf?"":"none";
+  if(ab)ab.style.display=isPf?"none":"";
+  if(nb)nb.style.display=isPf?"none":"";}
 const CST={production:["Production","#3fb950"],live:["Live","#3fb950"],stable:["Stable","#58a6ff"],wip:["WIP","#d29922"],building:["Building","#d29922"],blocked:["Blocked","#f85149"],idea:["Idea","#a371f7"],running:["Running","#3fb950"],paused:["Paused","#a0a0b0"],done:["Done","#3fb950"]};
 function badge(s){const x=CST[s]||[s||"?","#a0a0b0"];return '<span class="badge" style="background:'+x[1]+'22;color:'+x[1]+'">'+x[0]+'</span>';}
 function esc(s){return (s||"").replace(/'/g,"").replace(/</g,"&lt;");}
@@ -8308,6 +8328,7 @@ function paintSvc(){const el=document.getElementById("svchealth");if(!el)return;
   el.innerHTML='<div style="font-size:10px;font-weight:700;letter-spacing:.6px;color:var(--dim);margin-bottom:3px">SYSTEM</div>'+row(ST.bridge,"Bridge")+row(ST.edge,"Edge")+row(ST.t490,"T490")+row(ST.t480,"T480");}
 async function load(){D=await(await fetch("/api/data")).json();render();fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;paintSvc();if(LENS=="machines")render();});}
 function render(){
+  lensTopbar();
   const q=document.getElementById("search").value.toLowerCase();let h="";
   if(LENS=="pillars")h=D.components.filter(c=>!q||(c.name+c.summary).toLowerCase().includes(q)).map(compCard).join("");
   else if(LENS=="routines")h=(D.routines||[]).filter(r=>!q||(r.name+r.desc).toLowerCase().includes(q)).map(rouCard).join("")||empty("No routines yet.");
@@ -11588,7 +11609,7 @@ async function viewCMD(path){
 async function loadPortfolio(){document.getElementById("grid").innerHTML=empty("Scanning the portfolio…");
   let d={};try{d=await(await fetch('/api/portfolio')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load portfolio.");return;}
   const insts=d.instances||[],roll=d.roll||{};
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🛰 Portfolio</b> <span class="sub">'+(d.n||0)+' project ClaudeFather(s) overseen by '+esc(d.brand||'')+'</span><button class="mini go" style="margin-left:auto" onclick="cfAddWizard()" title="Provision a new, self-contained ClaudeFather instance">➕ Add a ClaudeFather</button></div>'
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🛰 Portfolio</b> <span class="sub">'+(d.n||0)+' project ClaudeFather(s) overseen by '+esc(d.brand||'')+' &middot; use <b>➕ Add a ClaudeFather</b> (top right) to provision a new one</span></div>'
     +'<div style="display:flex;gap:22px;margin-top:12px;flex-wrap:wrap">'
     +pchip('#3fb950',roll.green||0,'healthy')+pchip('#d29922',roll.amber||0,'warnings')+pchip('#f85149',roll.red||0,'critical')+pchip('#8b949e',roll.down||0,'down')+'</div></div>';
   if(!insts.length){h+=empty("No child ClaudeFathers yet. Click ➕ Add a ClaudeFather above to provision one.");document.getElementById("grid").innerHTML=h;return;}
@@ -11603,27 +11624,27 @@ async function loadPortfolio(){document.getElementById("grid").innerHTML=empty("
       +'<div class="sub" style="margin-top:9px">sessions '+(x.sessions_n!=null?x.sessions_n:'?')+' &middot; loops '+(x.loops_running!=null?x.loops_running:'?')+' &middot; security '+(x.security||'?')+'</div><div class="btns" style="margin-top:9px" onclick="event.stopPropagation()"><button class="mini" onclick="chiefDM(&#39;'+esc(x.id)+'&#39;)">&#128172; DM chief</button></div></div>';});
   document.getElementById("grid").innerHTML=h;}
 // ---- "Add a ClaudeFather": provision a new self-contained instance via the cc-newinstance engine ----
-function cfF(k,label,ph){return '<label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--sub,#8b949e)">'+label+'<input id="cf_'+k+'" class="mini" placeholder="'+esc(ph)+'"></label>';}
-function cfSel(k,label,opts){return '<label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--sub,#8b949e)">'+label+'<select id="cf_'+k+'" class="mini">'+opts.map(o=>'<option value="'+o[0]+'">'+esc(o[1])+'</option>').join('')+'</select></label>';}
+function cfF(k,label,ph){return '<label class="cff">'+label+'<input id="cf_'+k+'" class="mini" placeholder="'+esc(ph)+'"></label>';}
+function cfSel(k,label,opts){return '<label class="cff">'+label+'<select id="cf_'+k+'" class="mini">'+opts.map(o=>'<option value="'+o[0]+'">'+esc(o[1])+'</option>').join('')+'</select></label>';}
 function cfAddWizard(){
-  showM('<div class="pj-view"><div class="vshead"><h2>➕ Add a ClaudeFather</h2><button class="mini" onclick="closeM()">✕ Close</button></div>'
-   +'<div class="sub" style="margin-bottom:12px">Provision a new, self-contained instance — its own movable folder holding the framework + config + secrets + project + deliverables. The engine owns the layout, so the node stays portable and updatable. Nothing starts until you approve it.</div>'
-   +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
-   +cfF('id','ID','a-z 0-9 _ - · e.g. bakery')
-   +cfF('name','Name','human name · e.g. Bakery Ops')
-   +cfF('brand','Brand','brand label (defaults to name)')
-   +cfSel('preset','Role',[['project','project — a single operation'],['overseer','overseer — oversees other nodes']])
-   +cfF('dest','Bundle folder','default: /Volumes/Samsung990PRO/claudefather-<id>')
-   +cfF('port','Port','blank = auto (first free ≥ 8800)')
+  showM('<div class="cfw"><div class="vshead"><h2>➕ Add a ClaudeFather</h2><button class="mini" onclick="closeM()">✕ Close</button></div>'
+   +'<div class="sub" style="margin-bottom:2px">A new, self-contained instance — its own movable folder (framework + config + secrets + project + deliverables). Nothing starts until you choose below.</div>'
+   +'<div class="cfgrid">'
+   +cfF('id','ID','a-z 0-9 _ -  ·  e.g. bakery')
+   +cfF('name','Name','e.g. Bakery Ops')
+   +cfF('brand','Brand','defaults to name')
+   +cfSel('preset','Role',[['project','project — a single operation'],['overseer','overseer — oversees nodes']])
+   +cfF('dest','Bundle folder','blank = /Volumes/Samsung990PRO/claudefather-<id>')
+   +cfF('port','Port','blank = auto (≥ 8800)')
    +cfSel('storage','Storage',[['github','github'],['icloud','icloud'],['icloud+github','icloud+github']])
-   +cfF('agents','Agents','default: security,backup,usage,ideas,routines')
+   +cfF('agents','Agents','blank = security,backup,usage,ideas,routines')
    +'</div>'
-   +'<label style="display:flex;align-items:center;gap:7px;margin-top:13px;font-size:12px;color:var(--ink)"><input type="checkbox" id="cf_persist" checked> <b>Make it permanent &amp; join the mesh</b> &mdash; on Create &amp; start, install it to survive reboots and add it to the fleet automatically (no manual steps)</label>'
-   +'<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><button class="mini" onclick="cfPlan()" title="Just show what would be created — writes nothing">👁 Preview plan</button>'
-   +'<button class="mini go" onclick="cfProvision(false)" title="Create the instance folder, but do NOT start it running">📦 Create (no start)</button>'
-   +'<button class="mini go" onclick="cfProvision(true)" title="Create the instance, start it, and (if checked) make it permanent + join the mesh">🚀 Create &amp; start now</button></div>'
-   +'<div class="sub" style="margin-top:8px;font-size:11px;line-height:1.5">👁 <b>Preview</b> — show the plan only, nothing is written. &nbsp; 📦 <b>Create</b> — build the instance folder, but it stays off. &nbsp; 🚀 <b>Create &amp; start</b> — build it, bring its dashboard online, and finish setup automatically. Then open it and run its <b>Setup agent</b> to configure the project.</div>'
-   +'<pre id="cfout" class="pj-md" style="margin-top:12px;display:none;white-space:pre-wrap"></pre></div>');
+   +'<label class="cfpersist"><input type="checkbox" id="cf_persist" checked><span><b>Make it permanent &amp; join the mesh</b><br>On <b>Create &amp; start</b>, install it to survive reboots and add it to the fleet — no manual steps.</span></label>'
+   +'<div class="cfacts"><button class="mini" onclick="cfPlan()" title="Show the plan only — writes nothing">👁 Preview</button>'
+   +'<button class="mini go" onclick="cfProvision(false)" title="Build the folder, leave it off">📦 Create</button>'
+   +'<button class="mini go" onclick="cfProvision(true)" title="Build it, start it, finish setup">🚀 Create &amp; start</button></div>'
+   +'<div class="cflegend">👁 <b>Preview</b> — plan only. &nbsp; 📦 <b>Create</b> — build it, leave it off. &nbsp; 🚀 <b>Create &amp; start</b> — build, start, finish setup, then open it and run its <b>Setup agent</b>.</div>'
+   +'<pre id="cfout"></pre></div>');
 }
 function cfVals(){var g={};['id','name','brand','preset','dest','port','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
 async function cfPost(extra){

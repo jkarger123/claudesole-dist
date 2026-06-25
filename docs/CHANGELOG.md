@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.23.1 -- 2026-06-25
+- UX/MOBILE (Add-a-ClaudeFather layout redo): the wizard modal overflowed and clipped behind the nav on
+  mobile, and the card-header "Add" button hid behind the sticky topbar. Rebuilt: responsive field grid
+  (auto-fit -> single column on phones, inputs box-sizing:border-box so nothing overflows), mobile modal
+  sizing (96vw / 92dvh), an output panel that wraps + scrolls. Moved the primary action into the always-
+  visible topbar as "➕ Add a ClaudeFather" (shown only on the Portfolio lens) and hid the generic "＋ Add"
+  + "▶ New session" there (they don't apply to an overseer portfolio) -- so it's never buried in a scrolling
+  card again.
+
 ## 0.23.0 -- 2026-06-25
 - FEATURE (self-completing provisioning + Setup agent): "Create & start" now finishes a new node end-to-end
   so the operator never has to hand-run launchd or edit peers. A "Make it permanent & join the mesh" checkbox
