@@ -716,6 +716,45 @@ def _gmail_sync_loop():
         except Exception:
             pass
 
+# ---- Generic resilient Google cache (same spine as the Gmail cache, reused for Calendar + Drive so a flaky
+# uplink shows last-good content with a stale flag instead of a spinner). Stores the fetch fn per active key
+# so one background loop can keep every recently-viewed view warm. ----
+_GC_CACHE = {}            # key -> {"data":..., "at":ts, "ok":True}
+_GC_ACTIVE = {}           # key -> {"at":ts, "fetch":callable}
+_GC_LOCK = threading.Lock()
+def _g_cached(key, fetch, ttl=60, fresh=False):
+    now = time.time()
+    with _GC_LOCK:
+        _GC_ACTIVE[key] = {"at": now, "fetch": fetch}
+        ent = _GC_CACHE.get(key)
+    if not fresh and ent and ent.get("ok") and (now - ent["at"]) < ttl:
+        d = dict(ent["data"]); d["_synced"] = ent["at"]; d["_cached"] = True; return d
+    live = fetch()
+    if isinstance(live, dict) and "error" not in live:
+        with _GC_LOCK: _GC_CACHE[key] = {"data": live, "at": now, "ok": True}
+        d = dict(live); d["_synced"] = now; d["_cached"] = False; return d
+    if ent and ent.get("ok"):    # live failed -> serve last good, flagged stale (no spinner during a flap)
+        d = dict(ent["data"]); d["_synced"] = ent["at"]; d["_cached"] = True; d["_stale"] = True
+        d["_error"] = (live.get("error") if isinstance(live, dict) else "fetch failed"); return d
+    return live
+def _gc_sync_loop():
+    """Keep recently-viewed Calendar/Drive views warm (only those requested in the last 5 min)."""
+    while True:
+        try:
+            time.sleep(50)
+            if not google_configured(): continue
+            now = time.time()
+            with _GC_LOCK:
+                items = [(k, v["fetch"]) for k, v in _GC_ACTIVE.items() if now - v.get("at", 0) < 300]
+            for k, fetch in items[:8]:
+                try:
+                    live = fetch()
+                    if isinstance(live, dict) and "error" not in live:
+                        with _GC_LOCK: _GC_CACHE[k] = {"data": live, "at": time.time(), "ok": True}
+                except Exception: pass
+        except Exception:
+            pass
+
 def gmail_unread():
     # exact unread-in-inbox count for the nav badge. Reading the label does NOT mark anything read.
     r = _g_api("GET", GMAIL_BASE + "/labels/INBOX")
@@ -7045,11 +7084,11 @@ class H(BaseHTTPRequestHandler):
                 "edits_pending": len(voice_edits_load()), "optimized_at": v.get("optimized_at"),
                 "email": v.get("email"), "google": google_configured()}))
         if u.path == "/api/google/calendar":
-            return self._s(200, json.dumps(calendar_events(
-                q.get("days", ["7"])[0],
-                (q.get("tmin", [""])[0] or None),
-                (q.get("tmax", [""])[0] or None))))
-        if u.path == "/api/google/drive":    return self._s(200, json.dumps(drive_list(q.get("q", [""])[0], q.get("max", ["300"])[0], q.get("parent", [""])[0], q.get("kind", [""])[0], q.get("starred", [""])[0], q.get("order", [""])[0])))
+            _cd=q.get("days",["7"])[0]; _tn=(q.get("tmin",[""])[0] or None); _tx=(q.get("tmax",[""])[0] or None); _cf=(q.get("fresh",[""])[0] in ("1","true"))
+            return self._s(200, json.dumps(_g_cached("cal|%s|%s|%s"%(_cd,_tn,_tx), lambda: calendar_events(_cd,_tn,_tx), fresh=_cf)))
+        if u.path == "/api/google/drive":
+            _dq=q.get("q",[""])[0]; _dm=q.get("max",["300"])[0]; _dp=q.get("parent",[""])[0]; _dk=q.get("kind",[""])[0]; _ds=q.get("starred",[""])[0]; _do=q.get("order",[""])[0]; _df=(q.get("fresh",[""])[0] in ("1","true"))
+            return self._s(200, json.dumps(_g_cached("drv|%s|%s|%s|%s|%s|%s"%(_dq,_dm,_dp,_dk,_ds,_do), lambda: drive_list(_dq,_dm,_dp,_dk,_ds,_do), fresh=_df)))
         if u.path == "/api/google/drive-get":
             return self._s(200, json.dumps(drive_get(q.get("id", [""])[0])))
         if u.path == "/api/google/drive-content":
@@ -13911,6 +13950,7 @@ if __name__ == "__main__":
     threading.Thread(target=_autoapprove_loop, daemon=True).start()   # keep agents off the permission-prompt wall
     threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
     threading.Thread(target=_gmail_sync_loop, daemon=True).start()      # keep recently-viewed Gmail lists warm (cache + outage fallback)
+    threading.Thread(target=_gc_sync_loop, daemon=True).start()         # same for Calendar/Drive (resilient cache)
     # Bind host: default 0.0.0.0 (existing nodes unchanged). Provisioned standalone bundles set bind_host
     # "127.0.0.1" so the ONLY tailnet-visible surface is the TLS `tailscale serve` URL -- no raw plain-HTTP
     # port on the tailnet for a browser to hit and get ERR_SSL_PROTOCOL_ERROR.

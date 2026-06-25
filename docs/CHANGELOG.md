@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.35.0 -- 2026-06-25
+- FEATURE (Calendar + Drive get the resilient cache too): factored the Gmail cache spine into a generic
+  _g_cached (short-TTL cache + background warmer + serve-last-good-on-error) and applied it to the Calendar
+  and Drive lenses. Now when the uplink flaps, ALL three Google lenses show last-synced content (flagged
+  stale) instead of spinning forever -- the durable fix for the recurring 'Google loading'. /api/google/
+  calendar + drive accept fresh=1 to force-refresh; a _gc_sync_loop keeps recently-viewed views warm.
+
 ## 0.34.4 -- 2026-06-25
 - FIX (mobile session dock was empty/black): sbPoll() did `if(!sbDesktop()){bar.innerHTML='';return;}` -- it
   WIPED the dock and bailed on any non-desktop width, so the constant mobile dock showed as an empty black
