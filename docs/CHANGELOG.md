@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.31.1 -- 2026-06-25
+- FIX (per-account usage: stop misattributing pre-tracking history): usage from before the account-activity
+  log existed (it began when 0.30.0 shipped) was lumped under whatever account was logged in now. It's now a
+  separate '(before tracking)' bucket -- transcripts don't record the account, so older usage genuinely can't
+  be split. Going forward each account accrues correctly. The Usage 'By Claude account' card shows the
+  tracking-start date and labels the pre-tracking bucket distinctly.
+
 ## 0.31.0 -- 2026-06-25
 - FEATURE (Gmail list: server-side cache + background sync + outage resilience): the inbox was a full live
   Gmail pull on EVERY browser refresh (two users = 2x the work; a flaky uplink = spin forever). Now each node

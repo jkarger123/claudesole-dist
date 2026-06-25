@@ -1865,7 +1865,8 @@ def usage_payload(ttl=20):
             d = ba.setdefault(acct, {"account": acct, "total": 0, "output": 0, "cost": 0.0, "calls": 0})
             d["total"] += ev[2] + ev[3] + ev[4] + ev[5]; d["output"] += ev[3]; d["cost"] += _ev_cost(ev); d["calls"] += 1
         by_account = sorted([v for v in ba.values() if v["total"] > 0], key=lambda x: -x["total"])
-        data = {"totals": totals, "series": ser, "by_account": by_account,
+        acct_since = (_alog[0].get("ts") if _alog else None)   # when per-account tracking began (for the UI note)
+        data = {"totals": totals, "series": ser, "by_account": by_account, "acct_since": acct_since,
                 "by_model": sorted([v for v in bm.values() if v["total"] > 0], key=lambda x: -x["total"]),
                 "by_project": sorted([v for v in bp.values() if v["total"] > 0], key=lambda x: -x["total"])[:14],
                 "composition": comp, "calls": len(evs),
@@ -2387,13 +2388,16 @@ def _acct_log_active(email):
             tmp = _ACCT_LOG + ".tmp"; json.dump(log, open(tmp, "w")); os.replace(tmp, _ACCT_LOG)
         except Exception: pass
 def _acct_active_at(ts, log):
-    """The account email active at time ts (latest entry with entry.ts <= ts; else the earliest known)."""
-    if not log: return "unknown"
+    """The account email active at time ts. Events BEFORE tracking began (the first log entry) can't be
+    attributed -- transcripts don't record the account -- so they're '(before tracking)', NOT lumped under
+    whatever account happens to be logged in now."""
+    if not log: return "(before tracking)"
+    if ts < log[0].get("ts", 0): return "(before tracking)"
     act = log[0].get("email")
     for e in log:
         if e.get("ts", 0) <= ts: act = e.get("email")
         else: break
-    return act or "unknown"
+    return act or "(before tracking)"
 
 ACCT_WALLET_DIR = os.path.join(CC_HOME, "secrets", "claude_accounts")   # one 0600 json per account
 def _acct_safe(s): return re.sub(r"[^A-Za-z0-9_.@+-]", "_", (s or "").strip())
@@ -8892,9 +8896,10 @@ function renderUsage(){if(!USAGE)return;const u=USAGE,t=u.totals,cur=uRange(),se
     +'<div class="ucsub" style="margin-top:8px">cache reads are billed at ~10% of input — most of the raw token count, little of the cost.</div></div>';
   h+='<div class="modgrid">'+mid+'</div>';
   if(u.by_account&&u.by_account.length){const amax=Math.max(1,...u.by_account.map(a=>a.total));
-    h+='<div class="card" style="cursor:default"><h3><span>By Claude account</span> <span class="sub">all tracked · 30d · which login burned what</span></h3>'
-      +u.by_account.map(a=>hbar(a.account==='unknown'?'(before tracking)':('👤 '+a.account),a.total/amax*100,fmtUSD(a.cost)+' · '+fmtTok(a.total)+' · '+(a.calls||0).toLocaleString()+' calls','#bc8cff')).join('')
-      +'<div class="ucsub" style="margin-top:8px">attributed by which account was logged in at the time of each call — switch accounts in the Claude Accounts lens.</div></div>';}
+    const since=u.acct_since?new Date(u.acct_since*1000).toLocaleDateString():null;
+    h+='<div class="card" style="cursor:default"><h3><span>By Claude account</span> <span class="sub">30d · which login burned what</span></h3>'
+      +u.by_account.map(a=>{var pre=(a.account==='(before tracking)'||a.account==='unknown');return hbar(pre?'🕓 before account tracking':('👤 '+a.account),a.total/amax*100,fmtUSD(a.cost)+' · '+fmtTok(a.total)+' · '+(a.calls||0).toLocaleString()+' calls',pre?'#6b6b78':'#bc8cff');}).join('')
+      +'<div class="ucsub" style="margin-top:8px">Attributed by which account was logged in at the time of each call'+(since?(' — tracking started <b>'+since+'</b>; usage before that can\'t be split by account (transcripts don\'t record it)'):'')+'. Switch accounts in the Claude Accounts lens.</div></div>';}
   const pmax=Math.max(1,...u.by_project.map(p=>p.total));
   h+='<div class="card" style="cursor:default"><h3><span>By project / folder</span> <span class="sub">all tracked · 30d · '+u.by_project.length+' active · ▸ = part of this node</span></h3>'+u.by_project.map(p=>hbar((p.self?'▸ ':'')+p.name,p.total/pmax*100,fmtUSD(p.cost)+' · '+fmtTok(p.total)+' · '+(p.calls||0).toLocaleString()+' calls',p.self?'#e8c547':'#6f6a3f')).join('')+'</div>';
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
