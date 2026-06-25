@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.34.2 -- 2026-06-25
+- FIX (mobile sessions: no way to switch sessions): the desktop bottom session taskbar (#sessbar) was
+  display:none on mobile, so you were stuck on the one open session. It now shows on mobile ON THE SESSIONS
+  LENS as a touch dock -- tap a tile to switch (tap already maps to openInSessions). Taller tap targets,
+  safe-area bottom padding, and the focus terminal/grid reserve space so the dock never covers content. The
+  hover-blowup preview (#sessprev) stays desktop-only (no touch hover).
+
 ## 0.34.1 -- 2026-06-25
 - FIX/UX (mobile chrome + Gmail): (1) the topbar no longer leaves a gap under the nav -- it's now flush in
   normal flow (not sticky-with-measured-offset) and slides up under the nav as you scroll, no content

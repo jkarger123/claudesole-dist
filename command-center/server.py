@@ -7939,7 +7939,14 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 #sessprev .sb-acts .mini.sb-kill{color:#f85149}
 #sessprev .sb-acts .mini.sb-exit{color:#d29922}
 #sessprev .sb-pvframe{flex:1;min-height:0;width:100%;border:0;display:block;background:#0a0a0f}
-@media(max-width:820px){#sessbar,#sessprev{display:none!important}}
+@media(max-width:820px){
+  #sessprev{display:none!important}                                  /* hover-blowup is desktop-only (no touch hover) */
+  #sessbar{display:none!important}                                   /* hidden on every lens EXCEPT Sessions... */
+  body.cf-sessions #sessbar{display:flex!important;height:auto;min-height:48px;padding-top:5px;padding-bottom:calc(5px + env(safe-area-inset-bottom));z-index:60}  /* ...where it's the touch session switcher (tap a tile = switch). Tall tap target + safe area. */
+  body.cf-sessions #sessbar .sb-tile{height:36px;max-width:150px}
+  body.cf-sessions #grid{padding-bottom:calc(56px + env(safe-area-inset-bottom))}                          /* clear the fixed dock (grid/list views) */
+  body.cf-sessions .focusonly .bigsess{height:calc(100dvh - 200px - 60px)}                                /* ...and shrink the focus terminal so the dock doesn't cover it */
+}
 /* Sessions LENS: focus = ONLY the big terminal (littles removed); in-flow column, never floats over usage. */
 .focusonly{display:flex;flex-direction:column;
   height:calc(100vh - 300px);min-height:420px}   /* offset accounts for header card + usage strip + the bottom taskbar so the terminal fits without overlapping */
@@ -8834,7 +8841,9 @@ function lensTopbar(){var isPf=(LENS=="portfolio");
   var cb=document.getElementById("cfTopBtn"),ab=document.getElementById("addBtn"),nb=document.getElementById("newSessBtn");
   if(cb)cb.style.display=isPf?"":"none";
   if(ab)ab.style.display=(isPf||isG)?"none":"";               // Add / New-session are meaningless in Gmail/Calendar/Drive
-  if(nb)nb.style.display=(isPf||isG)?"none":"";}
+  if(nb)nb.style.display=(isPf||isG)?"none":"";
+  document.body.classList.toggle("cf-sessions",LENS=="sessions");   // -> mobile shows the bottom session dock only here
+}
 const CST={production:["Production","#3fb950"],live:["Live","#3fb950"],stable:["Stable","#58a6ff"],wip:["WIP","#d29922"],building:["Building","#d29922"],blocked:["Blocked","#f85149"],idea:["Idea","#a371f7"],running:["Running","#3fb950"],paused:["Paused","#a0a0b0"],done:["Done","#3fb950"]};
 function badge(s){const x=CST[s]||[s||"?","#a0a0b0"];return '<span class="badge" style="background:'+x[1]+'22;color:'+x[1]+'">'+x[0]+'</span>';}
 function esc(s){return (s||"").replace(/'/g,"").replace(/</g,"&lt;");}
