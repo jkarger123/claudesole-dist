@@ -10849,15 +10849,18 @@ async function endSess(n,force){if(force&&!confirm("Force-kill "+n+"?\n\nThis SK
   setTimeout(loadSessions,force?700:3000);}
 // ---- History lens: past conversations across the fleet, with where each was launched + resume ----
 let HISTMACHINE="studio", HISTDATA=[], HISTLOADED=null;
-const HISTLABEL={studio:"Mac Studio",t490:"T490 (dev/bench)",t480:"T480 (Editor)"};
+// Machine tabs come from THIS node's registry (_machines.json), not a hardcoded fleet -- so a tenant node
+// (e.g. AFP) shows only its own machine(s), never another deployment's dev boxes.
+function histMachs(){return ((typeof D!=='undefined'&&D&&D.machines&&D.machines.length)?D.machines:[{id:"studio",label:"This machine"}]);}
+function histLabel(id){var m=histMachs().find(function(x){return x.id==id;});return m?(m.label||m.name||m.id):(id||"this machine");}
 function setHistMachine(m){HISTMACHINE=m;HISTLOADED=null;loadHistory();syncHash();}
 async function loadHistory(){
-  const tabs=["studio","t490","t480"].map(m=>'<button class="mini'+(m==HISTMACHINE?" go":"")+'" onclick="setHistMachine(\''+m+'\')">'+HISTLABEL[m]+'</button>').join(" ");
-  document.getElementById("grid").innerHTML='<div style="margin-bottom:14px">'+tabs+' &nbsp;<span class="sub" id="histmsg">scanning '+HISTMACHINE+'…</span></div><div id="histlist">'+empty("Scanning "+HISTLABEL[HISTMACHINE]+" — first scan of a remote box can take a few seconds.")+'</div>';
+  const tabs=histMachs().map(m=>'<button class="mini'+(m.id==HISTMACHINE?" go":"")+'" onclick="setHistMachine(\''+m.id+'\')">'+esc(m.label||m.name||m.id)+'</button>').join(" ");
+  document.getElementById("grid").innerHTML='<div style="margin-bottom:14px">'+tabs+' &nbsp;<span class="sub" id="histmsg">scanning '+HISTMACHINE+'…</span></div><div id="histlist">'+empty("Scanning "+histLabel(HISTMACHINE)+" — first scan of a remote box can take a few seconds.")+'</div>';
   if(HISTMACHINE!=="studio" && ST[HISTMACHINE]==="offline"){   // don't hang on an SSH timeout to a down box
     HISTDATA=[]; HISTLOADED=HISTMACHINE;
     const m=document.getElementById("histmsg"); if(m)m.textContent="offline";
-    const l=document.getElementById("histlist"); if(l)l.innerHTML=empty(HISTLABEL[HISTMACHINE]+" is offline — can't scan its history right now.");
+    const l=document.getElementById("histlist"); if(l)l.innerHTML=empty(histLabel(HISTMACHINE)+" is offline — can't scan its history right now.");
     return;
   }
   if(HISTLOADED!==HISTMACHINE){                    // fetch only on machine change, not on every keystroke
@@ -10876,7 +10879,7 @@ function renderHist(){
     '<div class="meta">launched from <code>'+esc(c.cwd)+'</code>'+(c.branch?' · '+esc(c.branch):'')+' · '+new Date(c.mtime*1000).toLocaleString()+'</div>'+
     '<div class="btns" style="margin-top:8px"><button class="mini go" onclick="resumeConv(\''+esc(c.id)+'\',false)">▶ resume</button>'
     +'<button class="mini" title="branch this conversation into an independent copy (shares history, then diverges)" onclick="resumeConv(\''+esc(c.id)+'\',true)">⑂ fork</button></div></div>'
-  ).join("")||empty(q?"No past conversations match \""+esc(q)+"\".":"No past conversations found on "+HISTLABEL[HISTMACHINE]+".");
+  ).join("")||empty(q?"No past conversations match \""+esc(q)+"\".":"No past conversations found on "+histLabel(HISTMACHINE)+".");
 }
 async function resumeConv(id,fork){const c=HISTDATA.find(x=>x.id==id); if(!c)return;
   toast((fork?"Forking ":"Resuming ")+(c.label||"session").slice(0,38)+"…");

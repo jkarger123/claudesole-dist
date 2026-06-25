@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.29 -- 2026-06-24
+- FIX (portability: History lens showed another deployment's machines): the History lens hardcoded the HP
+  Tuners fleet tabs (studio/T490/T480), so EVERY deployment (e.g. AFP) showed James's Windows dev/RE boxes --
+  meaningless + unreachable for a tenant node. Tabs now come from THIS node's machine registry
+  (_machines.json), so a node shows only its own machine(s). hptuners still shows its three.
+
 ## 0.21.28 -- 2026-06-24
 - FIX (History lens broken on fresh/external nodes): `command-center/scan_projects.py` -- which powers the
   History lens + per-client "past conversations" (it scans ~/.claude/projects) -- was NOT in framework_paths,
