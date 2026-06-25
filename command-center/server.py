@@ -3661,7 +3661,9 @@ def instance_provision(p, do_launch=False, dry=False):
     if not iid:
         return {"ok": False, "error": "id required (letters, digits, _ or -)"}
     dest = (p.get("dest") or "").strip() or ("/Volumes/Samsung990PRO/claudefather-%s" % iid)
-    cmd = ["bash", eng, "--id", iid, "--dest", dest]
+    # register into THIS running overseer's registry (what its Portfolio reads) -- not the engine's
+    # default-config registry, which may be a different state dir (the bug that hid the first shopos).
+    cmd = ["bash", eng, "--id", iid, "--dest", dest, "--register-into", INSTANCES]
     for flag, key in (("--name", "name"), ("--brand", "brand"), ("--preset", "preset"),
                       ("--port", "port"), ("--storage", "storage"), ("--agents", "agents"),
                       ("--project-root", "project_root"), ("--user", "user")):

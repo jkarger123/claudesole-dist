@@ -27,7 +27,7 @@
 set -uo pipefail
 SRC="${CC_HOME:-$HOME/hptuners-control}"          # the dev/master copy we provision FROM
 ID="" DEST="" NAME="" BRAND="" PRESET="project" PORT="" STORAGE="github"
-AGENTS="security,backup,usage,ideas,routines" PROOT="" RUNUSER="$(whoami)" DRY="" JSON=""
+AGENTS="security,backup,usage,ideas,routines" PROOT="" RUNUSER="$(whoami)" DRY="" JSON="" REGINTO=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -41,6 +41,7 @@ while [ $# -gt 0 ]; do
     --agents) AGENTS="$2"; shift 2;;
     --project-root) PROOT="$2"; shift 2;;
     --user) RUNUSER="$2"; shift 2;;
+    --register-into) REGINTO="$2"; shift 2;;
     --json) JSON=1; shift;;
     --dry-run) DRY=1; shift;;
     *) echo "unknown option: $1" >&2; exit 2;;
@@ -177,13 +178,19 @@ cat > "$PLIST" <<EOF
 </plist>
 EOF
 
-# ---- 6) register in the parent's _instances.json so the new node shows up in Portfolio
-python3 - "$SRC/cc.config.json" "$ID" "$PROOT" "$PRESET" "$ROLE" "$PORT" "$DEST/cc.config.json" "$SRC/command-center" <<'PY'
+# ---- 6) register the new node in the overseeing instance's _instances.json so it shows in Portfolio.
+#         --register-into <path> wins (the CALLER passes ITS OWN registry -- the running overseer's, which is
+#         what its Portfolio reads); else derive from the default config's state_dir (CLI convenience).
+python3 - "$SRC/cc.config.json" "$ID" "$PROOT" "$PRESET" "$ROLE" "$PORT" "$DEST/cc.config.json" "$SRC/command-center" "$REGINTO" <<'PY'
 import json,sys,os
-pcfg,id,root,preset,role,port,cfg,base=sys.argv[1:9]
-p=json.load(open(pcfg)) if os.path.exists(pcfg) else {}
-sd=os.path.expanduser(p.get("state_dir") or base)
-reg=os.path.join(sd,"_instances.json")
+pcfg,id,root,preset,role,port,cfg,base,reginto=sys.argv[1:10]
+if reginto:
+    reg=reginto
+else:
+    p=json.load(open(pcfg)) if os.path.exists(pcfg) else {}
+    sd=os.path.expanduser(p.get("state_dir") or base)
+    reg=os.path.join(sd,"_instances.json")
+os.makedirs(os.path.dirname(reg), exist_ok=True)
 d=[x for x in (json.load(open(reg)) if os.path.exists(reg) else []) if x.get("id")!=id]
 d.append({"id":id,"project_root":root,"preset":preset,"role":role,"port":int(port),
           "config":cfg,"url":"http://127.0.0.1:%s"%port,"bundle":os.path.dirname(cfg),"standalone":True})

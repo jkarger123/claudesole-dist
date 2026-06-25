@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.22.2 -- 2026-06-25
+- FIX (provisioned node now appears in Portfolio): a new instance was registered into the engine's
+  default-config registry (state_dir of cc.config.json), which is NOT necessarily the registry the calling
+  overseer reads -> the node was alive but invisible in Portfolio. cc-newinstance.sh now takes
+  --register-into <path>; instance_provision() passes the running overseer's own INSTANCES, so the node lands
+  where its Portfolio looks. (CLI use without the flag keeps the prior default-config behavior.)
+
 ## 0.22.1 -- 2026-06-25
 - UX (clearer provisioning wizard buttons): the "Add a ClaudeFather" actions were ambiguous ("Stage bundle"
   vs "Stage & launch"). Renamed to 👁 Preview plan / 📦 Create (no start) / 🚀 Create & start now, each with a
