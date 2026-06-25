@@ -3,6 +3,10 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.35 -- 2026-06-24
+- TWEAK (session location placement): the 📍 location chip now sits BEFORE the session title (location then
+  title), on the far left of the header, across list/grid/Focus views.
+
 ## 0.21.34 -- 2026-06-24
 - FIX (location now shows in the Focus/big session view too): the big window header (`bigHead`) never rendered
   the launch location -- only the list/grid did -- so in the default Focus view you couldn't see where a session

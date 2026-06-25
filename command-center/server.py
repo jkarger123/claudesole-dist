@@ -10831,7 +10831,7 @@ async function loadSessions(quiet){
   document.getElementById("grid").innerHTML='<div class="modstack">'+head+body+'</div>';   // clean vertical stack -- usage strip (in head) sits ABOVE the focus block, never overlapped
   unpeekNow(); startSnaps();
 }
-function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span><span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+locTag(x)+ctxChip(x.name)
+function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)
   +'<span class="stbtns">'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
   +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
@@ -10853,15 +10853,15 @@ function swapBig(n){focusBig(n);}
 function peek(){}
 function schedUnpeek(){}
 function locTag(x){var t=(x&&(x.loc||x.cwd))||'';if(!t)return '';return '<span class="locchip" title="launched from '+esc(x.cwd||t)+'">📍 '+esc(t)+'</span>';}
-function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="cursor:default"><h3><span title="'+esc(x.name)+'">'+(x.attached?"🟢 ":"⚪ ")+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+badge(x.attached?"running":"paused")+'</h3>'
-  +'<div class="meta">'+(locTag(x)?locTag(x)+' ':'')+'active '+ago(now-x.activity)+' ago</div>'
+function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="cursor:default"><h3>'+locTag(x)+'<span title="'+esc(x.name)+'">'+(x.attached?"🟢 ":"⚪ ")+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+badge(x.attached?"running":"paused")+'</h3>'
+  +'<div class="meta">active '+ago(now-x.activity)+' ago</div>'
   +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="openInSessions(\''+esc(x.name)+'\')">▶ open</button>'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
   +'<button class="mini" onclick="endSess(\''+esc(x.name)+'\',false)" title="handoff + close">end</button>'
   +'<button class="mini" style="color:#f85149" onclick="endSess(\''+esc(x.name)+'\',true)" title="force kill">kill</button></div></div>';}
 function sessTile(x,i){const big=(SESSBIG==x.name);
   return '<div class="stile'+(big?' big':'')+'" data-name="'+esc(x.name)+'">'
-    +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span><span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+locTag(x)+ctxChip(x.name)
+    +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)
     +'<span class="stbtns" onclick="event.stopPropagation()">'
     +'<button class="mini" title="'+(big?'minimize':'maximize')+'" onclick="tileClick(\''+esc(x.name)+'\')">'+(big?'▒':'⤢')+'</button>'
     +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
