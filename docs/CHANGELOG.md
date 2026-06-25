@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.41 -- 2026-06-25
+- FEATURE (Voice Studio + self-improving voice): the "Learn my voice" button now opens a studio where you
+  VIEW/EDIT the learned style profile directly and set always-obeyed HARD RULES (injected on top of every
+  draft). Smart-reply drafts you EDIT before sending are quietly logged (no tokens). "✨ Optimize from my edits"
+  sends the agent your profile + those edits ONCE, learns your corrections, updates the profile, and clears the
+  buffer -- so learning cost is on-demand, not per-email. Built-in "How it works" explainer spells out every
+  piece. New: /api/voice/profile-save, /api/voice/optimize, /api/voice/edit-log.
+
 ## 0.21.40 -- 2026-06-25
 - UX (email): (1) threads now render CHRONOLOGICALLY (oldest at top, newest at bottom) with the NEWEST message
   expanded -- fixes the confusing "reply collapsed above the open original". (2) Smart reply moved OUT of the
