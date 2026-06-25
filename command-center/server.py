@@ -3672,6 +3672,9 @@ def instance_provision(p, do_launch=False, dry=False):
     # register into THIS running overseer's registry (what its Portfolio reads) -- not the engine's
     # default-config registry, which may be a different state dir (the bug that hid the first shopos).
     cmd = ["bash", eng, "--id", iid, "--dest", dest, "--register-into", INSTANCES]
+    # Type: product (default) vs agency (clients+tools tree, like AFP). Explicit beats auto-detect.
+    integration = "agency" if (p.get("type") or p.get("integration") or "").lower() == "agency" else "product"
+    cmd += ["--integration", integration]
     for flag, key in (("--name", "name"), ("--brand", "brand"), ("--preset", "preset"),
                       ("--port", "port"), ("--storage", "storage"), ("--agents", "agents"),
                       ("--project-root", "project_root"), ("--user", "user")):
@@ -11728,6 +11731,7 @@ function cfAddWizard(){
    +cfF('name','Name','e.g. Bakery Ops')
    +cfF('brand','Brand','defaults to name')
    +cfSel('preset','Role',[['project','project — a single operation'],['overseer','overseer — oversees nodes']])
+   +cfSel('type','Type',[['product','Product — a single product/operation'],['agency','Agency — clients + tools tree']])
    +cfF('dest','Bundle folder','blank = /Volumes/Samsung990PRO/claudefather-<id>')
    +cfF('port','Port','blank = auto (≥ 8800)')
    +cfSel('storage','Storage',[['github','github'],['icloud','icloud'],['icloud+github','icloud+github']])
@@ -11740,7 +11744,7 @@ function cfAddWizard(){
    +'<div class="cflegend">👁 <b>Preview</b> — plan only. &nbsp; 📦 <b>Create</b> — build it, leave it off. &nbsp; 🚀 <b>Create &amp; start</b> — build, start, finish setup, then open it and run its <b>Setup agent</b>.</div>'
    +'<pre id="cfout"></pre></div>');
 }
-function cfVals(){var g={};['id','name','brand','preset','dest','port','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
+function cfVals(){var g={};['id','name','brand','preset','type','dest','port','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
 async function cfPost(extra){
   var body=cfVals(); if(!body.id){toast('Enter an ID first.');return null;}
   Object.assign(body,extra||{});

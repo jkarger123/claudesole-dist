@@ -27,7 +27,7 @@
 set -uo pipefail
 SRC="${CC_HOME:-$HOME/hptuners-control}"          # the dev/master copy we provision FROM
 ID="" DEST="" NAME="" BRAND="" PRESET="project" PORT="" STORAGE="github"
-AGENTS="security,backup,usage,ideas,routines" PROOT="" RUNUSER="$(whoami)" DRY="" JSON="" REGINTO=""
+AGENTS="security,backup,usage,ideas,routines" PROOT="" RUNUSER="$(whoami)" DRY="" JSON="" REGINTO="" INTEGRATION=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -42,6 +42,7 @@ while [ $# -gt 0 ]; do
     --project-root) PROOT="$2"; shift 2;;
     --user) RUNUSER="$2"; shift 2;;
     --register-into) REGINTO="$2"; shift 2;;
+    --integration) INTEGRATION="$2"; shift 2;;
     --json) JSON=1; shift;;
     --dry-run) DRY=1; shift;;
     *) echo "unknown option: $1" >&2; exit 2;;
@@ -126,9 +127,9 @@ fi
 
 # ---- 3) write the per-instance config (secrets included; chmod 600 below). Values pass as argv so
 #         names/brands with spaces or quotes can't break the JSON.
-python3 - "$DEST/cc.config.json" "$NAME" "$PROOT" "$BRAND" "$STORAGE" "$AGENTS" "$PORT" "$ID" "$ROLE" "$PRESET" "$DEST/deliverables" "$AUTH_TOKEN" "$MESH_TOKEN" <<'PY'
+python3 - "$DEST/cc.config.json" "$NAME" "$PROOT" "$BRAND" "$STORAGE" "$AGENTS" "$PORT" "$ID" "$ROLE" "$PRESET" "$DEST/deliverables" "$AUTH_TOKEN" "$MESH_TOKEN" "$INTEGRATION" <<'PY'
 import json,sys
-cfg,name,proot,brand,storage,agents,port,iid,role,preset,deliv,auth,mesh=sys.argv[1:14]
+cfg,name,proot,brand,storage,agents,port,iid,role,preset,deliv,auth,mesh,integ=sys.argv[1:15]
 d={
  "project_name": name,
  "project_root": proot,
@@ -146,6 +147,7 @@ d={
 }
 if auth: d["auth_token"]=auth   # usually empty -> node starts open; operator sets a token on first open
 if mesh: d["mesh_token"]=mesh
+if integ: d["integration"]=integ   # "product" (single operation) | "agency" (clients+tools tree). default product.
 json.dump(d,open(cfg,"w"),indent=2)
 print("  wrote",cfg)
 PY

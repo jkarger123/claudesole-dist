@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.29.0 -- 2026-06-25
+- FEATURE (Type: Product vs Agency in the Add-a-ClaudeFather wizard): the wizard previously relied on
+  auto-detect for install type. Now there's an explicit Type selector -- Product (a single product/operation)
+  or Agency (clients + tools tree, like AFP). It writes cc.config integration=product|agency via
+  cc-newinstance.sh --integration, so the deployment shape is deliberate, not inferred. Default Product.
+
 ## 0.28.0 -- 2026-06-25
 - UX (no more copy-the-auto-token-or-be-locked-out): a provisioned node now starts with NO login token (open
   on the private tailnet, which is already access-gated by Tailscale). On first open the dashboard shows a
