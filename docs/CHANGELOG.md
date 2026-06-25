@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.46 -- 2026-06-25
+- FIX (smart reply respects WHICH message you reply to): replying to an OLDER message in the chain now scopes
+  the agent to THAT message + the thread UP TO it only -- it never sees messages sent after it (which may have
+  gone to someone else). The reply is addressed to that message's sender, and the prompt is told not to
+  reference anything after it. Default (reply to newest) now also gets the full earlier-thread context.
+
 ## 0.21.45 -- 2026-06-25
 - UX (never looks frozen): reusable spinner + busy overlay (busyOn/busyOff, .spin). Shown during the slow ops
   -- Learn my voice (build), Optimize my voice, and Smart-reply "Draft in my voice" -- plus spinners on the

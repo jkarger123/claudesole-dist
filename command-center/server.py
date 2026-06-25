@@ -5518,8 +5518,13 @@ def _flex_bundle_text(b, inbound_body=""):
             for s in samples[:3]: L.append("  • " + s[:500])
     if b.get("client_md"):
         L.append("\n=== CLIENT/PROJECT CONTEXT (their CLAUDE.md) ===\n" + b["client_md"][:4500])
+    if b.get("thread_context"):
+        note = " (you are replying to an EARLIER message in this thread -- do NOT reference anything sent AFTER it)" if b.get("thread_upto") else ""
+        L.append("\nEARLIER IN THIS THREAD%s:" % note)
+        for m in b["thread_context"]:
+            L.append("- %s | %s:\n    %s" % (m.get("date", ""), m.get("from", ""), (m.get("body", "") or "")[:700]))
     if inbound_body:
-        L.append("\nLATEST INBOUND MESSAGE (what you are replying to):\n" + inbound_body[:6000])
+        L.append("\nTHE MESSAGE YOU ARE REPLYING TO:\n" + inbound_body[:6000])
     if b.get("calls"):
         L.append("\nPRIOR CALL NOTES (CC:CALLS):\n" + b["calls"])
     if b.get("past_sender"):
@@ -5579,7 +5584,7 @@ def _flex_claude_reply(context_text):
         if isinstance(r2, dict) and (r2.get("variants") or r2.get("draft_html")): return r2
     return r
 
-def flex_context(tid, rel_override=None, sources=None, recipients_override=None):
+def flex_context(tid, rel_override=None, sources=None, recipients_override=None, upto_mid=None):
     """GET /api/flex/context?tid=  -- VoiceMatch smart reply with rich 360 context.
     Read-safe bundle + voice profile + per-recipient voice samples + past mail w/ sender + client CLAUDE.md
     + (if scheduling) calendar availability -> headless claude -> 2-3 voice-matched variants. NEVER sends.
@@ -5600,17 +5605,26 @@ def flex_context(tid, rel_override=None, sources=None, recipients_override=None)
         if msgs:
             subject = t.get("subject") or subject
             counter = next((m for m in msgs if not _is_me(m.get("from", ""))), None)  # msgs are newest-first
-            target = counter or msgs[0]
+            # Reply to a SPECIFIC message if asked (per-message reply -- "back in the chain"), else the latest counterparty.
+            target = next((m for m in msgs if upto_mid and m.get("messageId", "") == upto_mid), None) or counter or msgs[0]
             inbound_body = (target.get("body", {}).get("text")
                             or _html_to_text(target.get("body", {}).get("html", ""))
                             or target.get("snippet", ""))
             in_reply_to = target.get("messageId", "")
             references = (target.get("references", "") + (" " if target.get("references") else "") + in_reply_to).strip()
-            reply_to = (counter.get("from", "") if counter else msgs[0].get("to", "")) or reply_to
-            if counter:
-                b["sender"] = counter.get("from", "") or b.get("sender", "")
+            # address the reply to the SENDER of the target message (if the owner sent it, to its recipients)
+            reply_to = (target.get("from", "") if not _is_me(target.get("from", "")) else target.get("to", "")) or reply_to
+            if not _is_me(target.get("from", "")):
+                b["sender"] = target.get("from", "") or b.get("sender", "")
                 try: b.setdefault("headers", {})["from"] = b["sender"]
                 except Exception: pass
+            # thread context UP TO the target ONLY -- never messages sent AFTER it (they may have gone elsewhere)
+            try: _ti = msgs.index(target)
+            except Exception: _ti = 0
+            _older = list(reversed(msgs[_ti + 1:]))   # chronological, strictly older than the target
+            b["thread_context"] = [{"from": m.get("from", ""), "date": m.get("date", ""),
+                "body": ((m.get("body", {}).get("text") or _html_to_text(m.get("body", {}).get("html", "")) or m.get("snippet", "")) or "")[:1000]} for m in _older][-10:]
+            b["thread_upto"] = bool(upto_mid) and (target is not (counter or msgs[0]))
             # ALL recipients on the thread (for multi-recipient formality-max): from + to + cc, minus the owner
             raw = " ".join([target.get("from", ""), target.get("to", ""), target.get("cc", "")])
             for a in re.findall(r"[\w.+-]+@[\w.-]+\.[\w-]+", raw):
@@ -6277,7 +6291,8 @@ class H(BaseHTTPRequestHandler):
             _srcq = q.get("src", [None])[0]
             _src = ({k: (k in _srcq.split(",")) for k in ("past_sender", "client_md", "calendar", "granola")} if _srcq else None)
             _ro = ((q.get("to", [""])[0] or "") + " " + (q.get("cc", [""])[0] or "")).strip() or None
-            return self._s(200, json.dumps(flex_context(q.get("tid", [""])[0], rel_override=_rel, sources=_src, recipients_override=_ro)))
+            _upto = q.get("upto", [""])[0] or None
+            return self._s(200, json.dumps(flex_context(q.get("tid", [""])[0], rel_override=_rel, sources=_src, recipients_override=_ro, upto_mid=_upto)))
         if u.path == "/api/voice/profile":
             v = voice_profile_get() or {}
             return self._s(200, json.dumps({"ok": bool(v), "built_at": v.get("built_at"), "depth": v.get("depth"),
@@ -12202,7 +12217,8 @@ async function fxComposeDraft(tid){
   var to=((document.getElementById('gmcTo')||{}).value)||'';
   var cc=((document.getElementById('gmcCc')||{}).value)||'';
   busyOn('✨ Drafting in your voice…','reading the thread, past mail with them, the client file + your style');
-  var url='/api/flex/context?tid='+encodeURIComponent(tid)+'&to='+encodeURIComponent(to)+'&cc='+encodeURIComponent(cc);
+  var upto=(window.GMC&&GMC.ctx&&GMC.ctx.inReplyTo)||'';   // reply to the SPECIFIC message this composer targets (back-in-chain) -> scope context up to it
+  var url='/api/flex/context?tid='+encodeURIComponent(tid)+'&to='+encodeURIComponent(to)+'&cc='+encodeURIComponent(cc)+'&upto='+encodeURIComponent(upto);
   var r=null; try{ r=await(await fetch(url)).json(); }catch(e){}
   busyOff();
   if(!r||!r.ok){ toast('Draft: '+esc((r&&r.error)||'network error'),6000); return; }
