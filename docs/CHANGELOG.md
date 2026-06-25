@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.36 -- 2026-06-24
+- FIX (taskbar hover-peek): removed the duplicate Exit/Kill/New-tab buttons (the embedded terminal already has
+  end/kill/copy/compact/dashboard) -- peek now keeps only Usage + Focus. Added the 📍 launch-location before the
+  title and switched the peek title from the raw tmux name to the friendly session label.
+
 ## 0.21.35 -- 2026-06-24
 - TWEAK (session location placement): the 📍 location chip now sits BEFORE the session title (location then
   title), on the far left of the header, across list/grid/Focus views.

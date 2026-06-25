@@ -3726,7 +3726,8 @@ def session_bar():
     ts = [threading.Thread(target=chk, args=(s["name"],)) for s in sess]
     for t in ts: t.start()
     for t in ts: t.join()
-    return {"sessions": [{"name": s["name"], "label": s["label"], "busy": busy.get(s["name"], False),
+    return {"sessions": [{"name": s["name"], "label": s["label"], "loc": s.get("loc", ""), "cwd": s.get("cwd", ""),
+                          "busy": busy.get(s["name"], False),
                           "chief": s.get("chief", False), "attached": s.get("attached", False),
                           "protected": bool(s.get("protected", False))} for s in sess]}
 
@@ -11647,16 +11648,14 @@ function sbShowPanel(name,anchor){
   p.style.bottom=(window.innerHeight-r.top+8)+'px';
   p.onmouseenter=function(){SB.popHover=true;clearTimeout(SB.holdT);};
   p.onmouseleave=function(){SB.popHover=false;sbLeave();};
-  var acts='<button class="mini" title="usage / cost for this session" onclick="sbUsage(\''+esc(name)+'\')">📊 Usage</button>'
-    +'<button class="mini" title="open in a new browser tab" onclick="sbNewTab(\''+esc(name)+'\')">↗ New tab</button>';
-  if(!prot){
-    acts+='<button class="mini sb-exit" title="graceful exit: writes a handoff + resume pointer, then closes" onclick="sbExit(\''+esc(name)+'\')">⏏ Exit</button>'
-      +'<button class="mini sb-kill" title="force kill: NO handoff, NO resume notes" onclick="sbKill(\''+esc(name)+'\')">✕ Kill</button>';
-  }
+  // The embedded terminal already has end/kill (and copy/compact/dashboard) -- don't duplicate them here.
+  var acts='<button class="mini" title="usage / cost for this session" onclick="sbUsage(\''+esc(name)+'\')">📊 Usage</button>';
   // Only rebuild the shell when the panel is for a NEW session (so the iframe keeps its scroll/focus on re-hover).
   if(p.dataset.name!==name){
     p.dataset.name=name;
-    p.innerHTML='<div class="sb-pvh"><b title="'+e2(name)+'">'+e2(name)+'</b>'
+    var _s=(SB.list||[]).find(function(x){return x.name===name;})||{name:name};
+    var _loc=(_s.loc||_s.cwd)?'<span class="locchip" title="launched from '+e2(_s.cwd||_s.loc)+'">📍 '+e2(_s.loc||_s.cwd)+'</span>':'';
+    p.innerHTML='<div class="sb-pvh">'+_loc+'<b title="'+e2(name)+'">'+e2(_s.label||name)+'</b>'
       +'<span class="sb-pvbusy" id="sbPvBusy"></span>'
       +'<span class="sb-acts">'+acts+'<button class="mini go" title="open big in the Sessions tab" onclick="sbOpen(\''+esc(name)+'\')">⤢ Focus</button></span></div>'
       +'<iframe class="sb-pvframe" id="sbPvFrame" src="/term?name='+encodeURIComponent(name)+'" allow="clipboard-read; clipboard-write"></iframe>';
