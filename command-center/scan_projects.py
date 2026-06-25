@@ -5,6 +5,15 @@ Fast: stat+sort all transcripts by mtime, then parse the HEAD of only the most-r
 Usage: scan_projects.py <projects_base_dir> [limit]   -- prints a JSON array.
 Runs identically on macOS (Studio) and Windows (T490/T480) under python3."""
 import json, os, sys, glob
+from datetime import datetime
+
+
+def _iso_epoch(s):
+    """Claude transcript timestamps are ISO-8601 (…Z). -> epoch seconds, or None."""
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
 
 base = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/.claude/projects")
 limit = int(sys.argv[2]) if len(sys.argv) > 2 else 150
@@ -28,7 +37,9 @@ files.sort(key=lambda t: -t[0])
 
 def tail_preview(path, maxlines=30, maxbytes=48000):
     """A terminal-style tail of a conversation: the most recent user/assistant text turns (+ tool-use
-    markers), flattened to lines, last `maxlines`. Cheap: reads only the final chunk of the transcript."""
+    markers), flattened to lines, last `maxlines`. Also returns the LAST message's timestamp (epoch) -- the
+    true 'last activity', independent of file mtime (which a re-align/rewrite would clobber). Cheap: reads
+    only the final chunk of the transcript. Returns (lines, last_ts)."""
     try:
         sz = os.path.getsize(path)
         with open(path, "rb") as fh:
@@ -36,8 +47,9 @@ def tail_preview(path, maxlines=30, maxbytes=48000):
                 fh.seek(sz - maxbytes)
             chunk = fh.read().decode("utf-8", "replace")
     except Exception:
-        return []
+        return [], None
     lines = []
+    last_ts = None
     for ln in chunk.splitlines():
         ln = ln.strip()
         if not ln:
@@ -46,6 +58,9 @@ def tail_preview(path, maxlines=30, maxbytes=48000):
             o = json.loads(ln)          # a chunk-truncated first line just fails json -> skipped
         except Exception:
             continue
+        e = _iso_epoch(o.get("timestamp"))
+        if e:
+            last_ts = e
         m = o.get("message", {}) or {}
         role = m.get("role")
         if role not in ("user", "assistant"):
@@ -74,7 +89,7 @@ def tail_preview(path, maxlines=30, maxbytes=48000):
                 continue
             lines.append((pfx + sub)[:160])
             pfx = ""
-    return lines[-maxlines:]
+    return lines[-maxlines:], last_ts
 
 
 # 2) parse the head of only the most-recent `limit` files
@@ -109,12 +124,14 @@ for mt, f, slug in files[:limit]:
                     break
     except Exception:
         continue
+    prev_lines, last_ts = tail_preview(f)
     out.append({
         "id": sid or os.path.basename(f)[:-6],
         "cwd": cwd or slug.replace("-", "/"),
         "label": label or "(no opening message)",
-        "mtime": mt,
+        "mtime": last_ts or mt,          # display + sort key = time of the LAST message (falls back to file mtime)
         "branch": branch or "",
-        "preview": "\n".join(tail_preview(f)),
+        "preview": "\n".join(prev_lines),
     })
+out.sort(key=lambda r: r.get("mtime") or 0, reverse=True)   # true newest-first by last message, not file mtime
 print(json.dumps(out))

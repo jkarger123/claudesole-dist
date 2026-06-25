@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.32 -- 2026-06-24
+- FIX (History times were all identical): the displayed time used the transcript FILE mtime, which the history
+  re-align had clobbered (rewriting cwd touched every file), so all conversations showed the same time and
+  couldn't be ordered. Now the time + sort use the LAST MESSAGE's timestamp from inside the transcript -- the
+  true 'last activity', immune to file rewrites.
+
 ## 0.21.31 -- 2026-06-24
 - FIX (History lens layout was cramped): the lens rendered its header + card list as cells inside the 330px
   card grid, so the header sat in a narrow left cell and cards were squeezed into one column. Header + list now
