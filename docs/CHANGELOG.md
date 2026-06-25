@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.25.1 -- 2026-06-25
+- FIX (new instance's Chief of Staff: "can't find session"): opening a fresh node's Chief raced a cold start
+  -- the terminal attached before the session existed (or to one that exited on first-run). Two fixes: (1)
+  chief_open() now verifies the session actually survived launch (~1.3s) before telling the UI to attach, and
+  returns a real error (with the pane tail) instead of a false "started" -> no more ghost attach; (2)
+  provisioning WARMS the Chief of Staff (calls the new node's /api/chief-open after it's alive) so an
+  enterprise node boots with a live Chief, not one that starts on first click. Wizard shows "Chief of Staff:
+  ✅ warmed up & ready".
+
 ## 0.25.0 -- 2026-06-25
 - FEATURE (change the login token from the dashboard): Settings now has a "🔑 Login token" card -- type a new
   token or 🎲 auto-generate, confirm, and it applies LIVE (no manual cc.config edit, no restart). It persists

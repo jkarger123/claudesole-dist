@@ -2448,6 +2448,14 @@ def chief_open():
             if "trust this folder" in low or "is this a project you" in low:
                 sh([TMUX, "send-keys", "-t", CHIEF, "Enter"]); return
     threading.Thread(target=_trust, daemon=True).start()
+    # Confirm the session actually survived launch before telling the UI to attach -- otherwise a claude that
+    # exits instantly (first-run/auth issue) leaves the terminal attaching to a ghost ("can't find session").
+    time.sleep(1.3)
+    if sh([TMUX, "has-session", "-t", CHIEF])[0] != 0:
+        pane = sh([TMUX, "capture-pane", "-t", CHIEF, "-p"])[1] if sh([TMUX, "has-session", "-t", CHIEF])[0] == 0 else ""
+        return {"ok": False, "session": CHIEF,
+                "error": "the Chief of Staff session exited right after launch (claude did not stay up -- check this node's claude auth/login). Try again, or open a session in the Sessions tab to see the error.",
+                "detail": pane[-300:]}
     return {"ok": True, "session": CHIEF, "term": "/term?name=" + CHIEF, "note": "started"}
 
 def chief_say(text, sender="", timeout=48):
@@ -3702,6 +3710,17 @@ def instance_provision(p, do_launch=False, dry=False):
         except Exception:
             code = 0
         res["launched"] = True; res["http"] = code; res["alive"] = code in (200, 401, 403)
+        # warm the Chief of Staff so the new node's "Talk to me" works immediately (no cold-start "can't find
+        # session" race -- an enterprise node should boot with a live Chief, not start one on first click).
+        if res["alive"] and summ.get("auth_token"):
+            try:
+                creq = urllib.request.Request("http://127.0.0.1:%s/api/chief-open" % port, data=b"{}",
+                       headers={"X-CC-Token": summ["auth_token"], "Content-Type": "application/json"}, method="POST")
+                cr = json.loads(urllib.request.urlopen(creq, timeout=35).read().decode())
+                res["chief_started"] = bool(cr.get("ok"))
+                if not cr.get("ok"): res["chief_warn"] = cr.get("error", "")
+            except Exception as e:
+                res["chief_started"] = False; res["chief_warn"] = str(e)
         # auto-PERSIST (survive reboot): install the per-user launchd plist server-side when the new node is
         # hosted by THIS user (same-user). Removes the manual "make permanent" step the operator shouldn't need.
         host = (str(p.get("user")).strip() if p.get("user") else "")
@@ -11732,6 +11751,7 @@ async function cfProvision(launch){
   if('meshed' in r)txt+='Mesh: '+(r.meshed?'✅ added to the fleet peers':('⚠ '+(r.mesh_warn||'not added')))+NL;
   if('tailnet_url' in r)txt+='Remote access: ✅ '+r.tailnet_url+' (reachable from your other devices)'+NL;
   else if('tailnet_warn' in r)txt+='Remote access: ⚠ local only ('+r.tailnet_warn+')'+NL;
+  if('chief_started' in r)txt+='Chief of Staff: '+(r.chief_started?'✅ warmed up & ready':'⚠ start it from the Chief tab')+NL;
   if(!r.launched)txt+=NL+'It is staged but OFF. Re-run with Create & start to bring it online.'+NL;
   txt+=NL+'➡ Next: open the '+(s.id||'')+' dashboard ('+(s.url||'')+') and run its Setup agent (Agents → setup) to configure the project.';
   o.textContent=txt; toast((r.launched?'Started ':'Created ')+(s.id||'')); setTimeout(loadPortfolio,1600);
