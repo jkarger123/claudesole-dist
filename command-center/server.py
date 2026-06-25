@@ -6355,8 +6355,38 @@ def drift_report():
 #   Tier: ClaudeFather = a project node (role=project) | ClaudeGrandfather = the overseer (role=org).
 #   Type: Project | Agency (cc.config integration). Writes are atomic to this instance's _CC_CONFIG (a
 #   preserve-path, so they survive cc-update); a restart applies them (CC globals are read at boot).
+def auth_token_set(new):
+    """Change THIS node's login token (cc.config auth_token) from the dashboard: persist to the running config,
+    apply LIVE to the in-memory AUTH_TOKEN (no restart needed), chmod 600, and log the change. Returns the new
+    token; the caller re-sets the auth cookie so the current session stays logged in (no self-lockout)."""
+    global AUTH_TOKEN
+    import secrets as _secrets
+    new = (new or "").strip()
+    if not new or new.lower() == "generate":
+        new = _secrets.token_hex(16)
+    if len(new) < 4:
+        raise ValueError("token too short — use at least 4 characters (e.g. a 4-digit PIN), or leave blank to auto-generate")
+    cfg = _CC_CONFIG
+    try:
+        d = json.load(open(cfg)) if os.path.isfile(cfg) else {}
+    except Exception as e:
+        raise ValueError("could not read cc.config: " + str(e)[:120])
+    d["auth_token"] = new
+    tmp = cfg + ".tmp"
+    with open(tmp, "w") as f: json.dump(d, f, indent=2)
+    os.replace(tmp, cfg)
+    try: os.chmod(cfg, 0o600)
+    except Exception: pass
+    AUTH_TOKEN = new
+    try:
+        with open(os.path.expanduser("~/.cc-credential-changes.log"), "a") as f:
+            f.write("%s  auth_token changed via dashboard — %s (port %s)\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), BRAND, PORT))
+    except Exception: pass
+    return new
+
 def settings_get():
     return {"project_name": PROJECT_NAME, "brand": BRAND, "role": ROLE, "preset": PRESET,
+            "auth_on": bool(AUTH_TOKEN),
             "integration": (CC.get("integration") or "").lower(), "is_agency": is_agency(),
             "tier": "grandfather" if ROLE == "org" else "father",
             "type": "agency" if is_agency() else "project",
@@ -6825,6 +6855,16 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/ccr-delete":    return self._s(200, json.dumps(ccr_delete(body.get("id", ""))))
         if u.path == "/api/ccr-propose":   return self._s(200, json.dumps(ccr_propose(body)))
         if u.path == "/api/settings-save": return self._s(200, json.dumps(settings_save(body)))
+        if u.path == "/api/auth-token-set":
+            try:
+                tok = auth_token_set(body.get("token", ""))
+            except Exception as e:
+                return self._s(400, json.dumps({"ok": False, "error": str(e)}))
+            # apply live + keep THIS session logged in by re-issuing the cookie with the new token
+            self.send_response(200); self.send_header("Content-Type", "application/json")
+            self.send_header("Set-Cookie", "%s=%s; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000" % (AUTH_COOKIE, tok))
+            b = json.dumps({"ok": True, "token": tok}).encode()
+            self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
         if u.path == "/api/chief-open":    return self._s(200, json.dumps(chief_open()))
         if u.path == "/api/chief-say":
             if MESH_ENFORCE and not _mesh_token_ok(self.headers.get("X-Mesh-Token")): return self._s(403, json.dumps({"ok": False, "error": "mesh auth"}))
@@ -12389,7 +12429,26 @@ async function loadSettings(){
     +'</div>'
     +'<div class="meta" style="margin-top:12px">🎩 <b>ClaudeFather</b> shows project/agency lenses + <b>Propose Change</b> (route core changes up). 🏛 <b>ClaudeGrandfather</b> unlocks the overseer lenses — <b>Portfolio</b> + the <b>Change Requests</b> approval queue. Switching Tier auto-swaps the lens bundle (preset).</div>'
     +'<div class="btns" style="margin-top:12px"><button class="mini go" onclick="settingsSave()">💾 Save</button></div></div>';
+  h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🔑 Login token</b> <span class="sub">'+(s.auth_on?'a token is set — required at /login':'no token set — this node is OPEN to anyone on the tailnet')+'</span></div>'
+    +'<div class="meta" style="margin:7px 0">Change this node\'s dashboard login token (the PIN at <code>/login</code>). It applies <b>immediately</b> — <b>this</b> window stays logged in, but other devices/sessions will need the new token. Persists to <code>'+e2(s.config_path||"cc.config.json")+'</code> (survives <code>cc-update</code>).</div>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">'
+    +'<input id="set_newtok" class="mini" style="flex:1;min-width:200px" placeholder="new token (or leave blank to auto-generate)" autocomplete="off">'
+    +'<button class="mini" onclick="document.getElementById(\'set_newtok\').value=cfRandTok()">🎲 Generate</button>'
+    +'<button class="mini go" onclick="changeToken()">Change token</button></div>'
+    +'<div id="tokresult" style="margin-top:11px;display:none;background:#0d0d14;border:1px solid var(--line);border-radius:9px;padding:11px;font-size:12.5px;line-height:1.5"></div>'
+    +'<div class="meta" style="margin-top:10px;opacity:.7">🛟 Locked out by a typo? Run <code>cc-recover.sh</code> in a terminal on the host — it prints every node\'s current token, port, and URL.</div></div>';
   g.innerHTML=h;
+}
+function cfRandTok(){var a=new Uint8Array(16);crypto.getRandomValues(a);return Array.from(a,function(b){return b.toString(16).padStart(2,"0")}).join("");}
+async function changeToken(){
+  var v=(document.getElementById("set_newtok").value||"").trim();
+  if(!confirm("Change this node's login token now?\\n\\nThis window stays logged in; OTHER devices will need the new token. (cc-recover.sh always prints the current token if you get stuck.)"))return;
+  var r;try{r=await(await fetch("/api/auth-token-set",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token:v})})).json();}catch(e){toast("Request failed");return;}
+  if(!r||!r.ok){toast("Failed: "+((r||{}).error||"?"),5000);return;}
+  var el=document.getElementById("tokresult");
+  if(el){el.style.display="block";el.innerHTML="✅ <b>New login token (store it now):</b><br><code style=\"user-select:all;font-size:14px\">"+e2(r.token)+"</code><br><span style=\"opacity:.75\">This window is still logged in. Use this token at /login on your other devices.</span>";}
+  var ip=document.getElementById("set_newtok");if(ip)ip.value="";
+  toast("Login token changed ✓",4000);
 }
 async function settingsSave(){
   const tier=document.getElementById("set_tier").value,type=document.getElementById("set_type").value;

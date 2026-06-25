@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.25.0 -- 2026-06-25
+- FEATURE (change the login token from the dashboard): Settings now has a "🔑 Login token" card -- type a new
+  token or 🎲 auto-generate, confirm, and it applies LIVE (no manual cc.config edit, no restart). It persists
+  to cc.config (auth_token, chmod 600), updates the in-memory AUTH_TOKEN, re-issues THIS session's cookie so
+  you are never locked out, shows the new token to copy, and logs the change to ~/.cc-credential-changes.log.
+  Endpoint POST /api/auth-token-set (auth-gated). Min length 4 so 4-digit PINs (the existing convention) work.
+  cc-recover.sh remains the break-glass that prints every node's current token.
+
 ## 0.24.0 -- 2026-06-25
 - FEATURE (provisioned nodes are reachable from your other devices): a new node was registered at
   127.0.0.1:<port> -> only reachable ON the Studio, so the Portfolio link gave "site can't be reached" from a
