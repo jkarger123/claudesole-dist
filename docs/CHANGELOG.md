@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.40 -- 2026-06-25
+- UX (email): (1) threads now render CHRONOLOGICALLY (oldest at top, newest at bottom) with the NEWEST message
+  expanded -- fixes the confusing "reply collapsed above the open original". (2) Smart reply moved OUT of the
+  reader and INTO the reply composer as "✨ Draft in my voice" -- so it drafts for exactly who you hit Reply /
+  Reply-all on (recipients drive the voice + most-formal-wins). (3) "🎙 Learn my voice" moved to the email rail
+  (inbox/sent nav) instead of the per-thread actions.
+
 ## 0.21.39 -- 2026-06-25
 - FEATURE (VoiceMatch smart-reply engine): smart reply now (1) learns the owner's writing voice from their Sent
   mail ("Learn my voice" button -> per-node style profile: tone, punctuation incl. em-dash habit, greetings,

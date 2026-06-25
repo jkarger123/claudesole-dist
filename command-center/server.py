@@ -5490,7 +5490,7 @@ def _flex_claude_reply(context_text):
         if isinstance(r2, dict) and (r2.get("variants") or r2.get("draft_html")): return r2
     return r
 
-def flex_context(tid, rel_override=None, sources=None):
+def flex_context(tid, rel_override=None, sources=None, recipients_override=None):
     """GET /api/flex/context?tid=  -- VoiceMatch smart reply with rich 360 context.
     Read-safe bundle + voice profile + per-recipient voice samples + past mail w/ sender + client CLAUDE.md
     + (if scheduling) calendar availability -> headless claude -> 2-3 voice-matched variants. NEVER sends.
@@ -5528,7 +5528,11 @@ def flex_context(tid, rel_override=None, sources=None):
                 al = a.lower()
                 if al != me and al not in recipients: recipients.append(al)
     except Exception: pass
-    b["recipients"] = recipients[:5]
+    if recipients_override:   # the composer's To/Cc decide the audience (reply vs reply-all) + formality
+        ro_src = recipients_override if isinstance(recipients_override, str) else " ".join(recipients_override)
+        ro = [a.lower() for a in re.findall(r"[\w.+-]+@[\w.-]+\.[\w-]+", ro_src) if a.lower() != me]
+        if ro: recipients = ro
+    b["recipients"] = recipients[:6]
     # ---- enrich: voice + per-recipient samples + past mail + client md + scheduling availability ----
     b["voice"] = voice_profile_get()
     main_addr = _addr_of(b.get("sender", "")) or (recipients[0] if recipients else "")
@@ -6182,7 +6186,8 @@ class H(BaseHTTPRequestHandler):
             _rel = q.get("rel", [None])[0] or None
             _srcq = q.get("src", [None])[0]
             _src = ({k: (k in _srcq.split(",")) for k in ("past_sender", "client_md", "calendar", "granola")} if _srcq else None)
-            return self._s(200, json.dumps(flex_context(q.get("tid", [""])[0], rel_override=_rel, sources=_src)))
+            _ro = ((q.get("to", [""])[0] or "") + " " + (q.get("cc", [""])[0] or "")).strip() or None
+            return self._s(200, json.dumps(flex_context(q.get("tid", [""])[0], rel_override=_rel, sources=_src, recipients_override=_ro)))
         if u.path == "/api/voice/profile":
             v = voice_profile_get() or {}
             return self._s(200, json.dumps({"ok": bool(v), "built_at": v.get("built_at"), "depth": v.get("depth"),
@@ -8871,6 +8876,7 @@ function gmRailHTML(){
     +sys
     +(ulArr.length?'<div class="gm-sec gm-lbltog" onclick="gmToggleLabels()"><span class="gm-lblchev" id="gmLblChev">'+(lblOpen?'▾':'▸')+'</span> Labels <span class="gm-lblct">'+ulArr.length+'</span></div>'
         +'<div id="gmLabelWrap" style="display:'+(lblOpen?'block':'none')+'">'+userLabels+'</div>':'')
+    +(fxOn()?'<div class="gm-sec gm-voicebtn" id="gmVoiceBtn" onclick="fxLearnVoice()" title="Profile your writing style from your Sent mail so Smart Reply sounds like you">\u{1F399} Learn my voice</div>':'')
     +'<div class="gm-railfoot"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>e</kbd> archive · <kbd>#</kbd> trash · <kbd>s</kbd> star · <kbd>u</kbd> unread · <kbd>c</kbd> compose · <kbd>z</kbd> undo · <kbd>/</kbd> search</div>'
     +'</aside>';
 }
@@ -8980,7 +8986,7 @@ function gmRenderRead(){
   var read=document.getElementById('gmRead'); if(!read) return;
   var t=GM.thread;
   if(!t){ read.innerHTML=gmReadEmptyBody(); return; }
-  var msgs=t.messages||[];
+  var msgs=(t.messages||[]).slice().reverse();   // thread arrives newest-first; show it CHRONOLOGICALLY (oldest at top, newest at bottom) like a normal mail client
   var last=msgs.length-1;
   var head='<div class="gm-rdhead">'
     +'<div class="gm-rdsubj">'+e2(t.subject)+(msgs.length>1?' <span class="gm-cnt">'+msgs.length+'</span>':'')+'</div>'
@@ -8988,9 +8994,7 @@ function gmRenderRead(){
     +'<div class="gm-acts">'
       +'<button class="gm-act go" onclick="gmReply(false)" title="Reply (r)">↩ Reply</button>'
       +'<button class="gm-act" onclick="gmReply(true)" title="Reply all (a)">↪ Reply all</button>'
-      +(fxOn()?'<button class="gm-act fx-smart" onclick="fxSmartReply()" title="Draft a context-aware reply in your voice (staged, never sent)">✨ Smart reply</button>':'')
       +(fxOn()?'<button class="gm-act fx-hist" onclick="fxSenderHistory()" title="What you know about this sender">\u{1F50E} Sender history</button>':'')
-      +(fxOn()?'<button class="gm-act fx-voice" onclick="fxLearnVoice()" title="Profile your writing style from your Sent mail so replies sound like you">\u{1F399} Learn my voice</button>':'')
       +'<button class="gm-act" onclick="gmForward()" title="Forward (f)">➤ Forward</button>'
       +'<button class="gm-act" onclick="gmActCur(\'archive\')" title="Archive (e)">\u{1F5C4} Archive</button>'
       +'<button class="gm-act" onclick="gmActCur(\'trash\')" title="Trash (#)">\u{1F5D1} Trash</button>'
@@ -9366,6 +9370,7 @@ function gmcShellHTML(pre, showCc, initial){
     +'<div class="gmc-atts" id="gmcAtts" style="display:none"></div>'
     +'<div class="gmc-foot">'
       +'<button class="gmc-send" onclick="gmcSend()">Send <span class="gmc-sendk">⌘↵</span></button>'
+      +((fxOn()&&pre.threadId)?'<button class="gmc-tool gmc-voice" onclick="fxComposeDraft(\''+e2(pre.threadId)+'\')" title="Draft this reply in your voice from the full client context (uses the recipients above -- reply vs reply-all)">✨ Draft in my voice</button>':'')
       +'<button class="gmc-tool" onclick="document.getElementById(\'gmcFile\').click()" title="Attach files">📎</button>'
       +'<button class="gmc-tool" onclick="document.getElementById(\'gmcImg\').click()" title="Insert inline image">🖼</button>'
       +'<span class="gmc-spacer"></span>'
@@ -11993,6 +11998,17 @@ function fxPickVariant(i){
   var box=document.getElementById('fxVariants'); if(box){ box.querySelectorAll('button[data-vi]').forEach(function(b){ b.classList.toggle('go', (+b.getAttribute('data-vi'))===i); }); }
 }
 
+async function fxComposeDraft(tid){
+  if(!tid){ toast('Open a reply first'); return; }
+  var to=((document.getElementById('gmcTo')||{}).value)||'';
+  var cc=((document.getElementById('gmcCc')||{}).value)||'';
+  toast('✨ Drafting in your voice from the full context… (a few seconds)',5200);
+  var url='/api/flex/context?tid='+encodeURIComponent(tid)+'&to='+encodeURIComponent(to)+'&cc='+encodeURIComponent(cc);
+  var r; try{ r=await(await fetch(url)).json(); }catch(e){ toast('Draft: network error'); return; }
+  if(!r||!r.ok){ toast('Draft: '+esc((r&&r.error)||'unavailable')); return; }
+  var ed=document.getElementById('gmcBody'); if(ed) ed.innerHTML=r.draft_html||'';
+  setTimeout(function(){ fxShowVariants(r.variants||[]); fxShowBullets(r.three_bullets||[], null, null); },40);
+}
 function fxShowBullets(bullets, draftId, draftError){
   var root=document.getElementById('gmcRoot'); if(!root) return;
   var old=document.getElementById('fxBullets'); if(old) old.remove();
