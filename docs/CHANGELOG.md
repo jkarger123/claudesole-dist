@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.34 -- 2026-06-24
+- FIX (location now shows in the Focus/big session view too): the big window header (`bigHead`) never rendered
+  the launch location -- only the list/grid did -- so in the default Focus view you couldn't see where a session
+  was running. Unified all three views on one `locTag` helper; the 📍 chip now sits right after the window title
+  in the big view, and falls back to the full cwd when a session runs at the project root.
+
 ## 0.21.33 -- 2026-06-24
 - FIX/FEATURE (session titles clearer + show WHERE they run): resumed sessions whose tmux name embedded a slug
   of the opening message (e.g. `hp-r-i-need-you-to-review-a-media-l`) now display a de-slugified readable title

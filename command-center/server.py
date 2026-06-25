@@ -1526,7 +1526,7 @@ def tmux_sessions():
             if len(p) >= 4 and p[0] not in HIDE:
                 if SCOPE_SESSIONS and p[0] != globals().get("CHIEF") and not _session_in_project(cwds.get(p[0], "")):
                     continue  # belongs to a different project (the Chief is always kept -- it's THIS console's comms endpoint)
-                res.append({"name": p[0], "label": _session_label(p[0]), "loc": _session_loc(cwds.get(p[0], "")),
+                res.append({"name": p[0], "label": _session_label(p[0]), "loc": _session_loc(cwds.get(p[0], "")), "cwd": cwds.get(p[0], ""),
                             "created": float(p[1] or 0), "activity": float(p[2] or 0),
                             "attached": p[3] != "0", "protected": _protected(p[0]),
                             "chief": p[0] == globals().get("CHIEF")})
@@ -6552,7 +6552,7 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .snap{flex:1;margin:0;padding:8px;overflow:hidden;font:10.5px/1.32 ui-monospace,Menlo,monospace;color:#ccccdd;background:#0a0a0f;white-space:pre-wrap;word-break:break-word}
 .stframe{flex:1;border:0;width:100%;background:#0a0a0f}
 /* session launch-location chip: shows WHERE a session is running (path under the project) */
-.locchip{display:inline-block;font:600 10.5px/1.35 ui-monospace,Menlo,monospace;color:var(--accent-light);background:#0006;border:1px solid var(--line);border-radius:6px;padding:1px 6px;vertical-align:baseline;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.locchip{display:inline-block;flex:0 0 auto;font:600 10.5px/1.35 ui-monospace,Menlo,monospace;color:var(--accent-light);background:#0006;border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-right:4px;vertical-align:baseline;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* History lens: header + card list span the FULL grid width (don't get trapped in a 330px grid cell), and
    the list lays cards out in its own wide-column grid so big monitors get multiple roomy cards. */
 .histhead{grid-column:1/-1;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px}
@@ -10831,7 +10831,7 @@ async function loadSessions(quiet){
   document.getElementById("grid").innerHTML='<div class="modstack">'+head+body+'</div>';   // clean vertical stack -- usage strip (in head) sits ABOVE the focus block, never overlapped
   unpeekNow(); startSnaps();
 }
-function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span><span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)
+function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span><span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+locTag(x)+ctxChip(x.name)
   +'<span class="stbtns">'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
   +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
@@ -10852,15 +10852,16 @@ function unpeekNow(){}
 function swapBig(n){focusBig(n);}
 function peek(){}
 function schedUnpeek(){}
+function locTag(x){var t=(x&&(x.loc||x.cwd))||'';if(!t)return '';return '<span class="locchip" title="launched from '+esc(x.cwd||t)+'">📍 '+esc(t)+'</span>';}
 function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="cursor:default"><h3><span title="'+esc(x.name)+'">'+(x.attached?"🟢 ":"⚪ ")+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+badge(x.attached?"running":"paused")+'</h3>'
-  +'<div class="meta">'+(x.loc?'<span class="locchip" title="launched from '+esc(x.loc)+'">📍 '+esc(x.loc)+'</span> ':'')+'active '+ago(now-x.activity)+' ago</div>'
+  +'<div class="meta">'+(locTag(x)?locTag(x)+' ':'')+'active '+ago(now-x.activity)+' ago</div>'
   +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="openInSessions(\''+esc(x.name)+'\')">▶ open</button>'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
   +'<button class="mini" onclick="endSess(\''+esc(x.name)+'\',false)" title="handoff + close">end</button>'
   +'<button class="mini" style="color:#f85149" onclick="endSess(\''+esc(x.name)+'\',true)" title="force kill">kill</button></div></div>';}
 function sessTile(x,i){const big=(SESSBIG==x.name);
   return '<div class="stile'+(big?' big':'')+'" data-name="'+esc(x.name)+'">'
-    +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span><span class="stname" title="'+esc(x.name)+(x.loc?' — '+esc(x.loc):'')+'">'+esc(x.label||x.name)+(x.loc?' <span class="locchip">📍 '+esc(x.loc)+'</span>':'')+'</span>'+ctxChip(x.name)
+    +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span><span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+locTag(x)+ctxChip(x.name)
     +'<span class="stbtns" onclick="event.stopPropagation()">'
     +'<button class="mini" title="'+(big?'minimize':'maximize')+'" onclick="tileClick(\''+esc(x.name)+'\')">'+(big?'▒':'⤢')+'</button>'
     +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
