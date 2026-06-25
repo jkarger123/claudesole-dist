@@ -6254,7 +6254,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #keybar button:active{background:#34344a}
 #compose input{flex:1;min-width:0;background:#0a0a0f;color:#fff;border:1px solid #3a3a4a;border-radius:9px;padding:11px;font:16px -apple-system,sans-serif}
 #compose button{background:#2a3a2a;color:#fff;border:1px solid #3a5a3a;border-radius:9px;padding:11px 16px;font:15px -apple-system,sans-serif;cursor:pointer;white-space:nowrap}</style></head><body>
-<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Show the text as selectable plain text so you can copy it (needed on mobile - the terminal itself is a canvas and can't be selected by touch)">&#10697; copy</button><button id="mtog" onclick="toggleMouse()">scroll</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149">&#10005; kill</button><a href="/#sessions">dashboard</a></div>
+<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Show the text as selectable plain text so you can copy it (needed on mobile - the terminal itself is a canvas and can't be selected by touch)">&#10697; copy</button><button id="mtog" onclick="toggleMouse()">scroll</button><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149">&#10005; kill</button><a href="/#sessions">dashboard</a></div>
 <button id="live" onclick="toLive()">&#8595; jump to live</button>
 <div id="copyov"><div id="copybar"><b>Selectable text</b><span id="copyst" style="color:#8a8a99">long-press to select, or</span><button onclick="copyAll()">&#10697; copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" style="border-color:#e8c547">&#10005; close</button></div><pre id="copybody"></pre></div>
 <div id="wrap">
@@ -6280,8 +6280,15 @@ const name=new URLSearchParams(location.search).get('name')||'';document.title='
 // Protected services (the Chief of Staff mesh endpoint / live product / Ralph loops) are constant
 // singletons -- strip their end+kill buttons so they can't be closed from the terminal view.
 if(/^(chief-|ralph-)/.test(name)||name=='t2tbridge'||name=='t2tcrons'){document.querySelectorAll('#bar button').forEach(function(b){var t=(b.getAttribute('title')||'').toLowerCase();if(t.indexOf('end')>=0||t.indexOf('kill')>=0)b.remove();});}
-const term=new Terminal({fontSize:13,cursorBlink:true,scrollback:20000,theme:{background:'#0a0a0f',foreground:'#ffffff'}});
+let FS=parseFloat(localStorage.getItem('hpcc_fontsize'))||13; if(!(FS>=8&&FS<=28))FS=13;
+const term=new Terminal({fontSize:FS,cursorBlink:true,scrollback:20000,theme:{background:'#0a0a0f',foreground:'#ffffff'}});
 const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(document.getElementById('t'));fit.fit();
+(function(){var l=document.getElementById('fsz');if(l)l.textContent=FS;})();
+// Live, persistent terminal font size (shared across every /term view via localStorage).
+function setFont(d){FS=Math.max(8,Math.min(28,Math.round((FS+d)*2)/2));
+  try{if(term.options)term.options.fontSize=FS;else term.setOption('fontSize',FS);}catch(e){}
+  localStorage.setItem('hpcc_fontsize',FS);var l=document.getElementById('fsz');if(l)l.textContent=FS;
+  try{fit.fit();sendResize();}catch(e){}term.focus();}
 const ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws?name='+encodeURIComponent(name));
 ws.binaryType='arraybuffer';const st=document.getElementById('st');
 function sendResize(){try{ws.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}));}catch(e){}}

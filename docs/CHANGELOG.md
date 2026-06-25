@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.38 -- 2026-06-24
+- FEATURE (adjustable terminal font size): the session terminal toolbar now has A-/A+ controls (with the
+  current size shown) that live-resize the xterm font and re-fit; the choice persists in localStorage and
+  applies to every /term view. Range 8-28, version-safe across xterm option APIs.
+
 ## 0.21.37 -- 2026-06-24
 - FEATURE (brand title in a display font that ACTUALLY renders for every user): self-hosted Cinzel Decorative
   (SIL OFL 1.1 -- commercial-OK + redistributable) via @font-face from /static/brand, applied to the brand
