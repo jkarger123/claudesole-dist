@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.42 -- 2026-06-25
+- UX (email, Gmail-style replying): Reply/Reply-all/Forward moved to a bar UNDER the newest message, and every
+  OPEN message in the chain has its own ↩/↪/➤ controls so you can reply/forward an OLDER message out of order
+  (quotes that specific message). Top toolbar keeps thread actions (Sender history/Archive/Trash/Snooze/Unread).
+
 ## 0.21.41 -- 2026-06-25
 - FEATURE (Voice Studio + self-improving voice): the "Learn my voice" button now opens a studio where you
   VIEW/EDIT the learned style profile directly and set always-obeyed HARD RULES (injected on top of every
