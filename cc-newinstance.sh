@@ -137,6 +137,7 @@ d={
  "agents": [a.strip() for a in agents.split(",") if a.strip()],
  "chief_brief": "You are my Chief of Staff, operating from the top level. Read CLAUDE.md, give me a one-line status of the operation, and stand by.",
  "port": int(port),
+ "bind_host": "127.0.0.1",
  "instance_id": iid,
  "role": role,
  "preset": preset,

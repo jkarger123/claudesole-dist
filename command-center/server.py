@@ -13104,4 +13104,8 @@ if __name__ == "__main__":
     threading.Thread(target=_boot_housekeeping, daemon=True).start()
     threading.Thread(target=_autoapprove_loop, daemon=True).start()   # keep agents off the permission-prompt wall
     threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
-    ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
+    # Bind host: default 0.0.0.0 (existing nodes unchanged). Provisioned standalone bundles set bind_host
+    # "127.0.0.1" so the ONLY tailnet-visible surface is the TLS `tailscale serve` URL -- no raw plain-HTTP
+    # port on the tailnet for a browser to hit and get ERR_SSL_PROTOCOL_ERROR.
+    _bind = os.environ.get("HPCC_HOST") or CC.get("bind_host") or "0.0.0.0"
+    ThreadingHTTPServer((_bind, PORT), H).serve_forever()

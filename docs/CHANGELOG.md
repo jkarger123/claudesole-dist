@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.27.0 -- 2026-06-25
+- FIX (no more raw-port SSL footgun + full e2e-verified provisioning): provisioned nodes now set
+  cc.config bind_host "127.0.0.1" (server.py honors bind_host/HPCC_HOST, default 0.0.0.0 so existing nodes
+  are unchanged). Result: the ONLY tailnet-visible surface is the clean `tailscale serve` HTTPS URL -- there
+  is no raw plain-HTTP port on the tailnet for a browser to hit and get ERR_SSL_PROTOCOL_ERROR. Verified the
+  whole create-flow end-to-end on a throwaway node: local up, tailnet HTTPS reachable (real TLS), raw port
+  correctly unreachable, login works, Chief of Staff warmed + live, launchd persistence, mesh registration.
+
 ## 0.26.0 -- 2026-06-25
 - FIX (provisioned node couldn't start: tailnet serve port collided with the local port): auto-expose used
   `tailscale serve --https=<port>` with the SAME number as the local server, but the server binds
