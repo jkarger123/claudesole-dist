@@ -148,7 +148,7 @@ def render_page():
     except Exception: _lenses = None
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
-        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "authOn": bool(AUTH_TOKEN),
+        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(),
         "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md", "MASTER_HANDOFF.md",
             "FILE_SYSTEM_GOVERNANCE.md", "TEXT2TUNE_ARCHITECTURE.md", "ENTERPRISE_MIGRATION.md",
             "BRIDGE_MIGRATION.md"]})
@@ -2311,6 +2311,33 @@ def all_deliverables(limit=300):
                 if not fn.startswith("."): _add(os.path.join(r2, fn), module if module != "." else "", "ssd")
     out.sort(key=lambda x: x.get("mtime") or 0, reverse=True)
     return {"files": out[:limit], "count": len(out), "icloud": _icloud_ready(), "retain_days": DELIV_RETAIN_DAYS}
+
+def email_deliverable(rel, to=""):
+    """Email ONE deliverable file to the node owner (or an explicit address) as an attachment, REUSING the
+    existing Gmail send integration (gmail_send) + owner resolution (_owner_email). Powers the live
+    'deliverable ready -> Email it to me' slide-out. Done server-side so the bytes never round-trip through
+    the browser, and it honors the SAME secret guard + iCloud materialization as /api/file-get. The rel path
+    is project-relative (the same `rel` the Files lens / all_deliverables hand out). Returns {ok, to}|{ok,error}."""
+    if not google_configured():
+        return {"ok": False, "error": "Google Workspace is not configured on this node"}
+    try: ab = projpath((rel or "").strip())
+    except Exception: return {"ok": False, "error": "bad path"}
+    if _path_has_secret(ab): return {"ok": False, "error": "forbidden"}          # never email secrets/keys
+    real = os.path.realpath(ab)
+    if _icloud_state(real) == "absent": return {"ok": False, "error": "not found"}
+    b = _read_file_materializing(ab, timeout=22)                                  # local=instant; iCloud=faults in
+    if not b: return {"ok": False, "error": "file unavailable (still syncing from iCloud?)"}
+    to = (to or "").strip() or _owner_email()
+    if not to: return {"ok": False, "error": "no owner email connected on this node"}
+    import base64 as _b64m, mimetypes as _mt
+    name = os.path.basename(ab)
+    mime = _mt.guess_type(ab)[0] or "application/octet-stream"
+    att = [{"filename": name, "mime": mime, "data": _b64m.b64encode(b).decode()}]
+    body = "%s saved this file for you and attached it here.\n\nFile: %s\n" % (PRODUCT, name)
+    r = gmail_send(to, "Your file: " + name, body, attachments=att)
+    if isinstance(r, dict) and r.get("error"):
+        return {"ok": False, "error": str(r.get("error"))}
+    return {"ok": True, "to": to, "name": name}
 
 # ---- Scoped in-browser file explorer: navigate the PROJECT tree from the browser (download from anywhere).
 # Operator-authed (dashboard only) + path-traversal safe (projpath) + SECRET-HIDING so credentials never
@@ -5446,6 +5473,51 @@ def _save_attachment_bytes(rel, mid, att_id, filename, size=0, mime=""):
             elif isinstance(dr, dict) and "error" in dr: out["drive_error"] = dr["error"]
     return out
 
+# ---- give Claude a file from the portal (drag-drop / tap-to-attach onto a session) -------------------
+# Claude Code reads files by PATH from its prompt (text + images). So "handing Claude a file" = (1) write
+# the dropped bytes to a path the session can read, then (2) tmux send-keys that absolute path into the
+# session so Claude picks it up. Framework-level + config-driven: uploads land in a sensible per-deploy dir
+# (deliverables_root/SSD when set, else <install>/_uploads) -- never a hardcoded path; size cap from config.
+SESSION_UPLOAD_ROOT = os.path.join((DELIV_LOCAL_ROOT or CC_HOME), "_uploads")
+def _session_upload_cap_mb():
+    try: return max(1, int(CC.get("max_upload_mb") or 50))
+    except Exception: return 50
+
+def session_upload(session, filename, mime, b64data, note="", enter=False):
+    """Accept a base64-encoded file from the dashboard, save it under SESSION_UPLOAD_ROOT with a safe unique
+    name that PRESERVES the extension, then type its absolute path (plus an optional note) into the named
+    tmux session so Claude reads it. By default does NOT press Enter -- the operator reviews/adds context and
+    hits Enter, so the path is never merged into an in-flight turn or sent prematurely. Returns {ok,path,...}."""
+    sess = re.sub(r"[^A-Za-z0-9_-]", "", session or "")[:64]
+    if not sess: return {"ok": False, "error": "no session given"}
+    if sh([TMUX, "has-session", "-t", sess])[0] != 0:
+        return {"ok": False, "error": "session not found (it may have closed)"}
+    try:
+        raw = base64.b64decode((b64data or "").split(",")[-1])     # tolerate a data: URL prefix
+    except Exception:
+        return {"ok": False, "error": "could not decode file data"}
+    if not raw: return {"ok": False, "error": "empty file"}
+    cap = _session_upload_cap_mb() * 1024 * 1024
+    if len(raw) > cap:
+        return {"ok": False, "error": "file exceeds %d MB limit" % _session_upload_cap_mb()}
+    fn = _ensure_ext(_sanitize_filename(filename or "upload"), mime)   # reuse the attachment helpers: keep the type
+    stem, ext = os.path.splitext(fn)
+    uniq = "%s_%s%s" % (stem[:60] or "file", secrets.token_hex(4), ext)   # unique -> never clobbers a prior upload
+    try: os.makedirs(SESSION_UPLOAD_ROOT, exist_ok=True)
+    except Exception as e: return {"ok": False, "error": "uploads dir: " + str(e)[:80]}
+    dest = os.path.join(SESSION_UPLOAD_ROOT, uniq)
+    if _path_has_secret(dest): return {"ok": False, "error": "refusing to write to a secret path"}
+    try:
+        with open(dest, "wb") as f: f.write(raw)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+    n = (note or "").strip()
+    msg = (dest + " " + n) if n else (dest + " ")   # trailing space -> operator can append an instruction inline
+    sh([TMUX, "send-keys", "-t", sess, "-l", msg])   # literal: handles any chars in the path safely
+    if enter: sh([TMUX, "send-keys", "-t", sess, "Enter"])
+    return {"ok": True, "path": dest, "name": os.path.basename(dest), "session": sess,
+            "bytes": len(raw), "entered": bool(enter)}
+
 # ======================================================================================================
 # AGENTIC LEVERAGE LAYER -- vertical slice 1 (Action Queue + "Smart Reply with 360 context").
 # Generalizes granola's propose->approve->apply spine into ONE fleet-wide queue (_actions.json) and adds
@@ -7013,7 +7085,10 @@ class H(BaseHTTPRequestHandler):
             if not b: return self._s(503, "file is still downloading from iCloud -- click Download again in a few seconds")
             self.send_response(200); self.send_header("Content-Type", ct)
             self.send_header("Content-Length", str(len(b)))
-            self.send_header("Content-Disposition", 'attachment; filename="%s"' % os.path.basename(ab).replace('"', ''))
+            # ?inline=1 -> render in the browser (powers the deliverable slide-out's inline PDF/text preview);
+            # default stays attachment so existing Download links keep saving the file.
+            _disp = "inline" if (q.get("inline", [""])[0] in ("1", "true")) else "attachment"
+            self.send_header("Content-Disposition", '%s; filename="%s"' % (_disp, os.path.basename(ab).replace('"', '')))
             self.end_headers(); self.wfile.write(b); return
         if u.path == "/api/ralph-previous": return self._s(200, json.dumps(ralph_previous()))
         if u.path == "/api/ralph-detail": return self._s(200, json.dumps(ralph_detail(q.get("name", [""])[0])))
@@ -7059,6 +7134,10 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"ok": bool(nm), "mouse": "on" if on else "off"}))
         if u.path == "/api/term-scroll":    # touch-swipe -> tmux copy-mode scroll (mobile has no wheel)
             return self._s(200, json.dumps(term_scroll(body.get("name", ""), body.get("action", "up"), body.get("n", 3))))
+        if u.path == "/api/session-upload":   # drag-drop / tap-to-attach a file -> save + hand its path to the session
+            return self._s(200, json.dumps(session_upload(
+                body.get("session", ""), body.get("filename", ""), body.get("mime", ""),
+                body.get("data", ""), body.get("note", ""), bool(body.get("enter", False)))))
         if u.path == "/api/compact-session":  # handoff -> /compact -> re-read handoff (preserve agent memory)
             return self._s(200, json.dumps(compact_session(body.get("name", ""))))
         if u.path == "/api/resume":
@@ -7121,6 +7200,8 @@ class H(BaseHTTPRequestHandler):
                 body.get("cc", ""), body.get("bcc", ""), body.get("threadId"),
                 body.get("html", ""), body.get("inReplyTo", ""), body.get("references", ""),
                 body.get("attachments") or [], body.get("inline") or [])))
+        if u.path == "/api/deliverable-email":   # live slide-out: email a freshly-made deliverable to the owner
+            return self._s(200, json.dumps(email_deliverable(body.get("rel", ""), body.get("to", ""))))
         if u.path == "/api/google/gmail-modify":
             return self._s(200, json.dumps(gmail_modify(body.get("id", ""), body.get("action", ""))))
         if u.path == "/api/google/gmail-label":
@@ -7296,7 +7377,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #keybar button:active{background:#34344a}
 #compose input{flex:1;min-width:0;background:#0a0a0f;color:#fff;border:1px solid #3a3a4a;border-radius:9px;padding:11px;font:16px -apple-system,sans-serif}
 #compose button{background:#2a3a2a;color:#fff;border:1px solid #3a5a3a;border-radius:9px;padding:11px 16px;font:15px -apple-system,sans-serif;cursor:pointer;white-space:nowrap}</style></head><body>
-<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Show the text as selectable plain text so you can copy it (needed on mobile - the terminal itself is a canvas and can't be selected by touch)">&#10697; copy</button><button id="mtog" onclick="toggleMouse()">scroll</button><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149">&#10005; kill</button><a href="/#sessions">dashboard</a></div>
+<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Show the text as selectable plain text so you can copy it (needed on mobile - the terminal itself is a canvas and can't be selected by touch)">&#10697; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="mtog" onclick="toggleMouse()">scroll</button><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149">&#10005; kill</button><a href="/#sessions">dashboard</a></div>
 <button id="live" onclick="toLive()">&#8595; jump to live</button>
 <div id="copyov"><div id="copybar"><b>Selectable text</b><span id="copyst" style="color:#8a8a99">long-press to select, or</span><button onclick="copyAll()">&#10697; copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" style="border-color:#e8c547">&#10005; close</button></div><pre id="copybody"></pre></div>
 <div id="wrap">
@@ -7426,6 +7507,33 @@ function showCopy(){const el=document.getElementById('copybody');el.textContent=
 function hideCopy(){document.getElementById('copyov').classList.remove('show');term.focus();}
 function copyAll(){ccCopy(document.getElementById('copybody').textContent);const s=document.getElementById('copyst');if(s)s.textContent='copied!';setTimeout(()=>{if(s)s.textContent='long-press to select, or';},1500);}
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.getElementById('copyov').classList.contains('show'))hideCopy();});
+// GIVE CLAUDE A FILE: drag a file onto this terminal page (or use the 📎 button) -> upload + the server
+// types the file's absolute path into this session so Claude reads it. This page is its own document (no
+// nested iframe), so a drop on the body works directly -- the dashboard handles the iframe-overlay case.
+var TMAXMB=(window.CC&&window.CC.maxUploadMb)||50;
+(function(){var ov=document.createElement('div');ov.id='dropov';
+  ov.style.cssText='position:fixed;inset:0;z-index:60;display:none;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:rgba(10,10,15,.86);border:3px dashed #e8c547;color:#fff;font:600 17px -apple-system,sans-serif;text-align:center;padding:24px';
+  ov.innerHTML='<div style="font-size:42px">&#128206;</div><div>Drop to give Claude this file</div><div style="font-weight:400;font-size:13px;color:#a0a0b0">it uploads, then its path is typed into this session</div>';
+  document.body.appendChild(ov);var depth=0;function show(s){ov.style.display=s?'flex':'none';}
+  function hasFiles(e){try{var t=e.dataTransfer&&e.dataTransfer.types;return t&&(Array.prototype.indexOf.call(t,'Files')>=0||(t.contains&&t.contains('Files')));}catch(_){return false;}}
+  window.addEventListener('dragenter',function(e){if(!hasFiles(e))return;e.preventDefault();depth++;show(true);});
+  window.addEventListener('dragover',function(e){if(!hasFiles(e))return;e.preventDefault();try{e.dataTransfer.dropEffect='copy';}catch(_){ }});
+  window.addEventListener('dragleave',function(e){depth--;if(depth<=0)show(false);});
+  window.addEventListener('drop',function(e){e.preventDefault();depth=0;show(false);
+    var f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];if(f)tUpload(f);});
+})();
+function tPick(){var inp=document.createElement('input');inp.type='file';inp.style.display='none';
+  inp.onchange=function(){var f=inp.files&&inp.files[0];if(f)tUpload(f);try{document.body.removeChild(inp);}catch(_){ }};
+  document.body.appendChild(inp);inp.click();}
+function tUpload(f){if(!f)return;if(f.size>TMAXMB*1024*1024){st.textContent='file too large (max '+TMAXMB+'MB)';return;}
+  st.textContent='uploading '+f.name+'…';var rd=new FileReader();
+  rd.onerror=function(){st.textContent='could not read the file';};
+  rd.onload=function(){var d=String(rd.result||'');var b=d.indexOf(',')>=0?d.split(',')[1]:d;
+    fetch('/api/session-upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:name,filename:f.name,mime:f.type||'',data:b})})
+      .then(function(r){return r.json();})
+      .then(function(r){st.textContent=(r&&r.ok)?('📎 attached '+r.name+' — review & press Enter'):('upload failed: '+((r||{}).error||'?'));})
+      .catch(function(){st.textContent='upload failed';});};
+  rd.readAsDataURL(f);}
 </script></body></html>"""
 
 RALPH_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ralph loop</title>
@@ -7627,8 +7735,20 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .mtempty{padding:9px 11px;font:11px/1.4 ui-monospace,Menlo,monospace;color:var(--mut)}
 /* FOCUS view: one big terminal + a live dock + hover-peek */
 .focuswrap{display:flex;flex-direction:column;gap:10px;height:calc(100vh - 272px);min-height:430px}
-.bigsess{flex:1;min-height:0;display:flex;flex-direction:column;border:1px solid var(--accent);border-radius:12px;overflow:hidden;box-shadow:var(--glow)}
+.bigsess{flex:1;min-height:0;display:flex;flex-direction:column;border:1px solid var(--accent);border-radius:12px;overflow:hidden;box-shadow:var(--glow);position:relative}
 .bigsess .sthead{cursor:default}
+.stile.big{position:relative}
+/* "Give Claude a file": visible drop bar (header fallback + mobile tap) + a drag overlay that covers the
+   terminal iframe. The iframe normally swallows drag events, so the overlay only becomes pointer-active while
+   a file is being dragged (set by a document-level dragenter), then catches the drop on top of the iframe. */
+.ccdropbar{display:flex;align-items:center;gap:6px;flex:0 0 auto;padding:7px 10px;min-height:38px;background:var(--card2,#15151c);border-bottom:1px solid var(--line,#2a2a3a);color:var(--mut,#9a9aab);font-size:12px;cursor:pointer}
+.ccdropbar:hover{color:var(--ink,#fff);background:var(--card,#1a1a24)}
+.ccdropbar b{color:var(--accent)}
+@media(any-pointer:coarse){.ccdropbar{min-height:46px;font-size:13px}}
+.ccdrop{position:absolute;inset:0;z-index:40;display:none;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center;padding:18px;background:rgba(10,10,15,.86);border:3px dashed var(--accent);border-radius:12px;color:var(--ink,#fff);font:600 16px -apple-system,sans-serif;pointer-events:none}
+.ccdrop.show{display:flex;pointer-events:auto}
+.ccdrop .ccdico{font-size:40px}
+.ccdrop .ccdsub{font-weight:400;font-size:12.5px;color:var(--mut,#9a9aab)}
 .dock{flex:0 0 auto;display:flex;gap:10px;overflow-x:auto;overflow-y:hidden;padding:2px 0 6px}
 .dtile{flex:0 0 232px;height:128px;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer}
 .dtile:hover{border-color:var(--accent)}
@@ -8069,6 +8189,11 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-cc-toggle{font-size:11px;color:var(--accent);cursor:pointer;font-weight:600}
 .gm-sendlater{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--mut);margin-top:6px}
 
+/* --- mobile affordances (hidden on desktop; shown in the ≤760px block below) --- */
+.gm-burger{display:none;flex:0 0 auto;width:34px;height:34px;align-items:center;justify-content:center;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:9px;font-size:16px;cursor:pointer}
+.gm-back{display:none;align-items:center;gap:3px;background:transparent;border:none;color:var(--accent);font-size:15px;font-weight:600;cursor:pointer;padding:2px 8px 8px 0}
+.gm-railbg{display:none}
+
 /* --- responsive: collapse to single column on narrow --- */
 @media(max-width:980px){
   .gm-app{grid-template-columns:1fr;height:auto;min-height:0;border:none;background:transparent}
@@ -8077,6 +8202,47 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
   .gm-lane{flex:0 0 auto}
   .gm-list{border-right:none;border:1px solid var(--line);border-radius:12px;margin-bottom:10px;max-height:60vh}
   .gm-read{border:1px solid var(--line);border-radius:12px;min-height:50vh}
+}
+
+/* --- MOBILE (phone, ≤760px): iPhone-Gmail-like single pane. DOM unchanged; we restack + slide.
+   list = the page's own scroll; reader = full-screen fixed slide-in (translateX); rail = left drawer;
+   reply/reply-all/forward = sticky bottom action bar. Desktop/tablet untouched (gated by the query). --- */
+@media(max-width:760px){
+  .gm-app{display:block !important;height:auto !important;min-height:0;border:none;background:transparent;overflow:visible}
+  .gm-grip{display:none !important}
+  .gm-list{border:none !important;border-radius:0 !important;margin:0 !important;max-height:none !important;overflow:visible;background:transparent}
+  .gm-rows{overflow:visible}
+  .gm-lhead{position:sticky;top:0;z-index:5;background:var(--bg2)}
+  .gm-row{padding:13px 12px}
+  .gm-burger{display:inline-flex !important}
+  /* labels/folders rail -> left drawer with backdrop (restores the column layout the ≤980 rule flattened) */
+  .gm-rail{position:fixed !important;top:0;left:0;bottom:0;width:84%;max-width:310px;z-index:80;
+    flex-direction:column !important;flex-wrap:nowrap !important;border:none !important;border-right:1px solid var(--line) !important;
+    border-radius:0 !important;margin:0 !important;padding:calc(12px + env(safe-area-inset-top)) 10px 12px !important;
+    transform:translateX(-102%);transition:transform .26s cubic-bezier(.2,.85,.2,1);overflow-y:auto;background:#0c0c12}
+  .gm-rail .gm-acct,.gm-rail .gm-sec,.gm-rail .gm-railfoot{display:block !important}
+  .gm-lane{flex:0 0 auto;min-height:42px}
+  .gm-app.gm-rail-open .gm-rail{transform:none}
+  .gm-railbg{display:block;position:fixed;inset:0;z-index:79;background:rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .26s}
+  .gm-app.gm-rail-open .gm-railbg{opacity:1;pointer-events:auto}
+  /* reader = full-screen slide-in overlay (z below the compose modal so reply sheets sit on top) */
+  .gm-read{position:fixed !important;inset:0;z-index:40;transform:translateX(100%);
+    transition:transform .28s cubic-bezier(.2,.85,.2,1);border:none !important;border-radius:0 !important;min-height:0 !important;background:var(--bg2)}
+  .gm-app.gm-reading .gm-read{transform:none}
+  .gm-rdhead{padding-top:calc(11px + env(safe-area-inset-top))}
+  .gm-back{display:inline-flex !important}
+  .gm-act{padding:9px 12px;font-size:13px}
+  /* sticky bottom action bar mirroring the existing reply controls */
+  .gm-replybar{position:sticky;bottom:0;margin:0;padding:10px 12px calc(10px + env(safe-area-inset-bottom));
+    border-top:1px solid var(--line);background:var(--bg2);gap:8px}
+  .gm-replybar .gm-act{flex:1;justify-content:center;min-height:44px}
+  .gm-thread{padding-bottom:0}
+  /* compose -> full-screen sheet */
+  .modal-bg:has(.gmc){padding:0}
+  .modal:has(.gmc){width:100vw !important;max-width:100vw !important;height:100dvh;max-height:100dvh;border-radius:0;
+    padding:calc(14px + env(safe-area-inset-top)) 14px calc(14px + env(safe-area-inset-bottom));display:flex;flex-direction:column}
+  .gmc{flex:1;min-height:0}
+  .gmc-body{flex:1;max-height:none}
 }
 
 
@@ -8231,6 +8397,30 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .cal-cd{width:22px;height:22px;border-radius:50%;cursor:pointer;border:2px solid transparent}
 .cal-cd.on{border-color:var(--ink)}
 
+/* --- CALENDAR mobile (≤760px): iOS-Calendar feel. The sidebar is already hidden ≤820; here we make the
+   header wrap cleanly, default the unusable 7-col week grid to a single-day grid (coerced in loadCalendar),
+   and turn the event detail popover into a bottom sheet. Day grid (1 col) + agenda are naturally mobile. --- */
+@media(max-width:760px){
+  .cal-root{min-height:calc(100dvh - 150px);border:none;border-radius:0}
+  .cal-top{padding:9px 11px;gap:7px}
+  .cal-title{min-width:0;flex:1 1 auto;font-size:15px}
+  .cal-title small{font-size:10px}
+  .cal-vtabs{order:4;flex:1 1 100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .cal-vtab{flex:1 0 auto;white-space:nowrap;min-height:38px}
+  .cal-add{order:5;flex:1 1 100%;min-width:0;max-width:none}
+  .cal-foot{display:none}
+  .cal-tgrid .gut,.cal-daynames .gut,.cal-allday .gut{flex-basis:46px}
+  .cal-dn .num{font-size:16px}
+  .cal-ev{font-size:11px}
+  .cal-mcell{padding:2px 3px}.cal-mev{font-size:9.5px}
+  .cal-agenda{padding:6px 12px}
+  .cal-arow{padding:11px 6px}.cal-arow .at{flex-basis:90px;font-size:11.5px}
+  /* event detail -> bottom sheet (overrides the inline left/top set by calOpenEvent) */
+  .cal-pop{left:0 !important;right:0 !important;bottom:0 !important;top:auto !important;width:100% !important;
+    max-width:100% !important;border-radius:16px 16px 0 0;border-bottom:none}
+  .cal-pop .pbtns{flex-wrap:wrap}.cal-pop .pbtns .mini{flex:1 1 auto;min-height:42px}
+}
+
 /* ===================== DRIVE SURFACE (dr-*) ===================== */
 .dr-wrap{grid-column:1/-1;display:flex;flex-direction:column;min-height:0;gap:12px;margin:-4px 0}
 .dr-bar{display:flex;flex-direction:column;gap:10px;position:sticky;top:0;z-index:5;background:var(--bg);padding-bottom:2px}
@@ -8323,11 +8513,21 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .dr-ctxsep{height:1px;background:var(--line);margin:4px 6px}
 .dr-modal{min-width:340px}
 @media(max-width:760px){
+  /* iOS-Files/Drive feel: 2-up grid, name+size only in list, search on its own row, bigger tap targets,
+     full-screen preview with a safe-area header. browse/preview/download all preserved. */
   .dr-lh,.dr-trow{grid-template-columns:30px 1fr 86px}
   .dr-lco,.dr-lcm{display:none}
   .dr-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
+  .dr-tools{gap:7px}
+  .dr-search{flex:1 1 100%;min-width:0;padding:11px 13px}
+  .dr-segb,.dr-chip,.dr-icbtn{min-height:42px}
+  .dr-trow{padding:12px;font-size:13.5px}
+  .dr-lcs{font-size:11.5px}
   .dr-qlov{padding:0}
   .dr-ql{max-height:100vh;border-radius:0}
+  .dr-qlhead{padding:calc(10px + env(safe-area-inset-top)) 12px 10px}
+  .dr-qlmeta{display:none}
+  .dr-qlnav{width:40px;height:40px}
 }
 /* ============ GMAIL READER v3 (b0) -- resizer + attachments (gm-* namespaced) ============ */
 .gm-app{grid-template-columns:200px var(--gm-listw,minmax(320px,1fr)) 6px minmax(0,1.25fr) !important}
@@ -9652,6 +9852,9 @@ function gmLaneQuery(){
   return parts.join(' ');
 }
 
+// shared small-screen check for the Google surfaces (Gmail/Calendar/Drive mobile layouts)
+function cwMobile(){return window.matchMedia('(max-width:760px)').matches;}
+
 // ---- entry point (dispatched from render(): LENS=="gmail" -> loadGmail()) ----
 async function loadGmail(){
   var g=document.getElementById('grid');
@@ -9661,6 +9864,7 @@ async function loadGmail(){
     +gmListShell()
     +'<div class="gm-grip" id="gmGrip" title="Drag to resize · double-click to reset"></div>'
     +gmReadEmpty()
+    +'<div class="gm-railbg" id="gmRailBg" onclick="gmRailClose()"></div>'   // mobile: tap-to-close drawer backdrop (display:none on desktop)
   +'</div>';
   gmApplySplit();
   gmInitResizer();
@@ -9807,7 +10011,7 @@ function gmListShell(){
   }).join('');
   return '<section class="gm-list">'
     +'<div class="gm-lhead">'
-      +'<div class="gm-lhrow"><b id="gmLaneTitle">Inbox</b>'
+      +'<div class="gm-lhrow"><button class="gm-burger" onclick="gmRailOpen()" title="Folders & labels">☰</button><b id="gmLaneTitle">Inbox</b>'
         +'<span id="gmSync" class="gm-sync" title="how fresh this list is — the node keeps it synced in the background"></span>'
         +'<span class="gm-spacer"></span>'
         +'<button class="gm-act go" onclick="gmCompose()" title="Compose (c)">✎ Compose</button>'
@@ -9896,6 +10100,7 @@ function gmScrollCur(){
 // ---- open + threaded reader ----
 async function gmOpen(i){
   var m=GM.msgs[i]; if(!m) return;
+  var app=document.getElementById('gmApp'); if(app) app.classList.add('gm-reading');   // mobile: slide the full-screen reader in immediately (inert on desktop)
   var read=document.getElementById('gmRead'); if(read) read.innerHTML='<div class="gm-empty"><div class="gm-big">⏳</div><div>Opening…</div></div>';
   var r;
   try{ r=await(await fetch('/api/google/gmail-thread?id='+encodeURIComponent(m.threadId||m.id))).json(); }
@@ -9918,6 +10123,7 @@ function gmRenderRead(){
   GM.disp=msgs;                                   // chronological array -> per-message reply/forward index into this
   var last=msgs.length-1;
   var head='<div class="gm-rdhead">'
+    +'<button class="gm-back" onclick="gmMobileBack()" title="Back to list">‹ Inbox</button>'   // mobile only (display:none on desktop)
     +'<div class="gm-rdsubj">'+e2(t.subject)+(msgs.length>1?' <span class="gm-cnt">'+msgs.length+'</span>':'')+'</div>'
     +'<div class="gm-rdmeta">'+e2(gAddr((msgs[0]||{}).from||''))+' · '+msgs.length+' message'+(msgs.length>1?'s':'')+(t.drafts?' · <span style="color:var(--accent)">'+t.drafts+' draft'+(t.drafts>1?'s':'')+' in Drafts</span>':'')+'</div>'
     +'<div class="gm-acts">'
@@ -9996,8 +10202,12 @@ function gmMountBodies(read, msgs){
   });
 }
 function gmReadEmptyBody(){return '<div class="gm-empty"><div class="gm-big">✉️</div><div>Select a conversation</div><div style="font-size:11px">j/k move · Enter open</div></div>';}
-function gmCloseRead(){ GM.thread=null; gmRenderRead(); }
+function gmCloseRead(){ GM.thread=null; var a=document.getElementById('gmApp'); if(a) a.classList.remove('gm-reading'); gmRenderRead(); }
 function gmExpandThread(){ GM.expandThread=true; gmRenderRead(); }
+// mobile single-pane navigation: folders drawer + back-to-list (all inert on desktop)
+function gmRailOpen(){ var a=document.getElementById('gmApp'); if(a) a.classList.add('gm-rail-open'); }
+function gmRailClose(){ var a=document.getElementById('gmApp'); if(a) a.classList.remove('gm-rail-open'); }
+function gmMobileBack(){ gmCloseRead(); }
 function gmToggleMsg(idx){
   var el=document.querySelector('.gm-msg[data-mi="'+idx+'"]'); if(!el) return;
   el.classList.toggle('open');   // body is a Shadow-DOM host -- natural height, nothing to re-measure
@@ -10591,8 +10801,8 @@ function gmForward(idx){
 
 // ---- lane / chip switching ----
 function gmToggleLabels(){ GM.labelsOpen=!GM.labelsOpen; var w=document.getElementById('gmLabelWrap'); if(w) w.style.display=GM.labelsOpen?'block':'none'; var c=document.getElementById('gmLblChev'); if(c) c.textContent=GM.labelsOpen?'▾':'▸'; }
-function gmSetLane(k){ GM.lane=k; GM.text=''; var s=document.getElementById('gmSearch'); if(s) s.value=''; gmHighlightRail(); gmFetchList(true); if(k==='snoozed'){} }
-function gmSetLabelLane(id,name){ GM.lane='lbl:'+id; GM.text=''; GM.labelQuery='label:"'+name+'"'; gmHighlightRail(); gmFetchList(true); }
+function gmSetLane(k){ GM.lane=k; GM.text=''; var s=document.getElementById('gmSearch'); if(s) s.value=''; gmHighlightRail(); gmFetchList(true); gmRailClose(); if(k==='snoozed'){} }
+function gmSetLabelLane(id,name){ GM.lane='lbl:'+id; GM.text=''; GM.labelQuery='label:"'+name+'"'; gmHighlightRail(); gmFetchList(true); gmRailClose(); }
 async function gmFetchListRaw(q){ GM.cur=-1; GM.sel={}; gmPaintBatch(); var rows=document.getElementById('gmRows'); if(rows) rows.innerHTML=empty('Loading…');
   var r; try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(q)+'&max=50')).json(); }catch(e){ if(rows) rows.innerHTML=gErr({error:'network'}); return; }
   if(r.error){ if(rows) rows.innerHTML=gErr(r); return; }
@@ -10693,6 +10903,7 @@ function calWindow(){
 
 async function loadCalendar(force){
   var g=document.getElementById('grid');
+  if(cwMobile() && CAL.view=='week'){ CAL.view='day'; }   // the 7-column week grid is unusable on a phone -> single-day grid (iOS-style)
   var w=calWindow();
   var key=CAL.view+'|'+calYMD(w.s)+'|'+calYMD(w.e);
   if(!g.querySelector('.cal-root')){g.innerHTML='<div class="cal-root">'+empty('Loading Calendar…')+'</div>';}
@@ -12105,10 +12316,58 @@ async function loadSessions(quiet){
   else if(SESSVIEW=='grid')body='<div id="desk" class="desk desk-grid">'+s.map((x,i)=>sessTile(x,i)).join("")+'</div>';
   else body=renderFocus(s);
   document.getElementById("grid").innerHTML='<div class="modstack">'+head+body+'</div>';   // clean vertical stack -- usage strip (in head) sits ABOVE the focus block, never overlapped
-  unpeekNow(); startSnaps();
+  unpeekNow(); startSnaps(); ccWireDropzones();
+}
+// ---- Give Claude a file: drag-drop / tap-to-attach onto a session ----------------------------------
+// Upload the dropped/picked file, then the server types its absolute path into the tmux session so Claude
+// reads it. The terminal iframe swallows drag events, so the .ccdrop overlay only becomes pointer-active
+// while a file is being dragged (a document-level dragenter shows it), then catches the drop over the iframe.
+function ccDropBar(name){return '<div class="ccdropbar" onclick="ccPickFile(\''+esc(name)+'\')" title="Upload a file/image and hand its path to Claude in this session (Claude reads it by path)">📎 <b>Attach a file</b>&nbsp;— drag one onto this terminal, or tap here</div>';}
+function ccDropOverlay(){return '<div class="ccdrop"><div class="ccdico">📎</div><div>Drop to give Claude this file</div><div class="ccdsub">it uploads, then its path is typed into the session</div></div>';}
+function ccMaxMb(){return (window.CC&&window.CC.maxUploadMb)||50;}
+function ccPickFile(name){var inp=document.createElement('input');inp.type='file';inp.style.display='none';
+  inp.onchange=function(){var f=inp.files&&inp.files[0];if(f)ccUploadFile(name,f);try{document.body.removeChild(inp);}catch(e){}};
+  document.body.appendChild(inp);inp.click();}
+function ccUploadFile(name,file){
+  if(!file||!name)return;
+  if(file.size>ccMaxMb()*1024*1024){toast('File too large (max '+ccMaxMb()+' MB).',5000);return;}
+  toast('Uploading '+esc(file.name)+' to '+esc(name)+'…',4000);
+  var rd=new FileReader();
+  rd.onerror=function(){toast('Could not read the file.',5000);};
+  rd.onload=function(){
+    var d=String(rd.result||'');var b64=d.indexOf(',')>=0?d.split(',')[1]:d;
+    fetch('/api/session-upload',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session:name,filename:file.name,mime:file.type||'',data:b64})})
+      .then(function(r){return r.json();})
+      .then(function(r){if(r&&r.ok)toast('📎 Gave Claude '+esc(r.name)+' — path typed into '+esc(name)+'. Review &amp; press Enter.',7000);
+        else toast('Upload failed: '+((r||{}).error||'?'),6000);})
+      .catch(function(){toast('Upload failed.',5000);});
+  };
+  rd.readAsDataURL(file);
+}
+function ccHasFiles(e){try{var t=e.dataTransfer&&e.dataTransfer.types;if(!t)return false;
+  return Array.prototype.indexOf.call(t,'Files')>=0||(t.contains&&t.contains('Files'));}catch(_){return false;}}
+function ccShowDrops(on){var ovs=document.querySelectorAll('[data-ccsess] .ccdrop');for(var i=0;i<ovs.length;i++)ovs[i].classList.toggle('show',!!on);}
+function ccWireDropzones(){
+  if(!ccWireDropzones._doc){ccWireDropzones._doc=true;   // one set of document listeners, regardless of re-renders
+    document.addEventListener('dragenter',function(e){if(ccHasFiles(e)){e.preventDefault();ccShowDrops(true);}});
+    document.addEventListener('dragover',function(e){if(ccHasFiles(e))e.preventDefault();});   // needed so 'drop' can fire
+    document.addEventListener('drop',function(e){ccShowDrops(false);});
+    document.addEventListener('dragleave',function(e){if(e.clientX<=0&&e.clientY<=0)ccShowDrops(false);});   // left the window
+  }
+  var ovs=document.querySelectorAll('[data-ccsess] .ccdrop');
+  for(var i=0;i<ovs.length;i++){var ov=ovs[i];if(ov._ccwired)continue;ov._ccwired=true;
+    var z=ov.closest('[data-ccsess]');var name=z&&z.getAttribute('data-ccsess');
+    (function(ov,name){
+      ov.addEventListener('dragover',function(e){e.preventDefault();e.stopPropagation();try{e.dataTransfer.dropEffect='copy';}catch(_){ }});
+      ov.addEventListener('drop',function(e){e.preventDefault();e.stopPropagation();ccShowDrops(false);
+        var dt=e.dataTransfer;if(dt&&dt.files&&dt.files.length)ccUploadFile(name,dt.files[0]);});
+    })(ov,name);
+  }
 }
 function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)
   +'<span class="stbtns">'
+  +'<button class="mini" title="give Claude a file (upload + hand the path to this session)" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
   +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
   +'<button class="mini" style="color:#f85149" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
@@ -12116,9 +12375,9 @@ function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attache
 function renderFocus(s){
   if(!SESSBIG||!s.find(function(x){return x.name==SESSBIG;}))SESSBIG=s[0].name;
   var big=s.find(function(x){return x.name==SESSBIG;});
-  // Just the one big terminal -- the bottom taskbar lists/switches every session, so no redundant chip row.
+  // One big terminal + a visible attach bar (mobile/fallback) + a drag overlay (covers the iframe on dragover).
   var h='<div class="focusonly">'
-    +'<div class="bigsess">'+bigHead(big)+'<iframe class="stframe" src="/term?name='+encodeURIComponent(big.name)+'"></iframe></div>'
+    +'<div class="bigsess" data-ccsess="'+esc(big.name)+'">'+bigHead(big)+ccDropBar(big.name)+'<iframe class="stframe" src="/term?name='+encodeURIComponent(big.name)+'"></iframe>'+ccDropOverlay()+'</div>'
     +'</div>';
   return h;
 }
@@ -12133,18 +12392,20 @@ function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="c
   +'<div class="meta">active '+ago(now-x.activity)+' ago</div>'
   +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="openInSessions(\''+esc(x.name)+'\')">▶ open</button>'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
+  +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎 file</button>'
   +'<button class="mini" onclick="endSess(\''+esc(x.name)+'\',false)" title="handoff + close">end</button>'
   +'<button class="mini" style="color:#f85149" onclick="endSess(\''+esc(x.name)+'\',true)" title="force kill">kill</button></div></div>';}
 function sessTile(x,i){const big=(SESSBIG==x.name);
-  return '<div class="stile'+(big?' big':'')+'" data-name="'+esc(x.name)+'">'
+  return '<div class="stile'+(big?' big':'')+'" data-name="'+esc(x.name)+'"'+(big?(' data-ccsess="'+esc(x.name)+'"'):'')+'>'
     +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)
     +'<span class="stbtns" onclick="event.stopPropagation()">'
     +'<button class="mini" title="'+(big?'minimize':'maximize')+'" onclick="tileClick(\''+esc(x.name)+'\')">'+(big?'▒':'⤢')+'</button>'
+    +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
     +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
     +'<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
     +'<button class="mini" style="color:#f85149" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'
     +'</span></div>'
-    +(big?'<iframe class="stframe" src="/term?name='+encodeURIComponent(x.name)+'"></iframe>':'<pre class="snap" id="snap_'+i+'">…</pre>')
+    +(big?('<iframe class="stframe" src="/term?name='+encodeURIComponent(x.name)+'"></iframe>'+ccDropOverlay()):'<pre class="snap" id="snap_'+i+'">…</pre>')
     +'</div>';}
 function tileClick(name){SESSBIG=(SESSBIG==name)?null:name;loadSessions(true);syncHash();}
 async function refreshSnap(i,name){const el=document.getElementById('snap_'+i);if(!el)return;
@@ -13254,6 +13515,135 @@ if(!restoreFromHash())syncHash(false);   // restore exact place on refresh; else
 (function(){var hb=document.getElementById("helpBtn");if(hb)hb.style.display=HELP[LENS]?"":"none";ccHelpAuto(LENS);})();  // help for the landing lens
 // live health: repaint the header strip (+ machines lens) every 60s without a page reload
 setInterval(()=>{fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;paintSvc();if(LENS=="machines")render();}).catch(()=>{});},60000);
+
+// ===================================================================================================
+// LIVE "DELIVERABLE READY" SLIDE-OUT  (global, self-contained overlay -- the reverse of file UPLOAD)
+// When an agent saves a file into a folder's deliverables/ (the SAME spine the Files lens reads), this
+// surfaces it instantly: a card slides in from the right (bottom on mobile) offering Download / Preview /
+// Email-to-me, so the user never has to go hunting. It REUSES the existing deliverables system end-to-end:
+//   - detection  : polls /api/files (the same endpoint the Files lens uses) and diffs against page-open
+//   - Download    : dlFile() -> /api/file-get (blob, iCloud-retry aware)
+//   - Preview     : /api/file-get?inline=1 (inline image/pdf/text, no leaving the page)
+//   - Email to me : POST /api/deliverable-email -> server-side gmail_send() to _owner_email()
+// It is ORTHOGONAL to the Sessions render: its own DOM node (appended to <body>), its own CSS, its own
+// poll loop -- nothing here touches the sessions area (edited in parallel). Self-hides Email when Google
+// is not configured (window.CC.google). Only notifies for files created AFTER the page opened.
+// ===================================================================================================
+(function(){
+  var SINCE = Date.now()/1000;     // page-open epoch -- never nag for files older than this
+  var SEEN = {};                   // rel -> 1 ; seeded on the first poll so pre-existing files never pop
+  var seeded = false;
+  var POLL_MS = 15000, MAX_CARDS = 4;
+
+  var css = ''
+   + '#cfDeliv{position:fixed;right:16px;bottom:16px;z-index:9000;display:flex;flex-direction:column;gap:10px;max-width:344px;pointer-events:none}'
+   + '#cfDeliv .cfd-card{pointer-events:auto;background:var(--card,#15151c);border:1px solid var(--line,#2a2a35);border-left:3px solid var(--accent,#d4af37);border-radius:12px;box-shadow:0 12px 34px rgba(0,0,0,.5);padding:12px 12px 11px;transform:translateX(125%);opacity:0;transition:transform .38s cubic-bezier(.2,.9,.3,1),opacity .38s}'
+   + '#cfDeliv .cfd-card.in{transform:translateX(0);opacity:1}'
+   + '#cfDeliv .cfd-top{display:flex;align-items:flex-start;gap:9px}'
+   + '#cfDeliv .cfd-ico{font-size:22px;line-height:1.1;flex:0 0 auto}'
+   + '#cfDeliv .cfd-meta{flex:1;min-width:0}'
+   + '#cfDeliv .cfd-kick{font-size:10px;font-weight:700;letter-spacing:.5px;color:var(--accent,#d4af37);text-transform:uppercase}'
+   + '#cfDeliv .cfd-name{font-weight:700;font-size:13.5px;word-break:break-word;line-height:1.25;margin-top:1px;color:var(--ink,#e8e8ee)}'
+   + '#cfDeliv .cfd-sub{font-size:11px;color:var(--mut,#9a9aa6);margin-top:2px}'
+   + '#cfDeliv .cfd-x{pointer-events:auto;background:none;border:none;color:var(--mut,#9a9aa6);font-size:20px;cursor:pointer;flex:0 0 auto;padding:0 2px;line-height:1}'
+   + '#cfDeliv .cfd-btns{display:flex;gap:6px;margin-top:11px}'
+   + '#cfDeliv .cfd-btns button{flex:1;min-height:40px;border-radius:9px;border:1px solid var(--line,#2a2a35);background:var(--bg,#20202a);color:var(--ink,#e8e8ee);font-size:12px;font-weight:600;cursor:pointer}'
+   + '#cfDeliv .cfd-btns button.go{background:var(--accent,#d4af37);color:#1a1a10;border-color:transparent}'
+   + '#cfDeliv .cfd-btns button[disabled]{opacity:.6;cursor:default}'
+   + '#cfDeliv .cfd-prev{margin-top:9px;border-radius:8px;overflow:hidden;max-height:240px;border:1px solid var(--line,#2a2a35);background:var(--bg,#0d0d12)}'
+   + '#cfDeliv .cfd-prev img{display:block;max-width:100%;max-height:240px;margin:0 auto}'
+   + '#cfDeliv .cfd-prev iframe{width:100%;height:240px;border:0;background:#fff}'
+   + '#cfDeliv .cfd-prev pre{margin:0;padding:9px;max-height:240px;overflow:auto;font-size:11px;white-space:pre-wrap;word-break:break-word;color:var(--ink,#e8e8ee)}'
+   + '@media (max-width:640px){#cfDeliv{left:10px;right:10px;bottom:10px;max-width:none}#cfDeliv .cfd-card{transform:translateY(125%)}#cfDeliv .cfd-card.in{transform:translateY(0)}#cfDeliv .cfd-btns button{min-height:44px;font-size:13px}}';
+  var st=document.createElement('style'); st.textContent=css; (document.head||document.body).appendChild(st);
+  var host=document.createElement('div'); host.id='cfDeliv'; document.body.appendChild(host);
+
+  function ext(n){return (n||'').toLowerCase().split('.').pop();}
+  function icon(n){var e=ext(n);
+    if(/^(png|jpg|jpeg|gif|webp|svg|bmp|heic)$/.test(e))return '\u{1F5BC}';
+    if(e==='pdf')return '\u{1F4D5}';
+    if(/^(csv|xlsx|xls)$/.test(e))return '\u{1F4CA}';
+    if(/^(zip|tar|gz|tgz|7z|rar)$/.test(e))return '\u{1F5DC}';
+    if(/^(md|txt|log|json|yaml|yml|html|js|py|sh|css|xml|ts)$/.test(e))return '\u{1F4C4}';
+    if(/^(mp4|mov|webm|mp3|wav|m4a)$/.test(e))return '\u{1F39E}';
+    return '\u{1F4C1}';}
+  function isImg(n){return /\.(png|jpg|jpeg|gif|webp|svg|bmp)$/i.test(n||'');}
+  function isPdf(n){return /\.pdf$/i.test(n||'');}
+  function isTxt(n){return /\.(md|txt|log|json|yaml|yml|csv|html|js|py|sh|css|xml|ts)$/i.test(n||'');}
+  function fmtB(n){n=n||0;return n>=1e6?(n/1e6).toFixed(1)+' MB':n>=1e3?(Math.round(n/1e3))+' KB':n+' B';}
+
+  function dismiss(card){ if(!card)return; card.classList.remove('in'); setTimeout(function(){ if(card.parentNode)card.parentNode.removeChild(card); },380); }
+
+  function makeCard(f){
+    var card=document.createElement('div'); card.className='cfd-card';
+    var top=document.createElement('div'); top.className='cfd-top';
+    var ico=document.createElement('div'); ico.className='cfd-ico'; ico.textContent=icon(f.name);
+    var meta=document.createElement('div'); meta.className='cfd-meta';
+    var kick=document.createElement('div'); kick.className='cfd-kick'; kick.textContent='New file ready';
+    var nm=document.createElement('div'); nm.className='cfd-name'; nm.textContent=f.name||'file';
+    var sub=document.createElement('div'); sub.className='cfd-sub';
+    sub.textContent=fmtB(f.size)+(f.module?(' · '+f.module):'')+' · just now';
+    meta.appendChild(kick); meta.appendChild(nm); meta.appendChild(sub);
+    var x=document.createElement('button'); x.className='cfd-x'; x.innerHTML='&times;'; x.title='Dismiss';
+    x.onclick=function(){ dismiss(card); };
+    top.appendChild(ico); top.appendChild(meta); top.appendChild(x); card.appendChild(top);
+
+    var prevBox=null;
+    var btns=document.createElement('div'); btns.className='cfd-btns';
+
+    var dl=document.createElement('button'); dl.className='go'; dl.innerHTML='↓ Download';
+    dl.onclick=function(){ if(typeof dlFile==='function')dlFile(f.rel,f.name); else window.open('/api/file-get?b64='+b64u(f.rel),'_blank'); };
+    btns.appendChild(dl);
+
+    var pv=document.createElement('button'); pv.innerHTML='\u{1F441} Preview';
+    pv.onclick=function(){
+      if(prevBox){ if(prevBox.parentNode)prevBox.parentNode.removeChild(prevBox); prevBox=null; return; }
+      prevBox=document.createElement('div'); prevBox.className='cfd-prev';
+      var url='/api/file-get?inline=1&b64='+b64u(f.rel);
+      if(isImg(f.name)){ var im=document.createElement('img'); im.src=url; im.alt=f.name; prevBox.appendChild(im); }
+      else if(isPdf(f.name)){ var ifr=document.createElement('iframe'); ifr.src=url; prevBox.appendChild(ifr); }
+      else if(isTxt(f.name)){ var pre=document.createElement('pre'); pre.textContent='Loading…'; prevBox.appendChild(pre);
+        fetch(url,{cache:'no-store'}).then(function(r){return r.text();}).then(function(t){ pre.textContent=(t||'').slice(0,8000); }).catch(function(){ pre.textContent='(could not load preview)'; }); }
+      else { var p2=document.createElement('pre'); p2.textContent='No inline preview for this type — use Download.'; prevBox.appendChild(p2); }
+      card.appendChild(prevBox);
+    };
+    btns.appendChild(pv);
+
+    if(window.CC&&window.CC.google){
+      var em=document.createElement('button'); em.innerHTML='✉ Email to me';
+      em.onclick=function(){
+        em.disabled=true; em.innerHTML='Sending…';
+        fetch('/api/deliverable-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rel:f.rel})})
+          .then(function(r){return r.json();}).then(function(r){
+            if(r&&r.ok){ em.innerHTML='✓ Sent'; if(typeof toast==='function')toast('Emailed '+(f.name||'file')+(r.to?(' to '+r.to):''),3500); setTimeout(function(){dismiss(card);},1400); }
+            else { em.disabled=false; em.innerHTML='✉ Email to me'; if(typeof toast==='function')toast('Email failed: '+((r||{}).error||'?'),5000); }
+          }).catch(function(){ em.disabled=false; em.innerHTML='✉ Email to me'; if(typeof toast==='function')toast('Email failed',4000); });
+      };
+      btns.appendChild(em);
+    }
+    card.appendChild(btns);
+    return card;
+  }
+
+  function show(f){
+    while(host.children.length>=MAX_CARDS){ dismiss(host.firstChild); }
+    var card=makeCard(f); host.appendChild(card);
+    requestAnimationFrame(function(){ requestAnimationFrame(function(){ card.classList.add('in'); }); });
+  }
+
+  function poll(){
+    fetch('/api/files',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+      var files=(d&&d.files)||[];
+      if(!seeded){ files.forEach(function(f){ SEEN[f.rel]=1; }); seeded=true; return; }   // baseline: no pop-ups for what was already there
+      var fresh=[];
+      files.forEach(function(f){ if(f&&f.rel&&!SEEN[f.rel]){ SEEN[f.rel]=1; if((f.mtime||0)>=SINCE) fresh.push(f); } });
+      fresh.reverse().forEach(show);   // newest-first list -> stack oldest-first so newest ends on top
+    }).catch(function(){});
+  }
+  setTimeout(poll, 1500);              // seed quietly shortly after load
+  setInterval(poll, POLL_MS);
+  window.cfDeliverablesPoll=poll;      // optional manual nudge (e.g. right after an action that made a file) -- no Sessions coupling
+})();
 </script></body></html>"""
 
 def _ensure_skip_permissions_accepted():

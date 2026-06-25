@@ -3,6 +3,32 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.33.0 -- 2026-06-25
+- FEATURE (mobile Google): Gmail/Calendar/Drive lenses rebuilt for phones (iPhone-Google-app style) behind
+  @media(max-width:760px) so desktop is untouched. Gmail = single-pane: full-width list -> tap -> full-screen
+  reader with back, labels drawer (hamburger), full-screen compose, sticky reply/reply-all/forward bar.
+  Calendar -> day/agenda + bottom-sheet event detail. Drive -> mobile file list + full-screen preview. Every
+  feature preserved (VoiceMatch, attachments, sync badge, event create/edit, browse/preview/download).
+- FEATURE (give Claude a file): drag-drop a file/image onto the session terminal (drop overlay) or use the
+  '\u1f4ce Attach' bar / tap-to-pick (mobile) -> POST /api/session-upload saves it to a config-driven uploads
+  dir (extension-preserving, size-capped via max_upload_mb) and types the path into the tmux session so Claude
+  picks it up (no auto-Enter). Also on the standalone /term page.
+- FEATURE (deliverable slide-out): when an agent writes a file to deliverables/, a self-contained global
+  overlay slides out offering Download / Preview / Email-to-me -- built on the EXISTING deliverables spine
+  (/api/files detection, file-get download/preview with new ?inline=1, gmail_send for email via
+  /api/deliverable-email, owner email resolved server-side). Polls ~15s, only pops files newer than page-open.
+
+## 0.32.0 -- 2026-06-25
+- FEATURE (fleet usage rollup + enterprise visibility): a ClaudeGrandfather-level view that aggregates usage
+  across BOTH macOS users (your hptuner side + Sarah's sarahaios/AFP side) into OVERALL + by Claude account
+  (tallied against whichever login was active, wherever it ran, with a where-breakdown) + by node (per project
+  folder, grouped by side). Each macOS user = one transcript store (instances share it), so the aggregator
+  dedupes by store_id; peers expose /api/usage-store over the family mesh; cached 60s. Enterprise knobs
+  (Settings -> Fleet usage visibility, also superadmin-settable): fleet_view full|own (show whole fleet vs
+  only own) + fleet_share on|off (expose this node's usage to peers). Default full/share = single-owner full
+  visibility. 'Admin sees all, nodes see own' = children {share:on,view:own} + grandfather {view:full}.
+  (Also: AFP was missing the family mesh_token -- set to the verified family value so it joins the mesh.)
+
 ## 0.31.1 -- 2026-06-25
 - FIX (per-account usage: stop misattributing pre-tracking history): usage from before the account-activity
   log existed (it began when 0.30.0 shipped) was lumped under whatever account was logged in now. It's now a
