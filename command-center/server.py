@@ -60,6 +60,14 @@ PRESET = CC.get("preset") or ROLE           # which module/lens bundle this inst
 # Scope each project console to sessions whose working dir is under its PROJECT. Default on for projects;
 # an org/overseer can set "scope_sessions": false to see all sessions box-wide.
 SCOPE_SESSIONS = CC.get("scope_sessions", ROLE != "org")
+# Fleet usage visibility (enterprise multi-tenant). Two knobs, default = full visibility (single-owner):
+#   fleet_share: does this node EXPOSE its usage store to family peers (data). False -> /api/usage-store 403s.
+#   fleet_view : "full" -> this node SHOWS the fleet rollup; "own" -> shows only its own usage.
+# Enterprise "admin sees all, each node sees only its own" = children {share:true, view:own} + grandfather
+# {view:full}. Total isolation = children {share:false, view:own}. Settable per node + pushed from the
+# grandfather via superadmin set_config. Takes effect on restart (like the other settings).
+FLEET_SHARE = bool(CC.get("fleet_share", True))
+FLEET_VIEW = (CC.get("fleet_view") or "full").lower()
 
 def _agency_early():
     """Lightweight agency detection usable at import time (before is_agency/_agency_dirs are defined):
@@ -343,7 +351,7 @@ SA_MASTER = os.environ.get("MESH_SUPERADMIN_MASTER") or CC.get("superadmin_maste
 SA_NODE_KEY = os.environ.get("MESH_SUPERADMIN_NODE_KEY") or CC.get("superadmin_node_key") or ""  # this node's derived key
 SA_SKEW = 300                  # max clock skew (s) tolerated on the issued timestamp
 SA_ALLOWED_KEYS = ("mesh_auth_enforce", "mesh_reply_sla", "subscription_monthly", "pipeline_stale_sec",
-                   "deliverables_root", "storage_mode", "account_wallet")
+                   "deliverables_root", "storage_mode", "account_wallet", "fleet_share", "fleet_view", "side_label")
 _SA_SEEN = {}                  # nonce -> exp_ts (single-use replay cache)
 _SA_LOCK = threading.Lock()
 # PUBLIC-KEY superadmin (the "every install is auto-under my superadmin" model): MC holds an Ed25519 PRIVATE
@@ -1260,7 +1268,7 @@ def _web_manifest():
 # Peer/machine-to-machine ingress: NOT gated by the operator token (that's a human surface). These are
 # peer surface, protected on their own MESH_TOKEN track, so enabling operator auth on a node never severs
 # the mesh (a peer POSTs here with X-Mesh-Token or nothing, never the operator cookie/bearer).
-AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec")
+AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store")
 
 # Security frame stamped onto EVERY inbound peer message (appended AFTER the literal "[message from X]" so
 # the Stop-hook sender regex still matches). Makes the trust boundary explicit in the message itself -- a
@@ -1876,6 +1884,88 @@ def usage_payload(ttl=20):
         _USAGE_CACHE["at"] = now; _USAGE_CACHE["data"] = data
         return data
 
+# ---- FLEET usage rollup (ClaudeGrandfather view): overall + by Claude account (regardless of where it ran)
+# + by node, across BOTH macOS users. Each macOS user = ONE transcript store (all its instances share it), so
+# the consumer dedupes reports by store_id (username) to avoid triple-counting. Each store attributes its
+# events by (account via that user's timeline) x (project folder); the aggregator sums across stores. ----
+import getpass as _getpass
+def _store_id(): return _getpass.getuser()                       # one transcript store per macOS user
+def _side_label(): return CC.get("side_label") or _getpass.getuser()
+def usage_store():
+    """This node's transcript-store usage for the fleet rollup: store total + per-account x per-project cells.
+    Peers fetch this over the mesh; the aggregator dedupes by store_id (instances on one user share a store)."""
+    up = usage_payload()                                          # refreshes _TOK_STATE (cached)
+    alog = _acct_log_load()
+    cells = {}                                                   # account -> {proj_label -> {total,cost,calls}}
+    with _TOK_LOCK:
+        evs = [(ev, st.get("proj") or "?") for st in _TOK_STATE.values() for ev in st["events"]]
+    for ev, proj in evs:
+        acct = _acct_active_at(ev[0], alog)
+        a = cells.setdefault(acct, {}); c = a.setdefault(proj, {"total": 0, "cost": 0.0, "calls": 0})
+        c["total"] += ev[2] + ev[3] + ev[4] + ev[5]; c["cost"] += _ev_cost(ev); c["calls"] += 1
+    m = up["totals"]["month"]
+    return {"store_id": _store_id(), "side": _side_label(),
+            "me": {"id": INSTANCE_ID, "proj": _proj_label(PROJECT)},
+            "total": m["total"], "cost": m["cost"],
+            "windows": {k: {"total": v["total"], "cost": v["cost"]} for k, v in up["totals"].items()},
+            "cells": cells, "acct_since": (alog[0].get("ts") if alog else None)}
+
+def _mesh_get(url, timeout=4.0):
+    """GET a peer endpoint with the family mesh token (for cross-node fleet data)."""
+    try:
+        req = urllib.request.Request(url)
+        if MESH_TOKEN: req.add_header("X-Mesh-Token", MESH_TOKEN)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+_FLEET_CACHE = {"at": 0.0, "data": None}; _FLEET_LOCK = threading.Lock()
+def usage_fleet(ttl=60):
+    """Aggregate every store's usage into overall + by-account(+where) + by-node(grouped by side). Pulls each
+    peer's /api/usage-store over the mesh, dedupes by store_id, sums. Cached (limits mesh chatter)."""
+    now = time.time()
+    with _FLEET_LOCK:
+        if _FLEET_CACHE["data"] and now - _FLEET_CACHE["at"] < ttl: return _FLEET_CACHE["data"]
+    reports = [usage_store()]                                     # self
+    if FLEET_VIEW != "own":                                       # "own" -> show only this node (no peer pulls)
+        seen_urls = set()
+        for p in peers():
+            u = (p.get("url") or "").rstrip("/")
+            if not u or u in seen_urls: continue
+            seen_urls.add(u)
+            r = _mesh_get(u + "/api/usage-store")
+            if isinstance(r, dict) and r.get("store_id"): reports.append(r)
+    by_store = {}                                                 # dedupe: one report per macOS-user store
+    for r in reports:
+        sid = r.get("store_id")
+        if sid and sid not in by_store: by_store[sid] = r
+    stores = list(by_store.values())
+    overall = sum(s.get("total", 0) for s in stores); overall_cost = sum(s.get("cost", 0.0) for s in stores)
+    acct = {}; nodes = {}
+    for s in stores:
+        side = s.get("side") or s.get("store_id")
+        for a, projs in (s.get("cells") or {}).items():
+            ae = acct.setdefault(a, {"account": a, "total": 0, "cost": 0.0, "where": {}})
+            iname = (s.get("me") or {}).get("id")                 # name the store-owner's own project as its instance
+            ip = (s.get("me") or {}).get("proj")
+            for proj, c in projs.items():
+                ae["total"] += c["total"]; ae["cost"] += c["cost"]
+                ae["where"][side] = ae["where"].get(side, 0) + c["total"]
+                name = iname if (iname and proj == ip) else proj
+                key = side + "||" + name
+                ne = nodes.setdefault(key, {"node": name, "side": side, "total": 0, "cost": 0.0})
+                ne["total"] += c["total"]; ne["cost"] += c["cost"]
+    by_account = sorted(acct.values(), key=lambda x: -x["total"])
+    for ae in by_account:
+        ae["where"] = sorted([{"side": k, "total": v} for k, v in ae["where"].items()], key=lambda x: -x["total"])
+    data = {"overall": overall, "overall_cost": overall_cost,
+            "by_account": by_account, "by_node": sorted(nodes.values(), key=lambda x: -x["total"]),
+            "sides": sorted([{"side": s.get("side") or s.get("store_id"), "total": s.get("total", 0), "cost": s.get("cost", 0.0)} for s in stores], key=lambda x: -x["total"]),
+            "stores": len(stores), "now": now, "view": FLEET_VIEW, "share": FLEET_SHARE}
+    with _FLEET_LOCK: _FLEET_CACHE.update({"at": now, "data": data})
+    return data
+
 def token_usage_payload():
     """Per-session remaining context + the rolling token totals (for the Sessions box)."""
     sess = tmux_sessions()
@@ -2369,7 +2459,9 @@ def _kc_write(blob, account):
 # ---- Per-account usage attribution: transcripts don't record WHICH Claude account was active, so we keep a
 # tiny activity log (append on every account switch + a baseline at boot) and attribute each token event to
 # the account live at its timestamp -> inventory BY account, not just overall. ----
-_ACCT_LOG = os.path.join(STATE_DIR, "_account_log.json")
+# Per-macOS-USER (not per-instance): the Claude login is global per user, and all instances on one user share
+# ONE transcript store -> one shared account timeline so every instance attributes consistently.
+_ACCT_LOG = os.path.expanduser("~/.claude/_cc_account_log.json")
 _ACCT_LOG_LOCK = threading.Lock()
 def _acct_log_load():
     try:
@@ -6518,7 +6610,7 @@ def auth_token_set(new):
 
 def settings_get():
     return {"project_name": PROJECT_NAME, "brand": BRAND, "role": ROLE, "preset": PRESET,
-            "auth_on": bool(AUTH_TOKEN),
+            "auth_on": bool(AUTH_TOKEN), "fleet_share": FLEET_SHARE, "fleet_view": FLEET_VIEW,
             "integration": (CC.get("integration") or "").lower(), "is_agency": is_agency(),
             "tier": "grandfather" if ROLE == "org" else "father",
             "type": "agency" if is_agency() else "project",
@@ -6537,6 +6629,11 @@ def settings_save(body):
     if typ in ("project", "agency"):
         want = "agency" if typ == "agency" else "product"
         if (cfg.get("integration") or "").lower() != want: cfg["integration"] = want; changed.append("integration=" + want)
+    if "fleet_share" in body:
+        v = bool(body.get("fleet_share"))
+        if bool(cfg.get("fleet_share", True)) != v: cfg["fleet_share"] = v; changed.append("fleet_share=" + str(v))
+    if body.get("fleet_view") in ("full", "own"):
+        if (cfg.get("fleet_view") or "full") != body["fleet_view"]: cfg["fleet_view"] = body["fleet_view"]; changed.append("fleet_view=" + body["fleet_view"])
     if not changed: return {"ok": True, "changed": [], "note": "No changes."}
     try:
         tmp = _CC_CONFIG + ".tmp"
@@ -6788,6 +6885,11 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/token-usage": return self._s(200, json.dumps(token_usage_payload()))
         if u.path == "/api/pipeline":   return self._s(200, json.dumps(pipeline_payload()))
         if u.path == "/api/usage": return self._s(200, json.dumps(usage_payload()))
+        if u.path == "/api/usage-store":   # peer-to-peer (mesh-token gated): this node's store rollup
+            if not _mesh_token_ok(self.headers.get("X-Mesh-Token", "")): return self._s(403, json.dumps({"error": "mesh token required"}))
+            if not FLEET_SHARE: return self._s(403, json.dumps({"error": "this node does not share usage (fleet_share off)", "store_id": _store_id()}))
+            return self._s(200, json.dumps(usage_store()))
+        if u.path == "/api/usage-fleet": return self._s(200, json.dumps(usage_fleet()))
         if u.path == "/api/backup-status": return self._s(200, json.dumps(backup_status()))
         if u.path == "/api/security":      return self._s(200, json.dumps(security_status()))
         if u.path == "/api/agents":        return self._s(200, json.dumps(agents_list()))
@@ -8835,8 +8937,9 @@ function setURange(r){USAGERANGE=r;renderUsage();}
 async function loadUsage(){document.getElementById("grid").innerHTML=empty("Loading usage analytics…");
   try{USAGE=await(await fetch('/api/usage')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load usage.");return;}
   renderUsage();
+  loadFleet();   // fleet rollup pulls from every node over the mesh (async; re-renders when it lands)
   clearInterval(window.UTIMER);window.UTIMER=setInterval(async()=>{if(LENS!='usage'){clearInterval(window.UTIMER);return;}
-    try{USAGE=await(await fetch('/api/usage')).json();renderUsage();}catch(e){}},15000);}
+    try{USAGE=await(await fetch('/api/usage')).json();renderUsage();}catch(e){} loadFleet();},15000);}
 function udur(s){s=Math.max(0,s);return s<3600?Math.round(s/60)+'m':s<86400?(s/3600).toFixed(1)+'h':(s/86400).toFixed(1)+'d';}
 function ubLabel(i,n,span){const a=(n-i-0.5)*(span/n);return a<3600?Math.round(a/60)+'m ago':a<86400?(a/3600).toFixed(1)+'h ago':(a/86400).toFixed(1)+'d ago';}
 function uBarChart(series,key,span){const n=series.length||1,W=1000,H=210,pad=16,bw=W/n,vals=series.map(b=>b[key]||0),mx=Math.max(1,...vals);
@@ -8877,10 +8980,34 @@ function heroBanner(cur){const u=USAGE,t=u.totals,nd=u.node||{},cw=(t[cur.tot]||
       +'<div style="font-size:15px;color:#9aa0ad;margin-top:3px">30-day metered <b style="color:#f0d05a">'+fmtUSD(monthAll)+'</b> vs <b style="color:#e8e8ea">'+fmtUSD(sub)+'/mo</b> you pay flat</div>'
       +(lev>0?'<div style="margin-top:6px"><span style="background:#22c55e1f;color:#3fb950;border:1px solid #3fb95055;border-radius:9px;padding:3px 11px;font-weight:700;font-size:15px">'+lev.toFixed(lev>=10?0:1)+'× value for what you pay</span></div>':'')
     +'</div></div></div>';}
+async function loadFleet(){ try{ window.FLEET=await(await fetch('/api/usage-fleet')).json(); }catch(e){ window.FLEET=null; } if(LENS==='usage') renderUsage(); }
+function fleetCard(){
+  var f=window.FLEET;
+  if(!f) return '<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🌐 Fleet usage</b> <span class="sub"><span class="spin"></span> gathering from every node…</span></div></div>';
+  var h='<div class="card" style="cursor:default;grid-column:1/-1;background:linear-gradient(135deg,#11131d,#0d0f17);border-color:#58a6ff44;box-shadow:0 0 22px #58a6ff14">'
+   +'<div class="modnav"><b>🌐 Fleet usage</b> <span class="sub">everything under ClaudeGrandfather · '+(f.stores||0)+' store(s) · 30-day metered</span></div>'
+   +'<div style="font-size:36px;font-weight:800;color:#7cc4ff;line-height:1;margin-top:8px;letter-spacing:-1px">'+fmtUSD(f.overall_cost)+'</div>'
+   +'<div class="ucsub">'+fmtTok(f.overall)+' tokens total across the whole fleet</div>';
+  var smax=Math.max(1,...(f.sides||[]).map(s=>s.total),1);
+  h+='<div class="ucsub" style="margin-top:13px;font-weight:700;color:var(--ink)">By side (Studio user)</div>';
+  (f.sides||[]).forEach(function(s){ h+=hbar('🖥 '+esc(s.side), s.total/smax*100, fmtUSD(s.cost)+' · '+fmtTok(s.total), '#58a6ff'); });
+  var amax=Math.max(1,...(f.by_account||[]).map(a=>a.total),1);
+  h+='<div class="ucsub" style="margin-top:14px;font-weight:700;color:var(--ink)">By Claude account <span style="font-weight:400;opacity:.7">— who burned it, wherever it ran</span></div>';
+  if(!(f.by_account||[]).length) h+='<div class="ucsub">no per-account data yet</div>';
+  (f.by_account||[]).forEach(function(a){ var pre=(a.account==='(before tracking)'||a.account==='unknown');
+    var where=(a.where||[]).map(function(w){return esc(w.side)+' '+fmtTok(w.total);}).join(' · ');
+    h+=hbar(pre?'🕓 before account tracking':('👤 '+esc(a.account)), a.total/amax*100, fmtUSD(a.cost)+' · '+fmtTok(a.total)+(where?('   ['+where+']'):''), pre?'#6b6b78':'#bc8cff'); });
+  var nmax=Math.max(1,...(f.by_node||[]).map(n=>n.total),1), sides={};
+  (f.by_node||[]).forEach(function(n){ (sides[n.side]=sides[n.side]||[]).push(n); });
+  h+='<div class="ucsub" style="margin-top:14px;font-weight:700;color:var(--ink)">By node</div>';
+  Object.keys(sides).forEach(function(sd){ h+='<div class="ucsub" style="margin-top:7px;opacity:.85">'+esc(sd)+'</div>';
+    sides[sd].forEach(function(n){ h+=hbar('• '+esc(n.node), n.total/nmax*100, fmtUSD(n.cost)+' · '+fmtTok(n.total), '#e8c547'); }); });
+  return h+'</div>';
+}
 function renderUsage(){if(!USAGE)return;const u=USAGE,t=u.totals,cur=uRange(),ser=u.series[cur.k]||[],span=cur.span,tw=(t[cur.tot]||{total:0,cost:0,calls:0,output:0});
   const n=ser.length||1,bdur=span/n,peak=Math.max(0,...ser.map(b=>b.tok||0)),rate=tw.total/Math.max(1/60,span/3600);
-  // TOP: metered-value hero, then every window as a cost card, all visible at once. Click one to drive the charts.
-  let h=heroBanner(cur);
+  // TOP: fleet rollup (overall + by-account + by-node across all nodes), then the metered-value hero.
+  let h=fleetCard()+heroBanner(cur);
   h+='<div class="card" style="cursor:default"><div class="modnav"><b>🪙 Metered value by window</b> <span class="sub">live · every window at a glance · click one to drive the charts below</span></div>'
     +'<div class="tokrow">'+URANGES.map(tokCard).join('')+'</div>'
     +'<div class="ucsub" style="margin-top:10px"><b style="color:#e8c547">'+cur.lbl+'</b> detail: <b>'+fmtTok(tw.total)+'</b> processed · <b>'+fmtTok(tw.bill||0)+'</b> billable · <b>'+fmtTok(tw.output)+'</b> out · <b>'+fmtTok(rate)+'/hr</b> · peak '+udur(bdur)+' bucket <b>'+fmtTok(peak)+'</b> · this node <b style="color:#e8c547">'+fmtUSD((tw.self||{}).cost||0)+'</b> of '+fmtUSD(tw.cost)+'</div></div>';
@@ -12589,6 +12716,14 @@ async function loadSettings(){
     +'</div>'
     +'<div class="meta" style="margin-top:12px">🎩 <b>ClaudeFather</b> shows project/agency lenses + <b>Propose Change</b> (route core changes up). 🏛 <b>ClaudeGrandfather</b> unlocks the overseer lenses — <b>Portfolio</b> + the <b>Change Requests</b> approval queue. Switching Tier auto-swaps the lens bundle (preset).</div>'
     +'<div class="btns" style="margin-top:12px"><button class="mini go" onclick="settingsSave()">💾 Save</button></div></div>';
+  h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🌐 Fleet usage visibility</b> <span class="sub">cross-node usage sharing (enterprise multi-tenant)</span></div>'
+    +'<div class="meta" style="margin:7px 0"><b>View</b> = does this node show the whole-fleet rollup or only its own usage. <b>Share</b> = may other nodes pull this node\'s usage. Single owner: keep both full/on. Tenants who shouldn\'t see each other: set child nodes to <b>view: own</b> (keep share on so the grandfather still rolls up everything), or <b>share: off</b> for total isolation. Applies on restart.</div>'
+    +'<div style="display:grid;grid-template-columns:130px 1fr;gap:10px;align-items:center;margin-top:6px">'
+    +'<div class="meta">This node shows</div><select id="set_fleetview" style="background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px">'
+    +'<option value="full"'+(s.fleet_view==='full'?' selected':'')+'>🌐 Full fleet — overall + all nodes + all accounts</option>'
+    +'<option value="own"'+(s.fleet_view==='own'?' selected':'')+'>🔒 Only this node\'s own usage</option></select>'
+    +'<div class="meta">Share upward</div><label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="set_fleetshare"'+(s.fleet_share?' checked':'')+'> let other nodes / the grandfather pull this node\'s usage</label>'
+    +'</div><div class="btns" style="margin-top:12px"><button class="mini go" onclick="settingsSave()">💾 Save</button></div></div>';
   h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🔑 Login token</b> <span class="sub">'+(s.auth_on?'a token is set — required at /login':'no token set — this node is OPEN to anyone on the tailnet')+'</span></div>'
     +'<div class="meta" style="margin:7px 0">Change this node\'s dashboard login token (the PIN at <code>/login</code>). It applies <b>immediately</b> — <b>this</b> window stays logged in, but other devices/sessions will need the new token. Persists to <code>'+e2(s.config_path||"cc.config.json")+'</code> (survives <code>cc-update</code>).</div>'
     +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">'
@@ -12612,7 +12747,10 @@ async function changeToken(){
 }
 async function settingsSave(){
   const tier=document.getElementById("set_tier").value,type=document.getElementById("set_type").value;
-  const r=await(await fetch("/api/settings-save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tier,type})})).json();
+  var body={tier:tier,type:type};
+  var fv=document.getElementById("set_fleetview"); if(fv) body.fleet_view=fv.value;
+  var fs=document.getElementById("set_fleetshare"); if(fs) body.fleet_share=fs.checked;
+  const r=await(await fetch("/api/settings-save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
   if(r&&r.ok){
     if(r.changed&&r.changed.length){toast("Saved: "+r.changed.join(", ")+" — restart to apply.",6000);}
     else{toast(r.note||"No changes",3500);}
