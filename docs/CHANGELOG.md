@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.50 -- 2026-06-25
+- FIX (Tasks tab was hidden): applyPreset() hides any nav tab not in the node's preset lens list, so the new
+  Tasks tab never showed on preset nodes (AFP/carsearch). Tasks now gets an always-on override (like the Google
+  lenses) -- it's a built-in feature, visible on every node.
+
 ## 0.21.49 -- 2026-06-25
 - FEATURE (Tasks Phase 2): (1) DAILY-MORNING auto-scan -- programmatic sweep + AI scan run automatically ~6am
   so the operator sits down to a fresh list (cc.config tasks_morning_scan/_ai/_hour; default on). (2) Calendar

@@ -12182,6 +12182,7 @@ function applyPreset(){var L=(window.CC&&window.CC.lenses);if(!L||!L.length)retu
   // override the preset-hide above (they live outside the preset lens list). See navSeedGoogle() for the folder.
   ['gmail','calendar','drive'].forEach(function(l){var _gb=document.querySelector('#lens button[data-l="'+l+'"]');if(_gb)_gb.style.display=(window.CC&&window.CC.google)?'':'none';});
   {var _ab=document.querySelector('#lens button[data-l="accounts"]');if(_ab)_ab.style.display=(window.CC&&window.CC.accountWallet)?'':'none';}  // Claude Accounts lens self-hides until the wallet is enabled on this node
+  {var _tk=document.querySelector('#lens button[data-l="tasks"]');if(_tk)_tk.style.display='';}  // Tasks is a built-in feature -- always available, outside the preset lens list
   if(!(window.CC&&window.CC.role==='org')){var _pb=document.querySelector('#lens button[data-l="portfolio"]');if(_pb)_pb.style.display='none';}  // Portfolio = ClaudeGrandfather (overseer) only
   LENS=L[0];   // land on the preset's first lens (portfolio for an overseer, sessions for a project)
   document.querySelectorAll('#lens button').forEach(function(b){b.classList.toggle('on',b.dataset.l===LENS);});
