@@ -6532,14 +6532,19 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .stbtns{display:flex;gap:3px;flex:0 0 auto}.stbtns .mini{padding:2px 6px}
 .snap{flex:1;margin:0;padding:8px;overflow:hidden;font:10.5px/1.32 ui-monospace,Menlo,monospace;color:#ccccdd;background:#0a0a0f;white-space:pre-wrap;word-break:break-word}
 .stframe{flex:1;border:0;width:100%;background:#0a0a0f}
-/* History mini-terminal preview: a peek at a conversation's last ~15 lines, styled like a term pane */
+/* History lens: header + card list span the FULL grid width (don't get trapped in a 330px grid cell), and
+   the list lays cards out in its own wide-column grid so big monitors get multiple roomy cards. */
+.histhead{grid-column:1/-1;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px}
+.histcount{margin-left:auto;white-space:nowrap}
+#histlist{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,520px),1fr));gap:14px;align-items:start}
+/* History mini-terminal preview: a peek at a conversation's last lines, styled like a term pane */
 .mtwrap{margin-top:9px;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#0a0a0f}
 .mtbar{display:flex;align-items:center;gap:5px;padding:5px 9px;background:var(--card2);border-bottom:1px solid var(--line)}
 .mtbar i{width:9px;height:9px;border-radius:50%;display:inline-block}
 .mtd1{background:#ff5f57}.mtd2{background:#febc2e}.mtd3{background:#28c840}
 .mtbar span{margin-left:6px;font-size:10.5px;color:var(--mut);font-family:ui-monospace,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mtbody{margin:0;padding:9px 11px;max-height:188px;overflow:hidden;font:11px/1.45 ui-monospace,Menlo,Monaco,monospace;color:#c9d1d9;background:#0a0a0f;white-space:pre-wrap;word-break:break-word;
-  -webkit-mask-image:linear-gradient(180deg,#000 72%,transparent);mask-image:linear-gradient(180deg,#000 72%,transparent)}
+.mtbody{margin:0;padding:10px 12px;max-height:340px;overflow:hidden;font:11.5px/1.5 ui-monospace,Menlo,Monaco,monospace;color:#c9d1d9;background:#0a0a0f;white-space:pre-wrap;word-break:break-word;
+  -webkit-mask-image:linear-gradient(180deg,#000 86%,transparent);mask-image:linear-gradient(180deg,#000 86%,transparent)}
 .mtbody .u{color:#7fd1b9}.mtbody .t{color:#c9a227}
 .mtempty{padding:9px 11px;font:11px/1.4 ui-monospace,Menlo,monospace;color:var(--mut)}
 /* FOCUS view: one big terminal + a live dock + hover-peek */
@@ -10866,7 +10871,7 @@ function histLabel(id){var m=histMachs().find(function(x){return x.id==id;});ret
 function setHistMachine(m){HISTMACHINE=m;HISTLOADED=null;loadHistory();syncHash();}
 async function loadHistory(){
   const tabs=histMachs().map(m=>'<button class="mini'+(m.id==HISTMACHINE?" go":"")+'" onclick="setHistMachine(\''+m.id+'\')">'+esc(m.label||m.name||m.id)+'</button>').join(" ");
-  document.getElementById("grid").innerHTML='<div style="margin-bottom:14px">'+tabs+' &nbsp;<span class="sub" id="histmsg">scanning '+HISTMACHINE+'…</span></div><div id="histlist">'+empty("Scanning "+histLabel(HISTMACHINE)+" — first scan of a remote box can take a few seconds.")+'</div>';
+  document.getElementById("grid").innerHTML='<div class="histhead">'+tabs+'<span class="sub histcount" id="histmsg">scanning '+esc(histLabel(HISTMACHINE))+'…</span></div><div id="histlist">'+empty("Scanning "+histLabel(HISTMACHINE)+" — first scan of a remote box can take a few seconds.")+'</div>';
   if(HISTMACHINE!=="studio" && ST[HISTMACHINE]==="offline"){   // don't hang on an SSH timeout to a down box
     HISTDATA=[]; HISTLOADED=HISTMACHINE;
     const m=document.getElementById("histmsg"); if(m)m.textContent="offline";

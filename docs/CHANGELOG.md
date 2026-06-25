@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.31 -- 2026-06-24
+- FIX (History lens layout was cramped): the lens rendered its header + card list as cells inside the 330px
+  card grid, so the header sat in a narrow left cell and cards were squeezed into one column. Header + list now
+  span the full width; the list is its own wide-card grid (min 520px/card) that fills big monitors. The
+  conversation preview shows more (last ~30 lines, taller pane, softer fade).
+
 ## 0.21.30 -- 2026-06-24
 - FEATURE (History lens: mini-terminal preview per conversation): each past conversation now shows a small
   terminal-styled peek of its last ~15 message lines (user turns + assistant text + `⏵ tool` markers), so you

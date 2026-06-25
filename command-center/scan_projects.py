@@ -26,7 +26,7 @@ if os.path.isdir(base):
 files.sort(key=lambda t: -t[0])
 
 
-def tail_preview(path, maxlines=15, maxbytes=24000):
+def tail_preview(path, maxlines=30, maxbytes=48000):
     """A terminal-style tail of a conversation: the most recent user/assistant text turns (+ tool-use
     markers), flattened to lines, last `maxlines`. Cheap: reads only the final chunk of the transcript."""
     try:
