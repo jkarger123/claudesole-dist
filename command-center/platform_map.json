@@ -57,6 +57,13 @@
       "claude_md": "/Users/hptuner/hptuners-control/install/CLAUDE.md"
     },
     {
+      "category": "Lifecycle",
+      "name": "Provisioning — Add a ClaudeFather",
+      "path": "/Users/hptuner/hptuners-control/cc-newinstance.sh",
+      "summary": "How a new instance is born: the overseer Portfolio \"➕ Add a ClaudeFather\" wizard -> POST /api/instance-provision (instance_provision() in server.py, org-only) -> the deterministic engine cc-newinstance.sh, which builds a self-contained, PORTABLE bundle (one movable folder: full framework + its own cc.config.json/secrets/state/project/deliverables). Mints a fresh dashboard auth token, carries the FAMILY mesh token (joins the mesh), ships superadmin.pub (never the private key), stages a launchd plist, makes a starter project tree, and registers the node in _instances.json so it appears in Portfolio. Nothing starts until approved: preview (--dry-run) -> stage -> launch (on the brain tmux server, verified) -> persist (per-user launchd) -> mesh. cc-instance-supervise.sh derives its own bundle dir so a relocated bundle runs its OWN server.py. Charter: agents/provision/CLAUDE.md; full doc: docs/PROVISIONING.md.",
+      "claude_md": "/Users/hptuner/hptuners-control/agents/provision/CLAUDE.md"
+    },
+    {
       "category": "Extensions",
       "name": "Marketplace catalog",
       "path": "/Users/hptuner/hptuners-control/extensions",
@@ -216,6 +223,12 @@
           "claude_md": "/Users/hptuner/hptuners-control/agents/incidents/CLAUDE.md"
         },
         {
+          "name": "provision",
+          "path": "/Users/hptuner/hptuners-control/agents/provision",
+          "summary": "The \"Add a ClaudeFather\" brain (overseer-level): turns a design plan into a new self-contained instance by driving the cc-newinstance.sh engine -- never hand-crafts layout. Runs the approval gates (stage -> launch -> launchd -> mesh), verifies the port, reports the new node's bundle/port/initial token. Inert on leaf project nodes. Full doc: docs/PROVISIONING.md.",
+          "claude_md": "/Users/hptuner/hptuners-control/agents/provision/CLAUDE.md"
+        },
+        {
           "name": "routines",
           "path": "/Users/hptuner/hptuners-control/agents/routines",
           "summary": "Owns scheduled recurring jobs (the heartbeat). Currently a STUB: a _routines.json registry exists but no runner is wired; its first job is to build itself.",
@@ -239,7 +252,7 @@
       "category": "Docs",
       "name": "Platform docs",
       "path": "/Users/hptuner/hptuners-control/docs",
-      "summary": "Authoritative platform docs: SUPERADMIN.md (signed-grant authority model), NESTED_OVERSIGHT.md (3-level ORG->PROJECT->MODULE design), STORAGE_ARCHITECTURE.md (per-node SSD home standard), SMART_FILES.md (deliverables store), PACKAGING.md (dist/cc-update flow), MEMORY_SKILLS_AGENTS.md, SESSIONS_AND_SUDO.md (pre-typed admin-shell sudo protocol), AGENCY_INTEGRATION.md, CHANGELOG.md.",
+      "summary": "Authoritative platform docs: PROVISIONING.md (how a new instance is born — the Add-a-ClaudeFather flow), SUPERADMIN.md (signed-grant authority model), NESTED_OVERSIGHT.md (3-level ORG->PROJECT->MODULE design), STORAGE_ARCHITECTURE.md (per-node SSD home standard), SMART_FILES.md (deliverables store), PACKAGING.md (dist/cc-update flow), MEMORY_SKILLS_AGENTS.md, SESSIONS_AND_SUDO.md (pre-typed admin-shell sudo protocol), AGENCY_INTEGRATION.md, CHANGELOG.md.",
       "claude_md": ""
     }
   ]

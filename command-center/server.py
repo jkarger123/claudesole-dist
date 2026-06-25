@@ -3647,6 +3647,61 @@ def instances_list():
     try: return json.load(open(INSTANCES))
     except Exception: return []
 
+def instance_provision(p, do_launch=False, dry=False):
+    """Provision a NEW, self-contained, portable ClaudeFather bundle via the deterministic engine
+    cc-newinstance.sh (the "+ Add a ClaudeFather" flow). I never hand-craft layout -- the engine owns it,
+    which keeps every node portable + updatable. Overseer-only. dry=True returns the plan without writing.
+    do_launch=True is the approval-gated step: bring it up on THIS brain tmux server (SSD/TCC context) and
+    verify the port. launchd persistence + cross-node mesh registration stay with the operator."""
+    import subprocess, re, urllib.request, urllib.error
+    eng = os.path.join(CC_HOME, "cc-newinstance.sh")
+    if not os.path.exists(eng):
+        return {"ok": False, "error": "engine missing: %s" % eng}
+    iid = re.sub(r"[^A-Za-z0-9_-]", "", (p.get("id") or "").strip())
+    if not iid:
+        return {"ok": False, "error": "id required (letters, digits, _ or -)"}
+    dest = (p.get("dest") or "").strip() or ("/Volumes/Samsung990PRO/claudefather-%s" % iid)
+    cmd = ["bash", eng, "--id", iid, "--dest", dest]
+    for flag, key in (("--name", "name"), ("--brand", "brand"), ("--preset", "preset"),
+                      ("--port", "port"), ("--storage", "storage"), ("--agents", "agents"),
+                      ("--project-root", "project_root"), ("--user", "user")):
+        v = p.get(key)
+        if v not in (None, ""):
+            cmd += [flag, str(v).strip()]
+    cmd.append("--dry-run" if dry else "--json")
+    env = dict(os.environ); env["CC_HOME"] = CC_HOME
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env)
+    except Exception as e:
+        return {"ok": False, "error": "engine failed to run: %s" % e}
+    out = (r.stdout or "") + (("\n" + r.stderr) if r.stderr else "")
+    if r.returncode != 0:
+        return {"ok": False, "error": out.strip()[-1600:]}
+    if dry:
+        return {"ok": True, "dry": True, "plan": out.strip()}
+    summ = {}
+    for line in (r.stdout or "").splitlines():
+        if line.startswith("CC_NEWINSTANCE_JSON="):
+            try: summ = json.loads(line[len("CC_NEWINSTANCE_JSON="):])
+            except Exception: pass
+    res = {"ok": True, "staged": True, "summary": summ, "log": out.strip()[-2000:]}
+    if do_launch and summ.get("bundle") and summ.get("port"):
+        b = summ["bundle"]; port = summ["port"]; sess = "cc-%s" % iid
+        launch = ('TMUX_TMPDIR=/tmp %s new-session -d -s %s '
+                  '"CC_CONFIG=%s/cc.config.json python3 %s/command-center/server.py '
+                  '>>/tmp/%s.out 2>>/tmp/%s.err"') % (TMUX, sess, b, b, sess, sess)
+        sh(["/bin/bash", "-lc", launch], timeout=20)
+        time.sleep(5)
+        code = 0
+        try:
+            urllib.request.urlopen("http://127.0.0.1:%s/" % port, timeout=5); code = 200
+        except urllib.error.HTTPError as he:
+            code = he.code
+        except Exception:
+            code = 0
+        res["launched"] = True; res["http"] = code; res["alive"] = code in (200, 401, 403)
+    return res
+
 def portfolio():
     """Roll up every registered child ClaudeFather: scrape its /api/chief + /api/security (cached per call),
     derive a RAG, and present the portfolio. A dead child shows DOWN, never blocks the view."""
@@ -6882,6 +6937,10 @@ class H(BaseHTTPRequestHandler):
                             open(cm, "w").write("# %s\n\n%s\n" % (entry.get("name", ""), entry.get("summary", "")))
                 except Exception: pass
             return self._s(200, json.dumps({"ok": True, "id": entry["id"]}))
+        if u.path == "/api/instance-provision":
+            if ROLE != "org":
+                return self._s(403, json.dumps({"ok": False, "error": "provisioning is ClaudeGrandfather (overseer) only"}))
+            return self._s(200, json.dumps(instance_provision(body, do_launch=bool(body.get("launch")), dry=bool(body.get("dry")))))
         return self._s(404, "{}")
 
 TERM_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude session</title>
@@ -11501,10 +11560,10 @@ async function viewCMD(path){
 async function loadPortfolio(){document.getElementById("grid").innerHTML=empty("Scanning the portfolio…");
   let d={};try{d=await(await fetch('/api/portfolio')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load portfolio.");return;}
   const insts=d.instances||[],roll=d.roll||{};
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🛰 Portfolio</b> <span class="sub">'+(d.n||0)+' project ClaudeFather(s) overseen by '+esc(d.brand||'')+'</span></div>'
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🛰 Portfolio</b> <span class="sub">'+(d.n||0)+' project ClaudeFather(s) overseen by '+esc(d.brand||'')+'</span><button class="mini go" style="margin-left:auto" onclick="cfAddWizard()" title="Provision a new, self-contained ClaudeFather instance">➕ Add a ClaudeFather</button></div>'
     +'<div style="display:flex;gap:22px;margin-top:12px;flex-wrap:wrap">'
     +pchip('#3fb950',roll.green||0,'healthy')+pchip('#d29922',roll.amber||0,'warnings')+pchip('#f85149',roll.red||0,'critical')+pchip('#8b949e',roll.down||0,'down')+'</div></div>';
-  if(!insts.length){h+=empty("No child ClaudeFathers registered. Spawn one: cc-spawn.sh <id> <project_root> [preset]");document.getElementById("grid").innerHTML=h;return;}
+  if(!insts.length){h+=empty("No child ClaudeFathers yet. Click ➕ Add a ClaudeFather above to provision one.");document.getElementById("grid").innerHTML=h;return;}
   h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128172; Message the chiefs</b> <span class="sub">reach a peer ClaudeFather Chief of Staff (or all at once); replies come back here (~20-40s each)</span></div>'
     +'<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><select id="chieftarget" class="mini" style="min-width:150px"><option value="">All chiefs</option>'+insts.map(p=>'<option value="'+esc(p.id)+'">'+esc(p.id)+'</option>').join('')+'</select>'
     +'<input id="chiefmsg" class="mini" style="flex:1;min-width:220px" placeholder="message to the chief(s)...">'
@@ -11515,6 +11574,47 @@ async function loadPortfolio(){document.getElementById("grid").innerHTML=empty("
       +'<div class="meta">'+esc(x.preset||x.role||'')+' &middot; '+esc(x.url)+'</div>'
       +'<div class="sub" style="margin-top:9px">sessions '+(x.sessions_n!=null?x.sessions_n:'?')+' &middot; loops '+(x.loops_running!=null?x.loops_running:'?')+' &middot; security '+(x.security||'?')+'</div><div class="btns" style="margin-top:9px" onclick="event.stopPropagation()"><button class="mini" onclick="chiefDM(&#39;'+esc(x.id)+'&#39;)">&#128172; DM chief</button></div></div>';});
   document.getElementById("grid").innerHTML=h;}
+// ---- "Add a ClaudeFather": provision a new self-contained instance via the cc-newinstance engine ----
+function cfF(k,label,ph){return '<label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--sub,#8b949e)">'+label+'<input id="cf_'+k+'" class="mini" placeholder="'+esc(ph)+'"></label>';}
+function cfSel(k,label,opts){return '<label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--sub,#8b949e)">'+label+'<select id="cf_'+k+'" class="mini">'+opts.map(o=>'<option value="'+o[0]+'">'+esc(o[1])+'</option>').join('')+'</select></label>';}
+function cfAddWizard(){
+  showM('<div class="pj-view"><div class="vshead"><h2>➕ Add a ClaudeFather</h2><button class="mini" onclick="closeM()">✕ Close</button></div>'
+   +'<div class="sub" style="margin-bottom:12px">Provision a new, self-contained instance — its own movable folder holding the framework + config + secrets + project + deliverables. The engine owns the layout, so the node stays portable and updatable. Nothing starts until you approve it.</div>'
+   +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
+   +cfF('id','ID','a-z 0-9 _ - · e.g. bakery')
+   +cfF('name','Name','human name · e.g. Bakery Ops')
+   +cfF('brand','Brand','brand label (defaults to name)')
+   +cfSel('preset','Role',[['project','project — a single operation'],['overseer','overseer — oversees other nodes']])
+   +cfF('dest','Bundle folder','default: /Volumes/Samsung990PRO/claudefather-<id>')
+   +cfF('port','Port','blank = auto (first free ≥ 8800)')
+   +cfSel('storage','Storage',[['github','github'],['icloud','icloud'],['icloud+github','icloud+github']])
+   +cfF('agents','Agents','default: security,backup,usage,ideas,routines')
+   +'</div>'
+   +'<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap"><button class="mini" onclick="cfPlan()">👁 Preview plan</button>'
+   +'<button class="mini go" onclick="cfProvision(false)">📦 Stage bundle</button>'
+   +'<button class="mini go" onclick="cfProvision(true)">🚀 Stage &amp; launch</button></div>'
+   +'<pre id="cfout" class="pj-md" style="margin-top:12px;display:none;white-space:pre-wrap"></pre></div>');
+}
+function cfVals(){var g={};['id','name','brand','preset','dest','port','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
+async function cfPost(extra){
+  var body=cfVals(); if(!body.id){toast('Enter an ID first.');return null;}
+  Object.assign(body,extra||{});
+  var o=document.getElementById('cfout'); if(o){o.style.display='block';o.innerHTML='<span class="spin"></span> working…';}
+  try{return await(await fetch('/api/instance-provision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();}
+  catch(e){if(o)o.textContent='request failed';return null;}
+}
+async function cfPlan(){var r=await cfPost({dry:true});if(!r)return;var o=document.getElementById('cfout');o.textContent=r.ok?r.plan:('ERROR: '+(r.error||'?'));}
+async function cfProvision(launch){
+  if(!confirm('Provision'+(launch?' AND launch':'')+' this ClaudeFather now?'))return;
+  var r=await cfPost({launch:launch});if(!r)return;var o=document.getElementById('cfout');
+  if(!r.ok){o.textContent='ERROR: '+(r.error||'?');return;}
+  var s=r.summary||{}, NL=String.fromCharCode(10);
+  var txt='✅ Bundle staged: '+(s.bundle||'?')+NL+'port: '+(s.port||'?')+'   role: '+(s.role||'?')+NL+'dashboard: '+(s.url||'?')+NL+NL+'Initial auth token (store it — this is a brand-new token, not a change):'+NL+'  '+(s.auth_token||'?')+NL;
+  if(r.launched)txt+=NL+'Launch: '+(r.alive?('✅ alive (HTTP '+r.http+')'):('⚠ not responding (HTTP '+r.http+') — check /tmp/cc-'+(s.id||'')+'.err'))+NL;
+  txt+=NL+'Persist across reboot (run as the hosting user):'+NL+'  cp '+(s.plist||'')+' ~/Library/LaunchAgents/'+NL+'  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claudefather.'+(s.id||'')+'.plist'+NL;
+  txt+=NL+'Mesh: add {"id":"'+(s.id||'')+'","url":"'+(s.url||'')+'"} to the peers.json of the other family nodes so they can reach it.';
+  o.textContent=txt; toast('Provisioned '+(s.id||'')); setTimeout(loadPortfolio,1600);
+}
 async function chiefComms(){var t=document.getElementById('chieftarget'),m=document.getElementById('chiefmsg'),rd=document.getElementById('chiefreplies');
   var msg=((m&&m.value)||'').trim(); if(!msg){toast('Type a message first.');return;}
   var tgt=(t&&t.value)||''; if(rd)rd.innerHTML=empty('Reaching the chief(s)... a chief takes ~20-40s to reply.');

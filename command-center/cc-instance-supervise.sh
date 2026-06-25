@@ -1,0 +1,18 @@
+#!/bin/bash
+# Generic ClaudeFather instance supervisor. Runs an instance as a session on the SHARED (brain) tmux
+# server (so it inherits TCC context incl. external-SSD access, like the main CC), and stays foreground
+# while it lives so launchd KeepAlive can restart it. Reusable for ANY nested instance.
+# Usage (via launchd): cc-instance-supervise.sh <CC_CONFIG path> <tmux session name>
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export TMUX_TMPDIR=/tmp
+TMUX=/opt/homebrew/bin/tmux
+# Derive THIS bundle's command-center from the script's own location so a standalone/relocated bundle
+# runs its OWN server.py (portable). Falls back to the canonical path if resolution fails.
+CCDIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+[ -f "$CCDIR/server.py" ] || CCDIR="$HOME/hptuners-control/command-center"
+CFG="${1:-$HOME/hptuners-control/instances/overseer/cc.config.json}"
+SESS="${2:-cc-overseer}"
+if ! "$TMUX" has-session -t "$SESS" 2>/dev/null; then
+  "$TMUX" new-session -d -s "$SESS" -c "$CCDIR" "CC_CONFIG=$CFG python3 server.py >>/tmp/$SESS.out.log 2>>/tmp/$SESS.err.log"
+fi
+while "$TMUX" has-session -t "$SESS" 2>/dev/null; do sleep 5; done

@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.22.0 -- 2026-06-25
+- FEATURE ("+ Add a ClaudeFather" -- one-click provisioning of a new instance): the overseer Portfolio lens
+  now has an "➕ Add a ClaudeFather" button + wizard. It provisions a NEW, self-contained, PORTABLE bundle --
+  one movable folder holding the full framework + its own config/secrets/state/project/deliverables -- via a
+  new deterministic engine `cc-newinstance.sh`. The engine copies framework_paths, mints a fresh dashboard
+  auth token, carries the FAMILY mesh token (joins the mesh), ships superadmin.pub (never the private key),
+  seeds peers.json, stages a launchd plist, makes a starter project tree, and registers the node in the
+  parent's _instances.json (so it appears in Portfolio). NOTHING starts until approved: the wizard previews
+  the plan (--dry-run), stages the bundle, and -- optionally -- launches it on the brain tmux server and
+  verifies the port; launchd persistence + cross-node mesh registration are printed for the operator. Backed
+  by a new `agents/provision` charter (the "fluent" brain that turns a design plan into the right invocation).
+  Endpoint: POST /api/instance-provision (overseer-only). Portability fix: cc-instance-supervise.sh now derives
+  its own command-center dir from the script location, so a relocated bundle runs its OWN server.py.
+
 ## 0.21.53 -- 2026-06-25
 - DOCS + FEATURE (full platform documentation + overseer Projects tab): a multi-agent sweep read all of
   ClaudeFather and wrote accurate CLAUDE.md's (command-center, extensions + google-workspace + granola, agents,
