@@ -7389,7 +7389,11 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .snap{flex:1;margin:0;padding:8px;overflow:hidden;font:10.5px/1.32 ui-monospace,Menlo,monospace;color:#ccccdd;background:#0a0a0f;white-space:pre-wrap;word-break:break-word}
 .stframe{flex:1;border:0;width:100%;background:#0a0a0f}
 /* session launch-location chip: shows WHERE a session is running (path under the project) */
-.locchip{display:inline-block;flex:0 0 auto;font:600 10.5px/1.35 ui-monospace,Menlo,monospace;color:var(--accent-light);background:#0006;border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-right:4px;vertical-align:baseline;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.locchip{display:inline-block;flex:0 1 auto;min-width:0;font:600 10.5px/1.35 ui-monospace,Menlo,monospace;color:var(--accent-light);background:#0006;border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-right:4px;vertical-align:baseline;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* mobile: the location chip ate the whole header bar and pushed the ↗ open-in-new-tab / end / kill buttons
+   off-screen. Drop it on phones (location is still in the Sessions list + the title tooltip); keep the title
+   (truncated) and the action buttons always reachable. */
+@media(max-width:820px){.sthead .locchip{display:none}.sthead{gap:5px;padding:6px 7px}.sthead .stbtns{margin-left:auto}.sthead .stbtns .mini{padding:5px 9px;min-height:34px}}
 /* History lens: header + card list span the FULL grid width (don't get trapped in a 330px grid cell), and
    the list lays cards out in its own wide-column grid so big monitors get multiple roomy cards. */
 .histhead{grid-column:1/-1;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px}

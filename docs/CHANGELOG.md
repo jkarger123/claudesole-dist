@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.25.2 -- 2026-06-25
+- FIX (mobile session header: ↗ open-in-new-tab button pushed off-screen): the location chip was
+  flex:0 0 auto / max 280px, so on a phone it filled the bar and shoved the ↗ / end / kill buttons past the
+  edge. Now the chip shrinks (flex:0 1, max 200px) and is hidden entirely on mobile (location is still in the
+  Sessions list + title tooltip); the action buttons pin right and stay reachable with bigger tap targets.
+
 ## 0.25.1 -- 2026-06-25
 - FIX (new instance's Chief of Staff: "can't find session"): opening a fresh node's Chief raced a cold start
   -- the terminal attached before the session existed (or to one that exited on first-run). Two fixes: (1)
