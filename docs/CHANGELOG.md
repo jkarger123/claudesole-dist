@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.45 -- 2026-06-25
+- UX (never looks frozen): reusable spinner + busy overlay (busyOn/busyOff, .spin). Shown during the slow ops
+  -- Learn my voice (build), Optimize my voice, and Smart-reply "Draft in my voice" -- plus spinners on the
+  Voice Studio + Sender-history modal loads. Clear "it's working" feedback instead of a dead-looking UI.
+- FIX (per-message reply/forward): the controls only appeared on the newest message (gated on 'open'), so you
+  couldn't reply back in the chain. Now EVERY message has them -- revealed on hover when collapsed, always when
+  expanded -- with clear text labels ("Reply" / "Reply all" / "Forward") + tooltips.
+
 ## 0.21.44 -- 2026-06-25
 - FIX (Voice Studio overflow, for real): .vstudio was set to 88vw/680px -- WIDER than the modal box
   (min(560px,94vw)) -- so it and its textareas spilled out. Now .vstudio fills the modal (width:100%) and the

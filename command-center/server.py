@@ -7023,6 +7023,14 @@ textarea{width:100%;min-height:240px;font-family:ui-monospace,Menlo,Monaco,monos
 .mini{font-size:11px;padding:6px 10px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}.mini.go{background:var(--grad);color:#15120a;border:none;font-weight:700}
 code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 6px;color:var(--accent-light);font-size:11.5px;word-break:break-all;overflow-wrap:anywhere;display:inline-block;max-width:100%;vertical-align:bottom}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--card2);border:1px solid var(--accent);color:var(--ink);padding:12px 18px;border-radius:11px;display:none;z-index:90;max-width:90vw;box-shadow:var(--glow)}
+/* Reusable spinner + busy overlay: shown during any operation that takes a moment so it never looks frozen */
+@keyframes cfspin{to{transform:rotate(360deg)}}
+.spin{display:inline-block;width:18px;height:18px;border-radius:50%;border:2.5px solid rgba(255,255,255,.16);border-top-color:var(--accent);animation:cfspin .8s linear infinite;vertical-align:middle}
+.spin.big{width:38px;height:38px;border-width:3.5px}
+.cfbusy{position:fixed;inset:0;z-index:120;display:none;align-items:center;justify-content:center;background:rgba(8,8,12,.6);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+.cfbusy-card{background:var(--card2);border:1px solid var(--line);border-radius:16px;padding:26px 32px;display:flex;flex-direction:column;align-items:center;gap:15px;box-shadow:var(--glow);max-width:380px}
+.cfbusy-msg{color:var(--ink);font-size:13.5px;line-height:1.5;text-align:center}
+.cfbusy-sub{color:var(--mut);font-size:11.5px}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--mut)}.dot.ok{background:var(--ok)}.dot.bad{background:var(--err)}
 @media (max-width:820px){
   #app{flex-direction:column;height:auto;min-height:100dvh;overflow:visible}
@@ -7319,8 +7327,11 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .gm-msg:not(.open):hover{border-color:var(--accent);background:var(--card)}
 .gm-msg:not(.open) .gm-mhead{padding:7px 12px}
 /* Gmail-style reply UX: per-message reply/forward on each open message + a reply bar under the newest */
-.gm-mreply{display:inline-flex;gap:4px;margin-left:10px;flex:0 0 auto}
-.gm-mrbtn{background:transparent;border:1px solid var(--line);color:var(--mut);border-radius:6px;padding:2px 8px;font-size:12.5px;cursor:pointer;line-height:1.35}
+.gm-mreply{display:inline-flex;gap:5px;margin-left:10px;flex:0 0 auto}
+.gm-msg:not(.open) .gm-mreply{opacity:0;transition:opacity .12s}        /* collapsed: reveal on hover (Gmail-style) */
+.gm-msg:not(.open):hover .gm-mreply{opacity:1}
+.gm-msg.open .gm-mreply{opacity:1}
+.gm-mrbtn{background:transparent;border:1px solid var(--line);color:var(--mut);border-radius:6px;padding:2px 9px;font-size:11.5px;font-weight:600;cursor:pointer;line-height:1.4;white-space:nowrap}
 .gm-mrbtn:hover{border-color:var(--accent);color:var(--accent);background:var(--card)}
 .gm-replybar{display:flex;gap:8px;flex-wrap:wrap;padding:13px 2px 2px;margin-top:6px;border-top:1px dashed var(--line)}
 .gm-msg:not(.open) .gm-collapsed{padding:0 12px 7px}
@@ -9142,11 +9153,11 @@ function gmRenderRead(){
         +'<div class="gm-mhi"><div class="gm-mfrom">'+e2(gFrom(m.from))+(m.starred?' ★':'')+'</div>'
           +'<div class="gm-mto">to '+e2(gAddr(m.to)||'me')+'</div></div>'
         +'<span class="gm-mdate">'+e2(gmFullDate(m.date))+'</span>'
-        +(open?('<span class="gm-mreply" onclick="event.stopPropagation()">'
-          +'<button class="gm-mrbtn" title="Reply to THIS message" onclick="event.stopPropagation();gmReply(false,'+idx+')">↩</button>'
-          +'<button class="gm-mrbtn" title="Reply all to THIS message" onclick="event.stopPropagation();gmReply(true,'+idx+')">↪</button>'
-          +'<button class="gm-mrbtn" title="Forward THIS message" onclick="event.stopPropagation();gmForward('+idx+')">➤</button>'
-          +'</span>'):'')
+        +'<span class="gm-mreply" onclick="event.stopPropagation()">'
+          +'<button class="gm-mrbtn" title="Reply to this message" onclick="event.stopPropagation();gmReply(false,'+idx+')">↩ Reply</button>'
+          +'<button class="gm-mrbtn" title="Reply all to this message" onclick="event.stopPropagation();gmReply(true,'+idx+')">Reply all</button>'
+          +'<button class="gm-mrbtn" title="Forward this message" onclick="event.stopPropagation();gmForward('+idx+')">Forward</button>'
+          +'</span>'
       +'</div>'
       +'<div class="gm-collapsed">'+e2(m.snippet||'(no preview)')+'</div>'
       +'<div class="gm-mbody">'+bodyHtml+atts+'</div>'
@@ -11442,6 +11453,9 @@ function showM(h){document.getElementById("mbox").innerHTML=h;document.getElemen
 function closeM(){document.getElementById("mbg").style.display="none";}
 document.getElementById("mbg").addEventListener("click",e=>{if(e.target.id=="mbg")closeM();});
 function toast(t,ms){const e=document.getElementById("toast");e.innerHTML=t;e.style.display="block";clearTimeout(e._t);e._t=setTimeout(()=>e.style.display="none",ms||2800);}
+// Reusable busy overlay -- show a spinner + message during any slow op so it never looks frozen.
+function busyOn(msg,sub){ var o=document.getElementById('cfbusy'); if(!o){ o=document.createElement('div'); o.id='cfbusy'; o.className='cfbusy'; document.body.appendChild(o);} o.innerHTML='<div class="cfbusy-card"><div class="spin big"></div><div class="cfbusy-msg">'+(msg||'Working…')+'</div>'+(sub?('<div class="cfbusy-sub">'+sub+'</div>'):'')+'</div>'; o.style.display='flex'; }
+function busyOff(){ var o=document.getElementById('cfbusy'); if(o) o.style.display='none'; }
 // ---- "How this works" explainers: per-feature, auto-shows once, dismissible + never-again, reopen via the ? button ----
 var HELP={
  gmail:{t:'✉️ Gmail — a full client, built in',h:'<p>Keyboard-first triage: <b>j/k</b> move · <b>↵</b> open · <b>e</b> archive · <b>s</b> star · <b>#</b> trash · <b>r</b> reply · <b>c</b> compose · <b>z</b> undo. Saved lanes, threaded reader, search.</p><p><b>✨ Smart reply</b> drafts a reply <i>in your voice</i> using everything we know about the sender — past emails, calls, calendar, Drive files, pipeline status — and stages it as a Gmail <b>draft</b>. It <b>never sends</b>; you review and click Send.</p><p><b>🔎 Sender history</b> = a one-glance dossier. Attachments preview/download inline; <b>💾 Save to…</b> drops a file straight into a client/project folder. New mail appears on its own (list auto-refreshes; badge shows unread).</p>'},
@@ -12106,7 +12120,7 @@ async function fxSmartReply(){
 }
 async function fxLearnVoice(){
   if(!fxOn()){ toast('Connect Google Workspace first'); return; }
-  showM('<div class="vstudio"><div class="vsload">Loading your voice profile…</div></div>');
+  showM('<div class="vstudio"><div class="vsload"><span class="spin"></span> Loading your voice profile…</div></div>');
   var p={}; try{ p=await(await fetch('/api/voice/profile')).json(); }catch(e){}
   var built=p.built_at?new Date(p.built_at*1000).toLocaleString():'not built yet';
   var pend=p.edits_pending||0;
@@ -12136,18 +12150,19 @@ async function fxVoiceSave(){
 async function fxVoiceRebuild(){
   var d=prompt('How many of your most-recent SENT emails should I learn from? (more = richer voice, slower)','150'); if(d===null) return;
   d=parseInt(d,10)||150;
-  toast('🎙 Learning your voice from ~'+d+' sent emails… (~1-2 min — keep working)',9000);
-  var r; try{ r=await(await fetch('/api/voice/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({depth:d})})).json(); }
-  catch(e){ toast('Build: network hiccup (may still be finishing)',7000); return; }
-  if(!r||!r.ok){ toast('Voice build: '+esc((r&&r.error)||'failed'),8000); return; }
+  busyOn('🎙 Learning your voice from ~'+d+' sent emails…','reading your sent mail + profiling your style — about 1-2 minutes');
+  var r=null; try{ r=await(await fetch('/api/voice/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({depth:d})})).json(); }catch(e){}
+  busyOff();
+  if(!r||!r.ok){ toast('Voice build: '+esc((r&&r.error)||'network hiccup (may still be finishing)'),8000); return; }
   toast('✓ Learned from '+(r.depth||'?')+' emails — formality '+(r.formality||'?')+', em-dashes: '+(r.uses_em_dash?'yes':'no'),8000);
   fxLearnVoice();
 }
 async function fxVoiceOptimize(){
   if(!confirm('Optimize your voice profile from the edits you made to past smart-reply drafts?\n\nThis sends the agent your current profile + those edits ONCE, learns your corrections, updates the profile, and clears the edit buffer.')) return;
-  toast('✨ Optimizing your voice from your edits… (~1 min)',8000);
-  var r; try{ r=await(await fetch('/api/voice/optimize',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json(); }catch(e){ toast('Optimize: network error'); return; }
-  if(!r||!r.ok){ toast('Optimize: '+esc((r&&r.error)||'failed'),7000); return; }
+  busyOn('✨ Optimizing your voice…','learning from your edits to past drafts — about a minute');
+  var r=null; try{ r=await(await fetch('/api/voice/optimize',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json(); }catch(e){}
+  busyOff();
+  if(!r||!r.ok){ toast('Optimize: '+esc((r&&r.error)||'network error'),7000); return; }
   toast('✓ Voice optimized from '+(r.from_edits||0)+' edits. '+esc(r.learned||''),9000);
   fxLearnVoice();
 }
@@ -12186,10 +12201,11 @@ async function fxComposeDraft(tid){
   if(!tid){ toast('Open a reply first'); return; }
   var to=((document.getElementById('gmcTo')||{}).value)||'';
   var cc=((document.getElementById('gmcCc')||{}).value)||'';
-  toast('✨ Drafting in your voice from the full context… (a few seconds)',5200);
+  busyOn('✨ Drafting in your voice…','reading the thread, past mail with them, the client file + your style');
   var url='/api/flex/context?tid='+encodeURIComponent(tid)+'&to='+encodeURIComponent(to)+'&cc='+encodeURIComponent(cc);
-  var r; try{ r=await(await fetch(url)).json(); }catch(e){ toast('Draft: network error'); return; }
-  if(!r||!r.ok){ toast('Draft: '+esc((r&&r.error)||'unavailable')); return; }
+  var r=null; try{ r=await(await fetch(url)).json(); }catch(e){}
+  busyOff();
+  if(!r||!r.ok){ toast('Draft: '+esc((r&&r.error)||'network error'),6000); return; }
   var ed=document.getElementById('gmcBody'); if(ed) ed.innerHTML=r.draft_html||'';
   window._fxAI={tid:tid, to:to, subject:((document.getElementById('gmcSubj')||{}).value)||'', ai:r.draft_html||''};  // baseline for edit-capture
   setTimeout(function(){ fxShowVariants(r.variants||[]); fxShowBullets(r.three_bullets||[], null, null); },40);
@@ -12210,7 +12226,7 @@ function fxShowBullets(bullets, draftId, draftError){
 
 async function fxSenderHistory(){
   var tid=fxTid(); if(!tid){ toast('Open a conversation first'); return; }
-  showM('<div class="fx-dossier"><div class="fx-dload">🔎 Compiling the 360 dossier…</div></div>');
+  showM('<div class="fx-dossier"><div class="fx-dload"><span class="spin"></span> Compiling the 360 dossier…</div></div>');
   var r;
   try{ r=await(await fetch('/api/flex/context?tid='+encodeURIComponent(tid))).json(); }
   catch(e){ showM('<div class="fx-dossier"><div class="fx-derr">Network error.</div></div>'); return; }
