@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.52 -- 2026-06-25
+- FEATURE (install as a desktop app / PWA): the dashboard now serves a web-app manifest (/manifest.webmanifest,
+  branded per node) + standalone display + app meta, so it can be "Add to Dock" (Safari) / Installed (Chrome) as
+  a resizable native-feeling app window with NO browser chrome and its own Dock icon (the ClaudeFather mark).
+  Added an in-app ⟳ Refresh button in the topbar (since standalone windows have no address bar).
+
 ## 0.21.51 -- 2026-06-25
 - IMPROVE (Tasks AI scan reads FULL email bodies): the AI scan already covered email both directions (incoming +
   sent) + Granola notes, but only fed subject+preview snippets. Now it reads the FULL message bodies (quoted

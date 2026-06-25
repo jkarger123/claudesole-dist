@@ -1188,7 +1188,21 @@ def drive_content(fid):
 # programmatic/curl use, or a valid `X-Mesh-Token` for peer traffic. Constant-time compared. ----
 AUTH_TOKEN = os.environ.get("CC_AUTH_TOKEN") or CC.get("auth_token") or ""
 AUTH_COOKIE = "cc_auth"
-AUTH_EXEMPT = ("/login", "/api/login", "/api/logout", "/api/health", "/favicon.ico")
+AUTH_EXEMPT = ("/login", "/api/login", "/api/logout", "/api/health", "/favicon.ico", "/manifest.webmanifest")
+
+def _web_manifest():
+    """PWA manifest -> lets the operator 'Add to Dock' / Install this dashboard as a standalone, resizable
+    desktop app (no browser chrome, own Dock icon). Branded per node."""
+    short = (re.sub(r"[^A-Za-z0-9 ]", "", BRAND).split() or ["App"])[0][:12]
+    return {
+        "name": BRAND + " — " + PRODUCT_TAG, "short_name": short, "id": "/", "start_url": "/", "scope": "/",
+        "display": "standalone", "orientation": "any", "background_color": "#0a0a0f", "theme_color": "#0a0a0f",
+        "description": BRAND + " control center",
+        "icons": [
+            {"src": "/static/brand/claudefather_icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/static/apple-touch-icon.png", "sizes": "180x180", "type": "image/png"},
+        ],
+    }
 # Peer/machine-to-machine ingress: NOT gated by the operator token (that's a human surface). These are
 # peer surface, protected on their own MESH_TOKEN track, so enabling operator auth on a node never severs
 # the mesh (a peer POSTs here with X-Mesh-Token or nothing, never the operator cookie/bearer).
@@ -6485,6 +6499,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/ralph": return self._s(200, RALPH_PAGE, "text/html; charset=utf-8")
         if u.path.startswith("/static/"): return self.serve_static(u.path[len("/static/"):])
         if u.path == "/": return self._s(200, render_page(), "text/html; charset=utf-8")
+        if u.path == "/manifest.webmanifest": return self._s(200, json.dumps(_web_manifest()), "application/manifest+json")
         if u.path == "/favicon.ico": return self.serve_static("favicon.ico")
         if u.path == "/api/data":
             return self._s(200, json.dumps({
@@ -7131,7 +7146,7 @@ function placeholder(){
 (async()=>{await refresh();if(DETAIL.alive)connectTerm();else placeholder();setInterval(refresh,5000);})();
 </script></body></html>"""
 
-PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>text2tune — Command Center</title><link rel="icon" type="image/png" href="/static/brand/claudefather_favicon.png?v=2"><link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=2"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/light/style.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/fill/style.css"><style>
+PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>text2tune — Command Center</title><link rel="icon" type="image/png" href="/static/brand/claudefather_favicon.png?v=2"><link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=2"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#0a0a0f"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/light/style.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/fill/style.css"><style>
 :root{--bg:#0a0a0f;--bg2:#12121a;--card:#1a1a24;--card2:#22222e;--ink:#ffffff;--mut:#a0a0b0;--dim:#606070;--line:#2a2a3a;--accent:#c9a227;--accent-rgb:201,162,39;--accent-light:#e8c547;--accent-dark:#9a7a1a;--accent2:#7a1220;--accent2-light:#a01828;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--blue:#3b82f6;--grad:linear-gradient(135deg,#c9a227,#e8c547,#c9a227);--glow:0 0 26px rgba(201,162,39,.26)}
 /* brand lockup styled in the .brand rule below (cfmark + gold-foil serif wordmark) */
 /* Self-hosted display font for the brand title -- Cinzel Decorative (SIL OFL 1.1, commercial-OK + redistributable),
@@ -8142,7 +8157,7 @@ body.gm-resizing iframe{pointer-events:none}
 <div class="health" id="svchealth"></div>
 </aside>
 <main id="main">
-<div class="topbar"><h2 id="viewtitle">Sessions</h2><button class="btn" id="helpBtn" title="How this works" onclick="ccHelp(LENS)" style="padding:7px 11px">?</button><input id="search" placeholder="Search…"><button class="btn" id="agentBtn" style="display:none" onclick="openAgent(LENS)">🤖 Agent</button><button class="btn" id="addBtn" onclick="openAdd()">＋ Add</button><button class="btn go" onclick="openLaunch()">▶ New session</button></div>
+<div class="topbar"><h2 id="viewtitle">Sessions</h2><button class="btn" id="refreshBtn" title="Refresh" onclick="location.reload()" style="padding:7px 11px">⟳</button><button class="btn" id="helpBtn" title="How this works" onclick="ccHelp(LENS)" style="padding:7px 11px">?</button><input id="search" placeholder="Search…"><button class="btn" id="agentBtn" style="display:none" onclick="openAgent(LENS)">🤖 Agent</button><button class="btn" id="addBtn" onclick="openAdd()">＋ Add</button><button class="btn go" onclick="openLaunch()">▶ New session</button></div>
 <div class="wrap" id="grid"></div>
 </main>
 </div>
