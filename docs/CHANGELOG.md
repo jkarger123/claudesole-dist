@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.43 -- 2026-06-25
+- FIX (attachments keep their file type): when a sender names an attachment WITHOUT an extension, saving to a
+  folder / downloading now appends the correct extension derived from the MIME type (incl. Office types
+  mimetypes misses: xlsx/docx/pptx). Existing saves already kept extensions; this covers the typeless case.
+- FIX (Voice Studio modal): the Style-profile / Hard-rules textareas overflowed the modal -> added border-box
+  sizing so they fit.
+
 ## 0.21.42 -- 2026-06-25
 - UX (email, Gmail-style replying): Reply/Reply-all/Forward moved to a bar UNDER the newest message, and every
   OPEN message in the chain has its own ↩/↪/➤ controls so you can reply/forward an OLDER message out of order

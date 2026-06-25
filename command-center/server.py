@@ -5012,6 +5012,26 @@ def _sanitize_filename(fn):
     fn = re.sub(r"[\x00-\x1f/\\]+", "_", fn).strip().strip(".")
     return (fn or "attachment")[:120]
 
+# mimetypes misses several common Office/web types -> map them so a typeless attachment still gets the right ext.
+_MIME_EXT = {
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.ms-excel": ".xls", "application/msword": ".doc",
+    "application/vnd.ms-powerpoint": ".ppt", "application/pdf": ".pdf",
+    "text/csv": ".csv", "application/zip": ".zip", "text/plain": ".txt", "text/html": ".html",
+    "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
+    "image/heic": ".heic", "image/svg+xml": ".svg", "application/json": ".json",
+}
+def _ensure_ext(fn, mime):
+    """If the filename has no extension, append one derived from the MIME type -- so a sender who names an
+    attachment without an extension doesn't leave us with a typeless file."""
+    if re.search(r"\.[A-Za-z0-9]{1,8}$", fn or ""): return fn
+    m = (mime or "").split(";")[0].strip().lower()
+    ext = _MIME_EXT.get(m) or mimetypes.guess_extension(m) if m else ""
+    if ext == ".jpe": ext = ".jpg"
+    return (fn + ext) if ext else fn
+
 def _drive_multipart_upload(name, parents, data, mime):
     """Multipart upload bytes to a Drive folder (one new urllib POST; drive_* only do metadata/move).
     Dormant unless email_link.drive_mode + a per-folder driveFolderId is set."""
@@ -5038,7 +5058,7 @@ def _drive_multipart_upload(name, parents, data, mime):
     except Exception as e:
         return {"error": str(e)[:160]}
 
-def _save_attachment_bytes(rel, mid, att_id, filename, size=0):
+def _save_attachment_bytes(rel, mid, att_id, filename, size=0, mime=""):
     """Fetch attachment bytes (reuse gmail_attachment_bytes) + write into the folder's deliverables/ --
     PATH SAFE (projpath + _path_has_secret), size-guarded, collision/dedup-prefixed. Optional Drive mirror."""
     cfg = _email_cfg()
@@ -5054,7 +5074,7 @@ def _save_attachment_bytes(rel, mid, att_id, filename, size=0):
     deliv = _ensure_deliv_link(base, rel)                      # iCloud hot tier where configured
     try: os.makedirs(deliv, exist_ok=True)
     except Exception: pass
-    fn = _sanitize_filename(filename)
+    fn = _ensure_ext(_sanitize_filename(filename), mime)       # keep the file type even if the sender omitted it
     dest = os.path.join(deliv, fn)
     if os.path.exists(dest):                                   # collision/dedup: epoch-prefix (icloud_age_off style)
         try:
@@ -6237,6 +6257,7 @@ class H(BaseHTTPRequestHandler):
             b, err = gmail_attachment_bytes(q.get("id", [""])[0], q.get("att", [""])[0])
             if err or b is None: return self._s(404, err or "not found")
             fn = (q.get("name", ["attachment"])[0] or "attachment").replace('"', '').replace("\r", "").replace("\n", "")
+            fn = _ensure_ext(fn, q.get("mime", [""])[0])      # download keeps the file type even if the name lacked it
             ct = _gmail_att_ctype(fn, q.get("mime", [""])[0])
             disp = "attachment" if q.get("dl", [""])[0] == "1" else "inline"
             self.send_response(200); self.send_header("Content-Type", ct)
@@ -6447,7 +6468,7 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(mail_link(body.get("rel", ""), {"domains": [body.get("domain", "")]})))
         if u.path == "/api/mail/save-attachment":
             return self._s(200, json.dumps(_save_attachment_bytes(body.get("rel", ""), body.get("mid", ""),
-                body.get("attId", ""), body.get("filename", ""), body.get("size", 0))))
+                body.get("attId", ""), body.get("filename", ""), body.get("size", 0), body.get("mime", ""))))
         if u.path == "/api/superadmin-send":   return self._s(200, json.dumps(superadmin_send(body.get("node", ""), body.get("action", ""), body.get("params") or {}, body.get("ttl") or 120)))
         if u.path == "/api/superadmin-grant":  return self._s(200, json.dumps(superadmin_grant(body.get("node", ""), body.get("action", ""), body.get("params") or {}, body.get("ttl") or 120)))
         if u.path == "/api/superadmin-keygen": return self._s(200, json.dumps(superadmin_keygen()))
@@ -7736,7 +7757,9 @@ body.gm-resizing iframe{pointer-events:none}
 .vstudio .vsmeta{font-size:12px;color:var(--mut);margin:2px 0 12px}
 .vstudio .vslbl{font-weight:700;font-size:13px;margin:12px 0 5px}
 .vstudio .vssub{font-weight:400;color:var(--mut);font-size:11.5px}
-.vstudio .vsta{width:100%;background:#0a0a0f;border:1px solid var(--line);border-radius:9px;color:var(--ink);font:12.5px/1.5 ui-monospace,Menlo,monospace;padding:10px 12px;resize:vertical}
+.vstudio{box-sizing:border-box}
+.vstudio *{box-sizing:border-box}
+.vstudio .vsta{display:block;width:100%;max-width:100%;box-sizing:border-box;background:#0a0a0f;border:1px solid var(--line);border-radius:9px;color:var(--ink);font:12.5px/1.5 ui-monospace,Menlo,monospace;padding:10px 12px;resize:vertical}
 .vstudio .vsbtns{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;position:sticky;bottom:0;background:var(--card);padding-top:8px}
 .vstudio .vsload{padding:30px;text-align:center;color:var(--mut)}
 .vstudio.vshelp .vshbody{font-size:13.5px;line-height:1.6}
@@ -9280,7 +9303,7 @@ async function mlAttGo(mid,ai){
   var ctx=gmQLAtt(mid,ai); if(!ctx){closeM();return;}
   var a=ctx.a; closeM(); toast('Saving '+a.filename+'…');
   var r={}; try{ r=await(await fetch('/api/mail/save-attachment',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({rel:rel,mid:mid,attId:a.attachmentId,filename:a.filename,size:a.size})})).json(); }catch(e){}
+    body:JSON.stringify({rel:rel,mid:mid,attId:a.attachmentId,filename:a.filename,size:a.size,mime:a.mime})})).json(); }catch(e){}
   if(!r||!r.ok){ toast('Save failed: '+((r||{}).error||'?'),5000); return; }
   toast(r.dedup?('Already saved (identical file)'):'Saved → '+r.saved+(r.drive?' · mirrored to Drive':''),4000);
 }
