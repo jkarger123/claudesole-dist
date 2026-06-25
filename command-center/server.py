@@ -1469,15 +1469,20 @@ def _session_label(name):
     if name in _AGENT_TITLES: return _AGENT_TITLES[name]   # the agent named this session itself
     if name in _SESSLABEL: return _SESSLABEL[name]
     if name.startswith("ralph-"): return "Ralph: " + name[6:]
-    m = re.match(r"hp-(fork|r)-([A-Za-z0-9]+)", name)
+    m = re.match(r"hp-(fork|r)-(.+)", name)
     if m:
         tag = " · fork" if m.group(1) == "fork" else ""
-        pfx = m.group(2).lower()
-        for c in past_conversations("studio"):
-            if (c.get("id") or "").replace("-", "").lower().startswith(pfx):
-                lab = (c.get("label") or "").strip()
-                if lab and lab != "(no opening message)":
-                    out = lab[:46] + tag; _SESSLABEL[name] = out; return out
+        tail = m.group(2)
+        pfx = re.split(r"[^A-Za-z0-9]", tail)[0].lower()      # leading token
+        if len(pfx) >= 6:                                      # looks like an embedded session-id prefix -> match a convo
+            for c in past_conversations("studio"):
+                if (c.get("id") or "").replace("-", "").lower().startswith(pfx):
+                    lab = (c.get("label") or "").strip()
+                    if lab and lab != "(no opening message)":
+                        out = lab[:46] + tag; _SESSLABEL[name] = out; return out
+        desl = tail.replace("-", " ").strip()                 # else the name embeds a slug of the opening msg -> de-slugify
+        if desl:
+            return (desl[:1].upper() + desl[1:])[:46] + tag
         return name + tag
     m2 = re.match(r"hp-(.+)", name)
     return (m2.group(1).replace("-", " ") if m2 else name)
@@ -1497,11 +1502,23 @@ def _session_in_project(cwd):
     cwd = cwd.rstrip("/"); base = PROJECT.rstrip("/")
     return cwd == base or cwd.startswith(base + "/")
 
+def _session_loc(cwd):
+    """Short, human label of WHERE a session is launched -- relative to the project -- so the operator can
+    tell a '7th avenue' session from an 'Avenlur' one. Empty at the project root / unknown."""
+    if not cwd: return ""
+    c = cwd.rstrip("/"); base = PROJECT.rstrip("/")
+    if c == base: return ""
+    if c.startswith(base + "/"):
+        rel = c[len(base) + 1:]
+        if len(rel) <= 42: return rel
+        return "…/" + "/".join(rel.split("/")[-2:])
+    return os.path.basename(c)   # outside the project tree (an extension dir, CC_HOME, etc.)
+
 def tmux_sessions():
     code, o, _ = sh([TMUX, "list-sessions", "-F",
                      "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}"])
     HIDE = {"hpcc"}   # hide the CC web-server's own tmux entirely
-    cwds = _session_cwds() if SCOPE_SESSIONS else {}
+    cwds = _session_cwds()   # always -- also used to show WHERE each session is launched
     res = []
     if code == 0:
         for ln in o.splitlines():
@@ -1509,7 +1526,7 @@ def tmux_sessions():
             if len(p) >= 4 and p[0] not in HIDE:
                 if SCOPE_SESSIONS and p[0] != globals().get("CHIEF") and not _session_in_project(cwds.get(p[0], "")):
                     continue  # belongs to a different project (the Chief is always kept -- it's THIS console's comms endpoint)
-                res.append({"name": p[0], "label": _session_label(p[0]),
+                res.append({"name": p[0], "label": _session_label(p[0]), "loc": _session_loc(cwds.get(p[0], "")),
                             "created": float(p[1] or 0), "activity": float(p[2] or 0),
                             "attached": p[3] != "0", "protected": _protected(p[0]),
                             "chief": p[0] == globals().get("CHIEF")})
@@ -3877,6 +3894,8 @@ def resume_session(machine, sid, cwd, fork=False, label=""):
             return {"ok": True, "session": ex, "term": "/term?name=" + urllib.parse.quote(ex),
                     "note": "already open -- attached to the existing session (a 2nd resume would corrupt the transcript; fork instead to branch it)"}
     name = _uniq_session(("hp-fork-" if fork else "hp-r-") + (re.sub(r"[^A-Za-z0-9]+", "-", (label or "")).strip("-").lower()[:30] or re.sub(r"[^A-Za-z0-9]", "", sid)[:8]))
+    if (label or "").strip() and (label or "").strip() != "(no opening message)":
+        _SESSLABEL[name] = (label.strip()[:46]) + (" · fork" if fork else "")   # clean title immediately (until the agent self-names)
     fk = " --fork-session" if fork else ""
     mm = {m["id"]: m for m in load(MACHINES, {"machines": []}).get("machines", [])}.get(machine)
     if not mm:
@@ -6532,6 +6551,8 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .stbtns{display:flex;gap:3px;flex:0 0 auto}.stbtns .mini{padding:2px 6px}
 .snap{flex:1;margin:0;padding:8px;overflow:hidden;font:10.5px/1.32 ui-monospace,Menlo,monospace;color:#ccccdd;background:#0a0a0f;white-space:pre-wrap;word-break:break-word}
 .stframe{flex:1;border:0;width:100%;background:#0a0a0f}
+/* session launch-location chip: shows WHERE a session is running (path under the project) */
+.locchip{display:inline-block;font:600 10.5px/1.35 ui-monospace,Menlo,monospace;color:var(--accent-light);background:#0006;border:1px solid var(--line);border-radius:6px;padding:1px 6px;vertical-align:baseline;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* History lens: header + card list span the FULL grid width (don't get trapped in a 330px grid cell), and
    the list lays cards out in its own wide-column grid so big monitors get multiple roomy cards. */
 .histhead{grid-column:1/-1;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px}
@@ -10832,14 +10853,14 @@ function swapBig(n){focusBig(n);}
 function peek(){}
 function schedUnpeek(){}
 function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="cursor:default"><h3><span title="'+esc(x.name)+'">'+(x.attached?"🟢 ":"⚪ ")+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+badge(x.attached?"running":"paused")+'</h3>'
-  +'<div class="meta">active '+ago(now-x.activity)+' ago</div>'
+  +'<div class="meta">'+(x.loc?'<span class="locchip" title="launched from '+esc(x.loc)+'">📍 '+esc(x.loc)+'</span> ':'')+'active '+ago(now-x.activity)+' ago</div>'
   +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="openInSessions(\''+esc(x.name)+'\')">▶ open</button>'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
   +'<button class="mini" onclick="endSess(\''+esc(x.name)+'\',false)" title="handoff + close">end</button>'
   +'<button class="mini" style="color:#f85149" onclick="endSess(\''+esc(x.name)+'\',true)" title="force kill">kill</button></div></div>';}
 function sessTile(x,i){const big=(SESSBIG==x.name);
   return '<div class="stile'+(big?' big':'')+'" data-name="'+esc(x.name)+'">'
-    +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span><span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)
+    +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span><span class="stname" title="'+esc(x.name)+(x.loc?' — '+esc(x.loc):'')+'">'+esc(x.label||x.name)+(x.loc?' <span class="locchip">📍 '+esc(x.loc)+'</span>':'')+'</span>'+ctxChip(x.name)
     +'<span class="stbtns" onclick="event.stopPropagation()">'
     +'<button class="mini" title="'+(big?'minimize':'maximize')+'" onclick="tileClick(\''+esc(x.name)+'\')">'+(big?'▒':'⤢')+'</button>'
     +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'

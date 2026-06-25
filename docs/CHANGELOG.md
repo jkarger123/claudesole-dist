@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.33 -- 2026-06-24
+- FIX/FEATURE (session titles clearer + show WHERE they run): resumed sessions whose tmux name embedded a slug
+  of the opening message (e.g. `hp-r-i-need-you-to-review-a-media-l`) now display a de-slugified readable title
+  (and the conversation label is stored at resume time), instead of the raw code. Agent self-named titles
+  ([[CC_TITLE]]) still win. Every session row/tile now shows a 📍 location chip = the path under the project it
+  was launched from, so you can tell a '7th avenue' session from an 'Avenlur' one at a glance.
+
 ## 0.21.32 -- 2026-06-24
 - FIX (History times were all identical): the displayed time used the transcript FILE mtime, which the history
   re-align had clobbered (rewriting cwd touched every file), so all conversations showed the same time and
