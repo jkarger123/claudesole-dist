@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.24.0 -- 2026-06-25
+- FEATURE (provisioned nodes are reachable from your other devices): a new node was registered at
+  127.0.0.1:<port> -> only reachable ON the Studio, so the Portfolio link gave "site can't be reached" from a
+  phone. instance_provision() now auto-publishes a new node on the tailnet via `tailscale serve --https=<port>`
+  (same pattern as the existing nodes), then registers that https://<tailnet-host>:<port> URL in the Portfolio
+  registry + peers + the wizard result ("Remote access: ✅ ..."). Tied to the "join the mesh" checkbox; falls
+  back to local-only with a warning if tailscale isn't available.
+
 ## 0.23.1 -- 2026-06-25
 - UX/MOBILE (Add-a-ClaudeFather layout redo): the wizard modal overflowed and clipped behind the nav on
   mobile, and the card-header "Add" button hid behind the sticky topbar. Rebuilt: responsive field grid

@@ -3718,16 +3718,41 @@ def instance_provision(p, do_launch=False, dry=False):
                     res["persisted"] = True
                 except Exception as e:
                     res["persisted"] = False; res["persist_warn"] = str(e)
-        # auto-MESH: add the new node to this node's family peers so the fleet can reach it (default on).
+        # auto-EXPOSE on the tailnet + MESH (default on). A node registered at 127.0.0.1 is only reachable ON
+        # this machine -> "site can't be reached" from a phone/laptop. Publish it via `tailscale serve` (like
+        # the other nodes) and register the tailnet URL everywhere so the Portfolio link actually opens.
+        final_url = summ.get("url") or ("http://127.0.0.1:%s" % port)
         if p.get("mesh", True):
             try:
+                TS = _shutil.which("tailscale") or "/opt/homebrew/bin/tailscale"
+                stj = subprocess.run([TS, "status", "--json"], capture_output=True, text=True, timeout=10)
+                tnhost = (json.loads(stj.stdout).get("Self", {}).get("DNSName") or "").rstrip(".") if stj.returncode == 0 else ""
+                if tnhost:
+                    sv = subprocess.run([TS, "serve", "--bg", "--https=%d" % int(port), "http://127.0.0.1:%d" % int(port)],
+                                        capture_output=True, text=True, timeout=20)
+                    if sv.returncode == 0:
+                        final_url = "https://%s:%s" % (tnhost, port); res["tailnet_url"] = final_url
+                    else:
+                        res["tailnet_warn"] = (sv.stderr or sv.stdout or "").strip()[-200:]
+            except Exception as e:
+                res["tailnet_warn"] = str(e)
+            try:  # add to family peers with the reachable URL
                 pl = json.load(open(PEERS_FILE)) if os.path.exists(PEERS_FILE) else []
                 pl = [x for x in pl if x.get("id") != iid]
-                pl.append({"id": iid, "url": summ.get("url") or ("http://127.0.0.1:%s" % port)})
+                pl.append({"id": iid, "url": final_url})
                 json.dump(pl, open(PEERS_FILE, "w"), indent=2); os.chmod(PEERS_FILE, 0o600)
                 res["meshed"] = True
             except Exception as e:
                 res["meshed"] = False; res["mesh_warn"] = str(e)
+        # point the Portfolio registry entry at the reachable URL too (the engine wrote 127.0.0.1)
+        try:
+            reg = instances_list()
+            for x in reg:
+                if x.get("id") == iid: x["url"] = final_url
+            json.dump(reg, open(INSTANCES, "w"), indent=2)
+        except Exception:
+            pass
+        summ["url"] = final_url; res["summary"] = summ
     return res
 
 def portfolio():
@@ -11665,6 +11690,8 @@ async function cfProvision(launch){
   if(r.launched)txt+=NL+'Running: '+(r.alive?('✅ alive (HTTP '+r.http+')'):('⚠ not responding (HTTP '+r.http+')'))+NL;
   if('persisted' in r)txt+='Permanent: '+(r.persisted?'✅ installed — survives reboot':('⚠ '+(r.persist_note||r.persist_warn||'not installed')))+NL;
   if('meshed' in r)txt+='Mesh: '+(r.meshed?'✅ added to the fleet peers':('⚠ '+(r.mesh_warn||'not added')))+NL;
+  if('tailnet_url' in r)txt+='Remote access: ✅ '+r.tailnet_url+' (reachable from your other devices)'+NL;
+  else if('tailnet_warn' in r)txt+='Remote access: ⚠ local only ('+r.tailnet_warn+')'+NL;
   if(!r.launched)txt+=NL+'It is staged but OFF. Re-run with Create & start to bring it online.'+NL;
   txt+=NL+'➡ Next: open the '+(s.id||'')+' dashboard ('+(s.url||'')+') and run its Setup agent (Agents → setup) to configure the project.';
   o.textContent=txt; toast((r.launched?'Started ':'Created ')+(s.id||'')); setTimeout(loadPortfolio,1600);

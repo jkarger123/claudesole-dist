@@ -66,7 +66,11 @@ the node end-to-end; the operator's only remaining job is to open it and run its
    (`launchctl bootstrap gui/<uid>`) so it survives reboot. For a **cross-user** host (e.g. AFP on
    `sarahaios`) it can't (a per-user agent needs that user's login session) → it reports the one command to
    run as that user (pre-type into the Admin shell per `SESSIONS_AND_SUDO.md`).
-5. **Mesh (automatic)** — the new node is added to this node's `peers.json` so the fleet can reach it.
+5. **Mesh + remote access (automatic)** — the new node is published on the **tailnet** via
+   `tailscale serve --https=<port> http://127.0.0.1:<port>` (same as the other nodes), and that
+   `https://<tailnet-host>:<port>` URL is registered in the Portfolio registry + `peers.json`. Without this a
+   node sits at `127.0.0.1:<port>` — reachable only ON the host machine, so the Portfolio link would fail from
+   a phone/laptop. Falls back to local-only (with a warning) if tailscale isn't present.
 6. **Setup agent** — open the new instance and run **Agents → setup**: a guided walkthrough that configures
    the project (purpose → CLAUDE.md scaffold from a pasted spec → agents → extensions → first goals), then
    hands off to the instance's Chief of Staff. This is where a node goes from "running" to "useful."
