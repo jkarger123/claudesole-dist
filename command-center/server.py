@@ -6489,6 +6489,10 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(_COMPACT_STATE.get((q.get("name") or [""])[0], {})))
         if u.path == "/api/ideas": return self._s(200, json.dumps(ideas_list()))
         if u.path == "/api/tasks": return self._s(200, json.dumps({"tasks": tasks_load(), "today": _dt.date.today().isoformat()}))
+        if u.path == "/api/platform-map":
+            try: _pm = json.load(open(os.path.join(BASE, "platform_map.json")))
+            except Exception: _pm = {"components": []}
+            return self._s(200, json.dumps(_pm))
         if u.path == "/api/ccr": return self._s(200, json.dumps({"ccrs": ccr_list(), "self": INSTANCE_ID}))
         if u.path == "/api/ccr-sent": return self._s(200, json.dumps({"sent": ccr_sent_list(), "self": INSTANCE_ID, "mc": _mc_url()}))
         if u.path == "/api/fw-fingerprint": return self._s(200, json.dumps(fw_fingerprint()))
@@ -8092,6 +8096,20 @@ body.gm-resizing iframe{pointer-events:none}
 .tk-card .tk-due{font-weight:600}.tk-card .tk-due.tk-over{color:#f85149}.tk-card .tk-due.tk-today{color:var(--accent)}
 .tk-card .tk-detail{margin-top:7px;font-size:12.5px;color:var(--mut);line-height:1.5}
 .tk-card.tk-sug{border-left:3px solid var(--accent)}
+/* Projects lens (overseer platform map) */
+.pj-sec{font-weight:700;font-size:13px;margin:16px 2px 2px;color:var(--ink)}
+.pj-card .pj-top{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.pj-name{font-weight:700;font-size:14px}
+.pj-path{font:11px/1.5 ui-monospace,Menlo,monospace;color:var(--accent-light);background:#000;border:1px solid var(--line);border-radius:5px;padding:1px 6px;word-break:break-all}
+.pj-sum{margin-top:6px;font-size:12.5px;color:var(--mut);line-height:1.55}
+.pj-children{margin-top:10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr));gap:8px}
+.pj-child{border:1px solid var(--line);border-radius:9px;padding:9px 11px;background:var(--bg)}
+.pj-ctop{display:flex;align-items:center;gap:6px}
+.pj-cname{font-weight:600;font-size:12.5px}
+.pj-csum{margin-top:4px;font-size:11px;color:var(--mut);line-height:1.45}
+.modal:has(.pj-view){width:min(860px,95vw)}
+.pj-view{width:100%}.pj-view .vshead{display:flex;align-items:center;gap:10px;margin-bottom:10px}.pj-view .vshead h2{flex:1;margin:0;font-size:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pj-md{max-height:70vh;overflow:auto;background:#0a0a0f;border:1px solid var(--line);border-radius:10px;padding:14px;font:12px/1.6 ui-monospace,Menlo,monospace;color:#c9d1d9;white-space:pre-wrap;word-break:break-word}
 /* fx-* : agentic leverage (smart reply 360 + sender history dossier) */
 .gm-act.fx-smart{background:linear-gradient(135deg,#c9a22722,#c9a22711);color:var(--accent);border-color:#c9a22755}
 .gm-act.fx-hist{border-color:#3b82f655;color:#8ab4f8}
@@ -8119,6 +8137,7 @@ body.gm-resizing iframe{pointer-events:none}
 <div class="brand"><img class="cfmark" src="/static/brand/claudefather_mark.png" alt=""><span class="bword">text2tune<small>COMMAND CENTER</small></span></div>
 <nav class="lens" id="lens">
 <button data-l="portfolio"><i class="ph-light ph-broadcast"></i>Portfolio</button>
+<button data-l="projects"><i class="ph-light ph-tree-structure"></i>Projects</button>
 <button data-l="sessions" class="on"><i class="ph-light ph-terminal-window"></i>Sessions</button>
 <button data-l="modules"><i class="ph-light ph-folders"></i>Projects</button>
 <button data-l="files"><i class="ph-light ph-folder"></i>Files</button>
@@ -8227,6 +8246,7 @@ function render(){
   else if(LENS=="teams"){loadTeams();return;}
   else if(LENS=="audit"){loadAudit();return;}
   else if(LENS=="portfolio"){loadPortfolio();return;}
+  else if(LENS=="projects"){loadProjects();return;}
   else if(LENS=="sessions"){loadSessions();return;}
   else if(LENS=="history"){loadHistory();return;}
   else if(LENS=="tree"){loadTree();return;}
@@ -11449,6 +11469,35 @@ async function rosterRegen(){toast('Regenerating ROSTER.md from live discovery�
   if(r&&r.ok){toast('ROSTER.md rewritten ('+(r.bytes||0)+' bytes) — the human capability index is back in sync with the model-facing descriptions.',6000);}
   else toast('Failed: '+((r||{}).error||'?'),5000);}
 function pchip(c,n,l){return '<div style="display:flex;align-items:center;gap:7px"><span style="width:12px;height:12px;border-radius:50%;background:'+c+'"></span><b style="font-size:17px">'+n+'</b> <span class="sub">'+l+'</span></div>';}
+// ---- Projects lens (overseer): the ClaudeFather platform map -- every component + its CLAUDE.md ----
+async function loadProjects(){
+  var grid=document.getElementById("grid"); grid.innerHTML=empty('<span class="spin"></span> Loading the platform map…');
+  var r={}; try{ r=await(await fetch('/api/platform-map')).json(); }catch(e){ grid.innerHTML=empty("Couldn't load the platform map."); return; }
+  var comps=r.components||[];
+  if(!comps.length){ grid.innerHTML=empty("Platform map is empty — run the documentation sweep."); return; }
+  var cats={}; comps.forEach(function(c){ (cats[c.category]=cats[c.category]||[]).push(c); });
+  var order=['Core','Lifecycle','Extensions','Agents','Docs'];
+  var keys=order.filter(function(k){return cats[k];}).concat(Object.keys(cats).filter(function(k){return order.indexOf(k)<0;}));
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🗂 Projects</b> <span class="sub">the ClaudeFather platform — every component, fully documented</span><div style="margin-left:auto"><button class="mini go" onclick="viewCMD(\'docs/ARCHITECTURE.md\')">📖 Architecture</button></div></div></div>';
+  keys.forEach(function(k){
+    h+='<div class="pj-sec" style="grid-column:1/-1">'+esc(k)+' <span class="sub">'+cats[k].length+'</span></div>';
+    cats[k].forEach(function(c){
+      h+='<div class="card pj-card" style="cursor:default;grid-column:1/-1"><div class="pj-top"><span class="pj-name">'+esc(c.name)+'</span>'+(c.path?'<code class="pj-path">'+esc(c.path)+'</code>':'')+(c.claude_md?'<button class="mini" style="margin-left:auto" onclick="viewCMD(\''+esc(c.claude_md)+'\')">📄 CLAUDE.md</button>':'')+'</div><div class="pj-sum">'+esc(c.summary)+'</div>';
+      if(c.children&&c.children.length){
+        h+='<div class="pj-children">'+c.children.map(function(ch){
+          return '<div class="pj-child"><div class="pj-ctop"><span class="pj-cname">'+esc(ch.name)+'</span>'+(ch.claude_md?' <a href="#" title="open CLAUDE.md" onclick="event.preventDefault();viewCMD(\''+esc(ch.claude_md)+'\')">📄</a>':'')+'</div>'+(ch.path?'<code class="pj-path">'+esc(ch.path)+'</code>':'')+'<div class="pj-csum">'+esc(ch.summary)+'</div></div>';
+        }).join('')+'</div>';
+      }
+      h+='</div>';
+    });
+  });
+  grid.innerHTML=h;
+}
+async function viewCMD(path){
+  showM('<div class="pj-view"><div class="vshead"><h2>📄 '+esc(path)+'</h2><button class="mini" onclick="closeM()">✕ Close</button></div><pre class="pj-md"><span class="spin"></span> loading…</pre></div>');
+  var t=''; try{ t=await(await fetch('/api/file-get?b64='+b64u(path))).text(); }catch(e){ t='(could not load '+path+')'; }
+  var pre=document.querySelector('.pj-md'); if(pre) pre.textContent=t||'(empty)';
+}
 async function loadPortfolio(){document.getElementById("grid").innerHTML=empty("Scanning the portfolio…");
   let d={};try{d=await(await fetch('/api/portfolio')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load portfolio.");return;}
   const insts=d.instances||[],roll=d.roll||{};
@@ -11870,7 +11919,7 @@ async function treeResume(id,cwd,fork){const _c=CONVOMAP[id]||{};toast((fork?"Fo
   const r=await(await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({machine:"studio",id:id,cwd:cwd,fork:!!fork,label:_c.label||""})})).json();
   if(!r||!r.ok){toast("Failed: "+((r||{}).error||"?"),5000);return;}
   closeInfo();_openTerm(r);}
-const NAV={portfolio:'Portfolio',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',agency:'Agency',calls:'Calls',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Usage Analytics',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Claude Accounts'};
+const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',agency:'Agency',calls:'Calls',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Usage Analytics',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Claude Accounts'};
 // ---- Chief of Staff: your office (top-level command + a direct line to me) ----
 function gotoLens(l){const b=document.querySelector('#lens button[data-l="'+l+'"]');if(b)b.click();}
 async function talkChief(){toast("Opening your Chief of Staff…");
@@ -12201,7 +12250,8 @@ function applyPreset(){var L=(window.CC&&window.CC.lenses);if(!L||!L.length)retu
   ['gmail','calendar','drive'].forEach(function(l){var _gb=document.querySelector('#lens button[data-l="'+l+'"]');if(_gb)_gb.style.display=(window.CC&&window.CC.google)?'':'none';});
   {var _ab=document.querySelector('#lens button[data-l="accounts"]');if(_ab)_ab.style.display=(window.CC&&window.CC.accountWallet)?'':'none';}  // Claude Accounts lens self-hides until the wallet is enabled on this node
   {var _tk=document.querySelector('#lens button[data-l="tasks"]');if(_tk)_tk.style.display='';}  // Tasks is a built-in feature -- always available, outside the preset lens list
-  if(!(window.CC&&window.CC.role==='org')){var _pb=document.querySelector('#lens button[data-l="portfolio"]');if(_pb)_pb.style.display='none';}  // Portfolio = ClaudeGrandfather (overseer) only
+  if(!(window.CC&&window.CC.role==='org')){var _pb=document.querySelector('#lens button[data-l="portfolio"]');if(_pb)_pb.style.display='none';
+    var _pj=document.querySelector('#lens button[data-l="projects"]');if(_pj)_pj.style.display='none';}  // Portfolio + Projects = ClaudeGrandfather (overseer) only
   LENS=L[0];   // land on the preset's first lens (portfolio for an overseer, sessions for a project)
   document.querySelectorAll('#lens button').forEach(function(b){b.classList.toggle('on',b.dataset.l===LENS);});
   var vt=document.getElementById('viewtitle');if(vt)vt.textContent=NAV[LENS]||LENS;}

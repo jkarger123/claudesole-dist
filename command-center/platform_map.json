@@ -1,0 +1,246 @@
+{
+  "components": [
+    {
+      "category": "Core",
+      "name": "Command Center (engine)",
+      "path": "/Users/hptuner/hptuners-control/command-center",
+      "summary": "The platform web control plane: a single ~12.8k-line stdlib-Python HTTP server (server.py) with an embedded vanilla-JS single-page frontend. Serves the dashboard on :8799, is self-locating/portable via cc.config.json, and houses the whole platform (mesh, superadmin, Google, deliverables, agents, extensions, Ralph, browser terminal). Runs in the hpcc tmux session; edits require claudesole-restart.",
+      "claude_md": "/Users/hptuner/hptuners-control/command-center/CLAUDE.md"
+    },
+    {
+      "category": "Core",
+      "name": "Engine helpers",
+      "path": "/Users/hptuner/hptuners-control/command-center",
+      "summary": "Stdlib helpers beside server.py: granola.py (Calls engine), ralph_runner.py (loop runner), mesh_stop_hook.py (deterministic mesh reply forwarding), scan_projects.py, cc-session-watchdog.py, git-backup.sh + git-backup-secretscan.py, cc-task, cc-supervise.sh, cc-launch.sh.",
+      "claude_md": "/Users/hptuner/hptuners-control/command-center/CLAUDE.md"
+    },
+    {
+      "category": "Core",
+      "name": "Presets & roles",
+      "path": "/Users/hptuner/hptuners-control/presets",
+      "summary": "Role-tier lens/agent bundles. project.json = ClaudeFather (role project, ~24-lens single-project surface, lands Sessions); overseer.json = ClaudeGrandfather (role org, portfolio/overseer, lands Portfolio). server.py loads presets/<PRESET>.json and applyPreset() filters the nav. Framework files (FW_FINGERPRINT_FILES) \u2014 change at Mission Control, ship via dist/cc-update.",
+      "claude_md": "/Users/hptuner/hptuners-control/presets/CLAUDE.md"
+    },
+    {
+      "category": "Core",
+      "name": "Mesh, Superadmin & Multi-Node",
+      "path": "/Users/hptuner/hptuners-control",
+      "summary": "Asymmetric-authority fleet layer over Tailscale (all in server.py + mesh_stop_hook.py): peer roster (peers.json), durable chief-to-chief mesh queue with Stop-hook reply forwarding, tiered auth (MESH_TOKEN family badge + SUPERADMIN master), Ed25519/HMAC signed superadmin grants running only allowlisted actions, CCR pipeline (nodes propose, MC builds/ships), and sha256 framework-drift fingerprinting. Governance flows DOWN, observability/CCRs roll UP; fixed 3-level ORG->PROJECT->MODULE nested oversight.",
+      "claude_md": ""
+    },
+    {
+      "category": "Core",
+      "name": "Storage & data",
+      "path": "/Users/hptuner/hptuners-control",
+      "summary": "Storage architecture: per-node dedicated APFS SSD with the macOS home on it; storage_mode (github/icloud/icloud+github); /api/doctor flags internal-disk drift; deliverables routing precedence (explicit deliverables_root SSD store overrides iCloud tiered which overrides self-contained default); per-node _*.json state in STATE_DIR; data/ symlinked to the SSD. cc.config.json is the portability boundary.",
+      "claude_md": ""
+    },
+    {
+      "category": "Lifecycle",
+      "name": "Installer",
+      "path": "/Users/hptuner/hptuners-control/install",
+      "summary": "Packaged install entry point: install.sh bootstrap, AGENT_INSTALL.md agent playbook, README_INSTALL.md human intro. Scaffolds a node that then runs the root lifecycle scripts.",
+      "claude_md": "/Users/hptuner/hptuners-control/install/CLAUDE.md"
+    },
+    {
+      "category": "Lifecycle",
+      "name": "Lifecycle scripts",
+      "path": "/Users/hptuner/hptuners-control",
+      "summary": "Framework-root lifecycle: cc-init.sh (scaffold + write cc.config.json), cc-update.sh (overlay framework_paths, never touch preserve_paths, splice CC:NOTES, chmod-600 secrets), cc-spawn.sh / cc-promote.sh (nested child instances), cc-recover.sh (break-glass PIN/port/URL), make-install-package.sh (dist zip), brain.sh (operator session).",
+      "claude_md": "/Users/hptuner/hptuners-control/install/CLAUDE.md"
+    },
+    {
+      "category": "Lifecycle",
+      "name": "Ship manifest",
+      "path": "/Users/hptuner/hptuners-control/claudesole.manifest.json",
+      "summary": "Single source of truth for updates: splits generic FRAMEWORK paths (ship + propagate) from per-deployment PRESERVE paths (config/data/secrets/state, never overwritten), plus CC:NOTES preserve-region markers. Updates flow dev->fleet via cc-update against the private core repo or the public claudesole-dist mirror.",
+      "claude_md": "/Users/hptuner/hptuners-control/install/CLAUDE.md"
+    },
+    {
+      "category": "Extensions",
+      "name": "Marketplace catalog",
+      "path": "/Users/hptuner/hptuners-control/extensions",
+      "summary": "The installable-extension catalog. Each subdir has a required extension.json (catalog card + trigger) and SETUP.md (guided setup-agent script). Five category mechanics wired in server.py (~L2567-2806): integration (mcp.json merge), agent-tool (payload->AGENTS_DIR), skill (payload->~/.claude/skills), theme (theme.css), agency/lens. Catalog is framework; install state per-deployment in _extensions.json; secrets in .env.claudefather/secrets/. On a node, new/edited extensions route via CCR.",
+      "claude_md": "/Users/hptuner/hptuners-control/extensions/CLAUDE.md",
+      "children": [
+        {
+          "name": "github",
+          "path": "/Users/hptuner/hptuners-control/extensions/github",
+          "summary": "Integration: GitHub repos/issues/PRs/CI via official GitHub MCP (remote OAuth or local PAT)."
+        },
+        {
+          "name": "atlassian-jira-confluence",
+          "path": "/Users/hptuner/hptuners-control/extensions/atlassian-jira-confluence",
+          "summary": "Integration: Jira issues + Confluence pages (Atlassian Cloud) via MCP."
+        },
+        {
+          "name": "aws",
+          "path": "/Users/hptuner/hptuners-control/extensions/aws",
+          "summary": "Integration: query AWS resources + docs, read-first, via MCP."
+        },
+        {
+          "name": "brave-search",
+          "path": "/Users/hptuner/hptuners-control/extensions/brave-search",
+          "summary": "Integration: live privacy-respecting web search via Brave's independent index."
+        },
+        {
+          "name": "cloudflare",
+          "path": "/Users/hptuner/hptuners-control/extensions/cloudflare",
+          "summary": "Integration: manage Cloudflare Workers, DNS, KV/R2, analytics via MCP."
+        },
+        {
+          "name": "figma",
+          "path": "/Users/hptuner/hptuners-control/extensions/figma",
+          "summary": "Integration: read Figma files/components/frames for design-to-code; endpoint unconfirmed so wired at setup (no mcp.json auto-wire)."
+        },
+        {
+          "name": "filesystem",
+          "path": "/Users/hptuner/hptuners-control/extensions/filesystem",
+          "summary": "Integration: scoped, read-controlled file operations over a chosen directory."
+        },
+        {
+          "name": "google-workspace",
+          "path": "/Users/hptuner/hptuners-control/extensions/google-workspace",
+          "summary": "Integration + agent: headless Path-B Google OAuth minting/storing a refresh token for one controlled account (secrets/tokens/<account>.json). Two consumers: server.py's GOOGLE WORKSPACE block calls Gmail/Calendar/Drive REST directly for live lenses + VoiceMatch + Tasks; the agents/google power-agent uses the self-hosted workspace_mcp. Draft-first email; secrets gitignored + excluded from cc-update. Ships bin/gauth.sh, mint_token.py, verify.py.",
+          "claude_md": "/Users/hptuner/hptuners-control/extensions/google-workspace/CLAUDE.md"
+        },
+        {
+          "name": "linear",
+          "path": "/Users/hptuner/hptuners-control/extensions/linear",
+          "summary": "Integration: read/manage Linear issues, projects, cycles via MCP."
+        },
+        {
+          "name": "notion",
+          "path": "/Users/hptuner/hptuners-control/extensions/notion",
+          "summary": "Integration: read/write Notion pages and databases via MCP."
+        },
+        {
+          "name": "pagerduty",
+          "path": "/Users/hptuner/hptuners-control/extensions/pagerduty",
+          "summary": "Integration: read incidents + on-call schedules, ack/resolve with approval, via MCP."
+        },
+        {
+          "name": "playwright-browser",
+          "path": "/Users/hptuner/hptuners-control/extensions/playwright-browser",
+          "summary": "Integration: drive a real browser (navigate/click/fill/screenshot) for testing + web automation."
+        },
+        {
+          "name": "postgres-supabase",
+          "path": "/Users/hptuner/hptuners-control/extensions/postgres-supabase",
+          "summary": "Integration: read-only-by-default SQL against Postgres/Supabase via MCP."
+        },
+        {
+          "name": "sentry",
+          "path": "/Users/hptuner/hptuners-control/extensions/sentry",
+          "summary": "Integration: surface production errors + issues from Sentry via MCP."
+        },
+        {
+          "name": "slack",
+          "path": "/Users/hptuner/hptuners-control/extensions/slack",
+          "summary": "Integration: post to + read from Slack channels via MCP."
+        },
+        {
+          "name": "stripe",
+          "path": "/Users/hptuner/hptuners-control/extensions/stripe",
+          "summary": "Integration: look up Stripe customers, subscriptions, invoices, refunds, read-first."
+        },
+        {
+          "name": "telegram-notify",
+          "path": "/Users/hptuner/hptuners-control/extensions/telegram-notify",
+          "summary": "Integration: two-way Telegram (push notifications + chat to agents); ships notify.py as a standalone callable payload for loops/cron."
+        },
+        {
+          "name": "incident-commander",
+          "path": "/Users/hptuner/hptuners-control/extensions/incident-commander",
+          "summary": "Agent-tool: capstone agent triaging Sentry + PagerDuty + logs into one ranked posture; degrades to logs-only."
+        },
+        {
+          "name": "web-research",
+          "path": "/Users/hptuner/hptuners-control/extensions/web-research",
+          "summary": "Skill: guided deep-research workflow (fan-out search, verify sources, cited synthesis); payload copied into ~/.claude/skills."
+        },
+        {
+          "name": "theme-claudefather-dark",
+          "path": "/Users/hptuner/hptuners-control/extensions/theme-claudefather-dark",
+          "summary": "Theme: dark high-contrast ClaudeFather palette (theme.css scoped to data-theme); cosmetic, no data/secrets."
+        },
+        {
+          "name": "granola",
+          "path": "/Users/hptuner/hptuners-control/extensions/granola",
+          "summary": "Agency/Calls lens: turns Granola meeting transcripts into REVIEWED updates via a propose->approve->apply spine (engine command-center/granola.py). On approve, appends a dated entry to the matched client's CLAUDE.md (CC:CALLS region) + creates tasks/reminders. Headless claude -p extraction; state in _granola.json.",
+          "claude_md": "/Users/hptuner/hptuners-control/extensions/granola/CLAUDE.md"
+        }
+      ]
+    },
+    {
+      "category": "Agents",
+      "name": "Scoped agents roster",
+      "path": "/Users/hptuner/hptuners-control/agents",
+      "summary": "The agent-tool roster: each subdir is one scoped human-facing capability with a CLAUDE.md charter, optional tools/run.py check-suite, per-deployment config.json, and reports/. Auto-discovered by server.py (any dir with CLAUDE.md) and rendered in the Agents lens with zero per-agent frontend code. Common report schema + RAG rollup. Read-only/human-gated by default; delete-means-archive.",
+      "claude_md": "/Users/hptuner/hptuners-control/agents/CLAUDE.md",
+      "children": [
+        {
+          "name": "backup",
+          "path": "/Users/hptuner/hptuners-control/agents/backup",
+          "summary": "Additive-only git backup agent: keeps the project pushed to its private GitHub repo, verifies pushes, enforces .gitignore hygiene. Engine = git-backup.sh + a 4h launchd job. Never destructive/force-push.",
+          "claude_md": "/Users/hptuner/hptuners-control/agents/backup/CLAUDE.md"
+        },
+        {
+          "name": "cost",
+          "path": "/Users/hptuner/hptuners-control/agents/cost",
+          "summary": "Read-only spend posture: tools/run.py reads config.json sources, compares to warn/err thresholds, writes the common report schema. Never calls a paid/billing API.",
+          "claude_md": "/Users/hptuner/hptuners-control/agents/cost/CLAUDE.md"
+        },
+        {
+          "name": "deploy",
+          "path": "/Users/hptuner/hptuners-control/agents/deploy",
+          "summary": "Ship-readiness agent: tools/run.py health-checks targets + reports git cleanliness (read-only); tools/deploy.py --target X --yes is the human-gated executor. Never fires autonomously.",
+          "claude_md": "/Users/hptuner/hptuners-control/agents/deploy/CLAUDE.md"
+        },
+        {
+          "name": "google",
+          "path": "/Users/hptuner/hptuners-control/agents/google",
+          "summary": "Google Workspace power-agent driving live Gmail/Calendar/Drive MCP tools (brief/triage/schedule/Drive/client-comms). Read/draft-first: never sends, confirms before mutation. Needs Path B self-hosted MCP for headless; config.json maps clients to email domains.",
+          "claude_md": "/Users/hptuner/hptuners-control/agents/google/CLAUDE.md"
+        },
+        {
+          "name": "ideas",
+          "path": "/Users/hptuner/hptuners-control/agents/ideas",
+          "summary": "Idea inbox: capture verbatim, refine to a crisp scope, promote to a module note / new agent-tool / Ralph loop. Logic in server.py (idea_add/idea_promote, /api/idea*).",
+          "claude_md": "/Users/hptuner/hptuners-control/agents/ideas/CLAUDE.md"
+        },
+        {
+          "name": "incidents",
+          "path": "/Users/hptuner/hptuners-control/agents/incidents",
+          "summary": "Read-only open-incident posture: tools/run.py scans configured incident/error logs for open/critical patterns, writes the common report schema. Never edits or remediates.",
+          "claude_md": "/Users/hptuner/hptuners-control/agents/incidents/CLAUDE.md"
+        },
+        {
+          "name": "routines",
+          "path": "/Users/hptuner/hptuners-control/agents/routines",
+          "summary": "Owns scheduled recurring jobs (the heartbeat). Currently a STUB: a _routines.json registry exists but no runner is wired; its first job is to build itself.",
+          "claude_md": "/Users/hptuner/hptuners-control/agents/routines/CLAUDE.md"
+        },
+        {
+          "name": "security",
+          "path": "/Users/hptuner/hptuners-control/agents/security",
+          "summary": "Security posture auditor (project + AI-agent safety): tools/scan.py runs a read-only check suite (Secrets/Access/Deps/AI-safety/Network/Audit), writes reports in its own richer overall/checks[] schema with sev/dim. Tracks rotation_ledger.json + ROTATION_CHECKLIST.md; proposes irreversible fixes for human approval only.",
+          "claude_md": "/Users/hptuner/hptuners-control/agents/security/CLAUDE.md"
+        },
+        {
+          "name": "usage",
+          "path": "/Users/hptuner/hptuners-control/agents/usage",
+          "summary": "Token + cost analytics and token-waste detection from Claude Code transcripts. Aggregation in server.py (_scan_tok/token_totals/usage_payload, /api/usage), rendered in the Usage lens. Cost figures are estimates.",
+          "claude_md": "/Users/hptuner/hptuners-control/agents/usage/CLAUDE.md"
+        }
+      ]
+    },
+    {
+      "category": "Docs",
+      "name": "Platform docs",
+      "path": "/Users/hptuner/hptuners-control/docs",
+      "summary": "Authoritative platform docs: SUPERADMIN.md (signed-grant authority model), NESTED_OVERSIGHT.md (3-level ORG->PROJECT->MODULE design), STORAGE_ARCHITECTURE.md (per-node SSD home standard), SMART_FILES.md (deliverables store), PACKAGING.md (dist/cc-update flow), MEMORY_SKILLS_AGENTS.md, SESSIONS_AND_SUDO.md (pre-typed admin-shell sudo protocol), AGENCY_INTEGRATION.md, CHANGELOG.md.",
+      "claude_md": ""
+    }
+  ]
+}

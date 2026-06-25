@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.53 -- 2026-06-25
+- DOCS + FEATURE (full platform documentation + overseer Projects tab): a multi-agent sweep read all of
+  ClaudeFather and wrote accurate CLAUDE.md's (command-center, extensions + google-workspace + granola, agents,
+  install, presets), a master docs/ARCHITECTURE.md, a root-CLAUDE.md "where everything lives" index, and a
+  platform_map.json. New overseer-only "Projects" tab (ClaudeGrandfather) renders the whole platform as a tree
+  -- Core / Lifecycle / Extensions (with each extension nested) / Agents / Docs -- each opening its CLAUDE.md.
+
 ## 0.21.52 -- 2026-06-25
 - FEATURE (install as a desktop app / PWA): the dashboard now serves a web-app manifest (/manifest.webmanifest,
   branded per node) + standalone display + app meta, so it can be "Add to Dock" (Safari) / Installed (Chrome) as

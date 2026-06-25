@@ -1,7 +1,7 @@
 {
   "product": "ClaudeFather",
   "former_name": "Claudesole",
-  "version": "0.21.52",
+  "version": "0.21.53",
   "description": "Manifest that defines which paths are FRAMEWORK (ship + propagate to every ClaudeFather deployment on update) vs PRESERVE (per-deployment config/data/secrets/learnings -- never overwritten by an update).",
   "framework_paths": [
     "command-center/server.py",
@@ -42,7 +42,11 @@
     "docs/SUPERADMIN.md",
     "superadmin.pub",
     "docs/ICLOUD_STORAGE.md",
-    "docs/STORAGE_ARCHITECTURE.md"
+    "docs/STORAGE_ARCHITECTURE.md",
+    "command-center/CLAUDE.md",
+    "command-center/platform_map.json",
+    "agents/CLAUDE.md",
+    "docs/ARCHITECTURE.md"
   ],
   "preserve_paths": [
     "cc.config.json",
