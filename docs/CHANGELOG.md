@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.44 -- 2026-06-25
+- FIX (Voice Studio overflow, for real): .vstudio was set to 88vw/680px -- WIDER than the modal box
+  (min(560px,94vw)) -- so it and its textareas spilled out. Now .vstudio fills the modal (width:100%) and the
+  modal widens to ~760px for the studio specifically.
+
 ## 0.21.43 -- 2026-06-25
 - FIX (attachments keep their file type): when a sender names an attachment WITHOUT an extension, saving to a
   folder / downloading now appends the correct extension derived from the MIME type (incl. Office types

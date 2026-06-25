@@ -7751,7 +7751,8 @@ body.gm-resizing iframe{pointer-events:none}
 /* Voice Studio modal + rail button */
 .gm-voicebtn{margin:8px 4px 4px;padding:9px 10px;border:1px solid var(--accent);border-radius:9px;color:var(--accent);font-weight:700;font-size:12.5px;cursor:pointer;text-align:center;background:#c9a2270f}
 .gm-voicebtn:hover{background:#c9a22722}
-.vstudio{max-width:680px;width:88vw;max-height:84vh;overflow-y:auto;padding:4px 2px}
+.modal:has(.vstudio){width:min(760px,94vw)}   /* Voice Studio gets a roomier modal (no effect where :has is unsupported -> still fits) */
+.vstudio{width:100%;max-width:100%;overflow-x:hidden;padding:2px 0}
 .vstudio .vshead{display:flex;align-items:center;gap:10px;margin-bottom:4px}
 .vstudio .vshead h2{margin:0;font-size:18px;flex:1}
 .vstudio .vsmeta{font-size:12px;color:var(--mut);margin:2px 0 12px}
