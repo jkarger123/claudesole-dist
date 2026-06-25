@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.36.0 -- 2026-06-25
+- FIX (the REAL 'Google stuck loading' fix -- stale-while-revalidate): the cache served instantly only while
+  FRESH (<60s); once stale it BLOCKED on a live fetch, which during an uplink flap takes 7-30s = the spinner.
+  Now any cached copy is served INSTANTLY (flagged stale if old) and refreshed in the background -- the user
+  NEVER waits on a live fetch when there's data to show. Applied to Gmail + Calendar + Drive. Only a truly
+  cold first-load during an active outage can still spin (nothing cached yet); the warmer fills it ASAP.
+- UX (popped-out /term terminal, mobile top bar): the cluttered corner bar (~9 controls wrapping 2-3 rows) is
+  now a single ~44px row -- session name + copy + file + a '...' overflow holding scroll/select, font, compact,
+  end, and kill (kill divided off + red, never a stray tap). Every control kept; desktop bar unchanged.
+
 ## 0.35.0 -- 2026-06-25
 - FEATURE (Calendar + Drive get the resilient cache too): factored the Gmail cache spine into a generic
   _g_cached (short-TTL cache + background warmer + serve-last-good-on-error) and applied it to the Calendar

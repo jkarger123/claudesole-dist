@@ -688,16 +688,21 @@ def gmail_list(view="inbox", q="", maxn=25, fresh=False, page_token=""):
     with _GM_LOCK:
         _GM_ACTIVE[key] = now
         ent = _GM_CACHE.get(key)
-    if not fresh and ent and ent.get("ok") and (now - ent["at"]) < GM_TTL:
-        d = dict(ent["data"]); d["_synced"] = ent["at"]; d["_cached"] = True; return d
-    live = _gmail_list_live(view, q, maxn)
+    # STALE-WHILE-REVALIDATE: if we have ANY cached copy, serve it INSTANTLY (never block the user on a live
+    # fetch -- a flaky uplink makes live take 7-30s, which is the "stuck loading" people hit). Flag it stale if
+    # past TTL; the background sync loop (every ~50s) refreshes it without blocking anyone.
+    if ent and ent.get("ok") and not fresh:
+        d = dict(ent["data"]); d["_synced"] = ent["at"]; d["_cached"] = True
+        if (now - ent["at"]) >= GM_TTL: d["_stale"] = True
+        return d
+    live = _gmail_list_live(view, q, maxn)   # cold cache (or an explicit Refresh) -> must fetch live
     if isinstance(live, dict) and "error" not in live:
         with _GM_LOCK: _GM_CACHE[key] = {"data": live, "at": now, "ok": True}
         d = dict(live); d["_synced"] = now; d["_cached"] = False; return d
-    if ent and ent.get("ok"):    # live failed -> serve the last good copy (don't strand the user on a spinner)
+    if ent and ent.get("ok"):    # forced-fresh failed -> still fall back to last good
         d = dict(ent["data"]); d["_synced"] = ent["at"]; d["_cached"] = True; d["_stale"] = True
         d["_error"] = (live.get("error") if isinstance(live, dict) else "fetch failed"); return d
-    return live                  # no cache to fall back on -> surface the real error
+    return live                  # truly cold + fetch failed -> surface the error (first-ever load during an outage)
 def _gmail_sync_loop():
     """Keep recently-viewed Gmail lists warm so refreshes are instant + one sync serves everyone. Only polls
     views requested in the last 5 min (nobody looking -> no API calls)."""
@@ -727,8 +732,12 @@ def _g_cached(key, fetch, ttl=60, fresh=False):
     with _GC_LOCK:
         _GC_ACTIVE[key] = {"at": now, "fetch": fetch}
         ent = _GC_CACHE.get(key)
-    if not fresh and ent and ent.get("ok") and (now - ent["at"]) < ttl:
-        d = dict(ent["data"]); d["_synced"] = ent["at"]; d["_cached"] = True; return d
+    # STALE-WHILE-REVALIDATE: serve ANY cached copy instantly (never block on a slow live fetch); the
+    # background loop refreshes. Flag stale past TTL.
+    if ent and ent.get("ok") and not fresh:
+        d = dict(ent["data"]); d["_synced"] = ent["at"]; d["_cached"] = True
+        if (now - ent["at"]) >= ttl: d["_stale"] = True
+        return d
     live = fetch()
     if isinstance(live, dict) and "error" not in live:
         with _GC_LOCK: _GC_CACHE[key] = {"data": live, "at": now, "ok": True}
@@ -7423,8 +7432,29 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #keybar button{flex:1;min-width:0;background:#22222e;color:#fff;border:1px solid #3a3a4a;border-radius:8px;padding:11px 0;font:15px -apple-system,sans-serif;cursor:pointer}
 #keybar button:active{background:#34344a}
 #compose input{flex:1;min-width:0;background:#0a0a0f;color:#fff;border:1px solid #3a3a4a;border-radius:9px;padding:11px;font:16px -apple-system,sans-serif}
-#compose button{background:#2a3a2a;color:#fff;border:1px solid #3a5a3a;border-radius:9px;padding:11px 16px;font:15px -apple-system,sans-serif;cursor:pointer;white-space:nowrap}</style></head><body>
-<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Show the text as selectable plain text so you can copy it (needed on mobile - the terminal itself is a canvas and can't be selected by touch)">&#10697; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="mtog" onclick="toggleMouse()">scroll</button><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149">&#10005; kill</button><a href="/#sessions">dashboard</a></div>
+#compose button{background:#2a3a2a;color:#fff;border:1px solid #3a5a3a;border-radius:9px;padding:11px 16px;font:15px -apple-system,sans-serif;cursor:pointer;white-space:nowrap}
+/* MOBILE TOP BAR (#bar) redesign: a compact corner pill -- session name + the 3 most-used actions
+   (copy, file, more) on ONE non-wrapping row -- with secondary + destructive actions (scroll/select,
+   font, compact, end, KILL) tucked into a tap-to-open overflow menu. Mobile-only; desktop renders the
+   original inline bar verbatim. ALL controls stay inside #bar so the protected-session pruner (which
+   strips end/kill by title via '#bar button') keeps working. */
+#more{display:none}                      /* overflow toggle: desktop hides it -- everything is inline */
+#moremenu{display:contents}              /* desktop: wrapper vanishes -> children flow inline as before */
+.fontgrp{display:contents}               /* desktop: A- [13] A+ flow inline exactly as before */
+@media(any-pointer:coarse){
+  #bar{top:env(safe-area-inset-top);right:env(safe-area-inset-right);left:auto;display:flex;align-items:center;gap:6px;max-width:calc(100vw - 10px);padding:5px 8px;border-radius:0 0 0 14px;box-shadow:0 4px 16px rgba(0,0,0,.45)}
+  #bar>#st{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:#c8c8d6}
+  #bar>button{margin-left:0;min-width:44px;min-height:44px;display:inline-flex;align-items:center;justify-content:center;padding:0 10px;font-size:15px;line-height:1}
+  #more{display:inline-flex;font-size:20px}
+  #moremenu{position:absolute;top:calc(100% + 6px);right:6px;display:none;flex-direction:column;gap:4px;min-width:188px;background:#16161f;border:1px solid #2a2a3a;border-radius:12px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.6)}
+  #moremenu.open{display:flex}
+  #moremenu button,#moremenu a{margin-left:0;width:100%;box-sizing:border-box;justify-content:flex-start;text-align:left;min-height:44px;display:flex;align-items:center;border-radius:8px;font-size:15px;padding:0 12px}
+  #moremenu a{color:#e8c547;background:#22222e;border:1px solid #2a2a3a;text-decoration:none}
+  .fontgrp{display:flex;align-items:center;gap:8px;min-height:44px;padding:0 6px}
+  .fontgrp button{flex:1;min-width:44px;min-height:38px;margin-left:0;justify-content:center;text-align:center}
+  #moremenu .danger{margin-top:4px;border-top:2px solid #3a2230;color:#f85149;background:#241317}
+}</style></head><body>
+<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Show the text as selectable plain text so you can copy it (needed on mobile - the terminal itself is a canvas and can't be selected by touch)">&#10697; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><button id="mtog" onclick="toggleMouse()">scroll</button><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
 <button id="live" onclick="toLive()">&#8595; jump to live</button>
 <div id="copyov"><div id="copybar"><b>Selectable text</b><span id="copyst" style="color:#8a8a99">long-press to select, or</span><button onclick="copyAll()">&#10697; copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" style="border-color:#e8c547">&#10005; close</button></div><pre id="copybody"></pre></div>
 <div id="wrap">
@@ -7450,6 +7480,12 @@ const name=new URLSearchParams(location.search).get('name')||'';document.title='
 // Protected services (the Chief of Staff mesh endpoint / live product / Ralph loops) are constant
 // singletons -- strip their end+kill buttons so they can't be closed from the terminal view.
 if(/^(chief-|ralph-)/.test(name)||name=='t2tbridge'||name=='t2tcrons'){document.querySelectorAll('#bar button').forEach(function(b){var t=(b.getAttribute('title')||'').toLowerCase();if(t.indexOf('end')>=0||t.indexOf('kill')>=0)b.remove();});}
+// MOBILE overflow menu (the ⋯ button): tuck secondary + destructive bar actions behind one tap.
+function toggleMore(){var m=document.getElementById('moremenu');if(m)m.classList.toggle('open');}
+document.addEventListener('click',function(e){var m=document.getElementById('moremenu');if(!m||!m.classList.contains('open'))return;
+  if(e.target&&e.target.closest&&e.target.closest('#more'))return;        // the toggle button handles itself
+  if(e.target&&e.target.closest&&e.target.closest('.fontgrp'))return;     // A-/A+ are tapped repeatedly -> keep open
+  m.classList.remove('open');},true);                                       // any other tap (menu item OR terminal) closes
 let FS=parseFloat(localStorage.getItem('hpcc_fontsize'))||13; if(!(FS>=8&&FS<=28))FS=13;
 const term=new Terminal({fontSize:FS,cursorBlink:true,scrollback:20000,theme:{background:'#0a0a0f',foreground:'#ffffff'}});
 const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(document.getElementById('t'));fit.fit();
