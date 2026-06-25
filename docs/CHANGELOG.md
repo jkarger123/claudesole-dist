@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.21.48 -- 2026-06-25
+- FEATURE (Tasks -- the "Morning Command Center"): a new Tasks tab. (1) FREE programmatic suggestions from
+  recent email in+out (requests TO you + commitments YOU made + natural-language deadlines, balanced signal, no
+  AI). (2) Opt-in "AI scan" -- ONE batched headless-claude pass over recent correspondence -> todos + calendar
+  suggestions. Nothing auto-commits: everything lands as Suggestions you Accept/Dismiss. (3) ▶ Start LAUNCHES an
+  agent on a task -- in its client folder if known, else a self-filing misc inbox -- briefed with the task +
+  source. Grouped Today/Overdue/This-week/Suggestions, client chips, links back to the source email. Per node.
+  Endpoints: /api/tasks(+add/update/status/launch), /api/tasks-sweep, /api/tasks-ai-scan.
+  (Phase 2 next: daily-morning auto-scan, agent task_propose, real calendar-event creation from suggestions.)
+
 ## 0.21.47 -- 2026-06-25
 - FIX (per-message reply buttons visible on EVERY message): removed the hover-reveal opacity gate -- Reply /
   Reply all / Forward now show on every message in the chain, always, so you can reply back in the chain
