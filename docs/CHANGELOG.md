@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.48.0 -- 2026-06-26
+- FIX: "New session" was unusable on the overseer + fresh nodes -- the "Where" (machine) dropdown was built
+  only from the per-deployment machines registry, which is empty there, so there was nothing to select.
+  Now ALWAYS offers the local box ("This machine" -> the backend's "studio" local-launch sentinel, which
+  works with no machines registered); existing nodes still list their real machines (no duplicate).
+- DESKTOP CTA restyle: the "Try ClaudeFather Desktop" button was far too prominent (top of nav). Now a small,
+  subtle "Get the desktop app" link under the brand (web-runtime only, same download menu) -- professional,
+  not in the way.
+
 ## 0.47.0 -- 2026-06-26
 - DESKTOP delivery + auto-update (so we can ship the shell often with minimal labor):
   * Dashboard CTA "🎩 Try ClaudeFather Desktop" (sidebar, prominent) -- Mac (Apple Silicon/Intel) + Windows
