@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.53.0 -- 2026-06-26
+- PROJECTS tab = a curatable list of launch places (auto + pin/hide). Each project/module card now has a clear
+  "▶ launch agent here", plus 📌 pin (float to top) and 🚫 hide (tuck behind a "show hidden" toggle). The list
+  is still auto-detected (modules/pillars), but you control what's prominent vs hidden -- per node, persisted.
+  * New GET/POST /api/launch-curate (pinned/hidden rels in _launch_curate.json); modCard renders pin/hide;
+    loadModules partitions pinned -> top, hidden -> collapsible section.
+
 ## 0.52.0 -- 2026-06-26
 - OVERSEER "Projects" tab now matches the nodes: it used a different lens (a flat platform-component card list)
   than the nodes' polished drill-down module browser, so it looked worse and didn't drill. Overseer preset now
