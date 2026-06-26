@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.37.3 -- 2026-06-25
+- FIX (mobile terminal resize didn't grow): the drag grip lit up but wouldn't increase the terminal because
+  the max-height clamp was computed BELOW the default height (so every drag clamped downward) and the grip sat
+  right above the fixed dock with no room to drag down. Now: the full-screen fit is computed in JS and used as
+  the DEFAULT + the FLOOR (mobile = increase-only), the cap is ~3x viewport, and holding the grip near the
+  bottom edge AUTO-SCROLLS the page so you can grow the terminal past the viewport. Per-device persistence
+  unchanged.
+
 ## 0.37.2 -- 2026-06-25
 - UI (reclaim the Sessions lens -- two control bars -> one): the Sessions controls (🟢 live count, ⊞/▦/☰
   view modes, 🔑 Admin shell) are now MERGED into the always-visible global topbar via a new #lensTools slot

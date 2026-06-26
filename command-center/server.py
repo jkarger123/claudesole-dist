@@ -12879,32 +12879,40 @@ function renderFocus(s){
     +'</div>';
   return h;
 }
-// ---- Mobile focus-terminal resize: drag the grip below the terminal to size it; remembered PER DEVICE
-// (separate keys for phone vs desktop viewport). The CSS var --cf-term-h overrides the default height; we
-// clamp to the current viewport so a rotated/smaller screen never strands the terminal off-screen. ----
+// ---- Mobile focus-terminal resize: drag the grip below the terminal to make it TALLER (remembered per
+// device). On mobile the floor is the full-screen fit (you can only INCREASE), and you can grow PAST the
+// viewport -- the page auto-scrolls while you hold near the bottom edge so the grip stays reachable. The
+// chosen px height is stored per device (phone vs desktop-viewport keys) and re-clamped on load/rotate. ----
 function termIsMobile(){ return !!(window.matchMedia&&window.matchMedia('(max-width:820px)').matches); }
 function termKey(){ return termIsMobile()?'hpcc_term_h_m':'hpcc_term_h_d'; }
 function termBig(){ return document.querySelector('.focusonly .bigsess'); }
-function termMaxH(){ var bs=termBig(); var top=bs?bs.getBoundingClientRect().top:120;
-  var dock=parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cf-dock-h'))||0;
-  return Math.max(240, Math.round(window.innerHeight - top - dock - 34)); }   // leave room for the grip + a hair, never under the dock
-function termClampH(v){ return Math.max(220, Math.min(Math.round(v), termMaxH())); }
+function termDockH(){ return parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cf-dock-h'))||0; }
+function termFitH(){ var el=termBig(); if(!el) return 320;   // height that fills the screen above the dock (the floor on mobile)
+  var top=el.getBoundingClientRect().top+window.scrollY;
+  return Math.max(260, Math.round(window.innerHeight - top - termDockH() - 26)); }
+function termCapH(){ return Math.round(window.innerHeight*3); }   // allow growing well past the viewport (page scrolls)
+var TERM_MIN=260;
 function termApplySaved(){
-  if(!termIsMobile()){ document.documentElement.style.removeProperty('--cf-term-h'); return; }   // desktop CSS ignores the var; keep it clean
+  if(!termIsMobile()){ document.documentElement.style.removeProperty('--cf-term-h'); return; }   // desktop: CSS layout unchanged
+  if(!termBig()) return;
+  var fit=termFitH(); TERM_MIN=fit;                          // mobile: fill the screen by default; only ever INCREASE from there
   var v=parseInt(localStorage.getItem(termKey())||'0',10);
-  if(v>0){ document.documentElement.style.setProperty('--cf-term-h',termClampH(v)+'px'); }
-  else { document.documentElement.style.removeProperty('--cf-term-h'); }
+  document.documentElement.style.setProperty('--cf-term-h', Math.max(fit, Math.min(v>0?v:fit, termCapH()))+'px');
 }
 function termResizeInit(){
   if(!termResizeInit._r){ termResizeInit._r=1;
     window.addEventListener('resize',function(){ termApplySaved(); });
     window.addEventListener('orientationchange',function(){ setTimeout(termApplySaved,300); }); }
   var g=document.getElementById('termGrip'); if(!g||g._w) return; g._w=1;
-  var top0=0,drag=false;
-  function down(y){ var el=termBig(); if(!el)return; top0=el.getBoundingClientRect().top; drag=true; g.classList.add('drag'); document.body.style.userSelect='none'; }
-  function move(y){ if(!drag)return; document.documentElement.style.setProperty('--cf-term-h',termClampH(y-top0)+'px'); }
-  function up(){ if(!drag)return; drag=false; g.classList.remove('drag'); document.body.style.userSelect='';
-    var el=termBig(); if(el){ try{ localStorage.setItem(termKey(),termClampH(el.getBoundingClientRect().height)); }catch(e){} } }
+  var top0=0,lastY=0,drag=false,autoT=null;
+  function clampH(v){ return Math.max(TERM_MIN, Math.min(Math.round(v), termCapH())); }
+  function setH(clientY){ document.documentElement.style.setProperty('--cf-term-h', clampH((clientY+window.scrollY)-top0)+'px'); }
+  function autoOff(){ if(autoT){ clearInterval(autoT); autoT=null; } }
+  function autoOn(){ if(autoT)return; autoT=setInterval(function(){ if(!drag){autoOff();return;} window.scrollBy(0,16); setH(lastY); },30); }   // hold near the bottom edge -> keep scrolling + growing
+  function down(clientY){ var el=termBig(); if(!el)return; top0=el.getBoundingClientRect().top+window.scrollY; TERM_MIN=termFitH(); drag=true; lastY=clientY; g.classList.add('drag'); document.body.style.userSelect='none'; }
+  function move(clientY){ if(!drag)return; lastY=clientY; if(clientY>window.innerHeight-90){ autoOn(); } else { autoOff(); } setH(clientY); }
+  function up(){ if(!drag)return; drag=false; autoOff(); g.classList.remove('drag'); document.body.style.userSelect='';
+    var cur=parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cf-term-h'))||0; if(cur){ try{ localStorage.setItem(termKey(),cur); }catch(e){} } }
   g.addEventListener('touchstart',function(e){ if(e.touches.length!==1)return; down(e.touches[0].clientY); },{passive:true});
   g.addEventListener('touchmove',function(e){ if(!drag)return; e.preventDefault(); move(e.touches[0].clientY); },{passive:false});
   g.addEventListener('touchend',up); g.addEventListener('touchcancel',up);
