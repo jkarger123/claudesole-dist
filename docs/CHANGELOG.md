@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.37.9 -- 2026-06-25
+- FIX (mobile terminal resize: forgot size on refresh + still scrolled the page when expanding): the max
+  height was derived from the element's viewport top (getBoundingClientRect().top), which is unreliable -- when
+  off, the terminal grew past the screen and the page scrolled ("only goes a little, then scroll, then more").
+  Now max = the .wrap scroll container's clientHeight (scroll-independent, already excludes the dock) minus the
+  grip row, so the terminal fills the screen exactly and never pushes the page. And termApplySaved now waits
+  (rAF) for the list to lay out before applying the saved height -- it was running at clientHeight 0 and
+  clamping the remembered value to junk, which is why it 'forgot' on refresh.
+
 ## 0.37.8 -- 2026-06-25
 - FIX (mobile terminal resize -- - grew instead of shrank + drag was janky): root cause was the "grow past
   the viewport with page-scroll" design -- once the terminal scrolled the page, its top went negative and the

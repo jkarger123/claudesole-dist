@@ -12895,10 +12895,9 @@ var TERM_FLOOR=240, TERM_DRAG=false, TERM_H=0;
 function termIsMobile(){ return !!(window.matchMedia&&window.matchMedia('(max-width:820px)').matches); }
 function termKey(){ return termIsMobile()?'hpcc_term_h_m':'hpcc_term_h_d'; }
 function termBig(){ return document.querySelector('.focusonly .bigsess'); }
-function termDockH(){ return parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cf-dock-h'))||0; }
-function termMaxH(){ var el=termBig(); if(!el) return 480;   // fill the space between the terminal's top and the dock (+ room for the grip row); never taller -> page never scrolls
-  var top=el.getBoundingClientRect().top; if(top<0) top=0;   // guard: if ever scrolled, don't inflate the max
-  return Math.max(TERM_FLOOR+40, Math.round(window.innerHeight - top - termDockH() - 70)); }
+function termScroller(){ return document.querySelector('#grid.wrap')||document.querySelector('.wrap'); }
+function termMaxH(){ var sc=termScroller(); var avail=sc?sc.clientHeight:window.innerHeight;   // the .wrap list's visible area ALREADY excludes the dock (#main reserves it). Scroll-independent (clientHeight), so it never inflates. Subtract the grip row + padding so terminal+grip fit WITHOUT scrolling the page.
+  return Math.max(TERM_FLOOR+40, Math.round(avail-56)); }
 function termClamp(h){ return Math.max(TERM_FLOOR, Math.min(Math.round(h), termMaxH())); }
 function termShowN(){ var n=document.getElementById('termGripN'); if(!n)return; var el=termBig(); n.textContent= el?('↕ '+Math.round(el.getBoundingClientRect().height)+'px'):''; }
 function termSet(h){ var px=termClamp(h); TERM_H=px;
@@ -12910,6 +12909,8 @@ function termApplySaved(){
   var el=termBig();
   if(!termIsMobile()){ document.documentElement.style.removeProperty('--cf-term-h'); if(el){el.style.removeProperty('height');el.style.removeProperty('flex');el.style.removeProperty('min-height');} return; }   // desktop: drop inline sizing, CSS layout unchanged
   if(TERM_DRAG||!el) return;                                 // never fight an in-progress drag
+  var sc=termScroller();
+  if(!sc||sc.clientHeight<120){ requestAnimationFrame(termApplySaved); return; }   // wait until the list has laid out, else clientHeight is 0 and we'd clamp the saved value to junk (this was the 'forgets on refresh' bug)
   var v=parseInt(localStorage.getItem(termKey())||'0',10);
   termSet(v>0?v:termMaxH());                                 // default = fill the screen; a saved value is clamped to the current viewport (self-heals old oversized values)
 }
