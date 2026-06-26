@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.49.0 -- 2026-06-26
+- NEW SESSION redesign -- pick the working dir by BROWSING the project/client tree:
+  * The "Folder" picker is now an INTERACTIVE, lazily-expanding tree rooted at the project root (each folder
+    expands to show its contents on demand via /api/browse; click a folder to launch the session there). Files
+    shown dimmed for context. Replaces the old flat "Pillar (working dir)" dropdown (limited to registered
+    components) -- you can now launch anywhere down the tree (clients, projects, subfolders).
+  * Launch in any folder: /api/launch now passes `rel` through to launch() (the backend already supported a
+    project-relative working dir). Verified end-to-end (session cwd lands in the selected subfolder).
+  * The machine selector ("Run on") only appears when there's MORE than one machine -- on a single-box
+    deployment a session always runs locally, so we no longer ask. (Answers "why is there a Where?")
+
 ## 0.48.0 -- 2026-06-26
 - FIX: "New session" was unusable on the overseer + fresh nodes -- the "Where" (machine) dropdown was built
   only from the per-deployment machines registry, which is empty there, so there was nothing to select.

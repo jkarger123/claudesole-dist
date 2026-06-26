@@ -7916,7 +7916,7 @@ class H(BaseHTTPRequestHandler):
             b = json.dumps({"ok": True}).encode(); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
         if not self._auth_gate(u.path): return
         if u.path == "/api/launch":
-            return self._s(200, json.dumps(launch(body.get("target", "studio"), body.get("name", "session"), body.get("component"))))
+            return self._s(200, json.dumps(launch(body.get("target", "studio"), body.get("name", "session"), body.get("component"), body.get("rel") or None)))
         if u.path == "/api/close-session":
             return self._s(200, json.dumps(close_session(body["name"], body.get("force", False))))
         if u.path == "/api/claude-account/snapshot":
@@ -9740,6 +9740,14 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 .cfdesk-link{display:block;padding:7px 9px;border-radius:7px;color:var(--fg,#e8e8ee);font-size:12.5px;text-decoration:none}
 .cfdesk-link:hover{background:rgba(255,255,255,.07)}
 .cfdesk-ft{font-size:10.5px;color:var(--mut,#9aa3b2);margin:7px 4px 2px;line-height:1.45}
+.nstree{max-height:320px;overflow:auto;border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:6px;background:rgba(0,0,0,.18);font-size:13px}
+.nstree-row{display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.nstree-row:hover{background:rgba(255,255,255,.06)}
+.nstree-row.sel{background:rgba(231,184,75,.16);outline:1px solid rgba(231,184,75,.4)}
+.nscaret{width:14px;flex:0 0 14px;display:inline-block;text-align:center;color:var(--mut,#8a92a3);cursor:pointer;user-select:none;font-size:10px}
+.nslabel{flex:1;overflow:hidden;text-overflow:ellipsis}
+.nstree-row.nsfile{color:var(--mut,#8a92a3);opacity:.65;font-size:12px;cursor:default}
+.nstree-row.nsfile:hover{background:none}
 </style>
 <a class="cfdesk-cta" onclick="cfDeskMenu(event)" title="Get the ClaudeFather Desktop app — a real browser + your dashboard in one window"><i class="ph-light ph-desktop"></i>Get the desktop app</a>
 <div id="cfDesktopMenu" style="display:none">
@@ -10092,22 +10100,61 @@ function openMach(id){const m=D.machines.find(x=>x.id==id);const st=ST[id]||m.st
    +'<button class="btn" onclick="closeM()">Close</button></div>');}
 function PROJ(){return (window.CC&&window.CC.project)||"/Volumes/Samsung990PRO/hptuners";}
 // ---- launch / sessions / terminal ----
+// New session: pick a working dir by BROWSING the project/client tree (each folder expands lazily to show its
+// contents). The machine selector ("Run on") only appears when there's actually more than one machine -- on a
+// single-box deployment a session always runs here, so we don't ask.
+var NSV={sel:'',nodes:{},seq:0};
 function openLaunch(pt,pc){
-  // "Where" = which machine. ALWAYS offer the local box ("studio" is the backend's local-launch sentinel,
-  // works even with no machines registered) so New session works on the overseer + fresh nodes too.
   var machs=(D.machines||[]).slice();
   if(!machs.some(function(m){return m.id==='studio';})) machs.unshift({id:'studio',name:'This machine'});
-  const mo=machs.map(m=>'<option value="'+m.id+'"'+(m.id==(pt||'studio')?' selected':'')+'>'+esc(m.name||m.id)+'</option>').join("");
-  const co='<option value="">(project root)</option>'+D.components.map(c=>'<option value="'+c.id+'"'+(c.id==pc?' selected':'')+'>'+c.name+'</option>').join("");
-  const defn=(pc||pt||"session");
-  showM('<h2>New Claude session</h2><div class="row"><label>Where</label><select id="lT">'+mo+'</select></div>'
-   +'<div class="row"><label>Pillar (working dir)</label><select id="lC">'+co+'</select></div>'
-   +'<div class="row"><label>Name</label><input id="lN" value="'+esc(defn)+'" placeholder="e.g. e92cls-aux"></div>'
-   +'<div class="btns"><button class="btn" onclick="closeM()">Cancel</button><button class="btn go" onclick="doLaunchForm()">▶ Launch &amp; open terminal</button></div>');}
-function doLaunchForm(){const t=document.getElementById("lT").value,c=document.getElementById("lC").value,n=document.getElementById("lN").value.trim()||"session";doLaunch(t,c,n);}
-async function doLaunch(target,comp,name){
+  NSV={sel:'',nodes:{},seq:0};
+  var whereRow = (machs.length>1)
+    ? ('<div class="row"><label>Run on</label><select id="lT">'+machs.map(m=>'<option value="'+m.id+'"'+(m.id==(pt||'studio')?' selected':'')+'>'+esc(m.name||m.id)+'</option>').join('')+'</select></div>')
+    : ('<input type="hidden" id="lT" value="studio">');
+  showM('<h2>New Claude session</h2>'+whereRow
+   +'<div class="row" style="align-items:flex-start"><label>Folder</label><div style="flex:1;min-width:0">'
+     +'<div class="nstree" id="nsTree">Loading…</div>'
+     +'<div class="dim" id="nsSelPath" style="font-size:11px;margin-top:5px">Launch in: project root</div></div></div>'
+   +'<div class="row"><label>Name</label><input id="lN" value="session" placeholder="e.g. e92cls-aux"></div>'
+   +'<div class="btns"><button class="btn" onclick="closeM()">Cancel</button><button class="btn go" onclick="doLaunchForm()">▶ Launch &amp; open terminal</button></div>');
+  nsTreeInit();}
+async function nsFetch(rel){try{return await(await fetch('/api/browse?rel='+encodeURIComponent(rel||''))).json();}catch(e){return null;}}
+async function nsTreeInit(){
+  var box=document.getElementById('nsTree'); if(!box)return;
+  var r=await nsFetch(''); if(!r||!r.ok){box.innerHTML='<div class="dim">Could not load folders.</div>';return;}
+  box.innerHTML='';
+  var rid=nsMakeRow(box,'',(r.project||'project root'),0);
+  NSV.nodes[rid].loaded=true; nsRenderChildren(rid,r);
+  NSV.nodes[rid].expanded=true; nsSetCaret(rid,true);
+  nsSelectRow(rid);}
+function nsMakeRow(container,rel,name,depth){
+  var id=NSV.seq++; NSV.nodes[id]={rel:rel,name:name,depth:depth,loaded:false,expanded:false};
+  var row=document.createElement('div'); row.className='nstree-row'; row.id='nsrow'+id; row.style.paddingLeft=(depth*15+4)+'px';
+  row.innerHTML='<span class="nscaret" id="nsc'+id+'">▸</span><span class="nslabel">📁 '+esc(name)+'</span>';
+  row.querySelector('.nscaret').onclick=function(e){nsToggle(id,e);};
+  row.querySelector('.nslabel').onclick=function(){nsSelectRow(id);};
+  container.appendChild(row);
+  var kids=document.createElement('div'); kids.id='nskids'+id; kids.style.display='none'; container.appendChild(kids);
+  return id;}
+function nsRenderChildren(id,r){
+  var kids=document.getElementById('nskids'+id); if(!kids)return; kids.innerHTML='';
+  var d=NSV.nodes[id].depth+1;
+  (r.dirs||[]).forEach(function(x){nsMakeRow(kids,x.rel,x.name,d);});
+  (r.files||[]).forEach(function(f){var fr=document.createElement('div'); fr.className='nstree-row nsfile'; fr.style.paddingLeft=(d*15+20)+'px'; fr.innerHTML='📄 '+esc(f.name); kids.appendChild(fr);});
+  if(!(r.dirs||[]).length&&!(r.files||[]).length){var e=document.createElement('div'); e.className='dim'; e.style.cssText='padding-left:'+(d*15+20)+'px;font-size:12px'; e.textContent='(empty)'; kids.appendChild(e);}}
+async function nsToggle(id,e){if(e)e.stopPropagation(); var node=NSV.nodes[id]; var kids=document.getElementById('nskids'+id); if(!node||!kids)return;
+  if(!node.loaded){kids.innerHTML='<div class="dim" style="padding-left:'+((node.depth+1)*15+20)+'px;font-size:12px">…</div>'; var r=await nsFetch(node.rel); node.loaded=true; if(r&&r.ok)nsRenderChildren(id,r); else kids.innerHTML='';}
+  node.expanded=!node.expanded; kids.style.display=node.expanded?'block':'none'; nsSetCaret(id,node.expanded);}
+function nsSetCaret(id,open){var c=document.getElementById('nsc'+id); if(c)c.textContent=open?'▾':'▸';}
+function nsSelectRow(id){var node=NSV.nodes[id]; if(!node)return;
+  var prev=document.querySelector('.nstree-row.sel'); if(prev)prev.classList.remove('sel');
+  var row=document.getElementById('nsrow'+id); if(row)row.classList.add('sel');
+  NSV.sel=node.rel; var sp=document.getElementById('nsSelPath'); if(sp)sp.textContent='Launch in: '+(node.rel||'project root');
+  var ln=document.getElementById('lN'); if(ln){var slug=(node.name||'session').replace(/[^A-Za-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,36)||'session'; ln.value=slug;}}
+function doLaunchForm(){var t=(document.getElementById('lT')||{}).value||'studio',n=document.getElementById('lN').value.trim()||'session';doLaunch(t,'',n,NSV.sel);}
+async function doLaunch(target,comp,name,rel){
   toast("Launching…");
-  const r=await(await fetch("/api/launch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({target,component:comp,name:(name||"session")})})).json();
+  const r=await(await fetch("/api/launch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({target,component:comp,name:(name||"session"),rel:(rel||"")})})).json();
   if(!r.ok){toast("Failed: "+(r.error||"?"),6000);return;}
   closeM();
   _openTerm(r);}
