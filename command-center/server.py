@@ -5212,7 +5212,61 @@ def focus_report(lens=None, subject=None, session=None, url=None, title=None, te
     BROWSER_FOCUS = {"lens": (lens or None), "subject": (subject or None), "session": (session or None),
                      "url": (url or None), "title": (title or None),
                      "text": ((text or "")[:2000] or None), "ts": time.time()}
+    try: _homing_maybe((subject or None), (session or None))   # context-follows-you: brief the session on a switch
+    except Exception: pass
     return {"ok": True, "ts": BROWSER_FOCUS["ts"]}
+
+# ---- HOMING (docs/VISION.md Phase 3, "context follows you"): when focus moves to a NEW subject and you have a
+# session open, auto-deliver that subject's CITED context slice to the session -- so you never navigate to the
+# right context, it comes to you. Default OFF (opt-in, like capture). Safe by construction: a homing brief is
+# additive context dropped at YOUR own session's prompt (the exact "catch me up" path, NOT auto-executed), it's
+# fully cited, and a per-(subject,session) cooldown means it fires on a real SWITCH, not on every report. Runs
+# off-thread so the fire-and-forget focus-report never blocks; never raises into the caller.
+_HOMING_STATE = {"last": {}, "log": []}   # last: "subject\x00session" -> ts ;  log: recent auto-briefs (ring)
+_HOMING_COOLDOWN = 600.0     # don't re-brief the same subject+session within 10 min
+_HOMING_DWELL = 6.0          # SETTLE this long on a subject before briefing (quick fly-bys don't trigger)
+_HOMING_TIMERS = {}          # session -> pending threading.Timer (trailing-edge debounce: brief what you LAND on)
+_HOMING_LOCK = threading.Lock()
+
+def _homing_enabled():
+    try: return bool((load(FOCUS_STATE, {}) or {}).get("homing"))
+    except Exception: return False
+
+def _homing_maybe(subject, session):
+    """If homing is on, (re)arm a short dwell timer for this session so we brief the subject you SETTLE on,
+    not every subject you fly past. Each new report for a session cancels the prior pending brief. No-op when
+    homing is off / no subject / no session."""
+    if not (subject and session and _homing_enabled()): return
+    with _HOMING_LOCK:
+        t = _HOMING_TIMERS.pop(session, None)
+        if t:
+            try: t.cancel()
+            except Exception: pass
+        timer = threading.Timer(_HOMING_DWELL, _homing_fire, args=(subject, session))
+        timer.daemon = True
+        _HOMING_TIMERS[session] = timer
+        timer.start()
+
+def _homing_fire(subject, session):
+    """The dwell elapsed -> brief the settled subject (once per subject+session per cooldown). Records the log."""
+    now = time.time(); key = subject + "\x00" + session
+    with _HOMING_LOCK:
+        _HOMING_TIMERS.pop(session, None)
+        if not _homing_enabled(): return
+        if (now - _HOMING_STATE["last"].get(key, 0)) < _HOMING_COOLDOWN: return
+        _HOMING_STATE["last"][key] = now
+    try: r = context_brief(session, subject=subject, budget=3000)
+    except Exception as e: r = {"ok": False, "error": str(e)[:120]}
+    ok = bool(isinstance(r, dict) and r.get("ok"))
+    rec = {"subject": subject, "session": session, "ts": int(now), "ok": ok,
+           "count": (r.get("count") if isinstance(r, dict) else None),
+           "error": (None if ok else (r.get("error") if isinstance(r, dict) else "failed"))}
+    with _HOMING_LOCK:
+        _HOMING_STATE["log"].insert(0, rec); del _HOMING_STATE["log"][20:]
+
+def homing_status():
+    with _HOMING_LOCK:
+        return {"enabled": _homing_enabled(), "cooldown": int(_HOMING_COOLDOWN), "log": list(_HOMING_STATE["log"][:8])}
 
 # ---- RUNTIME AWARENESS: is the user in the Electron DESKTOP shell (real browser + capture available) or a
 # plain WEB browser (no embedded browser / capture)? The client reports it; the server + AGENTS read it so
@@ -7719,7 +7773,10 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/browser/commands":  # the desktop browser polls for agent-queued commands (Browser v2)
             return self._s(200, json.dumps(browser_pending(), default=str))
         if u.path == "/api/focus":   # FOCUS engine: what subject am I on right now (on-demand, gated by the trust dial)
-            return self._s(200, json.dumps(focus_now(), default=str))
+            fn = focus_now(); fn["homing"] = _homing_enabled()
+            return self._s(200, json.dumps(fn, default=str))
+        if u.path == "/api/homing":  # HOMING: on/off + recent auto-briefs (context follows you)
+            return self._s(200, json.dumps(homing_status(), default=str))
         if u.path == "/api/context/brief":   # CATCH ME UP: assemble a subject's cited slice + inject it into a session
             return self._s(200, json.dumps(context_brief((q.get("session", [""])[0]), (q.get("subject", [None])[0]),
                 (q.get("q", [None])[0]), int((q.get("budget", ["4000"])[0]) or 4000)), default=str))
@@ -7932,11 +7989,17 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(chief_say(body.get("text", ""), body.get("sender", ""),
                                                       sent_at=body.get("sent_at"), from_version=body.get("from_version"), msg_id=body.get("msg_id"))))
         if u.path == "/api/chief-broadcast": return self._s(200, json.dumps(mesh_send(body.get("text", ""), None, body.get("targets") or None, expect_reply=body.get("expect_reply", True))))
-        if u.path == "/api/focus-set":   # the trust dial: off | app (no perm) | context (needs Accessibility)
-            cap = (body.get("capture") or "off").lower()
-            if cap not in ("off", "app", "context", "deep"): cap = "off"
-            save(FOCUS_STATE, {"capture": cap}); focus.init({"capture": cap})
-            return self._s(200, json.dumps({"ok": True, "capture": cap, "signal": (focus.read_signal(cap) if cap != "off" else {})}, default=str))
+        if u.path == "/api/focus-set":   # the trust dial: off | app (no perm) | context (needs Accessibility) + homing toggle
+            cur = load(FOCUS_STATE, {}) or {}
+            if "capture" in body:
+                cap = (body.get("capture") or "off").lower()
+                if cap not in ("off", "app", "context", "deep"): cap = "off"
+                cur["capture"] = cap; focus.init({"capture": cap})
+            if "homing" in body: cur["homing"] = bool(body.get("homing"))
+            save(FOCUS_STATE, cur)
+            cap = cur.get("capture", "off")
+            return self._s(200, json.dumps({"ok": True, "capture": cap, "homing": bool(cur.get("homing")),
+                "signal": (focus.read_signal(cap) if cap != "off" else {})}, default=str))
         if u.path == "/api/runtime":  # the client (desktop shell or web) reports its runtime + capabilities
             return self._s(200, json.dumps(runtime_report(body.get("runtime"), body.get("platform"), body.get("capabilities")), default=str))
         if u.path == "/api/browser/queue":  # an agent/dashboard queues a browser command (open/scroll/highlight/...)
@@ -10443,12 +10506,13 @@ async function loadContext(){
     +'<button class="mini go" onclick="ctxAssemble()">Assemble</button>'
     +'<button class="mini" onclick="ctxBrief()" title="Assemble this context and hand it to a session -- the agent rides in already knowing">&#128203; Brief a session</button></div>'
     +'<div id="ctxOut" style="margin-top:10px"></div></div>';
-  document.getElementById("grid").innerHTML='<div class="modstack"><div id="ctxFocus"></div>'+h+'</div>';
+  document.getElementById("grid").innerHTML='<div class="modstack"><div id="ctxFocus"></div><div id="ctxHoming"></div>'+h+'</div>';
   loadFocus();
 }
 // FOCUS row: "what you're on" (on-demand, trust-dialed). Off by default; one tap to enable (app-only, no perm).
 async function loadFocus(){
   var el=document.getElementById('ctxFocus'); if(!el)return;
+  loadHoming();   // homing is always available (in-app signal), independent of the macOS trust dial
   var f={}; try{ f=await(await fetch('/api/focus')).json(); }catch(e){ return; }
   // Only show the "enable the macOS reader" prompt when the dial is OFF *and* the browser isn't reporting.
   // A fresh browser report (this device) drives the row regardless of the macOS trust dial.
@@ -10484,6 +10548,22 @@ function cfReportFocus(subject, session){
   }catch(e){}
 }
 async function focusSet(cap){ try{ await fetch('/api/focus-set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({capture:cap})}); }catch(e){} toast(cap==='off'?'Focus detection off':'Focus detection on ('+cap+')',3500); loadFocus(); }
+// HOMING row: context follows you. When on, switching to a subject auto-briefs your open session with its
+// cited slice (the "catch me up" path, fired automatically on a switch). Opt-in; shows recent auto-briefs.
+async function loadHoming(){
+  var el=document.getElementById('ctxHoming'); if(!el)return;
+  var h={}; try{ h=await(await fetch('/api/homing')).json(); }catch(e){ el.innerHTML=''; return; }
+  var on=!!h.enabled;
+  var log=(h.log||[]).slice(0,4).map(function(r){
+    return '<div class="dim" style="font-size:11px;margin-top:3px">'+(r.ok?'✓':'·')+' '+e2(r.subject||'')+' &rarr; '+esc(r.session||'')
+      +(r.count?(' <span style="opacity:.7">('+r.count+' cited)</span>'):'')
+      +(r.ok?'':' <span style="opacity:.6">'+esc((r.error||'no context yet').slice(0,60))+'</span>')
+      +' <span style="opacity:.55">'+tago(r.ts)+'</span></div>';
+  }).join('');
+  el.innerHTML='<div class="xr-focus"><b>🧭 Homing</b> <span class="dim">'+(on?'on — switch to a subject and your open session is auto-briefed with its cited context.':'off — turn on to let context follow you: switching subjects auto-briefs your open session.')+'</span>'
+    +'<span style="margin-left:auto"><button class="mini '+(on?'':'go')+'" onclick="homingSet('+(on?'false':'true')+')">'+(on?'turn off':'turn on')+'</button></span></div>'+(log||'');
+}
+async function homingSet(on){ try{ await fetch('/api/focus-set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({homing:!!on})}); }catch(e){} toast(on?'Homing on — context will follow you':'Homing off',3500); loadHoming(); }
 function ctxFocusBrief(subj){ var i=document.getElementById('ctxSubj'); if(i)i.value=subj; ctxBrief(); }
 // THE CONTEXT X-RAY: the sleek "behind the curtain" view of how the router assembled this slice.
 function ctxXray(p){

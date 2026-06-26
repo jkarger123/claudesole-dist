@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.46.0 -- 2026-06-26
+- HOMING (docs/VISION.md Phase 3, "context follows you"): when focus moves to a NEW subject and you have a
+  session open, ClaudeFather auto-delivers that subject's CITED context slice to the session -- you never
+  navigate to the right context, it comes to you. Opt-in (default OFF), safe by construction:
+  * server.py: `_homing_maybe`/`_homing_fire` fire from `/api/focus-report` on a focus switch; trailing-edge
+    DWELL debounce (6s -- briefs the subject you SETTLE on, not ones you fly past) + per-(subject,session)
+    cooldown (10 min). Reuses the exact `context_brief` "catch me up" path (additive, cited, NOT auto-run).
+  * `/api/focus-set` now MERGES (toggling the trust dial no longer wipes homing); new `homing` flag.
+  * GET `/api/homing` (on/off + recent auto-briefs); `/api/focus` reports the homing flag.
+  * Context lens: a "🧭 Homing" row -- one-tap on/off + a live log of recent auto-briefs (subject -> session,
+    N cited). Independent of the macOS trust dial (in-app focus signal is always available).
+- DESKTOP: macOS installer build verified (electron-builder -> arm64 + x64 DMG/zip); Windows NSIS via dist:win.
+
 ## 0.45.0 -- 2026-06-26
 - BROWSER v2 -- indistinguishable-from-Chrome + agent-drivable, fully inside the context loop:
   * SERVER command channel (server.py): POST /api/browser/queue (open/navigate/new_tab/scroll_to/highlight/
