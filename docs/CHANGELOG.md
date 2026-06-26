@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.41.0 -- 2026-06-26
+- VISION Phase 3 (the magic) + the CONTEXT X-RAY (show users why this is hard to replicate):
+  * FOCUS/INTENT engine (focus.py): reads a lightweight activity signal -- frontmost app + bundle id (NO
+    macOS permission), and (when granted) window title + active browser URL -- and classifies it to a SUBJECT
+    in your context graph (rules -> lexical match). On-demand only (no background capture); gated by a TRUST
+    DIAL (off|app|context|deep, default OFF, per-deployment). /api/focus (read) + /api/focus-set (dial). A
+    "🎯 you're on X" row in the Context lens with one-tap enable + "brief a session on this". Degrades
+    silently when Accessibility/Automation isn't granted.
+  * CONTEXT X-RAY: a sleek, plain-language "behind the curtain" panel rendered on every assemble -- a
+    horizontal pipeline (memories in store -> candidates matched -> ranked by relevance·recency·trust ->
+    duplicates/noise removed -> fit the window -> every source cited), source + trust chips, and the punchline
+    contrast: a blank chat box starts with nothing; ClaudeFather just handed the agent N sourced, ranked,
+    cited facts from your tools automatically. The router now returns a `pipeline` summary to power it.
+
 ## 0.40.0 -- 2026-06-26
 - VISION Phase 2 -- the context layer becomes USED, not just visible: "CATCH ME UP". /api/context/brief +
   a "Brief a session" button on the Context lens: name a subject/question, the ROUTER assembles the cited,

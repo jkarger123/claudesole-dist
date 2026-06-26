@@ -266,8 +266,20 @@ def assemble(query=None, subject=None, budget_tokens=3500, kinds=None, half_life
     text = _render(ordered, subject, query)
     citations = [{"id": x["id"], "source": x["source"], "kind": x["kind"],
                   "ts": x["ts"], "trust": x["trust"]} for x in ordered]
+    # PIPELINE: the "behind the curtain" story -- what the router actually did, for the Context X-ray.
+    _TLABEL = {0: "external", 1: "contact", 2: "internal", 3: "owner"}
+    src_mix, trust_mix = {}, {}
+    for it in ordered:
+        src_mix[it["source"]] = src_mix.get(it["source"], 0) + 1
+        tl = _TLABEL.get(it["trust"], str(it["trust"]))
+        trust_mix[tl] = trust_mix.get(tl, 0) + 1
+    pipeline = {"considered": len(cand), "ranked": len(scored), "kept": len(ordered),
+                "dropped": max(0, len(scored) - len(ordered)),
+                "sources": src_mix, "trust": trust_mix, "budget": budget_tokens, "used": used,
+                "signals": ["relevance", "recency", "trust"], "placement": "edges (highest-signal first & last)",
+                "store_total": stats().get("events", 0)}
     return {"ok": True, "subject": subject, "query": query, "budget": budget_tokens, "used": used,
-            "count": len(ordered), "items": ordered, "text": text, "citations": citations}
+            "count": len(ordered), "items": ordered, "text": text, "citations": citations, "pipeline": pipeline}
 
 def _edge_place(items):
     # items are sorted by score desc; render order = [0,2,4,...,5,3,1] -> #1 first, #2 last.
@@ -299,6 +311,17 @@ def stats():
     r = c.execute("SELECT MIN(ts) a, MAX(ts) b FROM events").fetchone()
     out["span"] = {"oldest": r["a"], "newest": r["b"]}
     return out
+
+def subjects(limit=300):
+    """Known subjects/people the focus engine can match an activity signal against (graph nodes + the
+    distinct subject keys seen on events). name + aliases/keys."""
+    c = _connect(); out = {}
+    for r in c.execute("SELECT type,name,keys FROM entities WHERE type IN ('subject','project','client','person') ORDER BY updated DESC LIMIT ?", (limit,)).fetchall():
+        out[_norm(r["name"])] = {"name": r["name"], "type": r["type"], "keys": json.loads(r["keys"] or "[]")}
+    for r in c.execute("SELECT DISTINCT subject FROM events WHERE subject IS NOT NULL AND subject!='' LIMIT ?", (limit,)).fetchall():
+        k = _norm(r["subject"])
+        if k and k not in out: out[k] = {"name": r["subject"], "type": "subject", "keys": []}
+    return list(out.values())
 
 def search(q, limit=30):
     rows = _fetch([i for i, _ in _search_ids(q, limit)])

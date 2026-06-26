@@ -10,6 +10,7 @@ import base64, fcntl, glob, hashlib, hmac, json, os, pty, re, secrets, select, s
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import granola   # Granola -> agency tree module (calls + client CLAUDE.md updates + tasks/reminders)
 import context   # THE CONTEXT LAYER: event store + entity graph + the router that assembles perfect slices (docs/VISION.md)
+import focus     # FOCUS/INTENT engine: read activity signal -> classify to a subject ("context follows you")
 try:   # Ed25519 for asymmetric superadmin (public-key). Optional: nodes without it fall back to HMAC + a doctor warning.
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
     from cryptography.hazmat.primitives import serialization as _crypto_ser
@@ -5168,6 +5169,26 @@ try:
 except Exception as _e:
     print("[context] init failed:", _e)
 
+FOCUS_STATE = os.path.join(STATE_DIR, "_focus.json")   # the trust dial setting (capture level), per-deployment
+def _focus_capture():
+    try: return (load(FOCUS_STATE, {}) or {}).get("capture") or ((CC.get("focus") or {}).get("capture")) or "off"
+    except Exception: return "off"
+try:
+    focus.init({"capture": _focus_capture(), "rules": (CC.get("focus") or {}).get("rules") or {}})
+except Exception as _e:
+    print("[focus] init failed:", _e)
+
+def focus_now():
+    """On-demand: read the current activity signal (only when asked -- no background capture) and classify it
+    to a subject in the context graph. Gated by the trust dial (capture level; default off)."""
+    cap = _focus_capture()
+    if cap == "off":
+        return {"capture": "off", "subject": None, "signal": {}, "confidence": 0.0, "why": "focus detection is off"}
+    sig = focus.read_signal(cap)
+    res = focus.classify(sig, context.subjects(), (CC.get("focus") or {}).get("rules") or {})
+    res.update({"capture": cap, "signal": sig, "grant_ok": focus.title_grant_ok()})
+    return res
+
 def _context_backfill():
     """Pull events from the surfaces we ALREADY have (Granola calls, deliverables, Gmail/Calendar caches) into
     the context store. Idempotent (ext_id-keyed) so it can run on boot + periodically without duplicating.
@@ -7434,6 +7455,8 @@ class H(BaseHTTPRequestHandler):
                 kinds=([k for k in (q.get("kinds", [""])[0] or "").split(",") if k] or None)), default=str))
         if u.path == "/api/context/search":
             return self._s(200, json.dumps(context.search((q.get("q", [""])[0]) or "", int((q.get("limit", ["30"])[0]) or 30)), default=str))
+        if u.path == "/api/focus":   # FOCUS engine: what subject am I on right now (on-demand, gated by the trust dial)
+            return self._s(200, json.dumps(focus_now(), default=str))
         if u.path == "/api/context/brief":   # CATCH ME UP: assemble a subject's cited slice + inject it into a session
             return self._s(200, json.dumps(context_brief((q.get("session", [""])[0]), (q.get("subject", [None])[0]),
                 (q.get("q", [None])[0]), int((q.get("budget", ["4000"])[0]) or 4000)), default=str))
@@ -7646,6 +7669,11 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(chief_say(body.get("text", ""), body.get("sender", ""),
                                                       sent_at=body.get("sent_at"), from_version=body.get("from_version"), msg_id=body.get("msg_id"))))
         if u.path == "/api/chief-broadcast": return self._s(200, json.dumps(mesh_send(body.get("text", ""), None, body.get("targets") or None, expect_reply=body.get("expect_reply", True))))
+        if u.path == "/api/focus-set":   # the trust dial: off | app (no perm) | context (needs Accessibility)
+            cap = (body.get("capture") or "off").lower()
+            if cap not in ("off", "app", "context", "deep"): cap = "off"
+            save(FOCUS_STATE, {"capture": cap}); focus.init({"capture": cap})
+            return self._s(200, json.dumps({"ok": True, "capture": cap, "signal": (focus.read_signal(cap) if cap != "off" else {})}, default=str))
         if u.path == "/api/mesh-send":     return self._s(200, json.dumps(mesh_send(body.get("text", ""), body.get("target") or None, body.get("targets") or None, expect_reply=body.get("expect_reply", True))))
         if u.path == "/api/mesh-recv":
             if MESH_ENFORCE and not _mesh_token_ok(self.headers.get("X-Mesh-Token")): return self._s(403, json.dumps({"ok": False, "error": "mesh auth"}))
@@ -8308,6 +8336,23 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .lenstools:empty{display:none}
 .lenstools .sesslive{font-size:12px;font-weight:800;color:var(--mut);white-space:nowrap}
 .lenstools .mini{padding:6px 10px}
+/* Context X-ray: the "behind the curtain" view of how the perfect context gets assembled (Context lens) */
+.ctx-xray{grid-column:1/-1;background:linear-gradient(160deg,#12141e,#0c0d14);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin-bottom:10px;box-shadow:0 10px 34px #0007}
+.ctx-xray .xr-h{font-size:11.5px;font-weight:800;letter-spacing:.7px;text-transform:uppercase;color:var(--accent-light);margin-bottom:13px;display:flex;align-items:center;gap:8px}
+.ctx-flow{display:flex;align-items:stretch;flex-wrap:wrap}
+.ctx-stage{flex:1;min-width:115px;position:relative;padding:8px 10px;text-align:center}
+.ctx-stage:not(:last-child)::after{content:"\2192";position:absolute;right:-6px;top:42%;transform:translateY(-50%);color:var(--accent);font-weight:800;opacity:.65}
+.ctx-stage .n{font-size:23px;font-weight:800;color:#fff;line-height:1}
+.ctx-stage .l{font-size:11px;color:var(--mut);margin-top:5px;line-height:1.32}
+.ctx-stage.lit .n{color:var(--accent-light)}
+@keyframes xrpulse{0%,100%{opacity:.6}50%{opacity:1}}
+.ctx-stage.lit{animation:xrpulse 1.7s ease-in-out infinite}
+.xr-srcs{display:flex;flex-wrap:wrap;gap:6px;margin-top:13px}
+.xr-chip{font-size:11.5px;font-weight:700;padding:3px 9px;border-radius:20px;border:1px solid var(--line);background:#0006;color:var(--mut)}
+.xr-contrast{margin-top:13px;padding:11px 14px;border-radius:11px;background:rgba(var(--accent-rgb),.10);border:1px solid rgba(var(--accent-rgb),.30);font-size:13px;line-height:1.55;color:var(--ink)}
+.xr-contrast b{color:var(--accent-light)}
+.xr-focus{margin-bottom:11px;padding:10px 13px;border-radius:11px;background:#0c1422;border:1px solid var(--line);font-size:13.5px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.xr-focus .dim{color:var(--mut);font-size:12px}
 input,select,textarea{background:var(--bg2);border:1px solid var(--line);color:var(--ink);padding:9px 12px;border-radius:9px;font-size:14px;outline:none}
 input:focus,select:focus,textarea:focus{border-color:var(--accent)}#search{flex:1;min-width:150px}
 textarea{width:100%;min-height:240px;font-family:ui-monospace,Menlo,Monaco,monospace;font-size:12.5px;line-height:1.55;resize:vertical}
@@ -10018,7 +10063,43 @@ async function loadContext(){
     +'<button class="mini go" onclick="ctxAssemble()">Assemble</button>'
     +'<button class="mini" onclick="ctxBrief()" title="Assemble this context and hand it to a session -- the agent rides in already knowing">&#128203; Brief a session</button></div>'
     +'<div id="ctxOut" style="margin-top:10px"></div></div>';
-  document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
+  document.getElementById("grid").innerHTML='<div class="modstack"><div id="ctxFocus"></div>'+h+'</div>';
+  loadFocus();
+}
+// FOCUS row: "what you're on" (on-demand, trust-dialed). Off by default; one tap to enable (app-only, no perm).
+async function loadFocus(){
+  var el=document.getElementById('ctxFocus'); if(!el)return;
+  var f={}; try{ f=await(await fetch('/api/focus')).json(); }catch(e){ return; }
+  if(f.capture==='off'){
+    el.innerHTML='<div class="xr-focus"><b>🎯 Focus detection</b><span class="dim">off — when on, ClaudeFather notices what you\'re working on and lines up the right context automatically.</span>'
+      +'<span style="margin-left:auto;display:flex;gap:6px"><button class="mini go" onclick="focusSet(\'app\')">Enable (app only)</button><button class="mini" onclick="focusSet(\'context\')" title="also read window title + active browser URL (needs a one-time macOS Accessibility grant)">Enable (full)</button></span></div>';
+    return;
+  }
+  var sigbits=[]; var s=f.signal||{};
+  if(s.app)sigbits.push(esc(s.app)); if(s.title)sigbits.push(esc((s.title||'').slice(0,50))); if(s.url)sigbits.push(esc((s.url||'').replace(/^https?:\/\//,'').slice(0,40)));
+  var subj=f.subject?('<b>🎯 You\'re on: '+e2(f.subject)+'</b> <span class="dim">('+Math.round((f.confidence||0)*100)+'% · from '+(sigbits.join(' · ')||'signal')+')</span>')
+    : '<b>🎯 Focus on</b> <span class="dim">'+(sigbits.join(' · ')||'(reading…)')+' — no matching subject in your context yet</span>';
+  var warn=(f.capture==='context'&&f.grant_ok===false)?' <span class="dim" style="color:#f0a35e">⚠ grant Accessibility to read window/URL</span>':'';
+  el.innerHTML='<div class="xr-focus">'+subj+warn
+    +'<span style="margin-left:auto;display:flex;gap:6px">'+(f.subject?'<button class="mini go" onclick="ctxFocusBrief(\''+esc(f.subject)+'\')">Brief a session on this</button>':'')+'<button class="mini" onclick="focusSet(\'off\')">turn off</button></span></div>';
+}
+async function focusSet(cap){ try{ await fetch('/api/focus-set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({capture:cap})}); }catch(e){} toast(cap==='off'?'Focus detection off':'Focus detection on ('+cap+')',3500); loadFocus(); }
+function ctxFocusBrief(subj){ var i=document.getElementById('ctxSubj'); if(i)i.value=subj; ctxBrief(); }
+// THE CONTEXT X-RAY: the sleek "behind the curtain" view of how the router assembled this slice.
+function ctxXray(p){
+  if(!p) return '';
+  var nsrc=Object.keys(p.sources||{}).length;
+  var stages=[[p.store_total||0,'memories in your store'],[p.considered||0,'matched as candidates'],
+    ['×','ranked: relevance · recency · trust'],[p.dropped||0,'duplicates & noise removed'],
+    [p.kept||0,'fit the window (~'+(p.used||0)+' tok)'],['✓','every source cited']];
+  var flow=stages.map(function(s,i){return '<div class="ctx-stage'+(i===4?' lit':'')+'"><div class="n">'+s[0]+'</div><div class="l">'+s[1]+'</div></div>';}).join('');
+  var tcol={owner:'#3fb950',internal:'#58a6ff',contact:'#d29922',external:'#8b949e'};
+  var srcs=Object.entries(p.sources||{}).map(function(kv){return '<span class="xr-chip">'+esc(kv[0])+' · '+kv[1]+'</span>';}).join('');
+  var trust=Object.entries(p.trust||{}).map(function(kv){var c=tcol[kv[0]]||'#8b949e';return '<span class="xr-chip" style="color:'+c+';border-color:'+c+'55">'+esc(kv[0])+' '+kv[1]+'</span>';}).join('');
+  return '<div class="ctx-xray"><div class="xr-h">🔬 Context X-ray — how this slice was assembled</div>'
+    +'<div class="ctx-flow">'+flow+'</div>'
+    +((srcs||trust)?'<div class="xr-srcs">'+srcs+(trust?'<span style="width:8px"></span>'+trust:'')+'</div>':'')
+    +'<div class="xr-contrast">A blank chat box starts with <b>nothing</b>. ClaudeFather just handed the agent <b>'+(p.kept||0)+' precisely-chosen, sourced facts</b> from <b>'+nsrc+'</b> of your own tools — ranked, de-duplicated, budgeted to the window, and <b>cited</b> — automatically. Doing this by hand would mean digging through every inbox, calendar, call and file and pasting the right pieces, in the right order, every single time.</div></div>';
 }
 var CTX_BRIEF=null;
 function ctxBrief(){
@@ -10054,7 +10135,7 @@ async function ctxAssemble(){
       +'<span class="sub" style="margin-left:auto">'+ago(Date.now()/1000-it.ts)+' ago &middot; score '+it.score+'</span></div>'
       +(it.snippet?'<div class="meta" style="margin-top:5px">'+e2(it.snippet)+'</div>':'')+'</div>';
   }).join('');
-  if(out)out.innerHTML=h;
+  if(out)out.innerHTML=ctxXray(b.pipeline)+h;
 }
 // ---- Comms lens: the persistent mesh inbox. Renders the full inter-chief thread (in + out) from
 // /api/mesh, independent of TUI state, with a composer to message any peer chief or all of them. ----
