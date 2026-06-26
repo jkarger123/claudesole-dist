@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.57.0 -- 2026-06-26
+- NEW-SESSION TREE revamp (sleek, two-line, session-aware):
+  * Two-line rows -- bold name over a CLIPPED one-line description (readable but can never overflow the modal;
+    proper fix, not a tooltip). Folders only (no files).
+  * LIVE SESSIONS surfaced: a folder shows a green "● N" badge for agents already running in it; expanding it
+    lists those sessions as "resume →" rows (click jumps into the running session instead of launching new).
+    Backend: `_sessions_by_rel()` maps live tmux sessions to their project-relative folder; launch_tree +
+    browse_dir annotate places/dirs with `sessions`.
+  * ＋ ADD SUBFOLDER at ANY node (hover action) -- same mechanism as the Projects tab (`/api/module-add` ->
+    CLAUDE.md scaffold); the new folder appears in place, ready to launch into.
+
 ## 0.56.1 -- 2026-06-26
 - FIX New-session picker overflow: launch-point rows showed the full (often long) CLAUDE.md description inline,
   which ran past the modal and triggered a horizontal scrollbar. Rows are now COMPACT (icon + name); the full

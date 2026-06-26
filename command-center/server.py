@@ -2546,16 +2546,20 @@ def browse_dir(rel):
             _m = json.load(open(_ej)) or {}
             ext_launch = set(_m.get("launchable") or []) | {os.path.basename((p.get("path") or "").rstrip("/")) for p in (_m.get("launch_points") or [])}
     except Exception: pass
+    sbr = _sessions_by_rel()
     for nm in entries:
         ap = os.path.join(base, nm); isd = os.path.isdir(ap)
         if _browse_blocked(nm, isd): continue
         try: st = os.stat(ap)
         except Exception: continue
-        rec = {"name": nm, "rel": os.path.relpath(ap, PROJECT), "isdir": isd, "mtime": st.st_mtime}
+        relp = os.path.relpath(ap, PROJECT)
+        rec = {"name": nm, "rel": relp, "isdir": isd, "mtime": st.st_mtime}
         if isd:
             rec["designated"] = bool(_launch_designated(ap) or nm in ext_launch)  # a recognized launch place
             cm = os.path.join(ap, "CLAUDE.md")
             if os.path.isfile(cm): rec["description"] = _msummary(cm)[1]          # one-line preview, if it has one
+            s = sbr.get(relp)
+            if s: rec["sessions"] = s                                             # live agents working here
             dirs.append(rec)
         else: rec["size"] = st.st_size; files.append(rec)
     return {"ok": True, "rel": rel, "parent": (os.path.dirname(rel) if rel else None),
@@ -2661,6 +2665,22 @@ register_launch_provider("agents", _lp_agents, 20)
 register_launch_provider("extensions", _lp_extensions, 30)
 register_launch_provider("preset", _lp_preset, 45)
 
+def _sessions_by_rel():
+    """Map LIVE sessions to the project-relative folder they run in (by cwd), so the picker can show which
+    folders already have an agent working in them."""
+    out = {}
+    try: sess = tmux_sessions()
+    except Exception: return out
+    for s in sess:
+        cwd = (s.get("cwd") or "").rstrip("/")
+        if not cwd: continue
+        try: rel = os.path.relpath(cwd, PROJECT)
+        except Exception: continue
+        if rel == ".": rel = ""
+        if rel.startswith(".."): continue          # outside the project tree
+        out.setdefault(rel, []).append({"name": s["name"], "label": s.get("label") or s["name"]})
+    return out
+
 def launch_tree():
     """The New Session launch picker: launch points DECLARED by core providers + extensions + preset, merged
     into the recognizable groups a user already knows (Projects / Agents / Extensions / ...). Each place then
@@ -2686,6 +2706,11 @@ def launch_tree():
                 if os.path.isdir(ap) and nm not in CC_SKIP and not nm.startswith("."): fb.append(_place_rec(nm, nm, ap))
         except Exception: pass
         groups = [{"name": "Folders", "icon": "📂", "places": fb}]
+    sbr = _sessions_by_rel()                                    # annotate places with their live sessions
+    for g in groups:
+        for p in g["places"]:
+            s = sbr.get(p["rel"])
+            if s: p["sessions"] = s
     return {"ok": True, "groups": groups, "project": os.path.basename(PROJECT.rstrip("/")) or "project"}
 
 def backup_status(ttl=8):
@@ -9895,22 +9920,29 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 .cfdesk-link{display:block;padding:7px 9px;border-radius:7px;color:var(--fg,#e8e8ee);font-size:12.5px;text-decoration:none}
 .cfdesk-link:hover{background:rgba(255,255,255,.07)}
 .cfdesk-ft{font-size:10.5px;color:var(--mut,#9aa3b2);margin:7px 4px 2px;line-height:1.45}
-.nstree{max-height:320px;overflow-y:auto;overflow-x:hidden;border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:6px;background:rgba(0,0,0,.18);font-size:13px}
-.nstree-row{display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:6px;cursor:pointer;white-space:nowrap;max-width:100%}
+.nstree{max-height:340px;overflow-y:auto;overflow-x:hidden;border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:6px;background:rgba(0,0,0,.18);font-size:13px}
+.nstree-row{display:flex;align-items:flex-start;gap:5px;padding:4px 5px;border-radius:7px;cursor:pointer;max-width:100%}
 .nstree-row:hover{background:rgba(255,255,255,.06)}
 .nstree-row.sel{background:rgba(231,184,75,.16);outline:1px solid rgba(231,184,75,.4)}
-.nscaret{width:14px;flex:0 0 14px;display:inline-block;text-align:center;color:var(--mut,#8a92a3);cursor:pointer;user-select:none;font-size:10px}
-.nslabel{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nstree-row.nsfile{color:var(--mut,#8a92a3);opacity:.65;font-size:12px;cursor:default}
-.nstree-row.nsfile:hover{background:none}
-.nstree-row.nsanc .nslabel{opacity:.55;font-weight:400}
-.nstree-row .nslabel{font-weight:600}
+.nscaret{flex:0 0 14px;width:14px;text-align:center;color:var(--mut,#8a92a3);cursor:pointer;user-select:none;font-size:10px;line-height:20px}
+.nsmain{flex:1;min-width:0}
+.nstop{display:flex;align-items:center;gap:6px;line-height:20px}
+.nsname{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.nstree-row.nsanc .nsname{opacity:.62;font-weight:500}
+.nssess{flex:0 0 auto;font-size:10px;font-weight:700;color:#3fb950}
+.nsact{margin-left:auto;flex:0 0 auto;opacity:0;transition:opacity .1s}
+.nstree-row:hover .nsact{opacity:1}
+.nsbtn{background:rgba(255,255,255,.09);border:none;color:var(--mut,#8a92a3);border-radius:6px;padding:0 7px;cursor:pointer;font-size:13px;line-height:18px}
+.nsbtn:hover{background:var(--accent,#e7b84b);color:#15120a}
+.nsdesc{font-size:11px;opacity:.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nslabel{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:20px}
+.nssrow .nslabel{font-weight:500;color:#cfe8d6}
+.nsopen{font-size:10px;color:#3fb950;opacity:.85}
 .nsgroup{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--mut,#8a92a3);margin:9px 2px 2px;padding:5px 4px 4px;border-top:1px solid rgba(255,255,255,.07);cursor:pointer;border-radius:6px}
 .nsgroup:hover{background:rgba(255,255,255,.05)}
 .nsgroup:first-child{border-top:none;margin-top:0}
 .nsgcaret{font-size:9px;width:10px;display:inline-block;text-align:center}
 .nsgcount{margin-left:auto;opacity:.5}
-.nsdesc{opacity:.55;font-size:11px;font-weight:400}
 </style>
 <a class="cfdesk-cta" onclick="cfDeskMenu(event)" title="Get the ClaudeFather Desktop app — a real browser + your dashboard in one window"><i class="ph-light ph-desktop"></i>Get the desktop app</a>
 <div id="cfDesktopMenu" style="display:none">
@@ -10309,27 +10341,51 @@ async function nsTreeInit(){
     hdr.onclick=function(){nsGroupToggle(gid);};
     box.appendChild(hdr);
     var gc=document.createElement('div'); gc.id=gid; gc.style.display='none'; box.appendChild(gc);   // collapsed by default
-    (g.places||[]).forEach(function(pl){ nsRow(gc, pl.rel, pl.name, 0, (pl.designated!==false), pl.description, pl.icon); });
+    (g.places||[]).forEach(function(pl){ nsRow(gc, pl, 0); });
   });
   nsSelectRoot();}
 function nsGroupToggle(gid){var c=document.getElementById(gid),h=document.getElementById(gid+'h');if(!c)return;var open=c.style.display!=='none';c.style.display=open?'none':'';if(h){var cr=h.querySelector('.nsgcaret');if(cr)cr.textContent=open?'▸':'▾';}}
-function nsRow(container,rel,name,depth,designated,desc,icon){
-  var id=NSV.seq++; NSV.nodes[id]={rel:rel,name:name,depth:depth,loaded:false,expanded:false};
+// Two-line launch-place row: bold name (+ live-session badge + hover actions) over a clipped description.
+function nsRow(container,rec,depth){
+  var id=NSV.seq++; var designated=(rec.designated!==false); var sess=rec.sessions||[];
+  NSV.nodes[id]={rel:rec.rel,name:rec.name,depth:depth,loaded:false,expanded:false,sessions:sess};
   var row=document.createElement('div'); row.className='nstree-row'+(designated?'':' nsanc'); row.id='nsrow'+id; row.style.paddingLeft=(depth*15+4)+'px';
-  if(desc)row.title=name+' — '+desc;   // full description on hover; NOT inline (kept compact so rows never overflow)
-  row.innerHTML='<span class="nscaret" id="nsc'+id+'">▸</span><span class="nslabel">'+(icon||(designated?'🧩':'📁'))+' '+esc(name)+'</span>';
+  var badge=sess.length?'<span class="nssess" title="'+sess.length+' agent session'+(sess.length>1?'s':'')+' open here">● '+sess.length+'</span>':'';
+  row.innerHTML='<span class="nscaret" id="nsc'+id+'">▸</span>'
+    +'<div class="nsmain"><div class="nstop"><span class="nsname">'+(rec.icon||(designated?'🧩':'📁'))+' '+esc(rec.name)+'</span>'+badge
+      +'<span class="nsact"><button class="nsbtn" title="Add a subfolder here" onclick="nsAddSub(event,'+id+')">＋</button></span></div>'
+      +(rec.description?'<div class="nsdesc">'+esc(rec.description)+'</div>':'')+'</div>';
   row.querySelector('.nscaret').onclick=function(e){nsToggle(id,e);};
-  row.querySelector('.nslabel').onclick=function(){nsSelectRow(id);};
+  row.querySelector('.nsname').onclick=function(){nsSelectRow(id);};
   container.appendChild(row);
   var kids=document.createElement('div'); kids.id='nskids'+id; kids.style.display='none'; container.appendChild(kids);
   return id;}
+// a live session running in this folder -> click to jump into it (instead of launching a new one)
+function nsSessRow(kids,s,depth){
+  var d=document.createElement('div'); d.className='nstree-row nssrow'; d.style.paddingLeft=(depth*15+18)+'px';
+  d.innerHTML='<span class="nscaret"></span><span class="nslabel">🟢 '+esc(s.label||s.name)+' <span class="nsopen">resume →</span></span>';
+  d.onclick=function(){ if(typeof closeM==='function')closeM(); openInSessions(s.name); };
+  kids.appendChild(d);}
 // FOLDERS only -- never individual files (you launch an agent IN a folder, not on a file)
 function nsPaint(kids,r,depth){
-  (r.dirs||[]).forEach(function(d){ nsRow(kids, d.rel, d.name, depth, !!d.designated, d.description, null); });
+  (r.dirs||[]).forEach(function(d){ nsRow(kids, d, depth); });
   if(!(r.dirs||[]).length){var e=document.createElement('div'); e.className='dim'; e.style.cssText='padding-left:'+(depth*15+20)+'px;font-size:12px'; e.textContent='(no subfolders)'; kids.appendChild(e);}}
 async function nsToggle(id,e){if(e)e.stopPropagation(); var node=NSV.nodes[id]; var kids=document.getElementById('nskids'+id); if(!node||!kids)return;
-  if(!node.loaded){kids.innerHTML='<div class="dim" style="padding-left:'+((node.depth+1)*15+20)+'px;font-size:12px">…</div>'; var r=await nsFetch(node.rel); node.loaded=true; kids.innerHTML=''; if(r&&r.ok)nsPaint(kids,r,node.depth+1);}
+  if(!node.loaded){
+    kids.innerHTML='<div class="dim" style="padding-left:'+((node.depth+1)*15+20)+'px;font-size:12px">…</div>';
+    var r=await nsFetch(node.rel); node.loaded=true; kids.innerHTML='';
+    (node.sessions||[]).forEach(function(s){ nsSessRow(kids,s,node.depth+1); });   // live agents here, first
+    if(r&&r.ok)nsPaint(kids,r,node.depth+1);
+  }
   node.expanded=!node.expanded; kids.style.display=node.expanded?'block':'none'; nsSetCaret(id,node.expanded);}
+// add a subfolder at ANY node, the same way the Projects tab does (module-add -> CLAUDE.md scaffold)
+async function nsAddSub(e,id){ if(e)e.stopPropagation(); var node=NSV.nodes[id]; if(!node)return;
+  var name=(prompt('New subfolder name (letters/numbers/-_):')||'').trim(); if(!name)return;
+  try{ await fetch('/api/module-add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parent:node.rel,name:name,summary:''})}); }catch(err){}
+  if(typeof toast==='function')toast('Created '+name+' — select it + launch to set it up');
+  node.loaded=false; node.expanded=false; var kids=document.getElementById('nskids'+id); if(kids)kids.innerHTML='';
+  nsToggle(id);   // reload + expand to reveal the new folder
+}
 function nsSetCaret(id,open){var c=document.getElementById('nsc'+id); if(c)c.textContent=open?'▾':'▸';}
 function nsSelectRow(id){var node=NSV.nodes[id]; if(!node)return;
   var prev=document.querySelector('.nstree-row.sel'); if(prev)prev.classList.remove('sel');
