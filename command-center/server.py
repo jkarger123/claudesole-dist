@@ -10125,6 +10125,7 @@ async function nsTreeInit(){
   box.innerHTML='';
   var rid=nsMakeRow(box,'',(r.project||'project root'),0);
   NSV.nodes[rid].loaded=true; nsRenderChildren(rid,r);
+  var kids=document.getElementById('nskids'+rid); if(kids)kids.style.display='block';   // actually SHOW the root's children
   NSV.nodes[rid].expanded=true; nsSetCaret(rid,true);
   nsSelectRow(rid);}
 function nsMakeRow(container,rel,name,depth){

@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.50.0 -- 2026-06-26
+- FIX (New session tree): the root auto-expanded its caret but its children container stayed display:none, so
+  only the project root row showed ("just shows hptuners-control"). nsTreeInit now actually reveals the root's
+  children. Verified visible (computed offsetParent), not just present in the DOM.
+
 ## 0.49.0 -- 2026-06-26
 - NEW SESSION redesign -- pick the working dir by BROWSING the project/client tree:
   * The "Folder" picker is now an INTERACTIVE, lazily-expanding tree rooted at the project root (each folder
