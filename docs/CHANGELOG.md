@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.44.0 -- 2026-06-26
+- RUNTIME AWARENESS + agents understand the system (enterprise; works with OR without the desktop app):
+  * The client reports its runtime -- the Electron desktop shell injects window.cfDesktop (runtime/platform/
+    capabilities) via a workspace preload; the web app detects it, sets window.CC.runtime ('desktop'|'web'),
+    POSTs /api/runtime, and tags <body class=cf-desktop>. No desktop app -> plain 'web', everything still works.
+  * GET /api/system -> a self-describing capability map (node + runtime + live surfaces: context, capture,
+    google, agency, slack, zoom, focus, mesh). UI gating + agent awareness source.
+  * Agents UNDERSTAND the whole system: a live SYSTEM MAP (_system_brief) is injected into the chief launch
+    brief -- the architecture (context layer + router/brief, capture loop, focus engine), what's configured on
+    THIS node, and the user's runtime (so an agent never offers a desktop-only capability on web, and uses the
+    context router to catch up instead of guessing).
+  * Desktop app is now Windows + Mac (electron-builder win/nsis target + dist:win/dist:all); capability
+    detection degrades per-OS. Brain server stays Mac-first; users can be on either.
+
 ## 0.43.2 -- 2026-06-26
 - HARDEN (turn the 0.43.0 incident into a permanent fix -- a node must never die over one file):
   * DEFENSIVE engine imports: granola/context/focus/slack/zoom/clips are now imported via `_opt_import`; a

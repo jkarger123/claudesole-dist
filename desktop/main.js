@@ -358,7 +358,10 @@ function createTab(type, url) {
       partition,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true            // content views run sandboxed; we never inject node into web pages
+      sandbox: true,           // content views run sandboxed; we never inject node into web pages
+      // The Workspace (dashboard) view gets a tiny preload that injects window.cfDesktop so the web app knows
+      // it's the DESKTOP runtime (real browser + capture). Browser tabs get no preload (they're the open web).
+      ...(type === 'workspace' ? { preload: path.join(__dirname, 'dashboard-preload.js') } : {})
     }
   });
 

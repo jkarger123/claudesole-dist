@@ -2837,8 +2837,8 @@ def chief_open():
               "exact command + output -- believing you 'did' something is NOT evidence it happened. You MAY "
               "flag a genuine discrepancy ONCE, with concrete evidence, in case of a blind spot -- but "
               "Mission Control's call is FINAL; do not re-litigate or loop. Never state your own version or "
-              "timestamps from memory; the mesh stamps those -- read the envelope. %s"
-              % (brief, roster_text()))
+              "timestamps from memory; the mesh stamps those -- read the envelope. %s %s"
+              % (brief, _system_brief(), roster_text()))
     cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'export MESH_CC="http://localhost:%d"; '
           "claude --dangerously-skip-permissions %s --settings %s %s"
           % (PORT, CC_TITLE_FLAG, shlex.quote(settings_file), shlex.quote(prompt)))
@@ -5213,6 +5213,47 @@ def focus_report(lens=None, subject=None, session=None, url=None, title=None, te
                      "url": (url or None), "title": (title or None),
                      "text": ((text or "")[:2000] or None), "ts": time.time()}
     return {"ok": True, "ts": BROWSER_FOCUS["ts"]}
+
+# ---- RUNTIME AWARENESS: is the user in the Electron DESKTOP shell (real browser + capture available) or a
+# plain WEB browser (no embedded browser / capture)? The client reports it; the server + AGENTS read it so
+# nothing offers a capability the runtime can't do. Plus a self-describing SYSTEM map so any agent understands
+# the whole platform (surfaces present, what's configured, the user's runtime). Enterprise + packageable. ----
+RUNTIME_STATE = {"runtime": "web", "platform": None, "capabilities": [], "ts": 0}
+def runtime_report(runtime=None, platform=None, capabilities=None):
+    RUNTIME_STATE.update({"runtime": (runtime or "web"), "platform": platform,
+                          "capabilities": capabilities or [], "ts": int(time.time())})
+    return {"ok": True, "runtime": RUNTIME_STATE["runtime"]}
+def _mod_on(mod, fn):
+    try: return getattr(mod, fn)() is True
+    except Exception: return False
+def system_info():
+    """Self-describing capability map -- what THIS node is + what's available right now. Powers UI gating and
+    the agent system-brief so agents understand the whole system instead of guessing."""
+    fresh = (int(time.time()) - RUNTIME_STATE.get("ts", 0)) < 300   # a report in the last 5 min = current
+    rt = dict(RUNTIME_STATE) if fresh else {"runtime": "web", "platform": None, "capabilities": [], "ts": 0}
+    return {"node": {"project": PROJECT, "brand": BRAND, "product": PRODUCT, "version": _manifest_version(), "role": ROLE},
+            "runtime": rt,
+            "surfaces": {"context": True, "capture": True,
+                         "google": google_configured(), "agency": is_agency(),
+                         "slack": _mod_on(slack, "configured"), "zoom": _mod_on(zoom, "is_configured"),
+                         "focus": _focus_capture(), "mesh": bool([p for p in peers() if p.get("id") != INSTANCE_ID])}}
+
+def _system_brief():
+    """A concise, LIVE description of the platform + what's available on THIS node + the user's runtime, so a
+    launched agent UNDERSTANDS the whole system instead of guessing. Injected into the chief launch brief."""
+    try:
+        si = system_info(); s = si["surfaces"]; rt = si["runtime"].get("runtime", "web")
+        on = ", ".join(k for k in ("context", "capture", "google", "agency", "slack", "zoom", "mesh") if s.get(k)) or "context, capture"
+        rtnote = " (DESKTOP: a real embedded browser + page capture + co-reading are available -- you can ask the user to be shown things in-browser)" if rt == "desktop" else " (WEB: no embedded browser/capture -- those are desktop-only)"
+        return ("SYSTEM MAP: you operate inside ClaudeFather, a self-hosted context OS. Core = a CONTEXT LAYER "
+                "(event store + entity graph + a router that assembles the perfect CITED slice for a subject -- "
+                "GET /api/context/assemble, /api/context/brief 'catch me up') feeding everything; a CAPTURE loop "
+                "(saved pages/clips -> review-first triage -> CC:CLIPS digests + tasks); a FOCUS engine (context "
+                "follows the user). Live surfaces on THIS node: " + on + ". The user is on the '" + rt +
+                "' runtime" + rtnote + ". Prefer the context router/brief to get caught up on a subject rather "
+                "than guessing; honor review-first (propose, never auto-apply); everything is provenance-stamped.")
+    except Exception:
+        return "SYSTEM MAP: ClaudeFather context OS (context layer + capture + focus + mesh)."
 
 def focus_now():
     """On-demand: what subject am I on right now? PREFERS a fresh BROWSER-reported focus (the remote user's
@@ -7624,6 +7665,8 @@ class H(BaseHTTPRequestHandler):
                 kinds=([k for k in (q.get("kinds", [""])[0] or "").split(",") if k] or None)), default=str))
         if u.path == "/api/context/search":
             return self._s(200, json.dumps(context.search((q.get("q", [""])[0]) or "", int((q.get("limit", ["30"])[0]) or 30)), default=str))
+        if u.path == "/api/system":  # self-describing capability map (runtime + surfaces) -- for UI gating + agents
+            return self._s(200, json.dumps(system_info(), default=str))
         if u.path == "/api/focus":   # FOCUS engine: what subject am I on right now (on-demand, gated by the trust dial)
             return self._s(200, json.dumps(focus_now(), default=str))
         if u.path == "/api/context/brief":   # CATCH ME UP: assemble a subject's cited slice + inject it into a session
@@ -7843,6 +7886,8 @@ class H(BaseHTTPRequestHandler):
             if cap not in ("off", "app", "context", "deep"): cap = "off"
             save(FOCUS_STATE, {"capture": cap}); focus.init({"capture": cap})
             return self._s(200, json.dumps({"ok": True, "capture": cap, "signal": (focus.read_signal(cap) if cap != "off" else {})}, default=str))
+        if u.path == "/api/runtime":  # the client (desktop shell or web) reports its runtime + capabilities
+            return self._s(200, json.dumps(runtime_report(body.get("runtime"), body.get("platform"), body.get("capabilities")), default=str))
         if u.path == "/api/focus-report":   # the WEB-SIDE bridge: browser reports the lens/subject/session you're on
             return self._s(200, json.dumps(focus_report(
                 lens=body.get("lens"), subject=body.get("subject"), session=body.get("session"),
@@ -14690,6 +14735,22 @@ function ssTutTick(){
 }
 function ssTutInit(){ if(ssTutSeen())return; ssTut.iv=setInterval(ssTutTick,1500); setTimeout(ssTutTick,1400); }
 ssWire(); ssTouchWire(); ssTutInit();
+// RUNTIME AWARENESS: detect whether we're in the ClaudeFather DESKTOP shell (Electron injects window.cfDesktop
+// with a real browser + capture) or a plain web browser, expose it on window.CC, and report it so the server
+// + agents know what this user can actually do. Adapts UI hints (desktop-only features show how to unlock).
+function cfRuntimeInit(){
+  try{
+    var d = window.cfDesktop || null;
+    window.CC = window.CC || {};
+    window.CC.runtime = d ? 'desktop' : 'web';
+    window.CC.desktop = d || null;
+    var payload = d ? {runtime:'desktop', platform:d.platform||null, capabilities:d.capabilities||[]}
+                    : {runtime:'web', platform:null, capabilities:['gmail','calendar','drive','context','capture-save','focus-report']};
+    fetch('/api/runtime',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),keepalive:true}).catch(function(){});
+    document.body.classList.toggle('cf-desktop', !!d);   // CSS can reveal desktop-only affordances
+  }catch(e){}
+}
+cfRuntimeInit();
 
 // ====================================================================================================
 // fx-* : AGENTIC LEVERAGE -- "Smart reply with 360 context" + "Sender history" + Action Queue.

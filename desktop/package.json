@@ -9,6 +9,8 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:all": "electron-builder -mw",
     "pack": "electron-builder --dir"
   },
   "devDependencies": {
@@ -21,6 +23,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "dashboard-preload.js",
       "renderer/**/*",
       "package.json"
     ],
@@ -32,6 +35,11 @@
       "target": [
         { "target": "dmg", "arch": ["arm64", "x64"] },
         { "target": "zip", "arch": ["arm64", "x64"] }
+      ]
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64", "arm64"] }
       ]
     },
     "dmg": {
