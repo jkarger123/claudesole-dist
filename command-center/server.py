@@ -9730,6 +9730,25 @@ body.gm-resizing iframe{pointer-events:none}
 <div id="app">
 <aside id="side">
 <div class="brand"><img class="cfmark" src="/static/brand/claudefather_mark.png" alt=""><span class="bword">text2tune<small>COMMAND CENTER</small></span></div>
+<style>
+.cfdesk-cta{display:flex;align-items:center;justify-content:center;gap:7px;margin:8px 12px 4px;padding:10px 12px;border-radius:11px;background:linear-gradient(135deg,var(--accent,#e7b84b),#c8922e);color:#1a1407;font-weight:800;font-size:13px;cursor:pointer;border:none;box-shadow:0 2px 12px rgba(231,184,75,.28);user-select:none}
+.cfdesk-cta:hover{filter:brightness(1.06)}
+body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!important}
+#cfDesktopMenu{margin:0 12px 8px;background:var(--card,#16161c);border:1px solid rgba(255,255,255,.09);border-radius:11px;padding:8px;box-shadow:0 10px 28px rgba(0,0,0,.45)}
+.cfdesk-hd{font-size:11px;color:var(--mut,#9aa3b2);text-transform:uppercase;letter-spacing:.05em;margin:2px 4px 7px;font-weight:700}
+.cfdesk-link{display:block;padding:8px 10px;border-radius:8px;color:var(--fg,#e8e8ee);font-size:13px;text-decoration:none}
+.cfdesk-link:hover{background:rgba(255,255,255,.07)}
+.cfdesk-ft{font-size:11px;color:var(--mut,#9aa3b2);margin:7px 4px 2px;line-height:1.45}
+</style>
+<a class="cfdesk-cta" onclick="cfDeskMenu(event)" title="Get the ClaudeFather Desktop app — a real browser + your dashboard in one window">🎩 Try ClaudeFather Desktop</a>
+<div id="cfDesktopMenu" style="display:none">
+<div class="cfdesk-hd">Download for your computer</div>
+<a id="cfdlMacArm" class="cfdesk-link" href="https://github.com/jkarger123/claudesole-dist/releases/latest/download/ClaudeFather-Desktop-arm64.dmg">🍎 Mac · Apple Silicon (M1–M4)</a>
+<a id="cfdlMacIntel" class="cfdesk-link" href="https://github.com/jkarger123/claudesole-dist/releases/latest/download/ClaudeFather-Desktop-x64.dmg">🍎 Mac · Intel</a>
+<a id="cfdlWin" class="cfdesk-link" href="https://github.com/jkarger123/claudesole-dist/releases/latest/download/ClaudeFather-Desktop-Setup.exe">🪟 Windows</a>
+<div class="cfdesk-ft">A real browser + your full dashboard in one app, so your AI can ride along. First launch asks for your server URL + PIN.</div>
+</div>
+<script>function cfDeskMenu(e){try{if(e)e.stopPropagation();var m=document.getElementById('cfDesktopMenu');if(m)m.style.display=(m.style.display==='block'?'none':'block');}catch(_){}}(function(){try{var ua=navigator.userAgent||'';var id=/Windows/i.test(ua)?'cfdlWin':(/Mac/i.test(ua)?'cfdlMacArm':null);if(id){var el=document.getElementById(id);if(el)el.insertAdjacentHTML('beforeend',' <span style="opacity:.65;font-size:11px">· recommended</span>');}}catch(_){}})();</script>
 <nav class="lens" id="lens">
 <button data-l="portfolio"><i class="ph-light ph-broadcast"></i>Portfolio</button>
 <button data-l="projects"><i class="ph-light ph-tree-structure"></i>Projects</button>

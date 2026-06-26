@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.47.0 -- 2026-06-26
+- DESKTOP delivery + auto-update (so we can ship the shell often with minimal labor):
+  * Dashboard CTA "🎩 Try ClaudeFather Desktop" (sidebar, prominent) -- Mac (Apple Silicon/Intel) + Windows
+    download links to GitHub Releases `latest/download` (stable filenames). WEB-runtime only (auto-hidden
+    inside the desktop app via body.cf-desktop). Auto-marks the recommended OS.
+  * Shell auto-update via electron-updater + GitHub Releases (jkarger123/claudesole-dist) -- ONE release is
+    both the download source and the update feed. Windows: silent download + install on quit (works unsigned).
+    macOS: notify + open download (unsigned can't silently update; sign with an Apple Developer ID for silent).
+    No-op in dev; never crashes the app.
+  * package.json: publish=github, stable artifactNames (ClaudeFather-Desktop-${arch}.dmg/.zip,
+    ClaudeFather-Desktop-Setup.exe), release:mac/release:win scripts. First release published: v0.1.0.
+  * THE MODEL (key): the desktop app is a THIN SHELL loading the LIVE dashboard -> dashboard/feature/server
+    changes need NO rebuild (users just reload); ONLY shell-file changes (main.js/preload/dashboard-preload/
+    package.json) require a release. Playbook: desktop/RELEASE.md; one-shot: cf-desktop-release.sh (MC-only).
+
 ## 0.46.0 -- 2026-06-26
 - HOMING (docs/VISION.md Phase 3, "context follows you"): when focus moves to a NEW subject and you have a
   session open, ClaudeFather auto-delivers that subject's CITED context slice to the session -- you never

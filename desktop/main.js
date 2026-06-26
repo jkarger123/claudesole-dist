@@ -930,6 +930,40 @@ function createWindow() {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// Auto-update (electron-updater + GitHub Releases). The SHELL self-updates; dashboard/feature updates are
+// server-side and need no rebuild (we just load the live dashboard). Windows: silent download + install on
+// quit. macOS (unsigned): can't silently update, so notify + open the releases page to download. No-op in
+// dev (unpackaged) and never crashes the app (every step guarded).
+// ---------------------------------------------------------------------------------------------------
+const RELEASES_URL = 'https://github.com/jkarger123/claudesole-dist/releases/latest';
+function initAutoUpdate() {
+  if (!app.isPackaged) return;                       // only a built app has an update feed
+  let autoUpdater;
+  try { ({ autoUpdater } = require('electron-updater')); } catch (e) { return; }
+  try {
+    autoUpdater.autoDownload = (process.platform === 'win32');   // mac (unsigned) can't silently install
+    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.on('update-available', (info) => {
+      if (process.platform === 'win32') return;                  // win downloads automatically
+      dialog.showMessageBox(win, { type: 'info', buttons: ['Download', 'Later'], defaultId: 0,
+        title: 'Update available',
+        message: 'ClaudeFather Desktop ' + ((info && info.version) || '') + ' is available.',
+        detail: 'A newer version is ready to download.' })
+        .then(r => { if (r.response === 0) shell.openExternal(RELEASES_URL); }).catch(() => {});
+    });
+    autoUpdater.on('update-downloaded', (info) => {
+      dialog.showMessageBox(win, { type: 'info', buttons: ['Restart now', 'Later'], defaultId: 0,
+        title: 'Update ready',
+        message: 'ClaudeFather Desktop ' + ((info && info.version) || '') + ' has been downloaded.',
+        detail: 'Restart to finish updating.' })
+        .then(r => { if (r.response === 0) autoUpdater.quitAndInstall(); }).catch(() => {});
+    });
+    autoUpdater.on('error', (e) => console.log('[updater]', e && e.message));
+    autoUpdater.checkForUpdates().catch(e => console.log('[updater] check', e && e.message));
+  } catch (e) { console.log('[updater] init', e && e.message); }
+}
+
+// ---------------------------------------------------------------------------------------------------
 // App lifecycle
 // ---------------------------------------------------------------------------------------------------
 app.whenReady().then(() => {
@@ -937,6 +971,7 @@ app.whenReady().then(() => {
   wireIpc();
   createWindow();
   registerShortcuts();   // the window starts focused; 'focus' may not fire on first show
+  setTimeout(initAutoUpdate, 4000);   // check shortly after launch (let the window settle first)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

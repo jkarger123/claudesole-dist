@@ -11,7 +11,12 @@
     "dist": "electron-builder --mac",
     "dist:win": "electron-builder --win",
     "dist:all": "electron-builder -mw",
-    "pack": "electron-builder --dir"
+    "pack": "electron-builder --dir",
+    "release:mac": "electron-builder --mac --publish always",
+    "release:win": "electron-builder --win --publish never"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
   },
   "devDependencies": {
     "electron": "^31.0.0",
@@ -20,6 +25,15 @@
   "build": {
     "appId": "com.claudefather.desktop",
     "productName": "ClaudeFather Desktop",
+    "artifactName": "ClaudeFather-Desktop-${arch}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "jkarger123",
+        "repo": "claudesole-dist",
+        "releaseType": "release"
+      }
+    ],
     "files": [
       "main.js",
       "preload.js",
@@ -38,6 +52,7 @@
       ]
     },
     "win": {
+      "artifactName": "ClaudeFather-Desktop-Setup.${ext}",
       "target": [
         { "target": "nsis", "arch": ["x64", "arm64"] }
       ]
