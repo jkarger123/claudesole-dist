@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.43.2 -- 2026-06-26
+- HARDEN (turn the 0.43.0 incident into a permanent fix -- a node must never die over one file):
+  * DEFENSIVE engine imports: granola/context/focus/slack/zoom/clips are now imported via `_opt_import`; a
+    missing/broken optional module substitutes an inert stub (every call returns {"ok":false,...}) so the
+    FEATURE goes dark but the NODE STAYS UP -- no more crash-loop on a missing import.
+  * PRE-SHIP invariant (`command-center/preship.py`): verifies every local command-center/*.py that server.py
+    imports is in framework_paths (the exact thing I missed with clips.py). Run before every ship; exit 1 on
+    a gap. (Root cause of the AFP outage: server.py imported clips.py but it wasn't in framework_paths, so
+    cc-update didn't propagate it.) Also observed + noted: a dead peer can stall a node via mesh/superadmin
+    blocking -- follow-up to bound all peer-contacting calls so an unreachable peer can never hang a node.
+
 ## 0.43.1 -- 2026-06-26
 - HOTFIX: add command-center/clips.py to framework_paths. 0.43.0 shipped a server.py that `import clips` but
   clips.py wasn't in framework_paths, so cc-update didn't propagate it -> remote nodes (AFP) crash-looped on

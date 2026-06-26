@@ -1,7 +1,7 @@
 {
   "product": "ClaudeFather",
   "former_name": "Claudesole",
-  "version": "0.43.1",
+  "version": "0.43.2",
   "description": "Manifest that defines which paths are FRAMEWORK (ship + propagate to every ClaudeFather deployment on update) vs PRESERVE (per-deployment config/data/secrets/learnings -- never overwritten by an update).",
   "framework_paths": [
     "command-center/server.py",
@@ -12,6 +12,7 @@
     "command-center/context.py",
     "command-center/focus.py",
     "command-center/clips.py",
+    "command-center/preship.py",
     "command-center/slack.py",
     "command-center/zoom.py",
     "command-center/mesh_stop_hook.py",

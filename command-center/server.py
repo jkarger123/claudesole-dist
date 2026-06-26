@@ -8,12 +8,25 @@ A faithful port of the Karger & Co Command Center, adapted for the HP Tuners fle
 Python stdlib only. Serves on 0.0.0.0:8799 -> reachable over Tailscale at http://100.109.63.56:8799 ."""
 import base64, fcntl, glob, hashlib, hmac, json, os, pty, re, secrets, select, shutil, signal, socket, struct, subprocess, sys, termios, threading, time, urllib.parse, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import granola   # Granola -> agency tree module (calls + client CLAUDE.md updates + tasks/reminders)
-import context   # THE CONTEXT LAYER: event store + entity graph + the router that assembles perfect slices (docs/VISION.md)
-import focus     # FOCUS/INTENT engine: read activity signal -> classify to a subject ("context follows you")
-import slack     # Slack -> context layer (read-only ingest, trust=contact; stdlib urllib, no SDK)
-import zoom      # Zoom transcript intake -> the granola proposal pipeline (calls/CC:CALLS + tasks)
-import clips      # CAPTURE SPINE: Capture -> Triage -> Apply (review-first); clips -> context store + CC:CLIPS digest
+# Engine sub-modules are imported DEFENSIVELY: a missing/broken optional module must NEVER crash-loop a whole
+# node (an un-shipped clips.py once took AFP down). On import failure we substitute an inert stub whose every
+# call returns {"ok":False,"error":...} -- the feature goes dark, the node stays up. (Enterprise invariant.)
+class _MissingMod:
+    def __init__(self, name, err=""): self.__dict__["_n"] = name; self.__dict__["_e"] = str(err)[:120]
+    def __getattr__(self, k):
+        def _noop(*a, **kw): return {"ok": False, "error": "%s module unavailable (%s)" % (self._n, self._e)}
+        return _noop
+def _opt_import(name):
+    try: return __import__(name)
+    except Exception as e:
+        print("[import] optional engine module %r UNAVAILABLE -> feature disabled, node stays up: %s" % (name, e))
+        return _MissingMod(name, e)
+granola = _opt_import("granola")   # Granola -> agency tree (calls + client CLAUDE.md + tasks)
+context = _opt_import("context")   # THE CONTEXT LAYER: event store + entity graph + the router (docs/VISION.md)
+focus   = _opt_import("focus")     # FOCUS/INTENT engine: activity signal -> subject ("context follows you")
+slack   = _opt_import("slack")     # Slack -> context layer (read-only ingest, trust=contact)
+zoom    = _opt_import("zoom")      # Zoom transcript intake -> the granola proposal pipeline
+clips   = _opt_import("clips")     # CAPTURE SPINE: Capture -> Triage -> Apply (review-first)
 try:   # Ed25519 for asymmetric superadmin (public-key). Optional: nodes without it fall back to HMAC + a doctor warning.
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
     from cryptography.hazmat.primitives import serialization as _crypto_ser
