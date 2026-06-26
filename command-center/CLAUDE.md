@@ -110,6 +110,14 @@ Brand assets in `static/brand/`; terminal via `static/xterm.js`; remote desktop 
 
 ## Hard rules / gotchas
 - **Stdlib only.** Don't add pip deps to `server.py`. `cryptography` is the sole optional import (guarded).
+- **Tasks extraction must not flood the list.** The FREE programmatic sweep (`_extract_tasks_from_text`,
+  `tasks_sweep_programmatic`) scans sent/received mail for commitments/requests. THREE invariants keep it sane
+  (regressions here = a junk-task flood, esp. on bulk-outreach inboxes): (1) contraction patterns REQUIRE an
+  apostrophe — never optional (`i'?ll`/`we'?ll` also match "ill"/"well", so greetings like "Hope you're well!"
+  became "(you committed)" tasks); (2) greetings/pleasantries/sign-offs are dropped via `_is_task_boiler`
+  (extend its list, don't loosen it); (3) `task_add` dedups on the `fp` fingerprint in ANY status, so a
+  dismissed/done suggestion never resurrects on the daily morning re-scan (keeps the loop idempotent). Titles
+  are HTML-unescaped + tag-stripped in `task_add`. Per-node data: `_tasks.json` (gitignored state).
 - **Restart after edits:** changes don't take effect until the `hpcc` tmux session is recreated —
   use the `claudesole-restart` skill.
 - **Portability boundary:** anything project/tenant-specific goes in `cc.config.json`, not the code.
