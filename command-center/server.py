@@ -8323,13 +8323,17 @@ body.ss-tut-on #sessbar{z-index:9995!important;box-shadow:0 -6px 40px 8px rgba(v
   /* sessions lens: drop the usage strip + hint and maximize the focus terminal between the nav and the dock */
   body.cf-sessions #tkstripwrap, body.cf-sessions .cf-sesshint{display:none!important}
   body.cf-sessions .focusonly{height:auto}
-  body.cf-sessions .focusonly .bigsess{height:calc(100dvh - 72px - var(--cf-dock-h))!important;min-height:0!important}   /* nav + dock -> rest = terminal (the compact header card is gone; controls moved into the topbar) */
+  body.cf-sessions .focusonly .bigsess{height:var(--cf-term-h, calc(100dvh - 76px - var(--cf-dock-h)))!important;min-height:0!important}   /* nav + grip + dock -> rest = terminal (header card gone; controls in the topbar). --cf-term-h = the user's drag-resized, remembered height (set by termResizeInit) */
+  body.cf-sessions .termgrip{display:flex;align-items:center;justify-content:center;height:20px;margin-top:4px;cursor:ns-resize;touch-action:none;-webkit-touch-callout:none;flex:0 0 auto}
+  body.cf-sessions .termgrip i{width:46px;height:5px;border-radius:3px;background:var(--line);transition:background .15s,width .15s}
+  body.cf-sessions .termgrip.drag i,body.cf-sessions .termgrip:active i{background:var(--accent);width:66px}
 }
 /* Sessions LENS: focus = ONLY the big terminal (littles removed); in-flow column, never floats over usage. */
 .focusonly{display:flex;flex-direction:column;
   height:calc(100vh - 255px);min-height:420px}   /* offset = topbar + slim usage strip + bottom taskbar (the old title/control card is gone -> ~45px reclaimed for the terminal) */
 .focusonly .bigsess{flex:1;min-height:0}
 .focusonly .bigsess .stframe{flex:1;min-height:0}
+.termgrip{display:none}   /* drag-to-resize grip: mobile focus view only (shown in the <=820px block) */
 @media(max-width:820px){.focusonly{height:auto}.focusonly .bigsess{height:calc(100dvh - 200px);min-height:380px}}
 /* ========================================================================
    SHARED SHELL + DESIGN SYSTEM  (cmdk-* / shell-*)  -- append inside <style>
@@ -12805,6 +12809,7 @@ async function loadSessions(quiet){
   else body=renderFocus(s);
   document.getElementById("grid").innerHTML='<div class="modstack">'+head+body+'</div>';   // clean vertical stack -- usage strip (in head) sits ABOVE the focus block, never overlapped
   unpeekNow(); startSnaps(); ccWireDropzones();
+  termApplySaved(); termResizeInit();   // restore the user's remembered terminal height + wire the drag-resize grip
 }
 // ---- Give Claude a file: drag-drop / tap-to-attach onto a session ----------------------------------
 // Upload the dropped/picked file, then the server types its absolute path into the tmux session so Claude
@@ -12870,8 +12875,42 @@ function renderFocus(s){
   // One big terminal + a visible attach bar (mobile/fallback) + a drag overlay (covers the iframe on dragover).
   var h='<div class="focusonly">'
     +'<div class="bigsess" data-ccsess="'+esc(big.name)+'">'+bigHead(big)+ccDropBar(big.name)+'<iframe class="stframe" src="/term?name='+encodeURIComponent(big.name)+'"></iframe>'+ccDropOverlay()+'</div>'
+    +'<div class="termgrip" id="termGrip" title="Drag to resize the terminal (remembered on this device)"><i></i></div>'
     +'</div>';
   return h;
+}
+// ---- Mobile focus-terminal resize: drag the grip below the terminal to size it; remembered PER DEVICE
+// (separate keys for phone vs desktop viewport). The CSS var --cf-term-h overrides the default height; we
+// clamp to the current viewport so a rotated/smaller screen never strands the terminal off-screen. ----
+function termIsMobile(){ return !!(window.matchMedia&&window.matchMedia('(max-width:820px)').matches); }
+function termKey(){ return termIsMobile()?'hpcc_term_h_m':'hpcc_term_h_d'; }
+function termBig(){ return document.querySelector('.focusonly .bigsess'); }
+function termMaxH(){ var bs=termBig(); var top=bs?bs.getBoundingClientRect().top:120;
+  var dock=parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cf-dock-h'))||0;
+  return Math.max(240, Math.round(window.innerHeight - top - dock - 34)); }   // leave room for the grip + a hair, never under the dock
+function termClampH(v){ return Math.max(220, Math.min(Math.round(v), termMaxH())); }
+function termApplySaved(){
+  if(!termIsMobile()){ document.documentElement.style.removeProperty('--cf-term-h'); return; }   // desktop CSS ignores the var; keep it clean
+  var v=parseInt(localStorage.getItem(termKey())||'0',10);
+  if(v>0){ document.documentElement.style.setProperty('--cf-term-h',termClampH(v)+'px'); }
+  else { document.documentElement.style.removeProperty('--cf-term-h'); }
+}
+function termResizeInit(){
+  if(!termResizeInit._r){ termResizeInit._r=1;
+    window.addEventListener('resize',function(){ termApplySaved(); });
+    window.addEventListener('orientationchange',function(){ setTimeout(termApplySaved,300); }); }
+  var g=document.getElementById('termGrip'); if(!g||g._w) return; g._w=1;
+  var top0=0,drag=false;
+  function down(y){ var el=termBig(); if(!el)return; top0=el.getBoundingClientRect().top; drag=true; g.classList.add('drag'); document.body.style.userSelect='none'; }
+  function move(y){ if(!drag)return; document.documentElement.style.setProperty('--cf-term-h',termClampH(y-top0)+'px'); }
+  function up(){ if(!drag)return; drag=false; g.classList.remove('drag'); document.body.style.userSelect='';
+    var el=termBig(); if(el){ try{ localStorage.setItem(termKey(),termClampH(el.getBoundingClientRect().height)); }catch(e){} } }
+  g.addEventListener('touchstart',function(e){ if(e.touches.length!==1)return; down(e.touches[0].clientY); },{passive:true});
+  g.addEventListener('touchmove',function(e){ if(!drag)return; e.preventDefault(); move(e.touches[0].clientY); },{passive:false});
+  g.addEventListener('touchend',up); g.addEventListener('touchcancel',up);
+  g.addEventListener('mousedown',function(e){ e.preventDefault(); down(e.clientY);
+    var mm=function(ev){ move(ev.clientY); }, mu=function(){ up(); document.removeEventListener('mousemove',mm); document.removeEventListener('mouseup',mu); };
+    document.addEventListener('mousemove',mm); document.addEventListener('mouseup',mu); });
 }
 function focusBig(name){ if(name==SESSBIG)return; SESSBIG=name; loadSessions(true); if(typeof syncHash==='function')syncHash(); }
 // littles dock removed — keep no-op/alias stubs so any stray caller stays defined.

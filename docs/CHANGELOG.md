@@ -9,7 +9,12 @@ both) to see if it is behind. Newest first.
   (sessToolsHTML/paintSessTools), and the redundant full-width header card (title + hint + duplicate ＋New)
   is DELETED. Only the slim metered-usage strip remains above the terminal. ＋Add is hidden on Sessions
   (▶ New session is the action). Reclaimed vertical space goes to the terminal: focus height offset 300->255px
-  desktop, 104->72px mobile. Generic framework pattern (#lensTools) any lens can use to avoid a 2nd bar.
+  desktop, 104->76px mobile. Generic framework pattern (#lensTools) any lens can use to avoid a 2nd bar.
+- UI (mobile focus terminal -- taller + drag-to-resize, remembered per device): the mobile focus terminal
+  is taller by default, and a grip below it (⋯) drag-resizes it (touch + mouse). The chosen height persists
+  in localStorage PER DEVICE (separate phone/desktop-viewport keys) and is clamped to the current viewport on
+  load/rotate so it never strands off-screen or under the dock. Driven by a --cf-term-h CSS var
+  (termApplySaved/termResizeInit); desktop layout unchanged (grip hidden, var ignored).
 
 ## 0.37.1 -- 2026-06-25
 - WIRE + TEACH (drag-anything, round 2): (1) Granola CALL TRANSCRIPTS are now draggable from the Calls lens
