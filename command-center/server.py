@@ -9895,12 +9895,12 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 .cfdesk-link{display:block;padding:7px 9px;border-radius:7px;color:var(--fg,#e8e8ee);font-size:12.5px;text-decoration:none}
 .cfdesk-link:hover{background:rgba(255,255,255,.07)}
 .cfdesk-ft{font-size:10.5px;color:var(--mut,#9aa3b2);margin:7px 4px 2px;line-height:1.45}
-.nstree{max-height:320px;overflow:auto;border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:6px;background:rgba(0,0,0,.18);font-size:13px}
-.nstree-row{display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.nstree{max-height:320px;overflow-y:auto;overflow-x:hidden;border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:6px;background:rgba(0,0,0,.18);font-size:13px}
+.nstree-row{display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:6px;cursor:pointer;white-space:nowrap;max-width:100%}
 .nstree-row:hover{background:rgba(255,255,255,.06)}
 .nstree-row.sel{background:rgba(231,184,75,.16);outline:1px solid rgba(231,184,75,.4)}
 .nscaret{width:14px;flex:0 0 14px;display:inline-block;text-align:center;color:var(--mut,#8a92a3);cursor:pointer;user-select:none;font-size:10px}
-.nslabel{flex:1;overflow:hidden;text-overflow:ellipsis}
+.nslabel{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nstree-row.nsfile{color:var(--mut,#8a92a3);opacity:.65;font-size:12px;cursor:default}
 .nstree-row.nsfile:hover{background:none}
 .nstree-row.nsanc .nslabel{opacity:.55;font-weight:400}
@@ -10316,7 +10316,8 @@ function nsGroupToggle(gid){var c=document.getElementById(gid),h=document.getEle
 function nsRow(container,rel,name,depth,designated,desc,icon){
   var id=NSV.seq++; NSV.nodes[id]={rel:rel,name:name,depth:depth,loaded:false,expanded:false};
   var row=document.createElement('div'); row.className='nstree-row'+(designated?'':' nsanc'); row.id='nsrow'+id; row.style.paddingLeft=(depth*15+4)+'px';
-  row.innerHTML='<span class="nscaret" id="nsc'+id+'">▸</span><span class="nslabel">'+(icon||(designated?'🧩':'📁'))+' '+esc(name)+(desc?'<span class="nsdesc"> — '+esc(desc)+'</span>':'')+'</span>';
+  if(desc)row.title=name+' — '+desc;   // full description on hover; NOT inline (kept compact so rows never overflow)
+  row.innerHTML='<span class="nscaret" id="nsc'+id+'">▸</span><span class="nslabel">'+(icon||(designated?'🧩':'📁'))+' '+esc(name)+'</span>';
   row.querySelector('.nscaret').onclick=function(e){nsToggle(id,e);};
   row.querySelector('.nslabel').onclick=function(){nsSelectRow(id);};
   container.appendChild(row);

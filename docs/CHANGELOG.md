@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.56.1 -- 2026-06-26
+- FIX New-session picker overflow: launch-point rows showed the full (often long) CLAUDE.md description inline,
+  which ran past the modal and triggered a horizontal scrollbar. Rows are now COMPACT (icon + name); the full
+  description shows as a hover tooltip. Plus the label clips with ellipsis + tree is overflow-x:hidden.
+
 ## 0.56.0 -- 2026-06-26
 - LAUNCH POINTS are now a FRAMEWORK MECHANISM (the New-session picker, built right):
   * `register_launch_provider(name, fn, order)` -- a provider registry mirroring `register_sendable`. Core
