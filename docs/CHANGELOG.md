@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.43.1 -- 2026-06-26
+- HOTFIX: add command-center/clips.py to framework_paths. 0.43.0 shipped a server.py that `import clips` but
+  clips.py wasn't in framework_paths, so cc-update didn't propagate it -> remote nodes (AFP) crash-looped on
+  the missing import. (Local fleet was fine -- shared file.) Re-shipped; AFP restored. Follow-up: make the
+  new-module imports defensive so a missing optional module can never take a whole node down.
+
 ## 0.43.0 -- 2026-06-26
 - VISION: the CAPTURE system -- turn the world into context (docs/CAPTURE.md). One review-first loop
   (Capture -> Triage -> Propose -> you Approve -> Applied with receipts), built fleet-wide by a fan-out of
