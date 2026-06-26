@@ -8270,6 +8270,30 @@ body.ss-dragging .sb-tile{border-color:rgba(var(--accent-rgb),.55)}
 .ss-pickb{text-align:left;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;
   padding:10px 12px;font-size:14px;font-weight:600;cursor:pointer}
 .ss-pickb:hover{border-color:var(--accent);background:rgba(var(--accent-rgb),.14)}
+/* ===== ss-tut : ONE-TIME animated coach-mark that SHOWS drag->session (a real chip flies into a real dock tile) ===== */
+body.ss-tut-on #sessbar{z-index:9995!important;box-shadow:0 -6px 40px 8px rgba(var(--accent-rgb),.45);border-top-color:var(--accent)}   /* lift the real dock above the dimmer so the landing is visible */
+.ss-tut-back{position:fixed;inset:0;z-index:9990;background:rgba(7,9,15,.66);backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:24px;animation:ssTutFade .35s ease}
+@keyframes ssTutFade{from{opacity:0}to{opacity:1}}
+.ss-tut-cap{max-width:540px;text-align:center;background:rgba(18,20,32,.94);border:1px solid rgba(var(--accent-rgb),.55);
+  border-radius:16px;padding:20px 24px;box-shadow:0 18px 60px rgba(0,0,0,.6),var(--glow)}
+.ss-tut-cap-t{font-size:21px;font-weight:800;color:#fff;letter-spacing:.2px}
+.ss-tut-cap-b{margin-top:9px;font-size:15px;line-height:1.5;color:var(--ink)}
+.ss-tut-sub{margin-top:11px;font-size:13px;color:var(--mut)}
+.ss-tut-cta{padding:11px 30px;border-radius:12px;border:1px solid rgba(var(--accent-rgb),.65);background:var(--accent);color:#fff;
+  font-weight:800;font-size:15px;cursor:pointer;box-shadow:0 10px 30px rgba(var(--accent-rgb),.5);transition:filter .15s,transform .1s}
+.ss-tut-cta:hover{filter:brightness(1.09)}.ss-tut-cta:active{transform:translateY(1px)}
+.ss-tut-chip{position:fixed;z-index:10000;pointer-events:none;display:flex;align-items:center;gap:8px;
+  padding:10px 16px;border-radius:13px;background:linear-gradient(135deg,var(--accent),var(--accent-light,#7aa2ff));color:#fff;
+  font-weight:800;font-size:14px;white-space:nowrap;max-width:62vw;overflow:hidden;text-overflow:ellipsis;
+  transform:translate(-50%,-50%);box-shadow:0 18px 48px rgba(var(--accent-rgb),.6),0 0 0 1px rgba(255,255,255,.28) inset}
+.ss-tut-spot{position:fixed;z-index:9992;pointer-events:none;border-radius:11px;box-sizing:border-box;
+  box-shadow:0 0 0 3px var(--accent),0 0 28px 6px rgba(var(--accent-rgb),.7);animation:ssTutSpot 1.1s ease-in-out infinite}
+@keyframes ssTutSpot{0%,100%{box-shadow:0 0 0 3px var(--accent),0 0 20px 4px rgba(var(--accent-rgb),.5)}50%{box-shadow:0 0 0 4px var(--accent),0 0 38px 11px rgba(var(--accent-rgb),.9)}}
+.ss-tut-burst{position:fixed;z-index:10001;pointer-events:none;color:var(--accent);font-weight:900;font-size:26px;
+  text-shadow:0 0 16px rgba(var(--accent-rgb),.9);transform:translate(-50%,-50%);animation:ssTutBurst .92s ease forwards}
+@keyframes ssTutBurst{0%{opacity:0;transform:translate(-50%,-50%) scale(.4)}28%{opacity:1;transform:translate(-50%,-135%) scale(1.15)}100%{opacity:0;transform:translate(-50%,-230%) scale(1)}}
+@media(prefers-reduced-motion:reduce){.ss-tut-chip,.ss-tut-spot,.ss-tut-burst{display:none!important}}
 /* ===== Sessions taskbar blow-up hover panel (sb-*) — live interactive terminal + actions ===== */
 #sessprev{position:fixed;z-index:61;display:none;flex-direction:column;
   background:var(--card);border:1px solid var(--accent);border-radius:12px;
@@ -9786,8 +9810,9 @@ async function loadCalls(){
   if(!pend.length)h+=empty(d.configured?"No calls awaiting review. Hit ⟲ Sync to pull recent Granola calls.":"Configure Granola, then Sync.");
   pend.forEach(function(p){
     const opts='<option value="">— pick client —</option>'+clients.map(function(c){return '<option value="'+esc(c)+'"'+(p.client===c?' selected':'')+'>'+esc(c)+'</option>';}).join('');
-    h+='<div class="card" style="cursor:default;grid-column:1/-1;border-left:3px solid '+(p.matched?'#3fb950':'#d29922')+'">'
-      +'<h3 style="margin:0 0 4px"><span>'+esc(p.title||'call')+'</span><span class="sub">'+esc(p.date||'')+'</span></h3>'
+    const gsd=p.meeting_id?{kind:'granola',id:p.meeting_id,name:(p.title||'call')}:null;   // drag the CALL TRANSCRIPT onto a session (keyed on meeting_id, what get_transcript wants -- NOT the proposal id)
+    h+='<div class="card" '+(gsd?ssAttr(gsd):'')+' style="cursor:default;grid-column:1/-1;border-left:3px solid '+(p.matched?'#3fb950':'#d29922')+'">'
+      +'<h3 style="margin:0 0 4px"><span>'+esc(p.title||'call')+'</span><span class="sub">'+esc(p.date||'')+'</span>'+(gsd?' '+ssBtn(gsd):'')+'</h3>'
       +'<div class="meta sub" style="margin-bottom:6px">client: <select id="cl-'+p.id+'" style="'+COMMS_INP+';padding:3px 6px">'+opts+'</select>'+(p.matched?'':' <span style="color:#d29922">· auto-match failed, pick one</span>')+'</div>'
       +(p.error?'<div class="meta" style="color:#f85149">extract error: '+e2(p.error)+'</div>':'')
       +(p.summary?'<div style="margin:4px 0">'+e2(p.summary)+'</div>':'')
@@ -13940,7 +13965,73 @@ function ssPickGo(name){ var d=SS_PICK; SS_PICK=null; closeM(); if(d) ssSend(nam
 function ssPickDrive(i){ var f=(typeof drSorted==='function')&&drSorted()[i]; if(f) ssPick({kind:'drive',id:f.id,name:f.name}); }   // Drive context-menu entry
 function ssPickThread(){ if(typeof GM!=='undefined'&&GM.thread) ssPick({kind:'gmail',thread:GM.thread.id,full:1,name:GM.thread.subject}); }   // email reader: send the whole thread
 function ssPickEvent(id,name){ if(!id) return; if(!name&&typeof CAL!=='undefined'&&CAL.events){ var e=CAL.events.find(function(x){return x.id==id;}); if(e) name=e.summary; } ssPick({kind:'calendar',id:id,name:name||'event'}); }   // calendar event modal
-ssWire(); ssTouchWire();
+// --- ssTut: ONE-TIME animated coach-mark. The FIRST time a draggable item AND a session tile are both on
+// screen, play a demo: a chip flies from the item down INTO a real dock tile (the tile lights up + a ✓ burst),
+// so users SEE how drag->session works. Shown once ever (localStorage); a "Got it" / backdrop tap dismisses. ---
+var ssTut={iv:null,ticks:0};
+function ssTutSeen(){ try{return !!localStorage.getItem('ss_tut_v1');}catch(e){return true;} }
+function ssTutMark(){ try{localStorage.setItem('ss_tut_v1','1');}catch(e){} }
+function ssTutClamp(v,lo,hi){ return Math.max(lo,Math.min(hi,v)); }
+function ssTutBurst(x,y){ var b=document.createElement('div'); b.className='ss-tut-burst'; b.innerHTML='&#10003;'; b.style.left=x+'px'; b.style.top=y+'px'; document.body.appendChild(b); setTimeout(function(){try{document.body.removeChild(b);}catch(_){}} ,950); }
+function ssTutPlay(item,tile){
+  if(document.body.classList.contains('ss-tut-on')) return;
+  document.body.classList.add('ss-tut-on');
+  var d=ssDesc(item)||{name:'this item'}; var label=ssLabel(d);
+  var icons={gmail:'✉️',drive:'📄',calendar:'📅',granola:'🎤',deliverable:'📎'};
+  var icon=icons[d.kind]||'📎';
+  var back=document.createElement('div'); back.className='ss-tut-back';
+  back.innerHTML='<div class="ss-tut-cap"><div class="ss-tut-cap-t">'+icon+' Drag it onto a session</div>'
+    +'<div class="ss-tut-cap-b">Drop an email, a file, a Drive doc, a calendar event or a call onto any session in the dock below &mdash; the agent instantly gets it, ready to use.</div>'
+    +'<div class="ss-tut-sub">On a phone: press &amp; hold an item, then drag it down &mdash; or tap the &#10148; button on any item.</div></div>'
+    +'<button class="ss-tut-cta" id="ssTutCta">Got it</button>';
+  document.body.appendChild(back);
+  var chip=document.createElement('div'); chip.className='ss-tut-chip'; chip.innerHTML='<span>'+icon+'</span> '+e2(label);
+  document.body.appendChild(chip);
+  var spot=document.createElement('div'); spot.className='ss-tut-spot'; spot.style.display='none'; document.body.appendChild(spot);
+  function end(){ ssTutMark(); document.body.classList.remove('ss-tut-on'); try{tile.classList.remove('ss-over');}catch(_){}
+    [back,chip,spot].forEach(function(el){try{document.body.removeChild(el);}catch(_){}}); }
+  back.addEventListener('click',function(e){ if(e.target===back||e.target.id==='ssTutCta') end(); });
+  var reduce=false; try{ reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches; }catch(_){}
+  if(reduce){ return; }   // caption only; CSS hides the moving parts. Dismiss marks seen.
+  var loops=0;
+  function flight(){
+    if(!document.body.classList.contains('ss-tut-on')) return;
+    var ir=item.getBoundingClientRect(), tr=tile.getBoundingClientRect();
+    if(!tr.width){ end(); return; }   // dock vanished -> bail (still marks seen)
+    var sx=ssTutClamp(ir.left+ir.width/2,70,window.innerWidth-70);
+    var sy=ssTutClamp((ir.top+ir.height/2)||140,90,window.innerHeight-160);
+    var tx=tr.left+tr.width/2, ty=tr.top+tr.height/2;
+    spot.style.display='block'; spot.style.left=ir.left+'px'; spot.style.top=ir.top+'px'; spot.style.width=ir.width+'px'; spot.style.height=ir.height+'px';
+    chip.style.transition='none'; chip.style.opacity='0'; chip.style.left=sx+'px'; chip.style.top=sy+'px'; chip.style.transform='translate(-50%,-50%) scale(1)';
+    requestAnimationFrame(function(){
+      chip.style.transition='opacity .3s ease'; chip.style.opacity='1';
+      setTimeout(function(){
+        spot.style.display='none';
+        chip.style.transition='left 1.05s cubic-bezier(.55,-0.25,.3,1.25), top 1.05s cubic-bezier(.5,0,.25,1), transform 1.05s ease';
+        chip.style.left=tx+'px'; chip.style.top=ty+'px'; chip.style.transform='translate(-50%,-50%) scale(.55)';
+        try{tile.classList.add('ss-over');}catch(_){}
+        setTimeout(function(){
+          chip.style.transition='opacity .3s ease, transform .3s ease'; chip.style.opacity='0'; chip.style.transform='translate(-50%,-50%) scale(.2)';
+          ssTutBurst(tx,ty);
+          setTimeout(function(){ try{tile.classList.remove('ss-over');}catch(_){} loops++; if(loops<2) flight(); }, 920);
+        },1080);
+      }, 600);
+    });
+  }
+  flight();
+}
+function ssTutTick(){
+  if(ssTutSeen()){ if(ssTut.iv)clearInterval(ssTut.iv); return; }
+  if(document.body.classList.contains('ss-tut-on')) return;
+  var splash=document.getElementById('splash'); if(splash&&splash.offsetParent!==null) return;   // wait past the splash
+  var mbg=document.getElementById('mbg'); if(mbg&&mbg.style.display==='flex') return;             // don't clash with an open modal
+  var item=document.querySelector('[data-ss][draggable]');
+  var tile=document.querySelector('#sessbar .sb-tile');
+  if(item&&tile){ if(ssTut.iv)clearInterval(ssTut.iv); ssTutPlay(item,tile); return; }
+  if(++ssTut.ticks>240){ if(ssTut.iv)clearInterval(ssTut.iv); }   // ~6min cap if the context never appears
+}
+function ssTutInit(){ if(ssTutSeen())return; ssTut.iv=setInterval(ssTutTick,1500); setTimeout(ssTutTick,1400); }
+ssWire(); ssTouchWire(); ssTutInit();
 
 // ====================================================================================================
 // fx-* : AGENTIC LEVERAGE -- "Smart reply with 360 context" + "Sender history" + Action Queue.

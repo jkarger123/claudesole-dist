@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.37.1 -- 2026-06-25
+- WIRE + TEACH (drag-anything, round 2): (1) Granola CALL TRANSCRIPTS are now draggable from the Calls lens
+  -- the card carries data-ss {kind:granola, id:meeting_id} (keyed on meeting_id, what get_transcript wants,
+  NOT the proposal id) + a ➔ "send to session" button on the title. Completes the built-in sendable kinds.
+  (2) A ONE-TIME animated coach-mark that SHOWS users how it works: the first time a draggable item AND a
+  session dock tile are both on screen (post-splash, no modal open), a chip flies from the item DOWN INTO a
+  real dock tile -- the real tile lights up (ss-over glow) + a ✓ burst -- looped twice, with a caption
+  ("Drag an email/file/Drive doc/event/call onto a session") and a mobile hint ("press & hold, then drag").
+  Shown ONCE EVER (localStorage ss_tut_v1); "Got it" or a backdrop tap dismisses; honors
+  prefers-reduced-motion (caption only, no motion). The real #sessbar is lifted above the dimmer so the
+  landing is visible. Pure frontend, no backend, no deps.
+
 ## 0.37.0 -- 2026-06-25
 - FEATURE (drag ANYTHING into a session/agent): a generic "sendable -> session" pipeline. Drag a Drive file,
   an email, a calendar event, or a deliverable onto a session (the bottom dock tiles, or the focused
