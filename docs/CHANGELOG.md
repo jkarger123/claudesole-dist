@@ -3,6 +3,23 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.56.0 -- 2026-06-26
+- LAUNCH POINTS are now a FRAMEWORK MECHANISM (the New-session picker, built right):
+  * `register_launch_provider(name, fn, order)` -- a provider registry mirroring `register_sendable`. Core
+    providers: Projects / Agents / Extensions. `launch_tree()` merges them into recognizable, collapsible
+    groups. Each place drills into WHATEVER REAL FOLDERS live inside it (browse); descriptions come from the
+    folder's CLAUDE.md one-liner (`_msummary`).
+  * EXTENSIONS declare their own launch points in `extension.json` (`launch_points[]` + `launch_group`); ONE
+    core provider reads every extension manifest, so a NEW/unbuilt extension lights up with ZERO core change.
+    `browse_dir` also honors an extension's declared launchable subdirs. Documented in extensions/AUTHORING.md.
+  * PRESETS can declare `launch_groups` (config-not-code) so deployments/future lenses add launch points with
+    no server.py edit.
+  * AUTO-LEARN: launching into a folder with no CLAUDE.md briefs the agent (`_NEW_FOLDER_BRIEF`) to create one
+    (H1 title + one-line description matching the preview parser) -> the place becomes a recognized, previewable
+    launch point next time. The system learns its launch points as work happens.
+  * UX: groups COLLAPSED by default (compact, no modal overflow); picker shows FOLDERS only (never individual
+    files -- you launch an agent in a folder); per-place one-line descriptions; "Show all folders" escape hatch.
+
 ## 0.55.0 -- 2026-06-26
 - NEW SESSION picker = launch places at top, real folders underneath (the model James actually wanted):
   * Top level = the logical launch PLACES (modules/extensions with a CLAUDE.md / extension.json + pillars),

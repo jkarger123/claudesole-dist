@@ -19,11 +19,25 @@ it works, and the safe way to run it. No extension ships without this.
   "provides": ["mcp:gmail", "notify:telegram"],   // capabilities it adds
   "requires": [ {"key":"X","label":"plain-language thing the user must have/get"} ],
   "setup_doc": "SETUP.md",
-  "setup_agent": true               // true => the Marketplace 'Set up' button opens a guided agent
+  "setup_agent": true,              // true => the Marketplace 'Set up' button opens a guided agent
+  "launch_group": "Tools",         // OPTIONAL: which group this extension's launch points show under
+                                   //   in the New-session picker (defaults to "Extensions")
+  "launch_points": [               // OPTIONAL: the logical places a user would launch an AGENT for this
+                                   //   extension. Omit => the extension's own dir is the launch place.
+    { "path": "extensions/my-ext", // PROJECT-relative folder the session launches in (required)
+      "name": "My Extension",      // label (required)
+      "description": "Build/extend the X integration.",  // one-line preview (optional)
+      "icon": "🧩" }               // optional glyph
+  ]
 }
 ```
 - `summary` + `description` are what the model/orchestrator sees at selection time -- write them as advertising
   that says WHAT and WHEN to use it. Weak text = the capability is invisible. (Same rule as skills/agents.)
+- **Launch points (framework feature):** the New-session picker is built from declarable launch points. Any
+  folder with a `CLAUDE.md` / `extension.json` is auto-recognized; declare `launch_points` to add or rename
+  specific spots (and `launch_group` to place them). A NEW extension lights up its launch points with ZERO
+  core change. When an agent is launched in a folder that has no `CLAUDE.md`, it is briefed to create one
+  (an `# H1` title + a one-line description) so the place becomes a recognized, previewable launch point.
 
 ### 2. `SETUP.md` -- the guided walkthrough the setup agent runs (the heart of the promise)
 It MUST contain these sections, in this order:

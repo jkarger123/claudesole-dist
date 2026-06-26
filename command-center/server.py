@@ -2538,10 +2538,13 @@ def browse_dir(rel):
     try: entries = sorted(os.listdir(base), key=str.lower)
     except Exception as e: return {"ok": False, "error": str(e)[:80]}
     # if we're browsing INSIDE an extension, let its extension.json declare which subdirs are claude-launchable
+    # (launch_points[].path basenames, superset of the legacy "launchable" name list)
     ext_launch = set()
     try:
         _ej = os.path.join(base, "extension.json")
-        if os.path.isfile(_ej): ext_launch = set((json.load(open(_ej)) or {}).get("launchable") or [])
+        if os.path.isfile(_ej):
+            _m = json.load(open(_ej)) or {}
+            ext_launch = set(_m.get("launchable") or []) | {os.path.basename((p.get("path") or "").rstrip("/")) for p in (_m.get("launch_points") or [])}
     except Exception: pass
     for nm in entries:
         ap = os.path.join(base, nm); isd = os.path.isdir(ap)
@@ -2551,6 +2554,8 @@ def browse_dir(rel):
         rec = {"name": nm, "rel": os.path.relpath(ap, PROJECT), "isdir": isd, "mtime": st.st_mtime}
         if isd:
             rec["designated"] = bool(_launch_designated(ap) or nm in ext_launch)  # a recognized launch place
+            cm = os.path.join(ap, "CLAUDE.md")
+            if os.path.isfile(cm): rec["description"] = _msummary(cm)[1]          # one-line preview, if it has one
             dirs.append(rec)
         else: rec["size"] = st.st_size; files.append(rec)
     return {"ok": True, "rel": rel, "parent": (os.path.dirname(rel) if rel else None),
@@ -2563,34 +2568,125 @@ def _launch_designated(absdir):
     return (os.path.isfile(os.path.join(absdir, "CLAUDE.md"))
             or os.path.isfile(os.path.join(absdir, "extension.json")))
 
+# ---- DECLARABLE LAUNCH POINTS (framework mechanism) ---------------------------------------------------
+# A "launch point" is a logical place to start an agent. CORE systems register providers; the single
+# "extensions" provider reads EVERY installed extension manifest, so a NEW extension that declares
+# launch_points in its extension.json lights up with ZERO core change. Presets can also declare launch_groups
+# (config-not-code). Mirror of register_sendable: a provider is fn() -> group | [group]; launch_tree merges
+# them into recognizable groups. A launch point = a folder with a CLAUDE.md / extension.json / declaration;
+# its one-line description comes from the CLAUDE.md (the same text the Modules lens previews).
+LAUNCH_PROVIDERS = {}            # name -> (order, fn)
+def register_launch_provider(name, fn, order=50):
+    """Register a launch-point provider (idempotent; re-register safe). fn() -> group | [group];
+    group = {name, icon, order?, places:[{rel, name, description?, icon?, designated?}]}."""
+    if name and callable(fn): LAUNCH_PROVIDERS[str(name)] = (order, fn)
+
+def _place_rec(rel, name, absdir=None, icon=None, desc=None):
+    """One launch place, enriched with the CLAUDE.md one-liner (preview) + a designated flag."""
+    try: absdir = absdir or (projpath(rel) if rel else PROJECT)
+    except Exception: absdir = PROJECT
+    cm = os.path.join(absdir, "CLAUDE.md")
+    rec = {"rel": rel, "name": name, "designated": _launch_designated(absdir),
+           "description": (desc if desc is not None else (_msummary(cm)[1] if os.path.isfile(cm) else ""))}
+    if icon: rec["icon"] = icon
+    return rec
+
+def _launch_places_in(subdir, icon=None):
+    """The designated launch places directly inside PROJECT/<subdir> (the agents, the extensions, the modules)."""
+    out = []
+    base = os.path.join(PROJECT, subdir) if subdir else PROJECT
+    if not os.path.isdir(base): return out
+    try: entries = sorted(os.listdir(base), key=str.lower)
+    except Exception: return out
+    for nm in entries:
+        ap = os.path.join(base, nm)
+        if not os.path.isdir(ap) or nm in CC_SKIP or nm.startswith(".") or re.match(r"^iter\d", nm): continue
+        rel = (subdir + "/" + nm) if subdir else nm
+        if _launch_designated(ap) or rel in PILLARS:
+            out.append(_place_rec(rel, nm, ap, icon))
+    return out
+
+# --- built-in providers (Projects / Agents / Extensions) + a config-driven preset provider --------------
+def _lp_projects():
+    skip = {"agents", "extensions"}
+    return [{"name": "Projects", "icon": "📂", "order": 10,
+             "places": [p for p in _launch_places_in("") if p["name"] not in skip]}]
+def _lp_agents():
+    return [{"name": "Agents", "icon": "🤖", "order": 20, "places": _launch_places_in("agents", "🤖")}]
+def _lp_extensions():
+    """ONE provider for ALL extensions present (the extensions/ source dir) -> reads each manifest's
+    launch_points (future-proof: a new extension declaring them lights up with no core change). An extension
+    with no declaration surfaces its own dir. Works regardless of installed/activated state (you launch agents
+    to BUILD/maintain an extension, not only to use an activated one)."""
+    groups = {}
+    edir = os.path.join(PROJECT, "extensions")
+    if not os.path.isdir(edir): return []
+    try: eids = sorted(os.listdir(edir), key=str.lower)
+    except Exception: return []
+    for eid in eids:
+        ed = os.path.join(edir, eid)
+        if not os.path.isdir(ed) or eid in CC_SKIP or eid.startswith("."): continue
+        ej = os.path.join(ed, "extension.json")
+        if not os.path.isfile(ej): continue                      # only real extensions
+        try: m = json.load(open(ej)) or {}
+        except Exception: m = {}
+        grp = m.get("launch_group") or "Extensions"
+        pts = m.get("launch_points") or [{"path": "extensions/" + eid, "name": m.get("name") or eid, "description": m.get("summary") or ""}]
+        for pt in pts:
+            rel = (pt.get("path") or "").strip().strip("/")
+            if not rel: continue
+            try: ap = projpath(rel)
+            except Exception: continue
+            if not os.path.isdir(ap): continue
+            groups.setdefault(grp, []).append(_place_rec(rel, pt.get("name") or os.path.basename(rel), ap,
+                                                          pt.get("icon") or m.get("icon") or "🧩", pt.get("description")))
+    return [{"name": g, "icon": "🧩", "order": 30, "places": p} for g, p in groups.items()]
+def _lp_preset():
+    """Deployment/lens-declared launch points (config-not-code) from the active preset's launch_groups."""
+    try: cfg = json.load(open(os.path.join(os.path.dirname(BASE), "presets", PRESET + ".json")))
+    except Exception: cfg = {}
+    out = []
+    for g in (cfg.get("launch_groups") or []):
+        places = []
+        for pt in (g.get("places") or []):
+            rel = (pt.get("path") or pt.get("rel") or "").strip().strip("/")
+            if not rel: continue
+            try: ap = projpath(rel)
+            except Exception: continue
+            if os.path.isdir(ap): places.append(_place_rec(rel, pt.get("name") or os.path.basename(rel), ap, pt.get("icon")))
+        if places: out.append({"name": g.get("name") or "More", "icon": g.get("icon") or "📂", "order": g.get("order", 45), "places": places})
+    return out
+register_launch_provider("projects", _lp_projects, 10)
+register_launch_provider("agents", _lp_agents, 20)
+register_launch_provider("extensions", _lp_extensions, 30)
+register_launch_provider("preset", _lp_preset, 45)
+
 def launch_tree():
-    """Curated launch targets for the New Session picker: ONLY intentional units (folders with a CLAUDE.md /
-    extension.json, plus the configured pillars) + the ancestors needed to reach them -- never the raw
-    filesystem (no node_modules/build/archives/etc., already pruned by CC_SKIP + dotfile skip). Returns a
-    nested tree rooted at the project. Enterprise/installable: zero config, pure convention."""
-    targets, walked, MAXDEPTH = set(), 0, 5
-    for root, dirs, _ in os.walk(PROJECT):
-        walked += 1
-        if walked > 40000: break                             # generous backstop on pathological trees
-        rel = os.path.relpath(root, PROJECT)
-        depth = 0 if rel == "." else rel.count(os.sep) + 1
-        # prune junk + cap DEPTH (launch targets are shallow; never descend into huge deep subtrees -- this also
-        # keeps the walk from exhausting on a depth-first dive into one giant first child, which returned 0 before)
-        dirs[:] = [] if depth >= MAXDEPTH else [d for d in dirs if d not in CC_SKIP and not d.startswith(".") and not re.match(r"^iter\d", d)]
-        if rel == ".": continue
-        if _launch_designated(root) or rel in PILLARS: targets.add(rel)
-    nodes = set(targets)                                       # add ancestors so every target is reachable
-    for t in list(targets):
-        parts = t.split(os.sep)
-        for i in range(1, len(parts)): nodes.add(os.sep.join(parts[:i]))
-    children = {}
-    for n in nodes: children.setdefault(os.path.dirname(n), []).append(n)   # dirname("")=="" => top-level
-    def build(rel, name):
-        kids = sorted(children.get(rel, []), key=lambda r: os.path.basename(r).lower())
-        return {"rel": rel, "name": name, "designated": (rel in targets) if rel else True,
-                "children": [build(k, os.path.basename(k)) for k in kids]}
-    return {"ok": True, "count": len(targets),
-            "tree": build("", os.path.basename(PROJECT.rstrip("/")) or "project")}
+    """The New Session launch picker: launch points DECLARED by core providers + extensions + preset, merged
+    into the recognizable groups a user already knows (Projects / Agents / Extensions / ...). Each place then
+    drills into WHATEVER REAL FOLDERS live inside it (via /api/browse). Convention + declaration driven."""
+    merged, order = {}, {}
+    for nm, (ordr, fn) in LAUNCH_PROVIDERS.items():
+        try: gs = fn()
+        except Exception: continue
+        if isinstance(gs, dict): gs = [gs]
+        for g in (gs or []):
+            gn = g.get("name") or nm
+            slot = merged.setdefault(gn, {"name": gn, "icon": g.get("icon", "📂"), "places": []})
+            order.setdefault(gn, g.get("order", ordr))
+            seen = {p["rel"] for p in slot["places"]}
+            for p in (g.get("places") or []):
+                if p.get("rel") and p["rel"] not in seen: slot["places"].append(p); seen.add(p["rel"])
+    groups = [merged[k] for k in sorted(merged, key=lambda k: (order.get(k, 50), k.lower())) if merged[k]["places"]]
+    if not groups:   # plain non-ClaudeFather project -> the real top-level folders
+        fb = []
+        try:
+            for nm in sorted(os.listdir(PROJECT), key=str.lower):
+                ap = os.path.join(PROJECT, nm)
+                if os.path.isdir(ap) and nm not in CC_SKIP and not nm.startswith("."): fb.append(_place_rec(nm, nm, ap))
+        except Exception: pass
+        groups = [{"name": "Folders", "icon": "📂", "places": fb}]
+    return {"ok": True, "groups": groups, "project": os.path.basename(PROJECT.rstrip("/")) or "project"}
 
 def backup_status(ttl=8):
     now = time.time()
@@ -2800,6 +2896,15 @@ def account_usage_current():
     sh([TMUX, "send-keys", "-t", sess, "C-c"]); sh([TMUX, "kill-session", "-t", sess])
     return {"email": _current_email(), "usage": _parse_usage(txt), "ts": int(time.time())}
 
+_NEW_FOLDER_BRIEF = (
+    "You're starting in a folder that has no CLAUDE.md yet. FIRST understand what this folder is for (read the "
+    "files here and the parent CLAUDE.md; ask me if it's ambiguous). THEN create a CLAUDE.md in THIS folder so "
+    "the platform recognizes it as a launch point and can preview it. Format it EXACTLY so the Command Center "
+    "can read the preview: line 1 is a markdown H1 title ('# <Short Title>'); the NEXT non-blank line is ONE "
+    "plain sentence (<160 chars, no links/lists) describing what this folder is and does -- that exact line "
+    "becomes the folder's one-line description in the New-session picker and Projects lens. Add more sections "
+    "below as useful. Then give me a one-line status and stand by.")
+
 def launch(target, name, cid=None, rel=None):
     """Create a tmux session ON THE STUDIO. studio target runs Claude locally in the pillar dir;
        windows target wraps `ssh -t <alias> claude` so it's still a persistent, browser-attachable Studio session."""
@@ -2814,7 +2919,12 @@ def launch(target, name, cid=None, rel=None):
     if target == "studio":
         try: wd = projpath(rel) if rel else (comp_dir(cid) if cid else PROJECT)
         except Exception: wd = PROJECT
-        sh([TMUX, "new-session", "-d", "-s", name, "-c", wd, cl])
+        # if launching into a folder with NO CLAUDE.md, brief the agent to create one (purpose + the one-line
+        # description our system previews) -> the system LEARNS this launch point. (Guarded by rel; root has one.)
+        seed = ""
+        if rel and os.path.isdir(wd) and not os.path.isfile(os.path.join(wd, "CLAUDE.md")):
+            seed = " " + _shlex.quote(_NEW_FOLDER_BRIEF)
+        sh([TMUX, "new-session", "-d", "-s", name, "-c", wd, cl + seed])
     else:
         sub = ""
         if cid:
@@ -9795,6 +9905,12 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 .nstree-row.nsfile:hover{background:none}
 .nstree-row.nsanc .nslabel{opacity:.55;font-weight:400}
 .nstree-row .nslabel{font-weight:600}
+.nsgroup{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--mut,#8a92a3);margin:9px 2px 2px;padding:5px 4px 4px;border-top:1px solid rgba(255,255,255,.07);cursor:pointer;border-radius:6px}
+.nsgroup:hover{background:rgba(255,255,255,.05)}
+.nsgroup:first-child{border-top:none;margin-top:0}
+.nsgcaret{font-size:9px;width:10px;display:inline-block;text-align:center}
+.nsgcount{margin-left:auto;opacity:.5}
+.nsdesc{opacity:.55;font-size:11px;font-weight:400}
 </style>
 <a class="cfdesk-cta" onclick="cfDeskMenu(event)" title="Get the ClaudeFather Desktop app — a real browser + your dashboard in one window"><i class="ph-light ph-desktop"></i>Get the desktop app</a>
 <div id="cfDesktopMenu" style="display:none">
@@ -10169,38 +10285,47 @@ function openLaunch(pt,pc){
    +'<div class="btns"><button class="btn" onclick="closeM()">Cancel</button><button class="btn go" onclick="doLaunchForm()">▶ Launch &amp; open terminal</button></div>');
   nsTreeInit();}
 async function nsFetch(rel){try{return await(await fetch('/api/browse?rel='+encodeURIComponent(rel||''))).json();}catch(e){return null;}}
-async function nsTops(){try{var r=await(await fetch('/api/launch-tree')).json();return (r&&r.ok&&r.tree)?(r.tree.children||[]):null;}catch(e){return null;}}
+async function nsTops(){try{var r=await(await fetch('/api/launch-tree')).json();return (r&&r.ok)?(r.groups||[]):null;}catch(e){return null;}}
 function nsToggleMode(){NSV.mode=(NSV.mode==='all'?'curated':'all');var l=document.getElementById('nsModeLink');if(l)l.textContent=(NSV.mode==='all'?'Show launch places only':'Show all folders');NSV.nodes={};NSV.seq=0;nsTreeInit();}
-// THE TREE: top level = the logical launch PLACES (modules/extensions, curated); drilling into any of them
-// shows WHATEVER REAL FOLDERS live inside (browse), designated launch places marked 🧩. "Show all folders"
-// makes even the top level the raw folder list.
+function nsSelectRoot(){NSV.sel='';var sp=document.getElementById('nsSelPath');if(sp)sp.textContent='Launch in: project root';}
+// THE TREE: organized into the recognizable GROUPS (Projects / Agents / Extensions) a user already knows;
+// each launch place then drills into WHATEVER REAL FOLDERS live inside it (browse), designated places 🧩.
+// "Show all folders" drops the grouping and shows the raw project folder tree.
 async function nsTreeInit(){
   var box=document.getElementById('nsTree'); if(!box)return; box.innerHTML='Loading…';
-  var rb=await nsFetch(''); if(!rb||!rb.ok){box.innerHTML='<div class="dim">Could not load folders.</div>';return;}
-  box.innerHTML='';
-  var rid=nsRow(box,'',(rb.project||'project root'),0,true);
-  var node=NSV.nodes[rid], kids=document.getElementById('nskids'+rid);
-  if(NSV.mode==='all'){ nsPaint(kids, rb, 1); }
-  else {
-    var tops=await nsTops();
-    if(tops&&tops.length){ tops.forEach(function(t){ nsRow(kids, t.rel, t.name, 1, true); }); }
-    else { nsPaint(kids, rb, 1); }   // no designated launch places -> just show the real folders
+  if(NSV.mode==='all'){
+    var rb=await nsFetch(''); if(!rb||!rb.ok){box.innerHTML='<div class="dim">Could not load folders.</div>';return;}
+    box.innerHTML=''; nsPaint(box, rb, 0); nsSelectRoot(); return;
   }
-  node.loaded=true; node.expanded=true; kids.style.display='block'; nsSetCaret(rid,true);
-  nsSelectRow(rid);}
-function nsRow(container,rel,name,depth,designated){
+  var groups=await nsTops();
+  if(!groups||!groups.length){   // no recognized launch places -> show the real folders
+    var rb2=await nsFetch(''); box.innerHTML=''; if(rb2&&rb2.ok)nsPaint(box,rb2,0); nsSelectRoot(); return;
+  }
+  box.innerHTML='';
+  groups.forEach(function(g,gi){
+    var gid='nsg'+gi;
+    var hdr=document.createElement('div'); hdr.className='nsgroup'; hdr.id=gid+'h';
+    hdr.innerHTML='<span class="nsgcaret">▸</span>'+((g.icon?g.icon+' ':'')+esc(g.name))+'<span class="nsgcount">'+(g.places||[]).length+'</span>';
+    hdr.onclick=function(){nsGroupToggle(gid);};
+    box.appendChild(hdr);
+    var gc=document.createElement('div'); gc.id=gid; gc.style.display='none'; box.appendChild(gc);   // collapsed by default
+    (g.places||[]).forEach(function(pl){ nsRow(gc, pl.rel, pl.name, 0, (pl.designated!==false), pl.description, pl.icon); });
+  });
+  nsSelectRoot();}
+function nsGroupToggle(gid){var c=document.getElementById(gid),h=document.getElementById(gid+'h');if(!c)return;var open=c.style.display!=='none';c.style.display=open?'none':'';if(h){var cr=h.querySelector('.nsgcaret');if(cr)cr.textContent=open?'▸':'▾';}}
+function nsRow(container,rel,name,depth,designated,desc,icon){
   var id=NSV.seq++; NSV.nodes[id]={rel:rel,name:name,depth:depth,loaded:false,expanded:false};
   var row=document.createElement('div'); row.className='nstree-row'+(designated?'':' nsanc'); row.id='nsrow'+id; row.style.paddingLeft=(depth*15+4)+'px';
-  row.innerHTML='<span class="nscaret" id="nsc'+id+'">▸</span><span class="nslabel">'+(designated?'🧩':'📁')+' '+esc(name)+'</span>';
+  row.innerHTML='<span class="nscaret" id="nsc'+id+'">▸</span><span class="nslabel">'+(icon||(designated?'🧩':'📁'))+' '+esc(name)+(desc?'<span class="nsdesc"> — '+esc(desc)+'</span>':'')+'</span>';
   row.querySelector('.nscaret').onclick=function(e){nsToggle(id,e);};
   row.querySelector('.nslabel').onclick=function(){nsSelectRow(id);};
   container.appendChild(row);
   var kids=document.createElement('div'); kids.id='nskids'+id; kids.style.display='none'; container.appendChild(kids);
   return id;}
+// FOLDERS only -- never individual files (you launch an agent IN a folder, not on a file)
 function nsPaint(kids,r,depth){
-  (r.dirs||[]).forEach(function(d){ nsRow(kids, d.rel, d.name, depth, !!d.designated); });
-  (r.files||[]).forEach(function(f){var fr=document.createElement('div'); fr.className='nstree-row nsfile'; fr.style.paddingLeft=(depth*15+20)+'px'; fr.innerHTML='📄 '+esc(f.name); kids.appendChild(fr);});
-  if(!(r.dirs||[]).length&&!(r.files||[]).length){var e=document.createElement('div'); e.className='dim'; e.style.cssText='padding-left:'+(depth*15+20)+'px;font-size:12px'; e.textContent='(empty)'; kids.appendChild(e);}}
+  (r.dirs||[]).forEach(function(d){ nsRow(kids, d.rel, d.name, depth, !!d.designated, d.description, null); });
+  if(!(r.dirs||[]).length){var e=document.createElement('div'); e.className='dim'; e.style.cssText='padding-left:'+(depth*15+20)+'px;font-size:12px'; e.textContent='(no subfolders)'; kids.appendChild(e);}}
 async function nsToggle(id,e){if(e)e.stopPropagation(); var node=NSV.nodes[id]; var kids=document.getElementById('nskids'+id); if(!node||!kids)return;
   if(!node.loaded){kids.innerHTML='<div class="dim" style="padding-left:'+((node.depth+1)*15+20)+'px;font-size:12px">…</div>'; var r=await nsFetch(node.rel); node.loaded=true; kids.innerHTML=''; if(r&&r.ok)nsPaint(kids,r,node.depth+1);}
   node.expanded=!node.expanded; kids.style.display=node.expanded?'block':'none'; nsSetCaret(id,node.expanded);}
