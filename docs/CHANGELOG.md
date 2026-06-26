@@ -3,6 +3,23 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.45.0 -- 2026-06-26
+- BROWSER v2 -- indistinguishable-from-Chrome + agent-drivable, fully inside the context loop:
+  * SERVER command channel (server.py): POST /api/browser/queue (open/navigate/new_tab/scroll_to/highlight/
+    screenshot/reload/back/forward/act); GET /api/browser/commands (the desktop polls; marked sent on read);
+    POST /api/browser/ack (a returned page snapshot is RE-INGESTED into context = browser->context).
+  * CONTEXT-DRIVEN: POST /api/browser/show {subject} picks the page WE ALREADY KNOW about a subject (a saved
+    clip/email/link) FROM the context graph and opens+highlights it = context->agent->browser. Agents are told
+    they can do this (the SYSTEM MAP brief). Verified end-to-end (queue->poll->ack->re-ingest; show resolved
+    the right URL).
+  * DESKTOP executor (desktop/): polls /api/browser/commands and runs them in a real Chromium tab
+    (open/scroll/highlight/screenshot/nav); a "🤖 Agent control" toggle (DEFAULT OFF) gates write actions
+    (click/type) -- show-me actions always run, with a visible "agent did this" toast; only ever obeys the
+    user's own server. Persistent profile + multi-tab were already in the shell -> now a real, agent-drivable
+    browser.
+  THE FULL CONTEXT LOOP is closed + tested: browse->context (ingest-page), context->co-read (page-intel),
+  context->agent->browser (browser/show), browser->context (ack re-ingest).
+
 ## 0.44.1 -- 2026-06-26
 - FIX (capture): a saved screenshot whose subject didn't resolve to a project folder was written to the
   managed store but then DROPPED (image_rel returned None when the file landed outside PROJECT). Now it keeps

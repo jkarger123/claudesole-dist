@@ -100,6 +100,43 @@ Auth is the configured `authToken`, sent as `X-CC-Token` **and** `Authorization:
 
 ---
 
+## Agent-driven browser ("let me show you")
+
+Your agents run on **your own** ClaudeFather server and know your context — so they can drive this browser
+to *show you* things. The desktop app **polls your server** for queued browser commands (~every 1.5s, only
+when a server is configured) and executes each in a real browser tab, then **acks** it (optionally with a
+result the server can fold back into context). It only ever polls/obeys your configured server, using the
+same auth as the bridge.
+
+### Server contract (built into the web app in parallel)
+
+- `GET  /api/browser/commands` → `{ ok, commands:[{ id, action, args }] }` — the server marks returned ones `sent`.
+- `POST /api/browser/ack` → `{ id, ok, result?, error? }` — one ack per executed command. `result` may carry
+  `{ url, title, image_b64 }` (e.g. for `screenshot`) or `{ url, title }`.
+
+### Actions (`action`, with `args`)
+
+| action | args | what it does |
+|---|---|---|
+| `open` / `navigate` | `{url}` | load url in the **active** browser tab (creates + activates one if none) |
+| `new_tab` | `{url}` | open + activate a new browser tab |
+| `scroll_to` | `{text \| selector}` | scroll to the first match (selector wins; text via tree-walk) |
+| `highlight` | `{text \| selector}` | scroll to **and** briefly flash an outline on the first match |
+| `screenshot` | — | `capturePage()`; acks `result:{url,title,image_b64}` |
+| `reload` / `back` / `forward` | — | navigation on the active browser tab |
+| `act` | `{kind:'click'\|'type', selector, value?}` | **GATED** — see below |
+
+### Safety model
+
+- **`🤖 Agent control` toggle (toolbar, DEFAULT OFF).** Show-me actions (everything except `act`) only *show*
+  you things, so they run regardless. `act` (click/type) is **refused** while the toggle is OFF — the agent
+  is acked `{ok:false, error:'agent control off'}`. Flip it ON to allow click/type.
+- **Never silent.** Every executed agent command fires a visible, AI-accented toast (e.g. "🤖 ClaudeFather
+  opened avenlur.com / highlighted …"). A blocked `act` shows a "turn on Agent control to allow it" toast.
+- **Your server only.** No server configured → no polling at all. Same base + auth (`X-CC-Token` / Bearer)
+  as the bridge; nothing else is ever contacted.
+- The Workspace dashboard view is never driven — agent commands only ever target **browser** tabs.
+
 ## Configure
 
 On first launch you're prompted for:
@@ -151,6 +188,12 @@ Output lands in `desktop/release/`.
   - **🧠 Co-read / `⌘⇧E`** → panel opens, the browser view narrows by 340px, navigating fires
     `POST /api/context/page-intel`, and `related` + `flags` render; switching to the Workspace tab hides the
     panel and restores full width; sensitive pages show "Skipped".
+  - **🤖 Agent-driven browser** → with your server queueing commands at `GET /api/browser/commands`:
+    confirm an `open`/`navigate` command loads + activates a browser tab and a toast fires; `scroll_to` /
+    `highlight` move + flash the right element; `screenshot` acks `result.image_b64` (non-empty — the view
+    must be on-screen); `reload`/`back`/`forward` work; and `act` (click/type) is **refused** while the
+    `🤖 Agent control` toggle is OFF (acked `{ok:false,error:'agent control off'}`, "blocked" toast) and
+    **runs** once it's ON. Confirm polling only happens with a server configured, and stops if you clear it.
 - **Hotkeys** are registered via `globalShortcut` only while the app window is focused (released on blur), so
   they fire even when a content view holds keyboard focus — confirm they don't leak to other apps.
 - **TLS:** standard valid certs (Tailscale `ts.net`, Let's Encrypt) and `http://localhost` work out of the

@@ -39,7 +39,9 @@ const fs = require('fs');
 // bridge POSTs.
 // ---------------------------------------------------------------------------------------------------
 const CONFIG_PATH = () => path.join(app.getPath('userData'), 'config.json');
-const DEFAULT_CONFIG = { serverUrl: '', authToken: '', captureEnabled: false };
+// agentControlEnabled gates the WRITE actions an agent can take (click/type). Default OFF: "show-me"
+// actions (open/scroll/highlight/screenshot/nav) always run, but click/type are refused until you opt in.
+const DEFAULT_CONFIG = { serverUrl: '', authToken: '', captureEnabled: false, agentControlEnabled: false };
 
 function loadConfig() {
   try {
@@ -343,6 +345,255 @@ function broadcastSidebar() {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// AGENT-DRIVEN BROWSER — "let me show you".
+//
+// The user's agents run on the user's OWN ClaudeFather server. They can't reach the desktop directly, so
+// this client POLLS the server for queued browser commands and executes them in a real browser tab, then
+// ACKs each one (optionally with a result the server can fold back into context). The whole point: the AI
+// already knows your context, so it can drive the browser to SHOW you things.
+//
+// Safety model (see also the "🤖 Agent control" toggle, DEFAULT OFF):
+//   - We only ever poll/obey the user's OWN configured server (same base + auth as the bridge). No server
+//     configured  ->  no polling at all.
+//   - "Show-me" actions (open/navigate/new_tab/scroll_to/highlight/screenshot/reload/back/forward) only
+//     SHOW you things, so they run regardless of the toggle.
+//   - WRITE actions (`act`: click/type) are REFUSED unless you flip "🤖 Agent control" ON. We ack
+//     {ok:false, error:'agent control off'} when it's off — the agent learns it was declined.
+//   - Every executed command fires a visible toast ("🤖 agent opened this / highlighted this") so the
+//     browser is never silently driven.
+// ---------------------------------------------------------------------------------------------------
+const AGENT_POLL_MS = 1500;          // poll cadence; the server marks returned commands 'sent'
+let agentPollTimer = null;
+let agentPollBusy = false;           // never overlap polls
+const seenCommandIds = new Set();    // defensive de-dupe (server shouldn't re-send, but be safe)
+
+function maybeStartAgentPoll() {
+  if (agentPollTimer) return;        // already running
+  if (!serverBase()) return;         // only ever poll a configured server
+  agentPollTimer = setInterval(pollAgentCommands, AGENT_POLL_MS);
+}
+function stopAgentPoll() {
+  if (agentPollTimer) { clearInterval(agentPollTimer); agentPollTimer = null; }
+}
+
+async function pollAgentCommands() {
+  if (agentPollBusy) return;
+  if (!serverBase()) { stopAgentPoll(); return; }     // server cleared since we started
+  agentPollBusy = true;
+  try {
+    const r = await apiRequest('GET', '/api/browser/commands');
+    if (!r.ok || !r.data) return;
+    const cmds = Array.isArray(r.data.commands) ? r.data.commands : [];
+    for (const cmd of cmds) {
+      if (!cmd || cmd.id === undefined || cmd.id === null) continue;
+      if (seenCommandIds.has(cmd.id)) continue;        // already handled this one
+      seenCommandIds.add(cmd.id);
+      await executeAndAck(cmd);
+    }
+    if (seenCommandIds.size > 1000) seenCommandIds.clear();   // bound the de-dupe set
+  } catch (_) {
+    /* transient network/server error — next tick retries */
+  } finally {
+    agentPollBusy = false;
+  }
+}
+
+async function executeAndAck(cmd) {
+  let res;
+  try { res = await executeAgentCommand(cmd); }
+  catch (e) { res = { ok: false, error: e && e.message ? e.message : String(e) }; }
+  res = res || { ok: false, error: 'no result' };
+
+  notifyAgent(cmd, res);   // visible toast so the user always sees the browser being driven
+
+  const body = { id: cmd.id, ok: !!res.ok };
+  if (res.error) body.error = res.error;
+  if (res.result) body.result = res.result;     // e.g. {url,title,image_b64} for screenshot
+  await postJson('/api/browser/ack', body);
+}
+
+// The active tab IF it's a browser tab (we never drive the Workspace dashboard view).
+function activeBrowserTab() {
+  const t = getTab(activeTabId);
+  return (t && t.type === 'browser') ? t : null;
+}
+// Get the active browser tab, or create + activate a fresh one if the active tab isn't a browser.
+function ensureBrowserTab() {
+  let t = activeBrowserTab();
+  if (!t) t = createTab('browser', '');
+  activateTab(t.id);
+  return t;
+}
+
+// Build a page-context JS snippet that finds the first element matching {selector} or {text} (selector
+// wins), scrolls it into view, and — for 'highlight' — briefly flashes an outline/background, restoring
+// the original inline style after a moment. Args are JSON-embedded so they can't break out of the string.
+function domOpJs(op, args) {
+  const sel = args && args.selector ? String(args.selector) : '';
+  const txt = args && args.text ? String(args.text) : '';
+  const doHighlight = op === 'highlight';
+  return `(function(){
+    try {
+      var sel = ${JSON.stringify(sel)};
+      var txt = ${JSON.stringify(txt)};
+      var el = null;
+      if (sel) { try { el = document.querySelector(sel); } catch(e){} }
+      if (!el && txt) {
+        var low = txt.toLowerCase();
+        var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+        var n;
+        while ((n = w.nextNode())) {
+          if (n.nodeValue && n.nodeValue.toLowerCase().indexOf(low) !== -1) { el = n.parentElement; break; }
+        }
+      }
+      if (!el) return { ok:false, error:'no match' };
+      el.scrollIntoView({ behavior:'smooth', block:'center' });
+      ${doHighlight ? `
+      var prev = el.getAttribute('style') || '';
+      el.style.outline = '3px solid #6c8cff';
+      el.style.outlineOffset = '2px';
+      el.style.backgroundColor = 'rgba(108,140,255,0.22)';
+      el.style.transition = 'background-color .4s ease, outline-color .4s ease';
+      setTimeout(function(){ try { el.setAttribute('style', prev); } catch(e){} }, 2600);
+      ` : ``}
+      return { ok:true };
+    } catch (e) { return { ok:false, error: String((e && e.message) || e) }; }
+  })()`;
+}
+
+// Build a page-context JS snippet that clicks or types into the first element matching {selector}. Used
+// ONLY by `act`, which is gated by the agent-control toggle.
+function actJs(kind, selector, value) {
+  return `(function(){
+    try {
+      var el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return { ok:false, error:'no match for selector' };
+      el.scrollIntoView({ block:'center' });
+      ${kind === 'click'
+        ? `el.click();`
+        : `el.focus();
+           if ('value' in el) {
+             el.value = ${JSON.stringify(value || '')};
+             el.dispatchEvent(new Event('input', { bubbles:true }));
+             el.dispatchEvent(new Event('change', { bubbles:true }));
+           } else if (el.isContentEditable) {
+             el.textContent = ${JSON.stringify(value || '')};
+             el.dispatchEvent(new Event('input', { bubbles:true }));
+           } else { return { ok:false, error:'element is not typeable' }; }`}
+      return { ok:true };
+    } catch (e) { return { ok:false, error: String((e && e.message) || e) }; }
+  })()`;
+}
+
+// Run one agent command. Returns { ok, error?, result? }.
+async function executeAgentCommand(cmd) {
+  const action = String(cmd.action || '').toLowerCase().trim();
+  const args = (cmd.args && typeof cmd.args === 'object') ? cmd.args : {};
+
+  switch (action) {
+    case 'open':
+    case 'navigate': {
+      const url = normalizeInput(args.url || '');
+      if (!url) return { ok: false, error: 'no url' };
+      const t = ensureBrowserTab();
+      t.view.webContents.loadURL(url);
+      return { ok: true, result: { url } };
+    }
+
+    case 'new_tab': {
+      const url = normalizeInput(args.url || '') || 'about:blank';
+      const t = createTab('browser', url);
+      activateTab(t.id);
+      return { ok: true, result: { url: url === 'about:blank' ? '' : url } };
+    }
+
+    case 'scroll_to':
+    case 'highlight': {
+      const t = activeBrowserTab();
+      if (!t) return { ok: false, error: 'no active browser tab' };
+      const wc = t.view.webContents;
+      if (!wc || wc.isDestroyed()) return { ok: false, error: 'no page' };
+      const out = await wc.executeJavaScript(domOpJs(action, args), false);
+      return {
+        ok: !!(out && out.ok),
+        error: out && out.error,
+        result: { url: wc.getURL(), title: wc.getTitle() }
+      };
+    }
+
+    case 'screenshot': {
+      const t = activeBrowserTab();
+      if (!t) return { ok: false, error: 'no active browser tab' };
+      const wc = t.view.webContents;
+      if (!wc || wc.isDestroyed()) return { ok: false, error: 'no page' };
+      let image_b64 = '';
+      try {
+        const img = await wc.capturePage();
+        if (img && !img.isEmpty()) image_b64 = img.toPNG().toString('base64');
+      } catch (e) { return { ok: false, error: 'capture failed: ' + e.message }; }
+      return { ok: true, result: { url: wc.getURL(), title: wc.getTitle(), image_b64 } };
+    }
+
+    case 'reload': {
+      const t = activeBrowserTab();
+      if (!t) return { ok: false, error: 'no active browser tab' };
+      t.view.webContents.reload();
+      return { ok: true, result: { url: t.view.webContents.getURL() } };
+    }
+    case 'back': {
+      const t = activeBrowserTab();
+      if (!t) return { ok: false, error: 'no active browser tab' };
+      const wc = t.view.webContents;
+      if (!wc.navigationHistory.canGoBack()) return { ok: false, error: 'cannot go back' };
+      wc.navigationHistory.goBack();
+      return { ok: true };
+    }
+    case 'forward': {
+      const t = activeBrowserTab();
+      if (!t) return { ok: false, error: 'no active browser tab' };
+      const wc = t.view.webContents;
+      if (!wc.navigationHistory.canGoForward()) return { ok: false, error: 'cannot go forward' };
+      wc.navigationHistory.goForward();
+      return { ok: true };
+    }
+
+    case 'act': {
+      // GATED: write actions only run when the user has flipped agent control ON.
+      if (!config.agentControlEnabled) return { ok: false, error: 'agent control off' };
+      const kind = String(args.kind || '').toLowerCase();
+      if (kind !== 'click' && kind !== 'type') return { ok: false, error: 'unknown act kind: ' + kind };
+      if (!args.selector) return { ok: false, error: 'selector required' };
+      const t = activeBrowserTab();
+      if (!t) return { ok: false, error: 'no active browser tab' };
+      const wc = t.view.webContents;
+      if (!wc || wc.isDestroyed()) return { ok: false, error: 'no page' };
+      // userGesture=true so click()/focus() are treated as user-initiated by the page.
+      const out = await wc.executeJavaScript(actJs(kind, String(args.selector), args.value), true);
+      return {
+        ok: !!(out && out.ok),
+        error: out && out.error,
+        result: { url: wc.getURL(), title: wc.getTitle() }
+      };
+    }
+
+    default:
+      return { ok: false, error: 'unknown action: ' + action };
+  }
+}
+
+// Tell the chrome renderer an agent just drove the browser, so it can show a visible toast/indicator.
+function notifyAgent(cmd, res) {
+  if (!win || win.isDestroyed()) return;
+  win.webContents.send('agent:event', {
+    action: cmd.action,
+    args: cmd.args || {},
+    ok: !!(res && res.ok),
+    error: res && res.error,
+    ts: Date.now()
+  });
+}
+
+// ---------------------------------------------------------------------------------------------------
 // Tab / view management
 // ---------------------------------------------------------------------------------------------------
 function browserPartitionFor(type) {
@@ -509,6 +760,7 @@ function broadcastConfig() {
     serverUrl: config.serverUrl,
     hasToken: !!config.authToken,
     captureEnabled: config.captureEnabled,
+    agentControlEnabled: config.agentControlEnabled,
     configured: !!serverBase()
   });
 }
@@ -532,6 +784,7 @@ function wireIpc() {
     serverUrl: config.serverUrl,
     hasToken: !!config.authToken,
     captureEnabled: config.captureEnabled,
+    agentControlEnabled: config.agentControlEnabled,
     configured: !!serverBase()
   }));
 
@@ -546,6 +799,9 @@ function wireIpc() {
       const t = createTab('workspace', serverBase());
       activateTab(t.id);
     }
+    // Start/stop the agent-command poll loop to match the (now-)configured server.
+    if (serverBase()) maybeStartAgentPoll();
+    else stopAgentPoll();
     return { ok: true };
   });
 
@@ -554,6 +810,14 @@ function wireIpc() {
     saveConfig(config);
     broadcastConfig();
     return { ok: true, enabled: config.captureEnabled };
+  });
+
+  // Agent control toggle (DEFAULT OFF) — gates write actions (`act`: click/type) only.
+  ipcMain.handle('agent:set', (_e, { enabled }) => {
+    config.agentControlEnabled = !!enabled;
+    saveConfig(config);
+    broadcastConfig();
+    return { ok: true, enabled: config.agentControlEnabled };
   });
 
   ipcMain.handle('tabs:create', (_e, { type, url }) => {
@@ -654,13 +918,15 @@ function createWindow() {
     } else {
       broadcastTabs();
     }
+    // Begin polling the user's own server for agent browser commands (no-op if no server configured).
+    maybeStartAgentPoll();
   });
 
   win.on('resize', layoutActiveView);
   // Hotkeys are live only while our window is focused (released otherwise so we never hold them globally).
   win.on('focus', registerShortcuts);
   win.on('blur', unregisterShortcuts);
-  win.on('closed', () => { unregisterShortcuts(); win = null; });
+  win.on('closed', () => { unregisterShortcuts(); stopAgentPoll(); win = null; });
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -677,7 +943,7 @@ app.whenReady().then(() => {
   });
 });
 
-app.on('will-quit', () => { unregisterShortcuts(); });
+app.on('will-quit', () => { unregisterShortcuts(); stopAgentPoll(); });
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

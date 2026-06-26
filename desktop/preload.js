@@ -13,6 +13,9 @@ contextBridge.exposeInMainWorld('cf', {
   setCapture: (enabled) => ipcRenderer.invoke('capture:set', { enabled }),
   captureNow: () => ipcRenderer.invoke('capture:now'),
 
+  // --- agent control (gates write actions: click/type) ---
+  setAgentControl: (enabled) => ipcRenderer.invoke('agent:set', { enabled }),
+
   // --- explicit Save / Clip (independent of the capture toggle) ---
   clipCapture: () => ipcRenderer.invoke('clip:capture'),          // grab {url,title,text,image_b64,siteName}
   clipSubjects: () => ipcRenderer.invoke('clip:subjects'),         // candidate subjects for the picker
@@ -45,5 +48,6 @@ contextBridge.exposeInMainWorld('cf', {
   onCaptureEvent: (cb) => ipcRenderer.on('capture:event', (_e, data) => cb(data)),
   onSidebar: (cb) => ipcRenderer.on('sidebar:state', (_e, data) => cb(data)),   // co-reading open/closed
   onIntel: (cb) => ipcRenderer.on('intel:state', (_e, data) => cb(data)),       // co-reading content
-  onSaveClip: (cb) => ipcRenderer.on('menu:save-clip', () => cb())              // hotkey -> open save dialog
+  onSaveClip: (cb) => ipcRenderer.on('menu:save-clip', () => cb()),             // hotkey -> open save dialog
+  onAgentEvent: (cb) => ipcRenderer.on('agent:event', (_e, data) => cb(data))   // an agent drove the browser
 });

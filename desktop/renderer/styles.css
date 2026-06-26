@@ -106,6 +106,8 @@ html, body {
 #toast.skipped { border-color: #d4a017; }
 #toast.error { border-color: var(--danger); }
 #toast.info { border-color: var(--accent); }
+/* an agent drove the browser — distinct accent + glow so it reads as "the AI did this" */
+#toast.agent { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 6px 24px rgba(108,140,255,.35); }
 .hidden { display: none !important; }
 
 /* ---- AI co-reading side panel ---- */

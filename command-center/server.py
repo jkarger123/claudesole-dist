@@ -5244,7 +5244,10 @@ def _system_brief():
     try:
         si = system_info(); s = si["surfaces"]; rt = si["runtime"].get("runtime", "web")
         on = ", ".join(k for k in ("context", "capture", "google", "agency", "slack", "zoom", "mesh") if s.get(k)) or "context, capture"
-        rtnote = " (DESKTOP: a real embedded browser + page capture + co-reading are available -- you can ask the user to be shown things in-browser)" if rt == "desktop" else " (WEB: no embedded browser/capture -- those are desktop-only)"
+        rtnote = (" (DESKTOP: a real embedded browser + page capture + co-reading are available. To SHOW the user "
+                  "something, POST /api/browser/show {subject} -- it opens + highlights the page you already know about "
+                  "that subject from the context graph -- or /api/browser/queue {action:open|scroll_to|highlight|screenshot, ...} "
+                  "to drive the browser directly)") if rt == "desktop" else " (WEB: no embedded browser/capture -- those are desktop-only)"
         return ("SYSTEM MAP: you operate inside ClaudeFather, a self-hosted context OS. Core = a CONTEXT LAYER "
                 "(event store + entity graph + a router that assembles the perfect CITED slice for a subject -- "
                 "GET /api/context/assemble, /api/context/brief 'catch me up') feeding everything; a CAPTURE loop "
@@ -5254,6 +5257,51 @@ def _system_brief():
                 "than guessing; honor review-first (propose, never auto-apply); everything is provenance-stamped.")
     except Exception:
         return "SYSTEM MAP: ClaudeFather context OS (context layer + capture + focus + mesh)."
+
+# ---- AGENT-DRIVABLE BROWSER (Browser v2): an agent (or the dashboard) queues commands; the desktop browser
+# polls + executes them -- "let me show you" + page control. Fully inside the CONTEXT loop: `browser_show`
+# picks WHAT to show FROM the context graph (context -> agent -> browser), and an executed page snapshot acked
+# back is re-ingested (browser -> context). Show-me actions are free; act-for-me is gated client-side. ----
+BROWSER_CMDS = []
+_BC_LOCK = threading.Lock()
+_BC_CAP = 60
+def browser_queue(action, **args):
+    cmd = {"id": "bc-%d-%d" % (int(time.time() * 1000), len(BROWSER_CMDS)), "action": action,
+           "args": {k: v for k, v in args.items() if v is not None}, "status": "queued", "ts": int(time.time())}
+    with _BC_LOCK:
+        BROWSER_CMDS.append(cmd)
+        if len(BROWSER_CMDS) > _BC_CAP: del BROWSER_CMDS[:-_BC_CAP]
+    return {"ok": True, "id": cmd["id"], "action": action}
+def browser_pending():
+    with _BC_LOCK:
+        out = [c for c in BROWSER_CMDS if c["status"] == "queued"]
+        for c in out: c["status"] = "sent"
+    return {"ok": True, "commands": [{"id": c["id"], "action": c["action"], "args": c["args"]} for c in out]}
+def browser_ack(cid, ok=True, result=None):
+    result = result or {}
+    with _BC_LOCK:
+        for c in BROWSER_CMDS:
+            if c["id"] == cid: c["status"] = "done"; c["ok"] = bool(ok); break
+    # BROWSER -> CONTEXT: a snapshot the agent was shown re-enters the substrate (provenance: browser).
+    if result.get("url") and result.get("text"):
+        try: context.ingest_event(kind="web", source="browser", title=(result.get("title") or result["url"]),
+                                  body=(result.get("text") or "")[:8000], trust="external", ext_id=result["url"],
+                                  refs={"url": result["url"]})
+        except Exception: pass
+    return {"ok": True}
+def browser_show(subject, query=None):
+    """CONTEXT -> AGENT -> BROWSER: pick the most relevant page WE ALREADY KNOW about a subject (a saved clip,
+    an email/event/Drive link) from the context graph, then open + highlight it in the user's browser."""
+    try: b = context.assemble(query=(query or subject), subject=subject, budget_tokens=1500)
+    except Exception as e: return {"ok": False, "error": "assemble failed: " + str(e)[:100]}
+    url, label = None, (subject or query or "")
+    for it in b.get("items", []):
+        r = it.get("refs") or {}
+        if r.get("url"): url, label = r["url"], (it.get("title") or label); break
+    if not url: return {"ok": False, "error": "no known page/link for that subject yet -- save one first"}
+    browser_queue("open", url=url)
+    browser_queue("highlight", text=label[:80])
+    return {"ok": True, "url": url, "highlight": label[:80]}
 
 def focus_now():
     """On-demand: what subject am I on right now? PREFERS a fresh BROWSER-reported focus (the remote user's
@@ -7668,6 +7716,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(context.search((q.get("q", [""])[0]) or "", int((q.get("limit", ["30"])[0]) or 30)), default=str))
         if u.path == "/api/system":  # self-describing capability map (runtime + surfaces) -- for UI gating + agents
             return self._s(200, json.dumps(system_info(), default=str))
+        if u.path == "/api/browser/commands":  # the desktop browser polls for agent-queued commands (Browser v2)
+            return self._s(200, json.dumps(browser_pending(), default=str))
         if u.path == "/api/focus":   # FOCUS engine: what subject am I on right now (on-demand, gated by the trust dial)
             return self._s(200, json.dumps(focus_now(), default=str))
         if u.path == "/api/context/brief":   # CATCH ME UP: assemble a subject's cited slice + inject it into a session
@@ -7889,6 +7939,12 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"ok": True, "capture": cap, "signal": (focus.read_signal(cap) if cap != "off" else {})}, default=str))
         if u.path == "/api/runtime":  # the client (desktop shell or web) reports its runtime + capabilities
             return self._s(200, json.dumps(runtime_report(body.get("runtime"), body.get("platform"), body.get("capabilities")), default=str))
+        if u.path == "/api/browser/queue":  # an agent/dashboard queues a browser command (open/scroll/highlight/...)
+            return self._s(200, json.dumps(browser_queue(body.get("action", ""), **{k: body.get(k) for k in ("url", "text", "selector", "tab", "kind", "value")}), default=str))
+        if u.path == "/api/browser/show":   # CONTEXT-DRIVEN: open + highlight the page we already know re: a subject
+            return self._s(200, json.dumps(browser_show(body.get("subject", ""), body.get("q")), default=str))
+        if u.path == "/api/browser/ack":    # the desktop acks an executed command (+ optional snapshot -> context)
+            return self._s(200, json.dumps(browser_ack(body.get("id", ""), body.get("ok", True), body.get("result")), default=str))
         if u.path == "/api/focus-report":   # the WEB-SIDE bridge: browser reports the lens/subject/session you're on
             return self._s(200, json.dumps(focus_report(
                 lens=body.get("lens"), subject=body.get("subject"), session=body.get("session"),

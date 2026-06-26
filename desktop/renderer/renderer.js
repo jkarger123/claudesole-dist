@@ -5,7 +5,7 @@
 const $ = (id) => document.getElementById(id);
 
 let state = { tabs: [], activeId: null };
-let cfg = { serverUrl: '', hasToken: false, captureEnabled: false, configured: false };
+let cfg = { serverUrl: '', hasToken: false, captureEnabled: false, agentControlEnabled: false, configured: false };
 let toastTimer = null;
 
 // ---------------------------------------------------------------------------------------------------
@@ -90,6 +90,54 @@ $('capture').onclick = async () => {
   cfg.captureEnabled = !!res.enabled;
   renderCapture();
 };
+
+// ---------------------------------------------------------------------------------------------------
+// Agent-control toggle (DEFAULT OFF). When OFF, the AI can still drive "show-me" actions (open / scroll /
+// highlight / screenshot / nav) — those only show you things. Flipping this ON additionally lets the AI's
+// commands click and type on pages. Mirrors the capture toggle's look.
+// ---------------------------------------------------------------------------------------------------
+function renderAgentControl() {
+  const btn = $('agentctl');
+  const on = cfg.agentControlEnabled;
+  btn.classList.toggle('on', on);
+  btn.classList.toggle('off', !on);
+  $('agentlabel').textContent = on ? '🤖 Agent control: ON' : '🤖 Agent control: OFF';
+  btn.title = on
+    ? 'The AI can click and type on pages. Click to restrict it to show-me actions only.'
+    : 'Show-me actions (open/scroll/highlight/screenshot) work now. Click to also let the AI click/type.';
+}
+
+$('agentctl').onclick = async () => {
+  if (!cfg.agentControlEnabled && !cfg.configured) {
+    showToast('error', 'Set a server URL in ⚙ Settings first.');
+    openModal();
+    return;
+  }
+  const res = await window.cf.setAgentControl(!cfg.agentControlEnabled);
+  cfg.agentControlEnabled = !!res.enabled;
+  renderAgentControl();
+  showToast(cfg.agentControlEnabled ? 'sent' : 'info',
+    cfg.agentControlEnabled ? '🤖 Agent control ON — the AI may click & type.' : '🤖 Agent control OFF — show-me actions only.');
+};
+
+// Friendly, present-tense description of an agent command for the toast.
+function describeAgentEvent(ev) {
+  const a = (ev.action || '').toLowerCase();
+  const args = ev.args || {};
+  switch (a) {
+    case 'open':
+    case 'navigate': return 'opened ' + hostOf(args.url || '');
+    case 'new_tab': return 'opened a new tab' + (args.url ? ' · ' + hostOf(args.url) : '');
+    case 'scroll_to': return 'scrolled to "' + (args.text || args.selector || '') + '"';
+    case 'highlight': return 'highlighted "' + (args.text || args.selector || '') + '"';
+    case 'screenshot': return 'took a screenshot';
+    case 'reload': return 'reloaded the page';
+    case 'back': return 'went back';
+    case 'forward': return 'went forward';
+    case 'act': return (args.kind === 'type' ? 'typed into ' : 'clicked ') + (args.selector || 'an element');
+    default: return a || 'did something';
+  }
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Toolbar actions
@@ -361,7 +409,13 @@ function intelMsg(text, spinning) {
 // Wire events from main
 // ---------------------------------------------------------------------------------------------------
 window.cf.onTabs((data) => { state = data; renderTabs(); });
-window.cf.onConfig((data) => { cfg = data; renderCapture(); });
+window.cf.onConfig((data) => { cfg = data; renderCapture(); renderAgentControl(); });
+window.cf.onAgentEvent((ev) => {
+  // Never let the browser be silently driven: every executed agent command surfaces a toast.
+  if (ev.ok) showToast('agent', '🤖 ClaudeFather ' + describeAgentEvent(ev));
+  else if (ev.error === 'agent control off') showToast('skipped', '🤖 Blocked a click/type — turn on 🤖 Agent control to allow it.');
+  else showToast('error', '🤖 Agent action failed (' + (ev.error || 'unknown') + ')');
+});
 window.cf.onCaptureEvent((ev) => {
   if (ev.status === 'sent') showToast('sent', '👁  Shared with ClaudeFather: ' + hostOf(ev.url));
   else if (ev.status === 'skipped') showToast('skipped', '⛔  Skipped (' + (ev.reason || 'private') + '): ' + hostOf(ev.url));
@@ -377,6 +431,7 @@ window.cf.onSaveClip(() => startClip());   // ⌘⇧S hotkey from main
 (async function init() {
   cfg = await window.cf.getConfig();
   renderCapture();
+  renderAgentControl();
   try { const sb = await window.cf.getSidebar(); sidebarOpen = !!(sb && sb.open); } catch (_) {}
   renderSidebarVisibility();
   if (!cfg.configured) openModal();   // first run -> force configuration
