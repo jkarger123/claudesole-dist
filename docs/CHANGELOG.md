@@ -3,6 +3,24 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.61.0 -- 2026-06-26
+- Accounts/Usage -- merged the standalone "Claude Accounts" lens INTO the Usage lens (one "Accounts / Usage"
+  tab) and added per-account RATE-LIMIT FUEL GAUGES: each Claude subscription account's 5-hour session + weekly
+  (all-models / Sonnet) windows as % used + live reset countdowns, with a "use this next" recommendation that
+  minimizes wasted capacity (drain the soonest-resetting account that still has headroom; rest one near its
+  weekly cap).
+- FLEET-aggregated at the overseer: new mesh-gated `/api/account-windows-store` (cached) lets the overseer roll
+  up EVERY macOS user's report and show ALL accounts with the FRESHEST reading per account + which user each is
+  live on. Per-user shared cache + single-poller file lock under `~/.claude` so co-located instances (overseer +
+  nodes on one user) no longer collide on the `/usage` scrape.
+- LIVE-account-only reads: a setup-token (`CLAUDE_CODE_OAUTH_TOKEN`) runs `/usage` in API mode with NO
+  subscription windows, so only the live keychain login is readable; non-live accounts show last-known windows
+  (refreshed whenever they're next the live login -- here or on another user). The setup-token path was removed.
+- One-click account switching kept + improved (reads the newly-live account's windows right after the switch).
+- Root CLAUDE.md: added the Mission Control "SHIP AN UPDATE TO THE WHOLE FLEET" playbook + a hard rule that any
+  server.py/lens edit must restart ALL co-located instances (hpcc/cc-overseer/cc-carsearch), not just one.
+- Verified headless on 8800 (no JS exceptions; gauges, recommendation, live-on/last-seen, switch buttons render).
+
 ## 0.60.0 -- 2026-06-26
 - TASKS hardening -- fix the "list full of repeat/junk tasks" failure (hit on a bulk-outreach inbox):
   * ROOT CAUSE: the commitment regex used optional-apostrophe contractions (`i'?ll`/`we'?ll`), which ALSO

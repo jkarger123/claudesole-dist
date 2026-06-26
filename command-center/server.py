@@ -1431,7 +1431,7 @@ def _web_manifest():
 # Peer/machine-to-machine ingress: NOT gated by the operator token (that's a human surface). These are
 # peer surface, protected on their own MESH_TOKEN track, so enabling operator auth on a node never severs
 # the mesh (a peer POSTs here with X-Mesh-Token or nothing, never the operator cookie/bearer).
-AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store")
+AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store", "/api/account-windows-store")
 
 # Security frame stamped onto EVERY inbound peer message (appended AFTER the literal "[message from X]" so
 # the Stop-hook sender regex still matches). Makes the trust boundary explicit in the message itself -- a
@@ -2876,6 +2876,11 @@ def account_switch(label):
     try: rec = json.load(open(pth))
     except Exception: return {"ok": False, "error": "account not in wallet"}
     ok = _kc_write(rec.get("blob"), rec.get("account"))
+    if ok:
+        # the newly-live account is now readable -- grab its /usage windows in the background (~18s) so the fuel
+        # gauges update promptly instead of waiting for the next poll tick.
+        try: threading.Thread(target=lambda: account_windows_refresh(), daemon=True).start()
+        except Exception: pass
     return {"ok": ok, "label": label, "email": rec.get("email"),
             "note": "live now -- every session uses it on its next request (no restart)"}
 def account_remove(label):
@@ -2949,19 +2954,37 @@ def _read_usage_session(token=None, label="cur"):
     limits with ZERO disruption to the live login every running session uses. token=None => the live login.
     NOTE: this itself costs a few hundred tokens against that account's session window (negligible, ~$0.04)."""
     import shlex
-    sess = "cc-uw-" + re.sub(r"[^A-Za-z0-9]", "", (label or "cur"))[:28]
+    # session name carries THIS instance's id so co-located instances never kill each other's in-flight read
+    sess = "cc-uw-" + re.sub(r"[^A-Za-z0-9]", "", (INSTANCE_ID or "x"))[:10] + "-" + re.sub(r"[^A-Za-z0-9]", "", (label or "cur"))[:20]
     sh([TMUX, "kill-session", "-t", sess])
     env = ("export CLAUDE_CODE_OAUTH_TOKEN=%s; " % shlex.quote(token)) if token else ""
     cl = 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + env + 'claude'
     if sh([TMUX, "new-session", "-d", "-s", sess, "-x", "200", "-y", "50", cl])[0] != 0:
         return {"ok": False, "error": "could not start session"}
-    time.sleep(8)
-    sh([TMUX, "send-keys", "-t", sess, "/usage"]); time.sleep(1.4); sh([TMUX, "send-keys", "-t", sess, "Enter"])
-    time.sleep(9)
-    txt = sh([TMUX, "capture-pane", "-t", sess, "-J", "-p", "-S", "-160"])[1] or ""
-    sh([TMUX, "send-keys", "-t", sess, "C-c"]); sh([TMUX, "kill-session", "-t", sess])
-    w = _parse_usage(txt)
-    return {"ok": bool(w.get("session") or w.get("week")), "windows": w}
+    # Claude Code takes a variable few seconds to be ready (TUI paint, MCP probes) and /usage adds a round-trip;
+    # a fixed sleep races it and captures an empty pane. Instead: send /usage, then POLL the pane until the
+    # windows actually render (re-sending once if the prompt wasn't ready). Robust against slow starts.
+    txt = ""; w = {}
+    try:
+        time.sleep(6)
+        for i in range(10):                                    # ~6s + up to 10*2.2s
+            if i == 0 or (i == 3 and not (w.get("session") or w.get("week"))):
+                sh([TMUX, "send-keys", "-t", sess, "/usage"]); time.sleep(0.6)
+                sh([TMUX, "send-keys", "-t", sess, "Enter"])
+            time.sleep(2.2)
+            txt = sh([TMUX, "capture-pane", "-t", sess, "-J", "-p", "-S", "-160"])[1] or ""
+            w = _parse_usage(txt)
+            if w.get("session") or w.get("week"): break
+    finally:
+        sh([TMUX, "send-keys", "-t", sess, "C-c"]); sh([TMUX, "kill-session", "-t", sess])
+    ok = bool(w.get("session") or w.get("week"))
+    err = None
+    if not ok:
+        low = txt.lower()
+        if any(k in low for k in ("login", "setup-token", "expired", "invalid")): err = "auth failed (re-run claude setup-token)"
+        elif not txt.strip(): err = "no output (claude slow to start)"
+        else: err = "couldn't read the /usage windows"
+    return {"ok": ok, "windows": w, "error": err}
 
 def account_usage_current():
     """Read the CURRENT keychain login's /usage windows (back-compat shape for the old single-account view)."""
@@ -2973,8 +2996,13 @@ def account_usage_current():
 # operator can play accounts against each other: drain the one that resets SOONEST while it still has headroom,
 # rest the one that's near its slow-resetting weekly cap. Accounts with a stored setup-token are polled in the
 # background with zero disruption; token-less accounts can only be read while they're the live login.
-ACCT_WINDOWS_FILE = os.path.join(STATE_DIR, "_acct_windows.json")   # email -> last reading {windows, ts, ok, via}
-ACCT_PREFS_FILE = os.path.join(STATE_DIR, "_acct_prefs.json")      # {rotation: [emails] | None}  (None = all saved)
+# Per macOS USER, NOT per instance: the Claude accounts + their /usage windows are global to the user, and
+# multiple co-located ClaudeFather instances (overseer + nodes) share ONE keychain, ONE token wallet, and one
+# set of accounts. So the readings cache + prefs live under ~/.claude (shared) and only ONE instance polls (a
+# file lock) -- otherwise every instance spawns same-named cc-uw sessions that collide and all reads fail.
+ACCT_WINDOWS_FILE = os.path.expanduser("~/.claude/_cc_acct_windows.json")  # email -> last reading (shared)
+ACCT_PREFS_FILE = os.path.expanduser("~/.claude/_cc_acct_prefs.json")      # {rotation:[emails]|None} (shared)
+ACCT_POLL_LOCKFILE = os.path.expanduser("~/.claude/_cc_acct_poll.lock")    # which instance owns the poll
 ACCT_POLL_TTL = int(CC.get("account_poll_ttl") or 1800)            # background refresh cadence (s); default 30 min
 _ACCT_WIN_LOCK = threading.Lock()
 _ACCT_POLL_LOCK = threading.Lock()                                 # serialize the spawn-claude reads (one at a time)
@@ -2982,7 +3010,15 @@ _ACCT_POLL_LOCK = threading.Lock()                                 # serialize t
 def _acct_windows_load():
     try:
         d = json.load(open(ACCT_WINDOWS_FILE)); return d if isinstance(d, dict) else {}
-    except Exception: return {}
+    except Exception:
+        # one-time migration: seed the new shared cache from this instance's legacy per-STATE_DIR file
+        try:
+            legacy = os.path.join(STATE_DIR, "_acct_windows.json")
+            if os.path.isfile(legacy):
+                d = json.load(open(legacy))
+                if isinstance(d, dict): return d
+        except Exception: pass
+        return {}
 def _acct_windows_save(d):
     with _ACCT_WIN_LOCK:
         try:
@@ -3009,20 +3045,29 @@ def _saved_accounts():
     if cur and cur not in seen: out.append((cur, cur))
     return out, (al.get("current_email") or "")
 
-def account_windows_refresh(email):
-    """Refresh ONE account's windows. Prefers its setup-token (zero-disruption); otherwise only works while
-    it's the live login. Persists the reading to _acct_windows.json. Blocks ~18s (spawns a claude session)."""
-    email = (email or "").strip()
-    if not email: return {"ok": False, "error": "no email"}
-    token = _tok_read(email)
+def account_windows_refresh(email=None):
+    """Read the LIVE keychain login's /usage windows and persist them. ONLY the live login can be read: a
+    setup-token authenticates in API mode where /usage shows NO subscription rate-limit windows, so a
+    non-live account is unreadable here -- its windows come from when it was last live (on this or another
+    macOS user, merged by the overseer). `email` is accepted for back-compat but we always read whoever is live.
+    Blocks ~18s (spawns a claude session)."""
     live = _current_email() or ""
-    if not token and email != live:
-        return {"ok": False, "error": "no setup-token, and this isn't the live login", "need_token": True}
+    email = (email or "").strip()
+    if email and email != live:
+        return {"ok": False, "error": "only the live login is readable (setup-tokens run in API mode without the windows)", "not_live": True}
+    if not live: return {"ok": False, "error": "no live login"}
     with _ACCT_POLL_LOCK:
-        r = _read_usage_session(token=token or None, label=email)
-    rec = {"email": email, "windows": r.get("windows") or {}, "ts": int(time.time()),
-           "ok": bool(r.get("ok")), "via": ("token" if token else "live"), "error": r.get("error")}
-    store = _acct_windows_load(); store[email] = rec; _acct_windows_save(store)
+        r = _read_usage_session(label=live)
+    store = _acct_windows_load(); prev = store.get(live) or {}
+    now = int(time.time()); side = _side_label()
+    if r.get("ok"):
+        rec = {"email": live, "windows": r.get("windows") or {}, "ts": now, "ok": True, "side": side, "error": None}
+    else:
+        # a flaky /usage scrape must NOT wipe a good prior reading -- keep the last good windows+ts, just note it.
+        rec = dict(prev); rec["email"] = live
+        rec.setdefault("windows", {}); rec.setdefault("ok", bool(prev.get("ok"))); rec["side"] = side
+        rec["last_error"] = r.get("error"); rec["last_try"] = now
+    store[live] = rec; _acct_windows_save(store)
     return rec
 
 def _acct_dur(s):
@@ -3049,10 +3094,8 @@ def _acct_recommend(accounts, now):
         if not a.get("in_rotation"):
             info[em] = {"status": "tracked", "why": "tracked, not in your rotation", "score": -9, "use_next": False}; continue
         if not a.get("ok") or not s:
-            need = (not a.get("has_token")) and (not a.get("active"))
-            info[em] = {"status": ("need_token" if need else "no_data"),
-                        "why": ("enable zero-disruption polling (paste a setup-token)" if need else "no reading yet — hit refresh"),
-                        "score": -9, "use_next": False}; continue
+            info[em] = {"status": "no_data", "score": -9, "use_next": False,
+                        "why": "no reading yet — log into it on any node (hptuner or sarahaios) to read it"}; continue
         s_free = s.get("free", 0); s_ttr = s.get("ttr"); s_ttr_h = max(0.1, (s_ttr if s_ttr else 360) / 3600.0)
         wk_free = (wk.get("free", 100) if wk else 100); wk_ttr = wk.get("ttr") if wk else None
         perish = s_free / s_ttr_h                       # unused 5h capacity lost per idle hour (higher = use sooner)
@@ -3074,31 +3117,84 @@ def _acct_recommend(accounts, now):
         info[pick]["status"] = "use_next"; info[pick]["use_next"] = True
     return info, pick
 
+def account_windows_store():
+    """THIS macOS user's account-window readings, for the overseer's fleet rollup (mesh-gated). Reports our
+    current live login + the last-known windows for any account previously live on this user. The windows are
+    account-GLOBAL (server-side), so the freshest reading of an account -- from whichever user last had it live
+    -- is the truth the overseer surfaces."""
+    store = _acct_windows_load()
+    accts = {em: {"email": em, "windows": rec.get("windows") or {}, "ts": rec.get("ts"),
+                  "ok": bool(rec.get("ok")), "side": rec.get("side") or _side_label(),
+                  "last_error": rec.get("last_error")}
+             for em, rec in store.items()}
+    return {"side": _side_label(), "store_id": _store_id(), "current_email": _current_email() or "", "accounts": accts}
+
+_ACCT_FLEET_CACHE = {"at": 0.0, "data": None}; _ACCT_FLEET_LOCK = threading.Lock()
+def _acct_fleet_reports(ttl=45):
+    """Self report (always fresh-local) + peers' /api/account-windows-store (cached to limit mesh chatter).
+    Only pulls peers when this node shows the whole fleet (fleet_view != own)."""
+    self_rep = account_windows_store()
+    if FLEET_VIEW == "own": return [self_rep]
+    now = time.time()
+    with _ACCT_FLEET_LOCK:
+        if _ACCT_FLEET_CACHE["data"] is not None and now - _ACCT_FLEET_CACHE["at"] < ttl:
+            peer_reps = _ACCT_FLEET_CACHE["data"]
+        else:
+            peer_reps = []; seen = set()
+            for p in peers():
+                u = (p.get("url") or "").rstrip("/")
+                if not u or u in seen: continue
+                seen.add(u)
+                r = _mesh_get(u + "/api/account-windows-store")
+                if isinstance(r, dict) and isinstance(r.get("accounts"), dict): peer_reps.append(r)
+            _ACCT_FLEET_CACHE.update({"at": now, "data": peer_reps})
+    return [self_rep] + peer_reps
+
 def account_windows_all():
-    """Everything the Accounts/Usage fuel-gauge UI needs: per saved account -> decorated windows + countdowns,
-    rotation membership, token status, last-read age, and the 'use this next' recommendation."""
+    """The Accounts/Usage fuel UI payload. Merges THIS node's readings with every peer's (the overseer rolls up
+    all macOS users), taking the FRESHEST reading per account, and flags which user each account is live on now.
+    Accounts live on nobody show their last-known windows. Then runs the 'use this next' recommendation."""
     now = time.time()
     saved, cur = _saved_accounts()
+    walletset = set(a.get("email") for a in account_list().get("accounts", []) if a.get("email"))
     prefs = _acct_prefs_load(); rot = prefs.get("rotation")
-    rotset = set(e for _, e in saved) if rot is None else set(rot)
-    store = _acct_windows_load()
+    label_by = {em: label for label, em in saved}
+    reps = []; seen_sid = set()
+    for r in _acct_fleet_reports():                              # dedupe one report per macOS-user store
+        sid = r.get("store_id") or r.get("side")
+        if sid and sid in seen_sid: continue
+        seen_sid.add(sid); reps.append(r)
+    live_on = {}                                                 # email -> [sides currently logged into it]
+    for r in reps:
+        ce = r.get("current_email")
+        if ce: live_on.setdefault(ce, []).append(r.get("side") or r.get("store_id"))
+    merged = {}                                                  # email -> freshest reading across the fleet
+    for r in reps:
+        for em, a in (r.get("accounts") or {}).items():
+            ts = a.get("ts") or 0
+            if em not in merged or ts > (merged[em].get("ts") or 0): merged[em] = a
+    emails = set(merged) | set(em for _, em in saved)
+    rotset = emails if rot is None else set(rot)
     accounts = []
-    for label, em in saved:
-        rec = store.get(em) or {}; w = rec.get("windows") or {}
+    for em in emails:
+        a = merged.get(em) or {}; w = a.get("windows") or {}
         accounts.append({
-            "email": em, "label": label, "active": em == cur, "in_rotation": em in rotset,
-            "has_token": bool(_tok_read(em)), "ok": bool(rec.get("ok")),
+            "email": em, "label": label_by.get(em, em),
+            "active": em == cur,                                 # live on THIS node (drives the switch button)
+            "in_wallet": em in walletset,                        # can THIS machine switch to it (saved here)?
+            "live_on": live_on.get(em, []), "in_rotation": em in rotset, "ok": bool(a.get("ok")),
             "windows": {"session": _win_view(w.get("session"), now), "week": _win_view(w.get("week"), now),
                         "week_sonnet": _win_view(w.get("week_sonnet"), now)},
-            "ts": rec.get("ts"), "via": rec.get("via")})
+            "ts": a.get("ts"), "side": a.get("side"), "last_error": a.get("last_error")})
     info, pick = _acct_recommend(accounts, now)
     for a in accounts:
         a.update(info.get(a["email"], {"status": "no_data", "why": "", "score": -9, "use_next": False}))
-    order = {"use_next": 0, "ready": 1, "cooling": 2, "resting": 3, "tracked": 4, "no_data": 5, "need_token": 6}
+    order = {"use_next": 0, "ready": 1, "cooling": 2, "resting": 3, "tracked": 4, "no_data": 5}
     accounts.sort(key=lambda a: (order.get(a.get("status"), 9), -(a.get("score") or -9)))
     pa = next((a for a in accounts if a["email"] == pick), None)
     return {"accounts": accounts, "now": now, "current_email": cur, "poll_ttl": ACCT_POLL_TTL,
-            "rotation_default_all": rot is None, "pick": pick, "pick_why": (pa["why"] if pa else None)}
+            "rotation_default_all": rot is None, "pick": pick, "pick_why": (pa["why"] if pa else None),
+            "sides": [{"side": r.get("side") or r.get("store_id"), "live": r.get("current_email")} for r in reps]}
 
 def account_rotation_set(email, want_in):
     """Add/remove an account from the recommendation rotation (we still TRACK all accounts either way)."""
@@ -3113,23 +3209,41 @@ def account_set_token(email, token):
     """Store a `claude setup-token` for an account (enables zero-disruption polling), then read once to verify."""
     email = (email or "").strip(); token = (token or "").strip()
     if not email or not token: return {"ok": False, "error": "email and token required"}
+    if not token.lower().startswith(("sk-ant-", "oat")) and len(token) < 20:
+        return {"ok": False, "error": "that doesn't look like a setup-token (expected sk-ant-oat...)"}
     if not _tok_write(email, token): return {"ok": False, "error": "could not store token"}
-    r = account_windows_refresh(email)
-    return {"ok": bool(r.get("ok")), "email": email, "error": r.get("error")}
+    r = account_windows_refresh(email)   # the token is STORED regardless; this just tries a first read
+    return {"ok": True, "stored": True, "verified": bool(r.get("ok")), "email": email, "error": r.get("error")}
 
 def _acct_poll_once():
-    """Refresh every account we can read non-disruptively (has a setup-token) plus the live login. Sequential."""
+    """Refresh the LIVE login's windows (the only account readable on this macOS user). Other accounts' windows
+    come from when they were last live -- here or, via the overseer's mesh rollup, on another macOS user."""
     try:
-        saved, cur = _saved_accounts()
-        targets = [em for _, em in saved if _tok_read(em) or em == cur]
-        for em in targets:
-            try: account_windows_refresh(em)
-            except Exception: pass
+        if _current_email(): account_windows_refresh()
     except Exception: pass
+def _acct_poll_claim():
+    """Per-user file lock so exactly ONE co-located instance runs the background poll (the cache is shared, so
+    the others just display it). The owner rewrites the lock each cycle; a dead owner's lock goes stale after
+    ~2.2x TTL and another instance takes over. Manual refresh is unaffected (it ignores this)."""
+    now = time.time(); mypid = str(os.getpid())
+    try:
+        age = now - os.stat(ACCT_POLL_LOCKFILE).st_mtime
+        held = open(ACCT_POLL_LOCKFILE).read().strip()
+    except Exception:
+        age = 1e9; held = ""
+    if held and held != mypid and age < 2.2 * max(300, ACCT_POLL_TTL):
+        return False                                # another live instance owns the poll
+    try:
+        fd = os.open(ACCT_POLL_LOCKFILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(fd, mypid.encode()); os.close(fd); return True
+    except Exception:
+        return False
 def _acct_poll_loop():
     time.sleep(50)                                  # let boot settle before the first (session-spawning) poll
     while True:
-        _acct_poll_once()
+        try:
+            if _acct_poll_claim(): _acct_poll_once()
+        except Exception: pass
         time.sleep(max(300, ACCT_POLL_TTL))
 
 _NEW_FOLDER_BRIEF = (
@@ -8145,6 +8259,10 @@ class H(BaseHTTPRequestHandler):
             if not FLEET_SHARE: return self._s(403, json.dumps({"error": "this node does not share usage (fleet_share off)", "store_id": _store_id()}))
             return self._s(200, json.dumps(usage_store()))
         if u.path == "/api/usage-fleet": return self._s(200, json.dumps(usage_fleet()))
+        if u.path == "/api/account-windows-store":   # peer-to-peer (mesh-token gated): this user's account readings
+            if not _mesh_token_ok(self.headers.get("X-Mesh-Token", "")): return self._s(403, json.dumps({"error": "mesh token required"}))
+            if not FLEET_SHARE: return self._s(403, json.dumps({"error": "this node does not share usage (fleet_share off)", "store_id": _store_id()}))
+            return self._s(200, json.dumps(account_windows_store()))
         if u.path == "/api/backup-status": return self._s(200, json.dumps(backup_status()))
         if u.path == "/api/security":      return self._s(200, json.dumps(security_status()))
         if u.path == "/api/agents":        return self._s(200, json.dumps(agents_list()))
@@ -10760,53 +10878,57 @@ function awBadge(st){ var M={use_next:['▶ USE NEXT','#1a1606','#e8c547',1],rea
   var m=M[st]||M.no_data; return '<span class="awbadge" style="background:'+m[1]+';color:'+m[2]+(m[3]?';border:1px solid #e8c547':'')+'">'+m[0]+'</span>'; }
 function acctFuelSection(){
   var d=ACCTWIN;
-  if(!d) return '<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🔋 Account fuel</b> <span class="sub"><span class="spin"></span> reading each account\'s limits…</span></div></div>';
-  var accts=d.accounts||[];
+  if(!d) return '<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🔋 Account fuel</b> <span class="sub"><span class="spin"></span> reading account limits…</span></div></div>';
+  var accts=d.accounts||[], sides=d.sides||[];
   var h='<div class="card" style="cursor:default;grid-column:1/-1;background:linear-gradient(135deg,#16140c,#0d0f17);border-color:#e8c54744;box-shadow:0 0 22px #e8c54712">'
-   +'<div class="modnav"><b>🔋 Account fuel — which login to burn next</b> <span class="sub">per-account rate limits · '+(d.poll_ttl?('auto every '+Math.round(d.poll_ttl/60)+'m'):'manual')+' · zero-disruption</span> <button class="mini" onclick="awRefreshAll(this)">↻ refresh all</button></div>';
+   +'<div class="modnav"><b>🔋 Account fuel — which login to burn next</b> <span class="sub">subscription rate limits · the live account on each machine auto-refreshes every '+Math.round((d.poll_ttl||1800)/60)+'m · others show last-known</span> <button class="mini" onclick="awRefreshAll(this)">↻ read live now</button></div>';
   if(d.pick){ h+='<div style="margin-top:11px;padding:13px 15px;border:1px solid #e8c54766;border-radius:12px;background:#e8c5470d">'
       +'<div style="font-size:19px;font-weight:800;color:#f0d05a;letter-spacing:-.2px">▶ Use '+e2(d.pick)+' next</div>'
       +'<div class="ucsub" style="margin-top:3px">'+e2(d.pick_why||'')+'</div></div>'; }
   else { h+='<div style="margin-top:11px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:#0006"><div class="sub">No in-rotation account has 5-hour headroom right now — they\'re cooling or resting. See the gauges below.</div></div>'; }
-  h+='<div class="ucsub" style="margin-top:11px">Live login (all sessions): <b style="color:#e8e8ea">'+e2(d.current_email||'?')+'</b> <button class="mini" onclick="acctSnapshot()" title="save / refresh the current login in the wallet">📸 snapshot</button></div></div>';
+  if(sides.length){ h+='<div class="ucsub" style="margin-top:11px">Logged in now: '+sides.map(function(s){return '<b style="color:#e8e8ea">'+e2(s.side)+'</b> → '+(s.live?e2(s.live):'<span style="opacity:.55">—</span>');}).join(' &nbsp;·&nbsp; ')+' &nbsp;<button class="mini" onclick="acctSnapshot()" title="save / refresh THIS machine\'s current login in the wallet">📸 snapshot this login</button></div>'; }
+  h+='</div>';
   accts.forEach(function(a){ h+=acctFuelCard(a); });
   return h;
 }
 function acctFuelCard(a){
   var w=a.windows||{}, dim=(!a.in_rotation)?'opacity:.6;':'';
+  var liveSides=a.live_on||[];
+  var fresh = liveSides.length ? ('🟢 live on '+liveSides.map(e2).join(', ')+(a.ts?(' · read '+tago(a.ts)):''))
+            : (a.ts ? ('🕓 last seen '+tago(a.ts)+(a.side?(' on '+e2(a.side)):'')) : 'never read');
   var h='<div class="card" style="cursor:default;grid-column:1/-1;'+dim+(a.use_next?'border-color:#e8c547;box-shadow:0 0 18px #e8c54722;':'')+'">'
    +'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
-   +'<b style="font-size:14.5px">'+(a.active?'🟢 ':'⚪ ')+e2(a.email)+'</b>'
+   +'<b style="font-size:14.5px">'+(liveSides.length?'🟢 ':'⚪ ')+e2(a.email)+'</b>'
    +awBadge(a.status)
-   +(a.active?'<span class="awbadge" style="background:#3fb95018;color:#3fb950">live</span>':'')
-   +(a.has_token?'<span class="awbadge" style="background:#58a6ff14;color:#58a6ff" title="setup-token stored — polled without touching your live login">🔑 polling</span>':'')
+   +(a.active?'<span class="awbadge" style="background:#3fb95018;color:#3fb950" title="this is the live login on THIS machine">live here</span>':'')
    +'<label class="awtog" title="include in the recommendation rotation (all accounts stay tracked either way)"><input type="checkbox" '+(a.in_rotation?'checked':'')+' onchange="awRotate(\''+esc(a.email)+'\',this.checked)"> in rotation</label>'
-   +'<span style="margin-left:auto" class="sub">'+(a.ts?('updated '+tago(a.ts)+(a.via?(' · via '+a.via):'')):'never read')+'</span>'
+   +'<span style="margin-left:auto" class="sub">'+fresh+((a.last_error&&a.active)?(' · <span style="color:#d29922" title="'+e2(a.last_error)+'">⚠ last read failed</span>'):'')+'</span>'
    +'</div>';
   if(a.ok){
     h+='<div style="margin-top:11px;display:flex;flex-direction:column;gap:9px">'
       +awBar(w.session,'5-hour session')+awBar(w.week,'Weekly · all')+awBar(w.week_sonnet,'Weekly · Sonnet')+'</div>';
     if(a.why) h+='<div class="ucsub" style="margin-top:9px;color:'+(a.use_next?'#f0d05a':'#9aa0ad')+'">'+e2(a.why)+'</div>';
-  } else if(!a.has_token && !a.active){ h+=awTokenSetup(a); }
-  else { h+='<div class="ucsub" style="margin-top:10px">No reading yet'+(a.error?(' — '+e2(a.error)):'')+'. <button class="mini" onclick="awRefresh(\''+esc(a.email)+'\',this)">↻ read now (~20s)</button></div>'; }
+  } else { h+='<div class="ucsub" style="margin-top:10px">No reading yet — log into this account on a machine (it becomes readable only while it\'s the live login) and it\'ll report in.</div>'; }
   h+='<div class="btns" style="margin-top:11px">'
-    +'<button class="mini" onclick="awRefresh(\''+esc(a.email)+'\',this)">↻ refresh</button>'
-    +(a.active?'':'<button class="mini go" onclick="acctSwitch(\''+esc(a.label||a.email)+'\',\''+esc(a.email)+'\')">▶ switch all sessions to this</button>')
+    +(a.active?'<button class="mini" onclick="awRefresh(\''+esc(a.email)+'\',this)">↻ refresh now</button>':'')
+    +((!a.active && a.in_wallet)?'<button class="mini go" onclick="acctSwitch(\''+esc(a.label||a.email)+'\',\''+esc(a.email)+'\')" title="switch THIS machine\'s login to this account (one click; reads its windows right after)">▶ switch this machine to this</button>':'')
+    +((!a.active && !a.in_wallet)?'<span class="sub">not in this machine\'s wallet — switch to it on '+(a.side?e2(a.side):'its machine')+'</span>':'')
     +'</div></div>';
   return h;
 }
 function awTokenSetup(a){
   var id='awtok_'+(a.email||'').replace(/[^a-z0-9]/gi,'');
+  var opt=a.active?' <span style="opacity:.8">(optional — this is your live login, already readable; a token lets it be polled even when another account is live)</span>':'';
   return '<div style="margin-top:11px;padding:12px;border:1px dashed #d2992255;border-radius:11px;background:#d299220a">'
-   +'<div class="sub" style="color:#e0b84a;font-weight:600">Enable zero-disruption polling for this account</div>'
-   +'<div class="ucsub" style="margin-top:5px">To read this account\'s limits without switching your live login, store a long-lived token. In a terminal logged in as <b>'+e2(a.email)+'</b>, run <code style="user-select:all;background:#0007;padding:1px 5px;border-radius:4px">claude setup-token</code> (one-time, opens a browser, ~1-year token), then paste the printed token here:</div>'
+   +'<div class="sub" style="color:#e0b84a;font-weight:600">🔑 Paste this account\'s setup-token to enable zero-disruption polling'+opt+'</div>'
+   +'<div class="ucsub" style="margin-top:5px">You ran <code style="user-select:all;background:#0007;padding:1px 5px;border-radius:4px">claude setup-token</code> as <b>'+e2(a.email)+'</b> and it printed an <code>sk-ant-oat…</code> token in the terminal — paste that token here (the snapshot saved your <i>login</i>; this saves the <i>polling token</i>, which is separate):</div>'
    +'<div style="display:flex;gap:7px;margin-top:9px;flex-wrap:wrap"><input id="'+id+'" class="mini" style="flex:1;min-width:230px" placeholder="paste setup-token (sk-ant-oat…)" autocomplete="off">'
-   +'<button class="mini go" onclick="awSaveToken(\''+esc(a.email)+'\',\''+id+'\',this)">save + verify</button></div></div>';
+   +'<button class="mini go" onclick="awSaveToken(\''+esc(a.email)+'\',\''+id+'\',this)">save token + verify</button></div></div>';
 }
 async function awRefresh(email,btn){ if(btn){btn.disabled=true;btn.textContent='reading… ~20s';} try{ await fetch('/api/account-windows/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); }catch(e){} await loadAcctWin(); }
 async function awRefreshAll(btn){ if(btn){btn.disabled=true;btn.textContent='reading all… (~20s each)';} try{ await fetch('/api/account-windows/refresh-all',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); }catch(e){} await loadAcctWin(); if(btn){btn.disabled=false;btn.textContent='↻ refresh all';} }
 async function awRotate(email,on){ try{ await fetch('/api/account-rotation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email,in:on})}); }catch(e){} loadAcctWin(); }
-async function awSaveToken(email,inputId,btn){ var el=document.getElementById(inputId),v=((el||{}).value||'').trim(); if(!v){toast('paste the token first');return;} if(btn){btn.disabled=true;btn.textContent='saving + verifying… ~20s';} var r={}; try{ r=await(await fetch('/api/account-set-token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email,token:v})})).json(); }catch(e){} if(r&&r.ok){toast('✓ polling enabled for '+email,4000);}else{toast('token saved but the test read failed: '+((r&&r.error)||'?'),6000);} loadAcctWin(); }
+async function awSaveToken(email,inputId,btn){ var el=document.getElementById(inputId),v=((el||{}).value||'').trim(); if(!v){toast('paste the token first');return;} if(btn){btn.disabled=true;btn.textContent='saving + verifying… ~20s';} var r={}; try{ r=await(await fetch('/api/account-set-token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email,token:v})})).json(); }catch(e){} if(r&&r.verified){toast('✓ polling enabled + first read OK for '+email,4500);}else if(r&&r.stored){toast('✓ token saved for '+email+' — first read flaked ('+((r&&r.error)||'?')+'); it will catch up on the next refresh',6500);}else{toast('save failed: '+((r&&r.error)||'?'),6000);} loadAcctWin(); }
 function udur(s){s=Math.max(0,s);return s<3600?Math.round(s/60)+'m':s<86400?(s/3600).toFixed(1)+'h':(s/86400).toFixed(1)+'d';}
 function ubLabel(i,n,span){const a=(n-i-0.5)*(span/n);return a<3600?Math.round(a/60)+'m ago':a<86400?(a/3600).toFixed(1)+'h ago':(a/86400).toFixed(1)+'d ago';}
 function uBarChart(series,key,span){const n=series.length||1,W=1000,H=210,pad=16,bw=W/n,vals=series.map(b=>b[key]||0),mx=Math.max(1,...vals);
@@ -14918,18 +15040,22 @@ async function acctSnapshot(){
   toast('Saving the current login to the wallet…');
   var r={}; try{ r=await(await fetch('/api/claude-account/snapshot',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json(); }catch(e){}
   if(r&&r.ok){ toast('Saved '+(r.email||r.label),4000); } else { toast('Save failed: '+((r&&r.error)||'?'),5000); }
-  loadAccounts();
+  acctReload();
 }
+// refresh the active lens after an account action -- the merged Accounts/Usage lens (loadAcctWin) when we're
+// on it, else the legacy standalone view. Without this, account actions repaint the OLD accounts lens over the
+// merged one (the "it went back to the old look" bug).
+function acctReload(){ if(LENS==='usage'){ loadAcctWin(); } else { loadAccounts(); } }
 async function acctSwitch(label,email){
   if(!confirm('Switch the Claude login for EVERY session to '+email+'?\\n\\nThis is live — all running sessions use it on their next request (no restart). Your current account stays saved in the wallet.'))return;
   toast('Switching all sessions to '+email+'…',4000);
   var r={}; try{ r=await(await fetch('/api/claude-account/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})})).json(); }catch(e){}
   if(r&&r.ok){ toast('✓ Now logged in as '+(r.email||email)+' across all sessions',6000); } else { toast('Switch failed: '+((r&&r.error)||'?'),5000); }
-  loadAccounts();
+  acctReload();
 }
 async function acctRemove(label){
   if(!confirm('Remove "'+label+'" from the wallet? (the stored credential is deleted; the LIVE login is unchanged. You can re-save it while logged into it.)'))return;
-  await fetch('/api/claude-account/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})}); loadAccounts();
+  await fetch('/api/claude-account/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})}); acctReload();
 }
 async function acctUsage(btn){
   var box=document.getElementById('acctUsageBox'); if(box)box.innerHTML='<span class="sub">checking the current account\'s usage (spawns a quick session, ~15s)…</span>';
