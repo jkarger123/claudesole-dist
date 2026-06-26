@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.55.0 -- 2026-06-26
+- NEW SESSION picker = launch places at top, real folders underneath (the model James actually wanted):
+  * Top level = the logical launch PLACES (modules/extensions with a CLAUDE.md / extension.json + pillars),
+    matching the Projects tab. Marked 🧩.
+  * Expand ANY of them -> WHATEVER REAL FOLDERS live inside (lazy /api/browse), not just CLAUDE.md sub-modules.
+    Designated places 🧩, plain folders 📁, files dimmed. Drill + launch at any depth.
+  * EXTENSIONS (and any place) designate their claude-launchable locations: browse_dir marks a folder
+    "designated" if it has a CLAUDE.md / extension.json, OR if the parent extension's extension.json lists it
+    under "launchable". So an extension self-declares where agents should launch.
+  * "Show all folders" now toggles the TOP level too (curated launch places <-> raw folder list); auto-fallback
+    to raw folders when a project has no designated places.
+
 ## 0.54.0 -- 2026-06-26
 - REVERT the Projects-tab pin/hide curation (0.53) -- wrong surface. The logical launch-place picker is the
   NEW SESSION button (Sessions topbar -> openLaunch): a curated tree of where you'd launch an agent (project

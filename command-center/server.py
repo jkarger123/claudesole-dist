@@ -2537,13 +2537,21 @@ def browse_dir(rel):
     dirs, files = [], []
     try: entries = sorted(os.listdir(base), key=str.lower)
     except Exception as e: return {"ok": False, "error": str(e)[:80]}
+    # if we're browsing INSIDE an extension, let its extension.json declare which subdirs are claude-launchable
+    ext_launch = set()
+    try:
+        _ej = os.path.join(base, "extension.json")
+        if os.path.isfile(_ej): ext_launch = set((json.load(open(_ej)) or {}).get("launchable") or [])
+    except Exception: pass
     for nm in entries:
         ap = os.path.join(base, nm); isd = os.path.isdir(ap)
         if _browse_blocked(nm, isd): continue
         try: st = os.stat(ap)
         except Exception: continue
         rec = {"name": nm, "rel": os.path.relpath(ap, PROJECT), "isdir": isd, "mtime": st.st_mtime}
-        if isd: dirs.append(rec)
+        if isd:
+            rec["designated"] = bool(_launch_designated(ap) or nm in ext_launch)  # a recognized launch place
+            dirs.append(rec)
         else: rec["size"] = st.st_size; files.append(rec)
     return {"ok": True, "rel": rel, "parent": (os.path.dirname(rel) if rel else None),
             "dirs": dirs, "files": files, "project": os.path.basename(PROJECT.rstrip("/"))}
@@ -10161,59 +10169,40 @@ function openLaunch(pt,pc){
    +'<div class="btns"><button class="btn" onclick="closeM()">Cancel</button><button class="btn go" onclick="doLaunchForm()">▶ Launch &amp; open terminal</button></div>');
   nsTreeInit();}
 async function nsFetch(rel){try{return await(await fetch('/api/browse?rel='+encodeURIComponent(rel||''))).json();}catch(e){return null;}}
-function nsToggleMode(){NSV.mode=(NSV.mode==='all'?'curated':'all');var l=document.getElementById('nsModeLink');if(l)l.textContent=(NSV.mode==='all'?'Show launch targets only':'Show all folders');NSV.nodes={};NSV.seq=0;nsTreeInit();}
+async function nsTops(){try{var r=await(await fetch('/api/launch-tree')).json();return (r&&r.ok&&r.tree)?(r.tree.children||[]):null;}catch(e){return null;}}
+function nsToggleMode(){NSV.mode=(NSV.mode==='all'?'curated':'all');var l=document.getElementById('nsModeLink');if(l)l.textContent=(NSV.mode==='all'?'Show launch places only':'Show all folders');NSV.nodes={};NSV.seq=0;nsTreeInit();}
+// THE TREE: top level = the logical launch PLACES (modules/extensions, curated); drilling into any of them
+// shows WHATEVER REAL FOLDERS live inside (browse), designated launch places marked 🧩. "Show all folders"
+// makes even the top level the raw folder list.
 async function nsTreeInit(){
   var box=document.getElementById('nsTree'); if(!box)return; box.innerHTML='Loading…';
-  if(NSV.mode==='all') return nsInitAll(box);
-  // CURATED (default): only intentional launch targets (folders with a CLAUDE.md / extension.json + pillars).
-  var r; try{ r=await(await fetch('/api/launch-tree')).json(); }catch(e){ r=null; }
-  if(!r||!r.ok){ box.innerHTML='<div class="dim">Could not load launch targets.</div>'; return; }
-  if(!r.tree||!(r.tree.children||[]).length){   // nothing designated (a non-ClaudeFather project) -> fall back
-    NSV.mode='all'; var lk=document.getElementById('nsModeLink'); if(lk)lk.textContent='Show launch targets only';
-    return nsInitAll(box); }
+  var rb=await nsFetch(''); if(!rb||!rb.ok){box.innerHTML='<div class="dim">Could not load folders.</div>';return;}
   box.innerHTML='';
-  var rid=nsNode(box,r.tree,0); nsExpandCur(rid); nsSelectRow(rid);}
-function nsNode(container,node,depth){
-  var id=NSV.seq++; NSV.nodes[id]={rel:node.rel,name:node.name,depth:depth,kids:node.children||[],rendered:false,expanded:false};
-  var hasKids=!!(node.children&&node.children.length);
-  var row=document.createElement('div'); row.className='nstree-row'+(node.designated?'':' nsanc'); row.id='nsrow'+id; row.style.paddingLeft=(depth*15+4)+'px';
-  row.innerHTML='<span class="nscaret" id="nsc'+id+'">'+(hasKids?'▸':'<span style="opacity:.25">•</span>')+'</span><span class="nslabel">📁 '+esc(node.name)+'</span>';
-  if(hasKids) row.querySelector('.nscaret').onclick=function(e){nsToggleCur(id,e);};
-  row.querySelector('.nslabel').onclick=function(){nsSelectRow(id);};
-  container.appendChild(row);
-  var kids=document.createElement('div'); kids.id='nskids'+id; kids.style.display='none'; container.appendChild(kids);
-  return id;}
-function nsExpandCur(id){var node=NSV.nodes[id],kids=document.getElementById('nskids'+id);if(!node||!kids)return;
-  if(!node.rendered){node.kids.forEach(function(ch){nsNode(kids,ch,node.depth+1);});node.rendered=true;}
-  node.expanded=true;kids.style.display='block';nsSetCaret(id,true);}
-function nsToggleCur(id,e){if(e)e.stopPropagation();var node=NSV.nodes[id],kids=document.getElementById('nskids'+id);if(!node||!kids)return;
-  if(!node.rendered){node.kids.forEach(function(ch){nsNode(kids,ch,node.depth+1);});node.rendered=true;}
-  node.expanded=!node.expanded;kids.style.display=node.expanded?'block':'none';nsSetCaret(id,node.expanded);}
-async function nsInitAll(box){
-  var r=await nsFetch(''); if(!r||!r.ok){box.innerHTML='<div class="dim">Could not load folders.</div>';return;}
-  box.innerHTML='';
-  var rid=nsMakeRow(box,'',(r.project||'project root'),0);
-  NSV.nodes[rid].loaded=true; nsRenderChildren(rid,r);
-  var kids=document.getElementById('nskids'+rid); if(kids)kids.style.display='block';
-  NSV.nodes[rid].expanded=true; nsSetCaret(rid,true);
+  var rid=nsRow(box,'',(rb.project||'project root'),0,true);
+  var node=NSV.nodes[rid], kids=document.getElementById('nskids'+rid);
+  if(NSV.mode==='all'){ nsPaint(kids, rb, 1); }
+  else {
+    var tops=await nsTops();
+    if(tops&&tops.length){ tops.forEach(function(t){ nsRow(kids, t.rel, t.name, 1, true); }); }
+    else { nsPaint(kids, rb, 1); }   // no designated launch places -> just show the real folders
+  }
+  node.loaded=true; node.expanded=true; kids.style.display='block'; nsSetCaret(rid,true);
   nsSelectRow(rid);}
-function nsMakeRow(container,rel,name,depth){
+function nsRow(container,rel,name,depth,designated){
   var id=NSV.seq++; NSV.nodes[id]={rel:rel,name:name,depth:depth,loaded:false,expanded:false};
-  var row=document.createElement('div'); row.className='nstree-row'; row.id='nsrow'+id; row.style.paddingLeft=(depth*15+4)+'px';
-  row.innerHTML='<span class="nscaret" id="nsc'+id+'">▸</span><span class="nslabel">📁 '+esc(name)+'</span>';
+  var row=document.createElement('div'); row.className='nstree-row'+(designated?'':' nsanc'); row.id='nsrow'+id; row.style.paddingLeft=(depth*15+4)+'px';
+  row.innerHTML='<span class="nscaret" id="nsc'+id+'">▸</span><span class="nslabel">'+(designated?'🧩':'📁')+' '+esc(name)+'</span>';
   row.querySelector('.nscaret').onclick=function(e){nsToggle(id,e);};
   row.querySelector('.nslabel').onclick=function(){nsSelectRow(id);};
   container.appendChild(row);
   var kids=document.createElement('div'); kids.id='nskids'+id; kids.style.display='none'; container.appendChild(kids);
   return id;}
-function nsRenderChildren(id,r){
-  var kids=document.getElementById('nskids'+id); if(!kids)return; kids.innerHTML='';
-  var d=NSV.nodes[id].depth+1;
-  (r.dirs||[]).forEach(function(x){nsMakeRow(kids,x.rel,x.name,d);});
-  (r.files||[]).forEach(function(f){var fr=document.createElement('div'); fr.className='nstree-row nsfile'; fr.style.paddingLeft=(d*15+20)+'px'; fr.innerHTML='📄 '+esc(f.name); kids.appendChild(fr);});
-  if(!(r.dirs||[]).length&&!(r.files||[]).length){var e=document.createElement('div'); e.className='dim'; e.style.cssText='padding-left:'+(d*15+20)+'px;font-size:12px'; e.textContent='(empty)'; kids.appendChild(e);}}
+function nsPaint(kids,r,depth){
+  (r.dirs||[]).forEach(function(d){ nsRow(kids, d.rel, d.name, depth, !!d.designated); });
+  (r.files||[]).forEach(function(f){var fr=document.createElement('div'); fr.className='nstree-row nsfile'; fr.style.paddingLeft=(depth*15+20)+'px'; fr.innerHTML='📄 '+esc(f.name); kids.appendChild(fr);});
+  if(!(r.dirs||[]).length&&!(r.files||[]).length){var e=document.createElement('div'); e.className='dim'; e.style.cssText='padding-left:'+(depth*15+20)+'px;font-size:12px'; e.textContent='(empty)'; kids.appendChild(e);}}
 async function nsToggle(id,e){if(e)e.stopPropagation(); var node=NSV.nodes[id]; var kids=document.getElementById('nskids'+id); if(!node||!kids)return;
-  if(!node.loaded){kids.innerHTML='<div class="dim" style="padding-left:'+((node.depth+1)*15+20)+'px;font-size:12px">…</div>'; var r=await nsFetch(node.rel); node.loaded=true; if(r&&r.ok)nsRenderChildren(id,r); else kids.innerHTML='';}
+  if(!node.loaded){kids.innerHTML='<div class="dim" style="padding-left:'+((node.depth+1)*15+20)+'px;font-size:12px">…</div>'; var r=await nsFetch(node.rel); node.loaded=true; kids.innerHTML=''; if(r&&r.ok)nsPaint(kids,r,node.depth+1);}
   node.expanded=!node.expanded; kids.style.display=node.expanded?'block':'none'; nsSetCaret(id,node.expanded);}
 function nsSetCaret(id,open){var c=document.getElementById('nsc'+id); if(c)c.textContent=open?'▾':'▸';}
 function nsSelectRow(id){var node=NSV.nodes[id]; if(!node)return;
