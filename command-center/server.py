@@ -12901,18 +12901,14 @@ function termFitH(){ var el=termBig(); if(!el) return 320;   // height that fill
   var top=el.getBoundingClientRect().top;
   return Math.max(260, Math.round(window.innerHeight - top - termDockH() - 64)); }
 function termCapH(){ return Math.round(window.innerHeight*3); }   // allow growing well past the viewport (the list scrolls)
-var TERM_MIN=260, TERM_DRAG=false, TERM_H=0, TERM_TAPS=0;
-function termShowN(){ var n=document.getElementById('termGripN'); if(!n)return; var el=termBig(); var h=el?Math.round(el.getBoundingClientRect().height):0; n.textContent='↕ '+h+'px'+(TERM_TAPS?(' ('+TERM_TAPS+')'):''); }
+var TERM_MIN=260, TERM_DRAG=false, TERM_H=0;
+function termShowN(){ var n=document.getElementById('termGripN'); if(!n)return; var el=termBig(); n.textContent= el?('↕ '+Math.round(el.getBoundingClientRect().height)+'px'):''; }
 function termSet(h){ var px=Math.max(TERM_MIN, Math.min(Math.round(h), termCapH())); TERM_H=px;
-  var el=termBig(); if(el){ el.style.setProperty('height',px+'px','important'); el.style.setProperty('flex','none','important'); el.style.setProperty('min-height','0','important'); }   // size the ELEMENT directly: inline !important beats the stylesheet, bypassing any var/cascade problem
+  var el=termBig(); if(el){ el.style.setProperty('height',px+'px','important'); el.style.setProperty('flex','none','important'); el.style.setProperty('min-height','0','important'); }   // size the ELEMENT directly: inline !important beats the stylesheet (the CSS var wasn't applying via the cascade)
   document.documentElement.style.setProperty('--cf-term-h',px+'px');
   termShowN(); }
 function termSave(){ if(TERM_H){ try{ localStorage.setItem(termKey(),TERM_H); }catch(e){} } }
-// step buttons (plain taps). The (N) counter in the readout = how many times the handler has FIRED -- so we
-// can tell "taps not reaching JS" (N stays 0) from "height won't change" (N rises, px frozen).
-function termStep(d){ TERM_TAPS++; var el=termBig();
-  if(el){ TERM_MIN=termFitH(); termSet(el.getBoundingClientRect().height + d); termSave(); }
-  else { var n=document.getElementById('termGripN'); if(n) n.textContent='(no terminal) ('+TERM_TAPS+')'; } }
+function termStep(d){ var el=termBig(); if(!el)return; TERM_MIN=termFitH(); termSet(el.getBoundingClientRect().height + d); termSave(); }
 function termApplySaved(){
   if(!termIsMobile()){ document.documentElement.style.removeProperty('--cf-term-h'); return; }   // desktop: CSS layout unchanged
   if(TERM_DRAG||!termBig()) return;                          // never fight an in-progress drag

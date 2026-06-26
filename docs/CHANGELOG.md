@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.37.7 -- 2026-06-25
+- Mobile terminal resize WORKS (root cause: the CSS var --cf-term-h wasn't applying through the cascade).
+  Now the bigsess element is sized directly via inline !important; the − / ＋ buttons and the drag bar both
+  resize it; height is shown live (↕ NNNpx) and remembered per device; increase-only floor = full-screen fit.
+  Removed the temporary tap-counter diagnostic now that it's confirmed working.
+
 ## 0.37.6 -- 2026-06-25
 - FIX/DIAGNOSE (mobile terminal resize still dead): now size the bigsess ELEMENT directly with inline
   !important (height/flex/min-height) instead of relying on a CSS var the cascade may have been dropping;
