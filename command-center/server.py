@@ -545,6 +545,11 @@ def superadmin_exec(grant):
         return {"ok": True, "action": action, "result": icloud_relink_all()}
     if action == "ageoff_deliverables":
         return {"ok": True, "action": action, "result": icloud_age_off(params.get("days"))}
+    if action == "switch_account":
+        # switch THIS node's (its macOS user's) live Claude login to a wallet account -- lets the overseer
+        # orchestrate the fleet (assign each user a distinct account). Reads the new account's windows right after.
+        r = account_switch(params.get("label") or params.get("email") or "")
+        return {"ok": bool(r.get("ok")), "action": action, "email": r.get("email"), "error": r.get("error")}
     return {"ok": False, "error": "unknown superadmin action: " + str(action)}
 
 def _self_restart():
@@ -2869,6 +2874,8 @@ def account_snapshot(label=None):
         os.makedirs(ACCT_WALLET_DIR, exist_ok=True)
         rec = {"label": label, "email": email, "blob": cur["blob"], "account": cur["account"], "ts": int(time.time())}
         fd = os.open(pth, os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o600); os.write(fd, json.dumps(rec).encode()); os.close(fd)
+        try: _acct_validate(email)   # freshly captured -> this wallet blob is known-good as of now
+        except Exception: pass
         return {"ok": True, "label": label, "email": email}
     except Exception as e: return {"ok": False, "error": str(e)[:120]}
 def account_switch(label):
@@ -3007,6 +3014,31 @@ ACCT_POLL_TTL = int(CC.get("account_poll_ttl") or 1800)            # background 
 _ACCT_WIN_LOCK = threading.Lock()
 _ACCT_POLL_LOCK = threading.Lock()                                 # serialize the spawn-claude reads (one at a time)
 _ACCT_STORE_CACHE = {"at": 0.0, "data": None}                      # account_windows_store() does model scans -> cache it
+# Autopilot CAPTURE layer (prerequisites for safe unattended switching; the switch loop itself is not enabled yet):
+#  - login freshness: when an account is the live login and reads /usage OK (or is snapshotted), its wallet blob
+#    on THIS macOS user is proven-good -> stamp it, so autopilot never switches onto a stale/expired login.
+#  - idle gate: seconds since the last session activity, so autopilot switches only when nothing is mid-task.
+ACCT_VALIDATED_FILE = os.path.expanduser("~/.claude/_cc_acct_login_validated.json")  # email -> ts (this user's wallet blob last confirmed working)
+ACCT_LOGIN_FRESH_SEC = int(CC.get("login_fresh_sec") or 7 * 86400)
+def _acct_validated_load():
+    try:
+        d = json.load(open(ACCT_VALIDATED_FILE)); return d if isinstance(d, dict) else {}
+    except Exception: return {}
+def _acct_validate(email):
+    email = (email or "").strip()
+    if not email: return
+    d = _acct_validated_load(); d[email] = int(time.time())
+    try:
+        tmp = ACCT_VALIDATED_FILE + ".tmp"; json.dump(d, open(tmp, "w")); os.replace(tmp, ACCT_VALIDATED_FILE)
+    except Exception: pass
+def _user_idle_secs():
+    """Seconds since the most recent activity across this user's live sessions (large = idle)."""
+    try:
+        sess = tmux_sessions()
+        if not sess: return 99999
+        last = max((s.get("activity", 0) or 0) for s in sess)
+        return max(0, int(time.time() - last)) if last else 99999
+    except Exception: return 99999
 
 def _acct_windows_load():
     try:
@@ -3065,6 +3097,8 @@ def account_windows_refresh(email=None):
     if r.get("ok"):
         rec = {"email": live, "windows": r.get("windows") or {}, "ts": now, "ok": True, "side": side, "error": None}
         try: _acct_calib_log(live, side, r.get("windows") or {}, now)   # pair this %-reading with our token telemetry
+        except Exception: pass
+        try: _acct_validate(live)   # a successful live read proves this user's login for `live` works right now
         except Exception: pass
     else:
         # a flaky /usage scrape must NOT wipe a good prior reading -- keep the last good windows+ts, just note it.
@@ -3140,7 +3174,11 @@ def account_windows_store():
         accts[em] = {"email": em, "windows": rec.get("windows") or {}, "ts": rec.get("ts"),
                      "ok": bool(rec.get("ok")), "side": rec.get("side") or _side_label(),
                      "last_error": rec.get("last_error"), "model": mv}
-    res = {"side": _side_label(), "store_id": _store_id(), "current_email": cur, "accounts": accts}
+    val = _acct_validated_load()
+    wallet = {a.get("email"): {"label": a.get("label"), "validated_ts": val.get(a.get("email"))}
+              for a in account_list().get("accounts", []) if a.get("email")}   # what THIS user can switch to + how fresh
+    res = {"side": _side_label(), "store_id": _store_id(), "current_email": cur, "accounts": accts,
+           "wallet": wallet, "idle_secs": _user_idle_secs()}
     _ACCT_STORE_CACHE.update({"at": now, "data": res}); return res
 
 _ACCT_FLEET_CACHE = {"at": 0.0, "data": None}; _ACCT_FLEET_LOCK = threading.Lock()
@@ -3179,9 +3217,15 @@ def account_windows_all():
         if sid and sid in seen_sid: continue
         seen_sid.add(sid); reps.append(r)
     live_on = {}                                                 # email -> [sides currently logged into it]
+    switchable = {}                                              # email -> [{side, validated_ts, fresh, idle_secs}] (autopilot eligibility)
     for r in reps:
+        side = r.get("side") or r.get("store_id")
         ce = r.get("current_email")
-        if ce: live_on.setdefault(ce, []).append(r.get("side") or r.get("store_id"))
+        if ce: live_on.setdefault(ce, []).append(side)
+        for em, winfo in (r.get("wallet") or {}).items():
+            vts = (winfo or {}).get("validated_ts")
+            switchable.setdefault(em, []).append({"side": side, "validated_ts": vts,
+                "fresh": bool(vts and (now - vts) < ACCT_LOGIN_FRESH_SEC), "idle_secs": r.get("idle_secs")})
     merged = {}                                                  # email -> freshest reading across the fleet
     for r in reps:
         for em, a in (r.get("accounts") or {}).items():
@@ -3199,7 +3243,8 @@ def account_windows_all():
             "live_on": live_on.get(em, []), "in_rotation": em in rotset, "ok": bool(a.get("ok")),
             "windows": {"session": _win_view(w.get("session"), now), "week": _win_view(w.get("week"), now),
                         "week_sonnet": _win_view(w.get("week_sonnet"), now)},
-            "ts": a.get("ts"), "side": a.get("side"), "last_error": a.get("last_error"), "model": a.get("model")})
+            "ts": a.get("ts"), "side": a.get("side"), "last_error": a.get("last_error"), "model": a.get("model"),
+            "switchable_on": switchable.get(em, [])})
     info, pick = _acct_recommend(accounts, now)
     for a in accounts:
         a.update(info.get(a["email"], {"status": "no_data", "why": "", "score": -9, "use_next": False}))
@@ -3208,7 +3253,8 @@ def account_windows_all():
     pa = next((a for a in accounts if a["email"] == pick), None)
     return {"accounts": accounts, "now": now, "current_email": cur, "poll_ttl": ACCT_POLL_TTL,
             "rotation_default_all": rot is None, "pick": pick, "pick_why": (pa["why"] if pa else None),
-            "sides": [{"side": r.get("side") or r.get("store_id"), "live": r.get("current_email")} for r in reps]}
+            "sides": [{"side": r.get("side") or r.get("store_id"), "live": r.get("current_email"),
+                       "idle_secs": r.get("idle_secs")} for r in reps]}
 
 def account_rotation_set(email, want_in):
     """Add/remove an account from the recommendation rotation (we still TRACK all accounts either way)."""
@@ -11034,7 +11080,10 @@ function acctFuelSection(){
       +'<div style="font-size:19px;font-weight:800;color:#f0d05a;letter-spacing:-.2px">▶ Use '+e2(d.pick)+' next</div>'
       +'<div class="ucsub" style="margin-top:3px">'+e2(d.pick_why||'')+'</div></div>'; }
   else { h+='<div style="margin-top:11px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:#0006"><div class="sub">No in-rotation account has 5-hour headroom right now — they\'re cooling or resting. See the gauges below.</div></div>'; }
-  if(sides.length){ h+='<div class="ucsub" style="margin-top:11px">Logged in now: '+sides.map(function(s){return '<b style="color:#e8e8ea">'+e2(s.side)+'</b> → '+(s.live?e2(s.live):'<span style="opacity:.55">—</span>');}).join(' &nbsp;·&nbsp; ')+' &nbsp;<button class="mini" onclick="acctSnapshot()" title="save / refresh THIS machine\'s current login in the wallet">📸 snapshot this login</button></div>'; }
+  if(sides.length){ h+='<div class="ucsub" style="margin-top:11px">Logged in now: '+sides.map(function(s){
+      var idle=(s.idle_secs!=null)?(s.idle_secs<120?'<span style="color:#3fb950">● active</span>':'<span style="opacity:.6">idle '+awDur(s.idle_secs)+'</span>'):'';
+      return '<b style="color:#e8e8ea">'+e2(s.side)+'</b> → '+(s.live?e2(s.live):'<span style="opacity:.55">—</span>')+(idle?(' '+idle):'');
+    }).join(' &nbsp;·&nbsp; ')+' &nbsp;<button class="mini" onclick="acctSnapshot()" title="save / refresh THIS machine\'s current login in the wallet">📸 snapshot this login</button></div>'; }
   h+='</div>';
   accts.forEach(function(a){ h+=acctFuelCard(a); });
   return h;
@@ -11058,6 +11107,12 @@ function acctFuelCard(a){
     if(a.why) h+='<div class="ucsub" style="margin-top:9px;color:'+(a.use_next?'#f0d05a':'#9aa0ad')+'">'+e2(a.why)+'</div>';
   } else { h+='<div class="ucsub" style="margin-top:10px">No reading yet — log into this account on a machine (it becomes readable only while it\'s the live login) and it\'ll report in.</div>'; }
   h+=awModel(a);
+  // login freshness (autopilot safety): can a machine safely auto-switch to this account, and is its stored login fresh?
+  var sw=(a.switchable_on||[]).slice().sort(function(x,y){return (y.validated_ts||0)-(x.validated_ts||0);});
+  if(sw.length){ var b=sw[0];
+    var ft = b.validated_ts ? ('login validated '+tago(b.validated_ts)+' on '+e2(b.side)+(b.fresh?'':' — <span style="color:#d29922">stale, re-snapshot</span>'))
+                            : ('login never validated on '+e2(b.side)+' — <span style="color:#d29922">snapshot it before relying on auto-switch</span>');
+    h+='<div class="ucsub" style="margin-top:5px;opacity:.85">🔑 '+ft+'</div>'; }
   h+='<div class="btns" style="margin-top:11px">'
     +(a.active?'<button class="mini" onclick="awRefresh(\''+esc(a.email)+'\',this)">↻ refresh now</button>':'')
     +((!a.active && a.in_wallet)?'<button class="mini go" onclick="acctSwitch(\''+esc(a.label||a.email)+'\',\''+esc(a.email)+'\')" title="switch THIS machine\'s login to this account (one click; reads its windows right after)">▶ switch this machine to this</button>':'')

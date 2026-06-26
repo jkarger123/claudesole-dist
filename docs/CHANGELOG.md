@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.63.0 -- 2026-06-26
+- Autopilot CAPTURE layer (prerequisites for safe unattended account-switching; the switch LOOP is intentionally
+  NOT enabled yet -- let the limit model bake first):
+  * Cross-user switch: new signed superadmin action `switch_account` -- the overseer can switch ANY node's live
+    login (so it can orchestrate the fleet: assign each macOS user a distinct account). Single-node switch was
+    already one-click.
+  * Login freshness: a successful live /usage read (or a snapshot) stamps `~/.claude/_cc_acct_login_validated.json`
+    {email->ts} -- proof this user's stored login for that account currently works -- so autopilot never switches
+    onto a stale/expired login. Surfaced per account (validated Xago / "stale, re-snapshot").
+  * Wallet inventory + idle reported up: each node's store now reports its wallet (which accounts it can switch
+    to + freshness) and an idle signal (seconds since last session activity). account_windows_all merges these
+    into per-account `switchable_on:[{side,validated_ts,fresh,idle_secs}]` + per-side `idle_secs`, so the overseer
+    knows WHERE each account can be safely switched to and WHEN a machine is idle enough to switch.
+  * UI: "Logged in now" shows ● active / idle per machine; each account shows its login-freshness.
+
 ## 0.62.0 -- 2026-06-26
 - Account LIMIT MODEL (reverse-engineer the hidden window budgets) -- Anthropic doesn't publish the token
   budget of a 5h/weekly window, so we LEARN it: at each /usage scrape we log the observed % alongside our
