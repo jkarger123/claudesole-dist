@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.37.8 -- 2026-06-25
+- FIX (mobile terminal resize -- - grew instead of shrank + drag was janky): root cause was the "grow past
+  the viewport with page-scroll" design -- once the terminal scrolled the page, its top went negative and the
+  floor calc inflated above the current height, so BOTH -/+ clamped upward (everything grew), and the
+  auto-scroll made the page lurch under your finger. Removed all of that: the terminal is now BOUNDED to the
+  visible space above the dock (xterm keeps its own scrollback), so the page never scrolls, dragging is smooth,
+  - actually shrinks (floor 240px), + and drag grow up to fill-screen. Default = fill screen; remembered per
+  device (old oversized saved values self-heal by clamping to the viewport).
+
 ## 0.37.7 -- 2026-06-25
 - Mobile terminal resize WORKS (root cause: the CSS var --cf-term-h wasn't applying through the cascade).
   Now the bigsess element is sized directly via inline !important; the − / ＋ buttons and the drag bar both

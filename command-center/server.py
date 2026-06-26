@@ -12887,49 +12887,42 @@ function renderFocus(s){
     +'</div>';
   return h;
 }
-// ---- Mobile focus-terminal resize: drag the grip below the terminal to make it TALLER (remembered per
-// device). DELTA-based (new height = height-at-grab + how far you've dragged + how far the list scrolled),
-// so it always tracks your finger regardless of scroll-container quirks. Floor = the full-screen fit (mobile
-// = increase-only); you can grow PAST the viewport -- holding near the bottom auto-scrolls the REAL scroll
-// container (the .wrap list, not the window). A drag flag stops the resize/rotate handler resetting mid-drag.
+// ---- Mobile focus-terminal resize: drag the grip (or tap -/+) to size the terminal. BOUNDED to the visible
+// space above the dock so the PAGE NEVER SCROLLS (that was what made dragging janky + broke the math when the
+// terminal's top went negative). The terminal has its own internal scrollback, so capping at "fills the
+// screen" loses nothing. DELTA-based drag (height-at-grab + finger delta). Remembered per device. ----
+var TERM_FLOOR=240, TERM_DRAG=false, TERM_H=0;
 function termIsMobile(){ return !!(window.matchMedia&&window.matchMedia('(max-width:820px)').matches); }
 function termKey(){ return termIsMobile()?'hpcc_term_h_m':'hpcc_term_h_d'; }
 function termBig(){ return document.querySelector('.focusonly .bigsess'); }
-function termScroller(){ return document.querySelector('#grid.wrap')||document.querySelector('.wrap')||document.scrollingElement||document.documentElement; }
 function termDockH(){ return parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cf-dock-h'))||0; }
-function termFitH(){ var el=termBig(); if(!el) return 320;   // height that fills the screen above the dock, leaving room for the grip row (the floor on mobile)
-  var top=el.getBoundingClientRect().top;
-  return Math.max(260, Math.round(window.innerHeight - top - termDockH() - 64)); }
-function termCapH(){ return Math.round(window.innerHeight*3); }   // allow growing well past the viewport (the list scrolls)
-var TERM_MIN=260, TERM_DRAG=false, TERM_H=0;
+function termMaxH(){ var el=termBig(); if(!el) return 480;   // fill the space between the terminal's top and the dock (+ room for the grip row); never taller -> page never scrolls
+  var top=el.getBoundingClientRect().top; if(top<0) top=0;   // guard: if ever scrolled, don't inflate the max
+  return Math.max(TERM_FLOOR+40, Math.round(window.innerHeight - top - termDockH() - 70)); }
+function termClamp(h){ return Math.max(TERM_FLOOR, Math.min(Math.round(h), termMaxH())); }
 function termShowN(){ var n=document.getElementById('termGripN'); if(!n)return; var el=termBig(); n.textContent= el?('↕ '+Math.round(el.getBoundingClientRect().height)+'px'):''; }
-function termSet(h){ var px=Math.max(TERM_MIN, Math.min(Math.round(h), termCapH())); TERM_H=px;
-  var el=termBig(); if(el){ el.style.setProperty('height',px+'px','important'); el.style.setProperty('flex','none','important'); el.style.setProperty('min-height','0','important'); }   // size the ELEMENT directly: inline !important beats the stylesheet (the CSS var wasn't applying via the cascade)
-  document.documentElement.style.setProperty('--cf-term-h',px+'px');
-  termShowN(); }
+function termSet(h){ var px=termClamp(h); TERM_H=px;
+  var el=termBig(); if(el){ el.style.setProperty('height',px+'px','important'); el.style.setProperty('flex','none','important'); el.style.setProperty('min-height','0','important'); }   // size the element directly: inline !important beats the stylesheet var (which wasn't applying via the cascade)
+  document.documentElement.style.setProperty('--cf-term-h',px+'px'); termShowN(); }
 function termSave(){ if(TERM_H){ try{ localStorage.setItem(termKey(),TERM_H); }catch(e){} } }
-function termStep(d){ var el=termBig(); if(!el)return; TERM_MIN=termFitH(); termSet(el.getBoundingClientRect().height + d); termSave(); }
+function termStep(d){ var el=termBig(); if(!el)return; termSet(el.getBoundingClientRect().height + d); termSave(); }
 function termApplySaved(){
-  if(!termIsMobile()){ document.documentElement.style.removeProperty('--cf-term-h'); return; }   // desktop: CSS layout unchanged
-  if(TERM_DRAG||!termBig()) return;                          // never fight an in-progress drag
-  TERM_MIN=termFitH();                                       // mobile: fill the screen by default; only ever INCREASE from there
+  var el=termBig();
+  if(!termIsMobile()){ document.documentElement.style.removeProperty('--cf-term-h'); if(el){el.style.removeProperty('height');el.style.removeProperty('flex');el.style.removeProperty('min-height');} return; }   // desktop: drop inline sizing, CSS layout unchanged
+  if(TERM_DRAG||!el) return;                                 // never fight an in-progress drag
   var v=parseInt(localStorage.getItem(termKey())||'0',10);
-  termSet(v>0?v:TERM_MIN);
+  termSet(v>0?v:termMaxH());                                 // default = fill the screen; a saved value is clamped to the current viewport (self-heals old oversized values)
 }
 function termResizeInit(){
   if(!termResizeInit._r){ termResizeInit._r=1;
-    window.addEventListener('resize',function(){ termApplySaved(); });
-    window.addEventListener('orientationchange',function(){ setTimeout(termApplySaved,300); }); }
+    window.addEventListener('resize',function(){ if(!TERM_DRAG) termApplySaved(); });
+    window.addEventListener('orientationchange',function(){ setTimeout(function(){ if(!TERM_DRAG) termApplySaved(); },300); }); }
   var g=document.getElementById('termBar'); if(!g||g._w) return; g._w=1;
   termShowN();
-  var startY=0,startH=0,startScroll=0,lastY=0,autoT=null;
-  function curH(){ var el=termBig(); return el?el.getBoundingClientRect().height:termFitH(); }
-  function recompute(){ var sc=termScroller(); var sct=sc?sc.scrollTop:0; termSet(startH + (lastY-startY) + (sct-startScroll)); }
-  function autoOff(){ if(autoT){ clearInterval(autoT); autoT=null; } }
-  function autoOn(){ if(autoT)return; autoT=setInterval(function(){ if(!TERM_DRAG){autoOff();return;} var sc=termScroller(); if(sc) sc.scrollTop+=14; recompute(); },30); }
-  function down(clientY){ var el=termBig(); if(!el)return; TERM_MIN=termFitH(); startH=curH(); startY=clientY; lastY=clientY; var sc=termScroller(); startScroll=sc?sc.scrollTop:0; TERM_DRAG=true; g.classList.add('drag'); document.body.style.userSelect='none'; }
-  function move(clientY){ if(!TERM_DRAG)return; lastY=clientY; if(clientY>window.innerHeight-100){ autoOn(); } else { autoOff(); } recompute(); }
-  function up(){ if(!TERM_DRAG)return; TERM_DRAG=false; autoOff(); g.classList.remove('drag'); document.body.style.userSelect=''; termSave(); }
+  var startY=0,startH=0;
+  function down(clientY){ var el=termBig(); if(!el)return; startH=el.getBoundingClientRect().height; startY=clientY; TERM_DRAG=true; g.classList.add('drag'); document.body.style.userSelect='none'; }
+  function move(clientY){ if(!TERM_DRAG)return; termSet(startH + (clientY - startY)); }   // bounded by termClamp -> never grows past the viewport -> page stays put
+  function up(){ if(!TERM_DRAG)return; TERM_DRAG=false; g.classList.remove('drag'); document.body.style.userSelect=''; termSave(); }
   g.addEventListener('touchstart',function(e){ if(e.touches.length!==1)return; e.preventDefault(); down(e.touches[0].clientY); },{passive:false});
   g.addEventListener('touchmove',function(e){ if(!TERM_DRAG)return; e.preventDefault(); move(e.touches[0].clientY); },{passive:false});
   g.addEventListener('touchend',up); g.addEventListener('touchcancel',up);
