@@ -3,6 +3,24 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.42.0 -- 2026-06-26
+- VISION: make focus work for REMOTE users + lay the desktop track. Two additive pieces, web app unchanged:
+  1) WEB CONTEXT-BRIDGE (server.py, additive): the focus signal now comes from the BROWSER, not the server's
+     macOS reader (which only sees the unattended Studio). POST /api/focus-report {lens,subject,session,url,
+     title,text} -> focus_now() PREFERS a fresh (<120s) browser report (explicit subject = 0.9 conf; else
+     classify) so "🎯 you're on X" works from anyone's laptop/phone, even with the macOS dial off (in-app
+     activity is the user's own workspace). A debounced client reporter fires on lens/subject/session change.
+     POST /api/context/ingest-page {url,title,text} -> ingests a viewed page as a "web" event (honors the
+     trust dial: skipped unless capture>=context; size-bounded; skips obvious auth/secret URLs). All existing
+     routes/behavior untouched.
+  2) CLAUDEFATHER DESKTOP (new desktop/ -- optional Electron client, does NOT change the web app): loads the
+     user's dashboard in one tab + a REAL Chromium browser (WebContentsView) in another, and a context bridge
+     reports the active page (url/title/text) to the user's own server's /api/{focus-report,ingest-page} so
+     the AI sees what you browse. Capture OFF by default with an always-visible toggle; config (server URL +
+     auth) persisted 0600; reports only to the user's server (no telemetry). Web/phone/any-device access over
+     Tailscale keeps working with NO install; the desktop app is pure addition that unlocks the browser +
+     page-vision. (GUI not testable headlessly; runs on a Mac with a display -- see desktop/README.md.)
+
 ## 0.41.0 -- 2026-06-26
 - VISION Phase 3 (the magic) + the CONTEXT X-RAY (show users why this is hard to replicate):
   * FOCUS/INTENT engine (focus.py): reads a lightweight activity signal -- frontmost app + bundle id (NO

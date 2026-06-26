@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <!-- Locked-down CSP for the chrome UI: it only ever runs our own local assets. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self';" />
+  <title>ClaudeFather Desktop</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- TAB STRIP -->
+  <div id="tabstrip">
+    <div id="tabs"></div>
+    <button id="newtab" class="iconbtn" title="New browser tab">+</button>
+    <div class="spacer"></div>
+    <button id="gear" class="iconbtn" title="Settings">⚙</button>
+  </div>
+
+  <!-- TOOLBAR (navigation + the capture toggle) -->
+  <div id="toolbar">
+    <button id="back" class="navbtn" title="Back">‹</button>
+    <button id="forward" class="navbtn" title="Forward">›</button>
+    <button id="reload" class="navbtn" title="Reload">⟳</button>
+    <button id="home" class="navbtn" title="Open Workspace (dashboard)">⌂</button>
+    <input id="address" type="text" spellcheck="false" autocomplete="off"
+           placeholder="Search or enter address" />
+    <!-- The capture indicator + toggle: the visible "the AI can see this tab" surface. -->
+    <button id="capture" class="capturebtn off" title="Toggle AI page capture for browser tabs">
+      <span class="dot"></span><span id="capturelabel">AI capture: OFF</span>
+    </button>
+  </div>
+
+  <!-- Content views (Workspace / Browser) are native WebContentsViews positioned by the main process,
+       so they render in the area below this chrome. Nothing else lives in <body> except modals. -->
+
+  <!-- TOAST (capture activity) -->
+  <div id="toast" class="hidden"></div>
+
+  <!-- MODAL: settings / first-run -->
+  <div id="modal" class="hidden">
+    <div class="card">
+      <h1 id="modal-title">Connect your ClaudeFather</h1>
+      <p class="sub">This app loads <b>your own</b> ClaudeFather dashboard and adds a real browser. When you
+        turn capture ON, browser pages are sent <b>only</b> to the server below — nowhere else.</p>
+
+      <label for="serverUrl">Server URL</label>
+      <input id="serverUrl" type="text" spellcheck="false" autocomplete="off"
+             placeholder="https://your-mac.your-tailnet.ts.net:8443  or  http://localhost:8799" />
+      <div class="hint">The address of your running ClaudeFather Command Center.</div>
+
+      <label for="authToken">Auth token <span class="muted">(optional)</span></label>
+      <input id="authToken" type="password" spellcheck="false" autocomplete="off"
+             placeholder="Only if your dashboard has auth enabled" />
+      <div class="hint">Your dashboard's <code>auth_token</code>. Used to sign in to the Workspace view and to
+        authenticate page reports. Leave blank if your dashboard has no auth. Stored locally, owner-only.</div>
+
+      <div class="row">
+        <button id="modal-save" class="primary">Save &amp; Connect</button>
+        <button id="modal-cancel" class="ghost">Cancel</button>
+      </div>
+      <div id="modal-err" class="err hidden"></div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

@@ -5178,15 +5178,47 @@ try:
 except Exception as _e:
     print("[focus] init failed:", _e)
 
+# BROWSER-reported focus (the WEB-SIDE context bridge). Everyone connects to this always-on Mac from their
+# OWN laptop/phone over the tailnet, so the macOS reader (focus.read_signal) only ever sees the UNATTENDED
+# server -- useless for a remote user. The browser instead reports what the dashboard already knows (which
+# lens/subject/session you have open). In-app activity is the user's own workspace -> always safe to report;
+# it is NOT gated by the macOS trust dial. Page url/title/text only matter to the future desktop app.
+BROWSER_FOCUS = {}            # last report: {lens, subject, session, url, title, text, ts}
+_BROWSER_FOCUS_TTL = 120.0    # a report this fresh (s) PREFERS over the server's macOS reader
+
+def focus_report(lens=None, subject=None, session=None, url=None, title=None, text=None):
+    """Record the browser's view of where the (remote) user is right now. Returns {ok, ts}."""
+    global BROWSER_FOCUS
+    BROWSER_FOCUS = {"lens": (lens or None), "subject": (subject or None), "session": (session or None),
+                     "url": (url or None), "title": (title or None),
+                     "text": ((text or "")[:2000] or None), "ts": time.time()}
+    return {"ok": True, "ts": BROWSER_FOCUS["ts"]}
+
 def focus_now():
-    """On-demand: read the current activity signal (only when asked -- no background capture) and classify it
-    to a subject in the context graph. Gated by the trust dial (capture level; default off)."""
+    """On-demand: what subject am I on right now? PREFERS a fresh BROWSER-reported focus (the remote user's
+    actual device) over the server's macOS reader (which only sees the unattended Mac). Falls back to the
+    macOS signal, gated by the trust dial (capture level; default off). Existing behavior is unchanged when
+    no browser report is fresh."""
     cap = _focus_capture()
+    bf = BROWSER_FOCUS
+    if bf and (time.time() - (bf.get("ts") or 0)) < _BROWSER_FOCUS_TTL:
+        # what the browser told us (lens/subject/session always; url/title only from the desktop app)
+        sig = {k: bf[k] for k in ("title", "url") if bf.get(k)}
+        if bf.get("lens"): sig["lens"] = bf["lens"]
+        subj = bf.get("subject")
+        if subj:   # explicit subject (the client/thread/folder the user has open) -> high confidence, no classify
+            res = {"subject": subj, "confidence": 0.9, "why": "browser:explicit"}
+        else:      # no explicit subject -> classify the {title,url} against the known subjects
+            res = focus.classify(sig, context.subjects(), (CC.get("focus") or {}).get("rules") or {})
+        res.update({"capture": cap, "signal": sig, "source": "browser", "grant_ok": True,
+                    "lens": bf.get("lens"), "session": bf.get("session")})
+        return res
     if cap == "off":
-        return {"capture": "off", "subject": None, "signal": {}, "confidence": 0.0, "why": "focus detection is off"}
+        return {"capture": "off", "subject": None, "signal": {}, "confidence": 0.0,
+                "why": "focus detection is off", "source": "none"}
     sig = focus.read_signal(cap)
     res = focus.classify(sig, context.subjects(), (CC.get("focus") or {}).get("rules") or {})
-    res.update({"capture": cap, "signal": sig, "grant_ok": focus.title_grant_ok()})
+    res.update({"capture": cap, "signal": sig, "grant_ok": focus.title_grant_ok(), "source": "server"})
     return res
 
 def _context_backfill():
@@ -7674,6 +7706,22 @@ class H(BaseHTTPRequestHandler):
             if cap not in ("off", "app", "context", "deep"): cap = "off"
             save(FOCUS_STATE, {"capture": cap}); focus.init({"capture": cap})
             return self._s(200, json.dumps({"ok": True, "capture": cap, "signal": (focus.read_signal(cap) if cap != "off" else {})}, default=str))
+        if u.path == "/api/focus-report":   # the WEB-SIDE bridge: browser reports the lens/subject/session you're on
+            return self._s(200, json.dumps(focus_report(
+                lens=body.get("lens"), subject=body.get("subject"), session=body.get("session"),
+                url=body.get("url"), title=body.get("title"), text=body.get("text")), default=str))
+        if u.path == "/api/context/ingest-page":   # turn a browsed PAGE into context (future desktop browser). Trust-dialed + size-bounded.
+            cap = _focus_capture()
+            if cap not in ("context", "deep"):   # page CONTENT capture honors the trust dial (level 2+); off/app -> skip
+                return self._s(200, json.dumps({"ok": False, "skipped": "trust-dial", "capture": cap}))
+            url = (body.get("url") or "").strip()
+            if not url or not url.lower().startswith("http"): return self._s(200, json.dumps({"ok": False, "error": "no url"}))
+            if any(w in url.lower() for w in ("login", "signin", "sign-in", "password", "secret", "/oauth", "token=")):
+                return self._s(200, json.dumps({"ok": False, "skipped": "secret-clean"}))   # don't ingest obvious auth pages
+            text = (body.get("text") or "")[:8000]   # size-bounded
+            eid = context.ingest_event(kind="web", source="browser", title=((body.get("title") or url)[:500]),
+                                       body=text, trust=(body.get("trust") or "external"), ext_id=url, refs={"url": url})
+            return self._s(200, json.dumps({"ok": True, "id": eid}, default=str))
         if u.path == "/api/mesh-send":     return self._s(200, json.dumps(mesh_send(body.get("text", ""), body.get("target") or None, body.get("targets") or None, expect_reply=body.get("expect_reply", True))))
         if u.path == "/api/mesh-recv":
             if MESH_ENFORCE and not _mesh_token_ok(self.headers.get("X-Mesh-Token")): return self._s(403, json.dumps({"ok": False, "error": "mesh auth"}))
@@ -10002,6 +10050,7 @@ function clientCard(cl){return '<div class="card" onclick="modLaunch(\''+esc(cl.
   +'</div>';}
 // open a client's correspondence in a modal (Agency drill-in surface for the Mail tab)
 function mlClientMail(rel,name){
+  cfReportFocus(name);   // a client/subject was opened -> report it to the focus engine (web-side context bridge)
   showM('<h3>📬 '+e2(name)+' — Correspondence</h3><div id="mlFolderBox_'+mlKey(rel)+'" style="max-height:60vh;overflow:auto">'+empty('Loading…')+'</div>'
     +'<div class="btns" style="margin-top:10px"><button class="mini" onclick="closeM()">Close</button></div>');
   ML.folders=null; setTimeout(function(){ mlFolderMail(rel,name); }, 60);
@@ -10070,18 +10119,38 @@ async function loadContext(){
 async function loadFocus(){
   var el=document.getElementById('ctxFocus'); if(!el)return;
   var f={}; try{ f=await(await fetch('/api/focus')).json(); }catch(e){ return; }
-  if(f.capture==='off'){
+  // Only show the "enable the macOS reader" prompt when the dial is OFF *and* the browser isn't reporting.
+  // A fresh browser report (this device) drives the row regardless of the macOS trust dial.
+  if(f.capture==='off' && f.source!=='browser'){
     el.innerHTML='<div class="xr-focus"><b>🎯 Focus detection</b><span class="dim">off — when on, ClaudeFather notices what you\'re working on and lines up the right context automatically.</span>'
       +'<span style="margin-left:auto;display:flex;gap:6px"><button class="mini go" onclick="focusSet(\'app\')">Enable (app only)</button><button class="mini" onclick="focusSet(\'context\')" title="also read window title + active browser URL (needs a one-time macOS Accessibility grant)">Enable (full)</button></span></div>';
     return;
   }
   var sigbits=[]; var s=f.signal||{};
   if(s.app)sigbits.push(esc(s.app)); if(s.title)sigbits.push(esc((s.title||'').slice(0,50))); if(s.url)sigbits.push(esc((s.url||'').replace(/^https?:\/\//,'').slice(0,40)));
-  var subj=f.subject?('<b>🎯 You\'re on: '+e2(f.subject)+'</b> <span class="dim">('+Math.round((f.confidence||0)*100)+'% · from '+(sigbits.join(' · ')||'signal')+')</span>')
+  if(f.source==='browser'&&f.lens&&!sigbits.length)sigbits.push(esc(f.lens)+' lens');   // in-app signal: which lens you're on
+  var subj=f.subject?('<b>🎯 You\'re on: '+e2(f.subject)+'</b> <span class="dim">('+Math.round((f.confidence||0)*100)+'% · from '+(sigbits.join(' · ')||(f.source==='browser'?'this device':'signal'))+')</span>')
     : '<b>🎯 Focus on</b> <span class="dim">'+(sigbits.join(' · ')||'(reading…)')+' — no matching subject in your context yet</span>';
-  var warn=(f.capture==='context'&&f.grant_ok===false)?' <span class="dim" style="color:#f0a35e">⚠ grant Accessibility to read window/URL</span>':'';
+  var warn=(f.source!=='browser'&&f.capture==='context'&&f.grant_ok===false)?' <span class="dim" style="color:#f0a35e">⚠ grant Accessibility to read window/URL</span>':'';
   el.innerHTML='<div class="xr-focus">'+subj+warn
-    +'<span style="margin-left:auto;display:flex;gap:6px">'+(f.subject?'<button class="mini go" onclick="ctxFocusBrief(\''+esc(f.subject)+'\')">Brief a session on this</button>':'')+'<button class="mini" onclick="focusSet(\'off\')">turn off</button></span></div>';
+    +'<span style="margin-left:auto;display:flex;gap:6px">'+(f.subject?'<button class="mini go" onclick="ctxFocusBrief(\''+esc(f.subject)+'\')">Brief a session on this</button>':'')+(f.capture!=='off'?'<button class="mini" onclick="focusSet(\'off\')">turn off</button>':'<button class="mini" onclick="focusSet(\'context\')" title="Also read this Mac\'s frontmost app/window/URL (when you\'re working at the server itself; needs a one-time macOS Accessibility grant)">+ device capture</button>')+'</span></div>';
+}
+// BROWSER focus reporter (the web-side context bridge): tell the server which lens/subject/session this
+// REMOTE device has open, so focus works from any laptop/phone (the server's macOS reader only sees the
+// unattended Mac). In-app activity is the user's OWN workspace -> always safe to report. Debounced; the
+// fetch is fire-and-forget (keepalive) so it never blocks the UI; de-duped so identical state is a no-op.
+var _cfFocusT=null, _cfFocusKey="";
+function cfReportFocus(subject, session){
+  try{
+    var body={lens:(typeof LENS!=='undefined'?LENS:null), subject:(subject||null), session:(session||null)};
+    var key=(body.lens||'')+'|'+(body.subject||'')+'|'+(body.session||'');
+    if(key===_cfFocusKey)return;            // unchanged -> skip
+    _cfFocusKey=key;
+    if(_cfFocusT)clearTimeout(_cfFocusT);
+    _cfFocusT=setTimeout(function(){
+      try{ fetch('/api/focus-report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),keepalive:true}); }catch(e){}
+    }, 400);
+  }catch(e){}
 }
 async function focusSet(cap){ try{ await fetch('/api/focus-set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({capture:cap})}); }catch(e){} toast(cap==='off'?'Focus detection off':'Focus detection on ('+cap+')',3500); loadFocus(); }
 function ctxFocusBrief(subj){ var i=document.getElementById('ctxSubj'); if(i)i.value=subj; ctxBrief(); }
@@ -13859,7 +13928,7 @@ async function settingsSave(){
     loadSettings();
   }else toast("Failed: "+((r||{}).error||"?"),5000);
 }
-document.getElementById("lens").addEventListener("click",e=>{const btn=e.target.closest('button[data-l]');if(!btn)return;if(navDragged)return;LENS=btn.dataset.l;[...document.querySelectorAll("#lens button")].forEach(b=>b.classList.toggle("on",b==btn));const vt=document.getElementById("viewtitle");if(vt)vt.textContent=NAV[LENS]||LENS;refreshAgentBtn();if(LENS=="modules")MODREL="";navBump(LENS);render();syncHash(true);var hb=document.getElementById("helpBtn");if(hb)hb.style.display=HELP[LENS]?"":"none";ccHelpAuto(LENS);document.body.classList.remove("cf-search-open");if(window.cfShowChrome)cfShowChrome();window.scrollTo(0,0);});
+document.getElementById("lens").addEventListener("click",e=>{const btn=e.target.closest('button[data-l]');if(!btn)return;if(navDragged)return;LENS=btn.dataset.l;[...document.querySelectorAll("#lens button")].forEach(b=>b.classList.toggle("on",b==btn));const vt=document.getElementById("viewtitle");if(vt)vt.textContent=NAV[LENS]||LENS;refreshAgentBtn();if(LENS=="modules")MODREL="";navBump(LENS);render();syncHash(true);var hb=document.getElementById("helpBtn");if(hb)hb.style.display=HELP[LENS]?"":"none";ccHelpAuto(LENS);document.body.classList.remove("cf-search-open");if(window.cfShowChrome)cfShowChrome();window.scrollTo(0,0);cfReportFocus();});
 function syncHash(push){let s=LENS;
   if(LENS=="modules"){if(MODREL)s+=":"+encodeURIComponent(MODREL);}
   else if(LENS=="sessions"){s+=":"+SESSVIEW+(SESSBIG?":"+encodeURIComponent(SESSBIG):"");}
@@ -13877,7 +13946,7 @@ function restoreFromHash(){const h=location.hash.slice(1);if(!h)return false;
   else if(lens=="tree"){if(p[1])TREEDAYS=+p[1]||7;}
   else if(lens=="history"){if(p[1])HISTMACHINE=p[1];}
   LENS=lens;[...document.querySelectorAll("#lens button")].forEach(b=>b.classList.toggle("on",b==btn));
-  const vt=document.getElementById("viewtitle");if(vt)vt.textContent=NAV[lens]||lens;refreshAgentBtn();render();return true;}
+  const vt=document.getElementById("viewtitle");if(vt)vt.textContent=NAV[lens]||lens;refreshAgentBtn();render();cfReportFocus();return true;}
 window.addEventListener("popstate",()=>{if(!document.getElementById("cinfo"))restoreFromHash();});  // Back/Forward = rebuild the view in place, no page reload (don't fall out to the overseer)
 document.addEventListener("keydown",e=>{if(LENS!="modules")return;const t=(e.target.tagName||"");if(t=="INPUT"||t=="TEXTAREA")return;if(e.key=="Backspace"){if(MODREL){e.preventDefault();loadModules(MODREL.split("/").slice(0,-1).join("/"));}}else if(e.key=="Escape"){if(MODREL)loadModules("");}});
 document.getElementById("search").addEventListener("input",render);
@@ -14570,6 +14639,7 @@ function fxDossierHTML(b, bullets){
 Shell.init();              // shared shell: command palette + keyboard router + quick look
 load();
 if(!restoreFromHash())syncHash(false);   // restore exact place on refresh; else stamp the landing lens as the back-stack baseline (so the first Back lands here, not the overseer)
+cfReportFocus();   // report the landing lens to the focus engine (web-side context bridge)
 (function(){var hb=document.getElementById("helpBtn");if(hb)hb.style.display=HELP[LENS]?"":"none";ccHelpAuto(LENS);})();  // help for the landing lens
 // live health: repaint the header strip (+ machines lens) every 60s without a page reload
 setInterval(()=>{fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;paintSvc();if(LENS=="machines")render();}).catch(()=>{});},60000);
