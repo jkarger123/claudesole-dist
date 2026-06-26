@@ -1,6 +1,6 @@
 {
   "name": "claudefather-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "ClaudeFather Desktop — an Electron shell that wraps your existing ClaudeFather web dashboard AND a real Chromium browser, so your AI can (with consent) see what you browse. Loads your own self-hosted server; never forks it.",
   "private": true,
   "license": "UNLICENSED",

@@ -9012,6 +9012,11 @@ body.ss-dragging #sessbar{box-shadow:0 -2px 22px rgba(var(--accent-rgb),.35)}
 body.ss-dragging .sb-tile{border-color:rgba(var(--accent-rgb),.55)}
 .sb-tile.ss-over{border-color:var(--accent)!important;background:rgba(var(--accent-rgb),.22)!important;box-shadow:0 0 14px 2px rgba(var(--accent-rgb),.6);transform:translateY(-2px)}
 [data-ss][draggable]{cursor:grab;-webkit-touch-callout:none}   /* suppress the iOS long-press save/callout menu so our pick-up gesture owns it */
+/* ===== sb reorder: hold a tile -> the dock wiggles + the tile lifts -> drag to reposition; order persists per device ===== */
+@keyframes sbwiggle{0%{transform:rotate(-1.6deg)}50%{transform:rotate(1.6deg)}100%{transform:rotate(-1.6deg)}}
+body.sb-reorder{cursor:grabbing;user-select:none;-webkit-user-select:none}
+body.sb-reorder .sb-tile{animation:sbwiggle .26s ease-in-out infinite}
+body.sb-reorder .sb-tile.sb-picked{animation:none;position:relative;z-index:6;transform:scale(1.07);opacity:.96;box-shadow:0 7px 22px rgba(0,0,0,.55);cursor:grabbing;border-color:var(--accent);color:var(--ink)}
 .ss-btn{background:transparent;border:1px solid var(--line);color:var(--mut);border-radius:6px;padding:1px 7px;font-size:12px;font-weight:700;cursor:pointer;line-height:1.5;flex:0 0 auto}
 .ss-btn:hover{color:var(--accent);border-color:var(--accent);background:rgba(var(--accent-rgb),.12)}
 .ss-ghost{position:fixed;z-index:9999;pointer-events:none;transform:translate(-50%,-130%);
@@ -14971,9 +14976,14 @@ async function sbPoll(){
 function sbViewing(n){ return LENS==='sessions' && SESSBIG===n; }   // is this session the one open big in the Sessions tab?
 function sbRender(list){
   var bar=document.getElementById('sessbar'); if(!bar)return;
+  sbReorderWire();
   if(LENS==='sessions' && SESSBIG && SB.done[SESSBIG]) delete SB.done[SESSBIG];   // viewing it = acknowledged
-  // STABLE order (by name) so tiles never shuffle position between polls -- they stay put and stay clickable.
-  list=list.slice().sort(function(a,b){return (a.name<b.name)?-1:(a.name>b.name)?1:0;});
+  // ORDER: your saved drag-order first (persisted per device), then any new sessions alphabetically.
+  var ord=sbOrderGet();
+  list=list.slice().sort(function(a,b){
+    var ia=ord.indexOf(a.name), ib=ord.indexOf(b.name);
+    if(ia<0&&ib<0) return (a.name<b.name)?-1:(a.name>b.name)?1:0;
+    if(ia<0) return 1; if(ib<0) return -1; return ia-ib;});
   var doneCount=list.filter(function(s){return SB.done[s.name];}).length;
   // Rebuild the DOM ONLY when the SET of tiles changes -- not every poll -- so the tile under your cursor is
   // not destroyed mid-hover (that's what made them "move around"/hard to use). State is applied in place below.
@@ -14994,7 +15004,7 @@ function sbRender(list){
 }
 function sbAck(name){ if(SB.done[name]){ delete SB.done[name]; var sel='.sb-tile[data-n="'+((window.CSS&&CSS.escape)?CSS.escape(name):name)+'"]'; var t=document.querySelector(sel); if(t)t.classList.remove('done'); } }
 // --- taskbar blow-up panel: a FULL interactive terminal + actions (b3) ---
-function sbHover(name,el){ SB.hover=name; sbAck(name); clearTimeout(SB.holdT); sbShowPanel(name,el); }
+function sbHover(name,el){ if(window.SBRE&&SBRE.active)return; SB.hover=name; sbAck(name); clearTimeout(SB.holdT); sbShowPanel(name,el); }
 function sbLeave(){ SB.hover=null;
   clearTimeout(SB.holdT);
   SB.holdT=setTimeout(function(){
@@ -15051,6 +15061,47 @@ async function sbKill(name){
   sbHide(); setTimeout(sbPoll,700);
 }
 function sbClick(name){ sbAck(name); sbOpen(name); }
+// ===== Taskbar REORDER: press-hold a tile -> the dock wiggles + the tile lifts -> drag to reposition.
+// The new order saves per device (localStorage) and survives refresh. Pointer-based (mouse + touch);
+// a hold (300ms, finger steady) starts it, a quick tap still opens the session, an early move = scroll. =====
+var SBRE={tile:null,name:null,timer:null,active:false,sx:0,sy:0,suppress:false,pid:null};
+function sbOrderGet(){ try{ return JSON.parse(localStorage.getItem('hpcc_sb_order')||'[]')||[]; }catch(_){ return []; } }
+function sbOrderSet(names){ try{ localStorage.setItem('hpcc_sb_order', JSON.stringify(names)); }catch(_){} }
+function sbReorderWire(){
+  if(sbReorderWire._done) return; var bar=document.getElementById('sessbar'); if(!bar) return; sbReorderWire._done=true;
+  bar.addEventListener('pointerdown',function(e){
+    if(e.button&&e.button!==0) return;
+    var t=e.target&&e.target.closest&&e.target.closest('.sb-tile'); if(!t) return;
+    SBRE.tile=t; SBRE.name=t.getAttribute('data-n'); SBRE.sx=e.clientX; SBRE.sy=e.clientY; SBRE.active=false; SBRE.pid=e.pointerId;
+    clearTimeout(SBRE.timer); SBRE.timer=setTimeout(sbReorderStart,300);
+  });
+  bar.addEventListener('pointermove',function(e){
+    if(!SBRE.tile) return;
+    if(!SBRE.active){ if(Math.abs(e.clientX-SBRE.sx)>8||Math.abs(e.clientY-SBRE.sy)>8){ clearTimeout(SBRE.timer); SBRE.tile=null; } return; }
+    e.preventDefault(); sbReorderMove(e.clientX);
+  });
+  function endit(){ clearTimeout(SBRE.timer);
+    if(SBRE.active){ sbReorderCommit(); SBRE.suppress=true; setTimeout(function(){SBRE.suppress=false;},60); }
+    if(SBRE.tile)SBRE.tile.classList.remove('sb-picked');
+    SBRE.tile=null; SBRE.name=null; SBRE.active=false; document.body.classList.remove('sb-reorder'); }
+  bar.addEventListener('pointerup',endit); bar.addEventListener('pointercancel',endit);
+  bar.addEventListener('click',function(e){ if(SBRE.suppress){ e.preventDefault(); e.stopPropagation(); SBRE.suppress=false; } },true);
+}
+function sbReorderStart(){ if(!SBRE.tile) return; SBRE.active=true; document.body.classList.add('sb-reorder'); SBRE.tile.classList.add('sb-picked');
+  try{ SBRE.tile.setPointerCapture && SBRE.tile.setPointerCapture(SBRE.pid); }catch(_){}
+  try{ if(navigator.vibrate)navigator.vibrate(12); }catch(_){} }
+function sbReorderMove(x){
+  var t=SBRE.tile, bar=document.getElementById('sessbar'); if(!t||!bar) return;
+  var tiles=[].slice.call(bar.querySelectorAll('.sb-tile')).filter(function(z){return z!==t;});
+  var ref=null;
+  for(var i=0;i<tiles.length;i++){ var r=tiles[i].getBoundingClientRect(); if(x < r.left + r.width/2){ ref=tiles[i]; break; } }
+  if(ref){ if(t.nextSibling!==ref) bar.insertBefore(t,ref); } else if(bar.lastChild!==t){ bar.appendChild(t); }
+}
+function sbReorderCommit(){
+  var bar=document.getElementById('sessbar'); if(!bar) return;
+  var names=[].slice.call(bar.querySelectorAll('.sb-tile')).map(function(z){return z.getAttribute('data-n');});
+  sbOrderSet(names); if(typeof toast==='function')toast('Session order saved',2000);
+}
 function sbOpen(name){ sbAck(name); var p=document.getElementById('sessprev'); if(p)p.style.display='none'; if(typeof openInSessions==='function') openInSessions(name); }
 sbPoll(); setInterval(sbPoll,4000);
 

@@ -3,7 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
-## 0.58.0 -- 2026-06-26
+## 0.59.0 -- 2026-06-26
+- TASKBAR drag-to-reorder: press-and-hold a session tile in the bottom dock -> the dock WIGGLES and the tile
+  lifts (clearly grabbable) -> drag left/right to reposition -> release. The order is saved PER DEVICE
+  (localStorage `hpcc_sb_order`) and survives refresh; new sessions append after your arranged ones. Pointer-
+  based (mouse + touch): a 300ms hold starts it, a quick tap still opens the session, an early move scrolls.
+  sbRender now orders tiles by the saved order; sbHover is suppressed during a reorder. Verified end-to-end.
 - NEW-SESSION PICKER rebuilt from scratch (the old nested tree was scrapped entirely). Researched against
   best-in-class pickers (VS Code Quick Open, Raycast, Linear). It is now a SEARCH-FIRST DRILL palette:
   * The launch TARGET is your current location -- no separate "select" step. The breadcrumb AND the footer

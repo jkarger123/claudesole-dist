@@ -109,6 +109,29 @@ function isSensitive(url) {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// Navigation-history shim — version-agnostic back/forward.
+// In Electron 32+ these live on `webContents.navigationHistory`; in Electron 31 (what we pin via
+// electron@^31) they live directly on `webContents` (deprecated but present). Calling the new API on 31
+// throws "navigationHistory.canGoBack is not a function" and crashes the main process, so we feature-detect.
+// ---------------------------------------------------------------------------------------------------
+function navCanGoBack(wc) {
+  const nh = wc.navigationHistory;
+  return (nh && typeof nh.canGoBack === 'function') ? nh.canGoBack() : wc.canGoBack();
+}
+function navCanGoForward(wc) {
+  const nh = wc.navigationHistory;
+  return (nh && typeof nh.canGoForward === 'function') ? nh.canGoForward() : wc.canGoForward();
+}
+function navGoBack(wc) {
+  const nh = wc.navigationHistory;
+  if (nh && typeof nh.goBack === 'function') nh.goBack(); else wc.goBack();
+}
+function navGoForward(wc) {
+  const nh = wc.navigationHistory;
+  if (nh && typeof nh.goForward === 'function') nh.goForward(); else wc.goForward();
+}
+
+// ---------------------------------------------------------------------------------------------------
 // The CONTEXT BRIDGE — POST captured page context to the user's own ClaudeFather server.
 // Uses Electron's net.fetch (Chromium networking stack). Sends auth as X-CC-Token (and Bearer) when set.
 // ---------------------------------------------------------------------------------------------------
@@ -544,16 +567,16 @@ async function executeAgentCommand(cmd) {
       const t = activeBrowserTab();
       if (!t) return { ok: false, error: 'no active browser tab' };
       const wc = t.view.webContents;
-      if (!wc.navigationHistory.canGoBack()) return { ok: false, error: 'cannot go back' };
-      wc.navigationHistory.goBack();
+      if (!navCanGoBack(wc)) return { ok: false, error: 'cannot go back' };
+      navGoBack(wc);
       return { ok: true };
     }
     case 'forward': {
       const t = activeBrowserTab();
       if (!t) return { ok: false, error: 'no active browser tab' };
       const wc = t.view.webContents;
-      if (!wc.navigationHistory.canGoForward()) return { ok: false, error: 'cannot go forward' };
-      wc.navigationHistory.goForward();
+      if (!navCanGoForward(wc)) return { ok: false, error: 'cannot go forward' };
+      navGoForward(wc);
       return { ok: true };
     }
 
@@ -746,8 +769,8 @@ function broadcastTabs() {
       title: t.title || (t.type === 'workspace' ? 'Workspace' : 'New Tab'),
       url: alive ? (wc.getURL() || t.url) : t.url,
       loading: alive ? wc.isLoading() : false,
-      canGoBack: alive ? wc.navigationHistory.canGoBack() : false,
-      canGoForward: alive ? wc.navigationHistory.canGoForward() : false,
+      canGoBack: alive ? navCanGoBack(wc) : false,
+      canGoForward: alive ? navCanGoForward(wc) : false,
       active: t.id === activeTabId
     };
   });
@@ -836,8 +859,8 @@ function wireIpc() {
     if (target) tab.view.webContents.loadURL(target);
   });
 
-  ipcMain.handle('tab:back', (_e, { id }) => { const t = getTab(id); if (t && t.view.webContents.navigationHistory.canGoBack()) t.view.webContents.navigationHistory.goBack(); });
-  ipcMain.handle('tab:forward', (_e, { id }) => { const t = getTab(id); if (t && t.view.webContents.navigationHistory.canGoForward()) t.view.webContents.navigationHistory.goForward(); });
+  ipcMain.handle('tab:back', (_e, { id }) => { const t = getTab(id); if (t && navCanGoBack(t.view.webContents)) navGoBack(t.view.webContents); });
+  ipcMain.handle('tab:forward', (_e, { id }) => { const t = getTab(id); if (t && navCanGoForward(t.view.webContents)) navGoForward(t.view.webContents); });
   ipcMain.handle('tab:reload', (_e, { id }) => { const t = getTab(id); if (t) t.view.webContents.reload(); });
   ipcMain.handle('tab:stop', (_e, { id }) => { const t = getTab(id); if (t) t.view.webContents.stop(); });
   ipcMain.handle('tab:home', (_e, { id }) => { const t = getTab(id); if (t && serverBase()) t.view.webContents.loadURL(serverBase()); });

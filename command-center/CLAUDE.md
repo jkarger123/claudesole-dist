@@ -1,5 +1,10 @@
 # Command Center — the engine
 
+<!-- CC:CHILDREN auto-managed by the Command Center; do not hand-edit -->
+**Sub-tools in this folder** (you can launch into any of these; file a learning to the one it belongs to):
+- `Usage/` -- This is everything about the usage tracking tool
+<!-- /CC:CHILDREN -->
+
 The ClaudeFather platform's web control plane: a single **stdlib-Python HTTP server** (`server.py`,
 ~12.8k lines) with an **embedded vanilla-JS frontend** (the `PAGE` string). No build step, no deps
 beyond the stdlib (one optional: `cryptography` for Ed25519 superadmin; falls back to HMAC). It serves
