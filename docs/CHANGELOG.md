@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.37.10 -- 2026-06-25
+- FIX (mobile terminal resize: page scrolled while dragging + forgot size): on mobile the PAGE (not .wrap) is
+  the scroller, so the clientHeight max inflated and the terminal grew past the screen -> page scrolled, the
+  bottom grip couldn't be dragged in one motion, and the scroll hijacked the gesture so save-on-release never
+  ran (= forgot). Now the max is the true viewport space (measured from the unscrolled top), the terminal is
+  capped there so it fills but never exceeds the screen, and scrolling is LOCKED during the drag. Result: one
+  smooth drag fills it, no page jumping, and the size saves + restores on refresh.
+
 ## 0.37.9 -- 2026-06-25
 - FIX (mobile terminal resize: forgot size on refresh + still scrolled the page when expanding): the max
   height was derived from the element's viewport top (getBoundingClientRect().top), which is unreliable -- when
