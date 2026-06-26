@@ -1,0 +1,4 @@
+secrets/*
+!secrets/.gitignore
+bot_token
+*.token

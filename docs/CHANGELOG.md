@@ -3,6 +3,26 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.43.0 -- 2026-06-26
+- VISION: the CAPTURE system -- turn the world into context (docs/CAPTURE.md). One review-first loop
+  (Capture -> Triage -> Propose -> you Approve -> Applied with receipts), built fleet-wide by a fan-out of
+  agents, all additive (web app unchanged):
+  * SPINE (clips.py + server.py): POST /api/clip saves a page/clip to a subject's tray (+ screenshot to
+    deliverables/, + a provenance-stamped context event); /api/clips lists; /api/clips/process runs a headless
+    triage agent (cluster, dedup, summarize, extract tasks/decisions/contacts) and PROPOSES a CC:CLIPS digest
+    + tasks + files; /api/clips/apply applies on approval, every line citing its source; /api/clips/skip. New
+    Capture lens (clip tray + review queue, styled like Calls). Optional EOD Routine (off by default, never
+    auto-applies).
+  * page-intel: POST /api/context/page-intel {url,title,text} -> what we ALREADY know relevant to a page
+    (related + flags) -- powers the desktop AI co-reading sidebar.
+  * DESKTOP (desktop/): ⭐ Save (cmd-shift-S) + 📸 screenshot clip + 🧠 co-reading sidebar (cmd-shift-E),
+    all explicit/opt-in, talking only to the user's own server.
+  * SLACK (slack.py + extensions/slack): read client channels into context (trust=contact) + save-thread;
+    no-op until a bot token is configured.
+  * ZOOM (zoom.py): cloud recordings + dropped .vtt/.txt transcripts -> the SAME granola proposal pipeline
+    (appear in the Calls lens -> CC:CALLS + tasks). /api/zoom-sync, /api/zoom-drop.
+  Review-first + provenance/trust throughout; stdlib-only; nothing edits a CLAUDE.md or sends without approval.
+
 ## 0.42.0 -- 2026-06-26
 - VISION: make focus work for REMOTE users + lay the desktop track. Two additive pieces, web app unchanged:
   1) WEB CONTEXT-BRIDGE (server.py, additive): the focus signal now comes from the BROWSER, not the server's

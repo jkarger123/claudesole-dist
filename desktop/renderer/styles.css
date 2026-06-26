@@ -86,6 +86,15 @@ html, body {
 .capturebtn.on .dot { background: var(--on); box-shadow: 0 0 8px var(--on); }
 .capturebtn.off { color: var(--muted); }
 
+/* ---- explicit action buttons (Save / Clip / Co-read) ---- */
+.actbtn {
+  height: 30px; padding: 0 11px; cursor: pointer; white-space: nowrap;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 16px; font-size: 12px; font-weight: 600;
+}
+.actbtn:hover { border-color: var(--accent); }
+.actbtn.active { border-color: var(--accent); color: var(--accent); background: #20223a; }
+
 /* ---- toast ---- */
 #toast {
   position: fixed; right: 14px; bottom: 14px; z-index: 50;
@@ -96,16 +105,76 @@ html, body {
 #toast.sent { border-color: var(--on); }
 #toast.skipped { border-color: #d4a017; }
 #toast.error { border-color: var(--danger); }
+#toast.info { border-color: var(--accent); }
 .hidden { display: none !important; }
 
+/* ---- AI co-reading side panel ---- */
+#sidebar {
+  position: fixed; right: 0; top: var(--chrome-h); bottom: 0; width: 340px; z-index: 40;
+  background: var(--panel); border-left: 1px solid var(--line);
+  display: flex; flex-direction: column;
+}
+.sb-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--line);
+}
+.sb-title { font-weight: 700; font-size: 13px; flex: 1; }
+.sb-icon {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; width: 26px; height: 24px; cursor: pointer; font-size: 13px;
+}
+.sb-icon:hover { border-color: var(--accent); }
+.sb-note { padding: 8px 12px; color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--line); }
+#sb-body { flex: 1; overflow-y: auto; padding: 10px 12px; }
+
+.sb-empty { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; padding: 8px 2px; }
+.sb-section { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 6px 0 8px; }
+
+.sb-flags { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.sb-flag {
+  background: #2a2436; border: 1px solid #4a3a2a; color: #ffcf8f;
+  border-radius: 8px; padding: 7px 10px; font-size: 12px;
+}
+
+.sb-card {
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
+  padding: 9px 11px; margin-bottom: 8px;
+}
+.sb-card-top { display: flex; align-items: baseline; gap: 8px; }
+.sb-card-title { font-weight: 600; font-size: 12.5px; flex: 1; }
+.sb-card-kind {
+  font-size: 10px; padding: 1px 6px; border-radius: 5px;
+  background: #2a3a5a; color: #aac4ff; white-space: nowrap;
+}
+.sb-card-why { color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+.sb-card-src { color: #6a6a82; font-size: 10.5px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- clip/save modal extras ---- */
+.clip-preview { margin: 4px 0 8px; }
+.clip-preview img {
+  width: 100%; max-height: 200px; object-fit: cover; object-position: top;
+  border: 1px solid var(--line); border-radius: 8px; display: block;
+}
+.clip-pagetitle { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-pageurl { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+.card select, .card textarea {
+  width: 100%; padding: 8px 12px;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; outline: none;
+  font-size: 13px; font-family: inherit; user-select: text;
+}
+.card select { height: 34px; }
+.card select:focus, .card textarea:focus { border-color: var(--accent); }
+.card textarea { resize: vertical; }
+
 /* ---- modal ---- */
-#modal {
+#modal, #clipmodal {
   position: fixed; inset: 0; z-index: 100;
   background: rgba(5,5,10,.85);
   display: flex; align-items: center; justify-content: center;
 }
 .card {
-  width: 540px; max-width: 92vw;
+  width: 540px; max-width: 92vw; max-height: 92vh; overflow-y: auto;
   background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
   padding: 24px 26px; box-shadow: 0 20px 60px rgba(0,0,0,.6);
 }

@@ -25,10 +25,27 @@
     <button id="home" class="navbtn" title="Open Workspace (dashboard)">⌂</button>
     <input id="address" type="text" spellcheck="false" autocomplete="off"
            placeholder="Search or enter address" />
+    <!-- Explicit, user-initiated saves (independent of the capture toggle). -->
+    <button id="clip-save" class="actbtn" title="Save this page to ClaudeFather (⌘⇧S)">⭐ Save</button>
+    <button id="clip-shot" class="actbtn" title="Clip a screenshot of this page to ClaudeFather">📸 Clip</button>
+    <!-- AI co-reading: read-only side panel, off by default. -->
+    <button id="coread" class="actbtn" title="Toggle AI co-reading panel (⌘⇧E)">🧠 Co-read</button>
     <!-- The capture indicator + toggle: the visible "the AI can see this tab" surface. -->
     <button id="capture" class="capturebtn off" title="Toggle AI page capture for browser tabs">
       <span class="dot"></span><span id="capturelabel">AI capture: OFF</span>
     </button>
+  </div>
+
+  <!-- AI CO-READING PANEL — a right-hand strip. The active browser view is laid out narrower by the main
+       process when this is open, so this panel shows through. Read-only; only your own server is asked. -->
+  <div id="sidebar" class="hidden">
+    <div class="sb-head">
+      <span class="sb-title">🧠 Co-reading</span>
+      <button id="sb-refresh" class="sb-icon" title="Refresh">⟳</button>
+      <button id="sb-close" class="sb-icon" title="Close co-reading">×</button>
+    </div>
+    <div class="sb-note">What your ClaudeFather already knows about this page. Read-only · only your own server is asked.</div>
+    <div id="sb-body"></div>
   </div>
 
   <!-- Content views (Workspace / Browser) are native WebContentsViews positioned by the main process,
@@ -60,6 +77,43 @@
         <button id="modal-cancel" class="ghost">Cancel</button>
       </div>
       <div id="modal-err" class="err hidden"></div>
+    </div>
+  </div>
+
+  <!-- MODAL: Save / Clip a page to ClaudeFather -->
+  <div id="clipmodal" class="hidden">
+    <div class="card">
+      <h1>⭐ Save to ClaudeFather</h1>
+      <p class="sub">Send this page — its text and a screenshot — to a subject in <b>your own</b> ClaudeFather.
+        This is an explicit save; it goes nowhere else.</p>
+
+      <div id="clip-preview" class="clip-preview"></div>
+      <div id="clip-pagetitle" class="clip-pagetitle"></div>
+      <div id="clip-pageurl" class="clip-pageurl"></div>
+
+      <label for="clip-subject">Subject</label>
+      <input id="clip-subject" type="text" spellcheck="false" autocomplete="off" list="clip-subjectlist"
+             placeholder="Which client / project / topic?" />
+      <datalist id="clip-subjectlist"></datalist>
+      <div class="hint">Pick an existing subject or type a new one.</div>
+
+      <label for="clip-kind">Kind</label>
+      <select id="clip-kind">
+        <option value="reference">📑 Reference</option>
+        <option value="lead">🎯 Lead</option>
+        <option value="competitor">🥊 Competitor</option>
+        <option value="inspiration">✨ Inspiration</option>
+        <option value="read-later">🕮 Read later</option>
+      </select>
+
+      <label for="clip-note">Note <span class="muted">(optional)</span></label>
+      <textarea id="clip-note" rows="2" spellcheck="true" placeholder="Why does this matter?"></textarea>
+
+      <div class="row">
+        <button id="clip-save-btn" class="primary">Save</button>
+        <button id="clip-cancel" class="ghost">Cancel</button>
+      </div>
+      <div id="clip-err" class="err hidden"></div>
     </div>
   </div>
 

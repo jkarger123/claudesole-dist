@@ -58,6 +58,34 @@ POSTs to your configured server, against this contract:
 If an **auth token** is configured it's sent as `X-CC-Token` (and `Authorization: Bearer`) — the same value
 the dashboard accepts as its `cc_auth` cookie, so it also auto-signs-in the Workspace view.
 
+---
+
+## Explicit capture (Save / Clip / Co-read)
+
+Beyond the always-on toggle, three **user-initiated** capture features live in the browser toolbar. They
+talk to the **same** server + auth the bridge uses, and each is an explicit action (the click/hotkey is the
+consent) — they do **not** depend on the AI-capture toggle.
+
+- **⭐ Save** *(or `⌘⇧S`)** — captures `{url, title, page text (~8k), PNG screenshot}` of the current page,
+  then asks for a **subject** (free-text, prefilled with the site name, auto-completed from your server's
+  known subjects via `GET /api/context/stats`), a **kind** (reference / lead / competitor / inspiration /
+  read-later), and an optional **note**, and `POST`s `/api/clip`. A toast confirms the save.
+- **📸 Clip** — the same flow, surfaced as a screenshot-first button (full-view PNG via
+  `webContents.capturePage()`). Region-select / full-scroll stitching is a future enhancement.
+- **🧠 Co-read** *(or `⌘⇧E`)** — a read-only right-hand panel, **off by default**. When open, each page you
+  navigate to (debounced) is `POST`ed to `/api/context/page-intel` and the reply
+  `{ related:[{title,source,kind,why}], flags:[…] }` is rendered as a sleek "what we already know about
+  this" panel (e.g. "🔗 ties to your 2pm with Avenlur"). Sensitive pages are skipped; the active browser
+  view is laid out narrower so the panel shows through.
+
+### Server contract (added to the web app in parallel)
+
+- `POST /api/clip` → `{ subject, kind, url, title, text, note, image_b64 }` ⇒ `{ ok, id }`
+- `POST /api/context/page-intel` → `{ url, title, text }` ⇒ `{ related:[…], flags:[…] }`
+- `GET  /api/context/stats` → used to populate the subject picker (parsed defensively).
+
+Auth is the configured `authToken`, sent as `X-CC-Token` **and** `Authorization: Bearer` (same as the bridge).
+
 ### Privacy model
 
 - **Capture is OFF by default** and only flips when *you* click the toggle. The toggle is always visible in
@@ -116,6 +144,15 @@ Output lands in `desktop/release/`.
   - new Browser tab → navigate → flip capture ON → confirm the green dot, the "shared" toast, and that the
     two POSTs reach your server (and that `login`/password-manager pages are skipped);
   - tab open/close/switch and back/forward/reload.
+  - **⭐ Save / `⌘⇧S`** on a browser tab → the dialog shows the screenshot preview + prefilled subject →
+    pick a kind + note → Save → confirm `POST /api/clip` arrives with `image_b64` populated and the success
+    toast fires. (Verify the screenshot is non-empty — `capturePage()` needs the view on-screen.)
+  - **📸 Clip** → same dialog/flow as Save.
+  - **🧠 Co-read / `⌘⇧E`** → panel opens, the browser view narrows by 340px, navigating fires
+    `POST /api/context/page-intel`, and `related` + `flags` render; switching to the Workspace tab hides the
+    panel and restores full width; sensitive pages show "Skipped".
+- **Hotkeys** are registered via `globalShortcut` only while the app window is focused (released on blur), so
+  they fire even when a content view holds keyboard focus — confirm they don't leak to other apps.
 - **TLS:** standard valid certs (Tailscale `ts.net`, Let's Encrypt) and `http://localhost` work out of the
   box. A self-signed dashboard cert would need a cert exception (not added by default, on purpose).
 - **`electron`/`electron-builder` versions** are pinned to recent stable ranges; `npm install` will resolve

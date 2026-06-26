@@ -11,6 +11,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import granola   # Granola -> agency tree module (calls + client CLAUDE.md updates + tasks/reminders)
 import context   # THE CONTEXT LAYER: event store + entity graph + the router that assembles perfect slices (docs/VISION.md)
 import focus     # FOCUS/INTENT engine: read activity signal -> classify to a subject ("context follows you")
+import slack     # Slack -> context layer (read-only ingest, trust=contact; stdlib urllib, no SDK)
+import zoom      # Zoom transcript intake -> the granola proposal pipeline (calls/CC:CALLS + tasks)
+import clips      # CAPTURE SPINE: Capture -> Triage -> Apply (review-first); clips -> context store + CC:CLIPS digest
 try:   # Ed25519 for asymmetric superadmin (public-key). Optional: nodes without it fall back to HMAC + a doctor warning.
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
     from cryptography.hazmat.primitives import serialization as _crypto_ser
@@ -5162,6 +5165,10 @@ def _agency_subfolders(absdir):
 
 granola.init({"CC": CC, "PROJECT": PROJECT, "STATE_DIR": STATE_DIR,
               "agency_dirs": _agency_dirs, "agency_subfolders": _agency_subfolders})
+try: slack.init({"CC": CC, "STATE_DIR": STATE_DIR, "CC_HOME": CC_HOME, "EXT_DIR": EXT_DIR, "deploy_env": _deploy_env})
+except Exception as _e: print("[slack] init failed:", _e)
+try: zoom.init({"CC": CC, "PROJECT": PROJECT, "STATE_DIR": STATE_DIR, "secret": _deploy_env})
+except Exception as _e: print("[zoom] init failed:", _e)
 # THE CONTEXT LAYER -- store the DB on the SSD (next to deliverables) when configured, else CC_HOME/data.
 try:
     context.init({"PROJECT": PROJECT, "CC_HOME": CC_HOME,
@@ -5238,6 +5245,16 @@ def _context_backfill():
                                     subject=(p.get("client") or None), trust="owner", ext_id=mid,
                                     refs={"meeting_id": mid}): n += 1
     except Exception: pass
+    # --- Clips (CAPTURE SPINE; trust: external -- captured from where you work) ---
+    try:
+        for c in (clips._load_state().get("clips") or [])[:500]:
+            if context.ingest_event("clip", (c.get("source") or "web"),
+                                    (c.get("title") or c.get("url") or "clip"), (c.get("text") or ""),
+                                    ts=c.get("ts"), subject=(c.get("subject") or None), trust="external",
+                                    ext_id=(c.get("url") or c.get("id")),
+                                    refs={"url": c.get("url"), "note": c.get("note"),
+                                          "image_rel": c.get("image_rel"), "clip_kind": c.get("kind")}): n += 1
+    except Exception: pass
     # --- Deliverables (trust: owner -- artifacts you produced) ---
     try:
         for f in (_deliv_listing("") or {}).get("files", [])[:500]:
@@ -5270,6 +5287,12 @@ def _context_backfill():
                                      ts=_epoch(e.get("start")), trust="internal", ext_id=eid,
                                      refs={"link": e.get("link")}); n += 1
     except Exception: pass
+    # --- Slack (trust: contact -- chat is untrusted DATA, not instructions; no-op if unconfigured) ---
+    try: n += slack.ingest(context, 50)
+    except Exception: pass
+    # --- Zoom cloud recordings -> the shared granola proposal queue (no-op if unconfigured) ---
+    try: zoom.zoom_sync(15)
+    except Exception: pass
     return n
 
 def _epoch(s):
@@ -5293,6 +5316,105 @@ def _context_backfill_loop():
         try: _context_backfill()
         except Exception: pass
         time.sleep(900)   # re-ingest every 15 min (idempotent)
+
+# ======================================================================================================
+# CAPTURE SPINE wiring (clips.py engine). Resolve a subject -> its folder + deliverables target, write clip
+# images/text into the managed deliverables store (SSD when configured), and hand clips.py the context-store
+# + task + agency helpers via init() so the engine stays server-import-free. All review-first (see clips.py).
+# ======================================================================================================
+def _subject_dir(subject):
+    """Resolve a clip's subject (a client/agency folder name OR its pretty name) to its abs folder under the
+    project tree, mirroring granola's client matching. None when it doesn't map to a real folder (then the
+    digest is skipped on apply -- we never invent a CLAUDE.md)."""
+    if not subject: return None
+    s = str(subject).strip().lower()
+    try:
+        for nm, p in granola._client_dirs():
+            if nm.lower() == s or _pretty_name(nm).lower() == s or slug(nm) == slug(subject):
+                return p
+    except Exception: pass
+    return None
+
+def _clip_client_list():
+    """Subjects the operator can assign a clip/proposal to (the agency client folders) -- like granola.clients."""
+    try: return [nm for nm, _ in granola._client_dirs()]
+    except Exception: return []
+
+def _clip_store_dir(subject):
+    """Where a clip's image/text file lands: the subject folder's deliverables/clips/ (so it shows in Files),
+    else the managed store under _clips/<slug>. Returns an abs dir (created)."""
+    sd = _subject_dir(subject)
+    if sd:
+        try: _ensure_deliv_link(sd, os.path.relpath(sd, PROJECT))
+        except Exception: pass
+        d = os.path.join(sd, "deliverables", "clips")
+    else:
+        d = os.path.join(_hot_dir("_clips"), slug(subject or "misc") or "misc")
+    try: os.makedirs(d, exist_ok=True)
+    except Exception: pass
+    return d
+
+def _write_clip_image(subject, filename, b64):
+    """Decode a data:/base64 image and save it into the subject's deliverables/clips/. Returns the path
+    RELATIVE to PROJECT (so the Files lens shows it) or None. Secret-clean + size-capped (reuses upload cap)."""
+    try: raw = base64.b64decode((b64 or "").split(",")[-1])
+    except Exception: return None
+    if not raw: return None
+    if len(raw) > _session_upload_cap_mb() * 1024 * 1024: return None
+    d = _clip_store_dir(subject)
+    fn = _ensure_ext(_sanitize_filename(filename or "clip"), "image/png")
+    stem, ext = os.path.splitext(fn)
+    dest = os.path.join(d, "%s_%s%s" % (stem[:50] or "clip", secrets.token_hex(4), ext or ".png"))
+    if _path_has_secret(dest): return None
+    try:
+        with open(dest, "wb") as f: f.write(raw)
+    except Exception: return None
+    try:
+        rel = os.path.relpath(dest, PROJECT)
+        return rel if not rel.startswith("..") else None
+    except Exception: return None
+
+def _file_clip_text(subject, clip):
+    """File a text-only clip as a small markdown deliverable in the subject's deliverables/clips/. Returns True."""
+    d = _clip_store_dir(subject)
+    base = slug(clip.get("title") or clip.get("kind") or "clip") or "clip"
+    dest = os.path.join(d, "%s_%s.md" % (base[:50], secrets.token_hex(3)))
+    if _path_has_secret(dest): return False
+    body = "# %s\n\n" % (clip.get("title") or "Captured clip")
+    if clip.get("url"): body += "Source: %s\n\n" % clip["url"]
+    body += (clip.get("text") or "")
+    try:
+        with open(dest, "w") as f: f.write(body)
+        return True
+    except Exception: return False
+
+try:
+    clips.init({"CC": CC, "PROJECT": PROJECT, "STATE_DIR": STATE_DIR,
+                "ingest_event": (lambda **k: context.ingest_event(**k)),
+                "assemble": (lambda **k: context.assemble(**k)),
+                "subjects": (lambda *a, **k: context.subjects(*a, **k)),
+                "task_add": (lambda *a, **k: task_add(*a, **k)),     # defined later -> late-bound at call time
+                "write_clip_image": _write_clip_image, "file_clip": _file_clip_text,
+                "subject_dir": _subject_dir, "pretty_name": (lambda *a, **k: _pretty_name(*a, **k)),  # _pretty_name is defined just below -> late-bind
+                "client_list": _clip_client_list})
+except Exception as _e:
+    print("[clips] init failed:", _e)
+
+def _clips_eod_loop():
+    """OPT-IN end-of-day triage: at clips_eod_hour, run the PROPOSAL step (clips_process) so the operator
+    sits down to a review queue. PROPOSES ONLY -- never applies (review-first). Off unless cc.config
+    clips_eod_process is true; mirrors _tasks_morning_loop. No token cost beyond the headless extractor."""
+    sched = {"last": ""}
+    while True:
+        try:
+            if CC.get("clips_eod_process"):
+                import datetime as _d; now = _d.datetime.now(); today = now.strftime("%Y-%m-%d")
+                if now.hour == int(CC.get("clips_eod_hour") or 17) and sched["last"] != today:
+                    sched["last"] = today
+                    clips.clips_process()
+                    print("clips: end-of-day triage proposals generated for", today)
+        except Exception: pass
+        time.sleep(900)
 
 def _pretty_name(folder, title=None):
     """Canonical display name for a slugged folder. Prefer the folder's CLAUDE.md H1 title (the real,
@@ -7479,6 +7601,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/agency":        return self._s(200, json.dumps(agency_model()))
         if u.path == "/api/mesh":          return self._s(200, json.dumps(mesh_inbox()))
         if u.path == "/api/granola":       return self._s(200, json.dumps(granola.gr_proposals()))
+        if u.path == "/api/clips":         # CAPTURE SPINE: the clip tray + pending proposals (review queue)
+            return self._s(200, json.dumps(clips.clips_list((q.get("subject", [None])[0]), (q.get("status", [None])[0]))))
         if u.path == "/api/context/stats": return self._s(200, json.dumps(context.stats(), default=str))
         if u.path == "/api/context/assemble":   # the ROUTER: assemble a cited, budgeted slice for a subject/query
             return self._s(200, json.dumps(context.assemble(
@@ -7797,6 +7921,27 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"ok": True, "started": True}))
         if u.path == "/api/granola-apply": return self._s(200, json.dumps(granola.gr_apply(body.get("id", ""), body.get("edited"))))
         if u.path == "/api/granola-skip":  return self._s(200, json.dumps(granola.gr_skip(body.get("id", ""))))
+        if u.path == "/api/slack/save-thread":  # capture a specific Slack thread to a subject
+            return self._s(200, json.dumps(slack.save_thread(context, body.get("channel", ""), body.get("ts", ""), body.get("subject"))))
+        if u.path == "/api/zoom-sync":  # Zoom cloud recordings -> proposals (slow -> background); appear in the Calls lens
+            threading.Thread(target=lambda: zoom.zoom_sync(int(body.get("limit") or 15)), daemon=True).start()
+            return self._s(200, json.dumps({"ok": True, "started": True}))
+        if u.path == "/api/zoom-drop":  # a dropped local .vtt/.txt transcript -> a proposal
+            return self._s(200, json.dumps(zoom.zoom_drop(body.get("path", ""), body.get("client"))))
+        # ---- CAPTURE SPINE (clips): Capture -> Triage -> Apply (review-first). Nothing edits a CLAUDE.md or
+        #      creates a task until /api/clips/apply. page-intel is READ-ONLY (the AI co-reading sidebar).
+        if u.path == "/api/clip":          # save a pending clip (+ context ingest, + optional image to deliverables)
+            return self._s(200, json.dumps(clips.clip_save(
+                subject=body.get("subject", ""), kind=body.get("kind", "web"), url=body.get("url", ""),
+                title=body.get("title", ""), text=body.get("text", ""), note=body.get("note", ""),
+                image_b64=body.get("image_b64"), source=body.get("source", "web"))))
+        if u.path == "/api/clips/process":  # the TRIAGE agent (headless claude) -- clusters + extracts; PROPOSES ONLY
+            return self._s(200, json.dumps(clips.clips_process(body.get("subject") or None)))
+        if u.path == "/api/clips/apply":   return self._s(200, json.dumps(clips.clips_apply(body.get("id", ""), body.get("edited"))))
+        if u.path == "/api/clips/skip":    return self._s(200, json.dumps(clips.clips_skip(body.get("id", ""))))
+        if u.path == "/api/context/page-intel":   # AI co-reading sidebar: what we ALREADY know re: this page (read-only)
+            return self._s(200, json.dumps(clips.page_intel(url=body.get("url", ""), title=body.get("title", ""),
+                text=body.get("text", ""), subject=(body.get("subject") or None)), default=str))
         # ---- Agentic leverage: Action Queue approve/reject (HUMAN-ONLY -- NOT in AUTH_MESH_INGRESS; a peer
         #      can never approve) + Smart Reply staging (stages a Gmail DRAFT + a pending action; NEVER sends).
         if u.path == "/api/flex/stage-reply":
@@ -9421,6 +9566,7 @@ body.gm-resizing iframe{pointer-events:none}
 <button data-l="marketplace"><i class="ph-light ph-storefront"></i>Marketplace</button>
 <button data-l="agency"><i class="ph-light ph-buildings"></i>Agency</button>
 <button data-l="calls"><i class="ph-light ph-phone-call"></i>Calls</button>
+<button data-l="capture"><i class="ph-light ph-scissors"></i>Capture</button>
 <button data-l="comms"><i class="ph-light ph-chats-circle"></i>Comms<span id="commsBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="ccr"><i class="ph-light ph-git-pull-request"></i>Change Requests<span id="ccrBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="propose"><i class="ph-light ph-paper-plane-tilt"></i>Propose Change</button>
@@ -9527,6 +9673,7 @@ function render(){
   else if(LENS=="marketplace"){loadMarketplace();return;}
   else if(LENS=="agency"){loadAgency();return;}
   else if(LENS=="calls"){loadCalls();return;}
+  else if(LENS=="capture"){loadCapture();return;}
   else if(LENS=="context"){loadContext();return;}
   else if(LENS=="comms"){loadComms();return;}
   else if(LENS=="skills"){loadSkills();return;}
@@ -10090,6 +10237,75 @@ async function loadCalls(){
       +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="callsApply(\''+p.id+'\')">✓ Approve &amp; apply</button> <button class="mini" onclick="callsSkip(\''+p.id+'\')">skip</button></div></div>';
   });
   if(done.length){h+=secHead('Recently handled');done.slice(0,8).forEach(function(p){h+='<div class="card" style="cursor:default;grid-column:1/-1;opacity:.6"><div class="meta">'+(p.status==='applied'?'✓ applied':'– skipped')+' · '+esc(p.title||'')+(p.client?' → '+esc(p.client):'')+'</div></div>';});}
+  document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
+}
+// ---- Capture lens (the CAPTURE SPINE): clip tray + triage review. Each clip you save lands as PENDING and is
+// ingested into the context store; "Process clips" runs the triage agent (headless) which PROPOSES a dated
+// CC:CLIPS digest + tasks per subject; you Approve/edit/Skip. Nothing edits a CLAUDE.md until you approve. ----
+async function capSave(){
+  var subj=(document.getElementById('capSubj')||{}).value||'';
+  var url=(document.getElementById('capUrl')||{}).value||'';
+  var txt=(document.getElementById('capTxt')||{}).value||'';
+  if(!txt.trim()&&!url.trim()){toast('Paste some text or a URL first',3500);return;}
+  toast('Saving clip…');
+  try{await fetch('/api/clip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({subject:subj,kind:(url?'web':'note'),url:url,text:txt,source:'web'})});}catch(e){}
+  var t=document.getElementById('capTxt'); if(t)t.value=''; var uu=document.getElementById('capUrl'); if(uu)uu.value='';
+  setTimeout(loadCapture,400);
+}
+async function capProcess(){toast('Triaging clips… (clustering + extracting — this can take a moment)');
+  try{var r=await(await fetch('/api/clips/process',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+    if(r&&r.proposals&&!r.proposals.length&&r.note)toast(r.note,3500);}catch(e){}
+  loadCapture();}
+async function capApply(pid){var sel=document.getElementById('cap-'+pid);var subj=sel?sel.value:'';
+  var ed=subj?{subject:subj}:null;
+  toast('Applying…');
+  try{await fetch('/api/clips/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:pid,edited:ed})});}catch(e){}
+  setTimeout(loadCapture,500);}
+async function capSkip(pid){try{await fetch('/api/clips/skip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:pid})});}catch(e){}loadCapture();}
+function capItems(label,arr,fmt){if(!arr||!arr.length)return'';return '<div class="meta sub" style="margin-top:6px"><b>'+label+'</b></div>'+arr.map(function(x){return '<div class="meta" style="margin-left:8px">• '+e2(fmt(x))+'</div>';}).join('');}
+async function loadCapture(){
+  var d={};try{d=await(await fetch('/api/clips')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load Capture.");return;}
+  var clips=d.clips||[];var props=d.proposals||[];var clients=d.clients||[];
+  var pend=clips.filter(function(c){return c.status==='pending';});
+  var bysub=d.by_subject||{};
+  var subjChips=Object.keys(bysub).sort().map(function(s){return '<span class="badge" style="background:#bc8cff22;color:#bc8cff">'+esc(s||'(no subject)')+' '+bysub[s]+'</span>';}).join(' ');
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#9986;&#65039; Capture</b> <span class="sub">'+pend.length+' clip(s) pending &middot; '+props.length+' proposal(s) to review</span> <button class="mini go" onclick="capProcess()">&#9889; Process clips</button></div>'
+    +'<div class="meta" style="margin-top:8px">Anything you save from where you work lands here and is ingested into your context store. <b>Process clips</b> clusters them per subject and proposes a dated <code>CC:CLIPS</code> note + tasks &mdash; review-first, nothing edits a file until you approve.</div>'
+    +(subjChips?'<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">'+subjChips+'</div>':'')+'</div>';
+  // quick add-clip form
+  h+='<div class="card" style="cursor:default;grid-column:1/-1"><b>&#128206; Save a clip</b>'
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">'
+    +'<input id="capSubj" placeholder="subject (client/project, optional)" style="'+COMMS_INP+';flex:1;min-width:160px">'
+    +'<input id="capUrl" placeholder="url (optional)" style="'+COMMS_INP+';flex:2;min-width:200px"></div>'
+    +'<textarea id="capTxt" placeholder="paste a selection or a note…" style="'+COMMS_INP+';width:100%;min-height:64px;margin-top:6px;resize:vertical"></textarea>'
+    +'<div class="btns" style="margin-top:8px"><button class="mini go" onclick="capSave()">+ Save clip</button></div></div>';
+  // review queue: pending proposals
+  if(props.length){h+=secHead('Review &mdash; proposed from your clips');}
+  props.forEach(function(p){
+    var opts='<option value="">&mdash; subject &mdash;</option>'+clients.map(function(c){return '<option value="'+esc(c)+'"'+(p.subject===c?' selected':'')+'>'+esc(c)+'</option>';}).join('');
+    h+='<div class="card" style="cursor:default;grid-column:1/-1;border-left:3px solid '+(p.subject?'#3fb950':'#d29922')+'">'
+      +'<h3 style="margin:0 0 4px"><span>'+esc(p.subject||'(unsorted)')+'</span><span class="sub">'+(p.clip_ids?p.clip_ids.length:0)+' clip(s)</span></h3>'
+      +'<div class="meta sub" style="margin-bottom:6px">subject: <select id="cap-'+p.id+'" style="'+COMMS_INP+';padding:3px 6px">'+opts+'</select></div>'
+      +(p.error?'<div class="meta" style="color:#f85149">triage error: '+e2(p.error)+'</div>':'')
+      +(p.summary?'<div style="margin:4px 0">'+e2(p.summary)+'</div>':'')
+      +capItems('Digest &rarr; CLAUDE.md (CC:CLIPS)',p.digest,function(x){return x;})
+      +capItems('Decisions',p.decisions,function(x){return x;})
+      +capItems('Tasks',p.tasks,function(t){return (t.title||'')+(t.owner?' [@'+t.owner+']':'')+(t.due?' (due '+t.due+')':'');})
+      +capItems('Contacts',p.contacts,function(c){return (c.name||'')+(c.handle?' <'+c.handle+'>':'');})
+      +capItems('Links',p.links,function(l){return (l.url||'')+(l.why?' — '+l.why:'');})
+      +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="capApply(\''+p.id+'\')">&#10003; Approve &amp; apply</button> <button class="mini" onclick="capSkip(\''+p.id+'\')">skip</button></div></div>';
+  });
+  // clip tray (pending, newest first)
+  if(pend.length){h+=secHead('Pending clips');
+    pend.slice(0,40).forEach(function(c){
+      h+='<div class="card" style="cursor:default;grid-column:1/-1;opacity:.92"><div class="meta"><b>'+esc(c.subject||'(no subject)')+'</b> · '+esc(c.kind||'web')+(c.url?' · <a href="'+esc(c.url)+'" target="_blank" rel="noopener" style="color:#58a6ff">'+esc((c.url||'').replace(/^https?:\/\//,'').slice(0,50))+'</a>':'')+'</div>'
+        +(c.title?'<div style="margin-top:3px">'+e2(c.title)+'</div>':'')
+        +(c.text?'<div class="meta sub" style="margin-top:3px">'+e2((c.text||'').slice(0,200))+'</div>':'')
+        +(c.image_rel?'<div class="meta sub" style="margin-top:3px">📎 '+esc(c.image_rel)+'</div>':'')
+        +' <button class="mini" style="margin-top:6px" onclick="capSkip(\''+c.id+'\')">discard</button></div>';
+    });
+  }
+  if(!pend.length&&!props.length)h+=empty("No clips yet. Save one above (or via the capture extension), then Process to triage.");
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
 }
 // ============ CONTEXT lens: the substrate behind "perfect context, every time" (docs/VISION.md). ============
@@ -13598,7 +13814,7 @@ async function treeResume(id,cwd,fork){const _c=CONVOMAP[id]||{};toast((fork?"Fo
   const r=await(await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({machine:"studio",id:id,cwd:cwd,fork:!!fork,label:_c.label||""})})).json();
   if(!r||!r.ok){toast("Failed: "+((r||{}).error||"?"),5000);return;}
   closeInfo();_openTerm(r);}
-const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',agency:'Agency',calls:'Calls',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Usage Analytics',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Claude Accounts'};
+const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',agency:'Agency',calls:'Calls',capture:'Capture',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Usage Analytics',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Claude Accounts'};
 // ---- Chief of Staff: your office (top-level command + a direct line to me) ----
 function gotoLens(l){const b=document.querySelector('#lens button[data-l="'+l+'"]');if(b)b.click();}
 async function talkChief(){toast("Opening your Chief of Staff…");
@@ -14919,6 +15135,7 @@ if __name__ == "__main__":
     threading.Thread(target=_gc_sync_loop, daemon=True).start()         # same for Calendar/Drive (resilient cache)
     threading.Thread(target=_warm_default_views, daemon=True).start()   # boot-warm the UI's default views + prime the OAuth token (non-blocking)
     threading.Thread(target=_context_backfill_loop, daemon=True).start()   # CONTEXT LAYER: ingest existing surfaces into the store (idempotent, every 15 min)
+    threading.Thread(target=_clips_eod_loop, daemon=True).start()           # CAPTURE SPINE: opt-in end-of-day triage proposals (review-first; off unless clips_eod_process)
     # Bind host: default 0.0.0.0 (existing nodes unchanged). Provisioned standalone bundles set bind_host
     # "127.0.0.1" so the ONLY tailnet-visible surface is the TLS `tailscale serve` URL -- no raw plain-HTTP
     # port on the tailnet for a browser to hit and get ERR_SSL_PROTOCOL_ERROR.

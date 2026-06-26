@@ -27,7 +27,7 @@
 
 'use strict';
 
-const { app, BrowserWindow, WebContentsView, ipcMain, session, net, shell, dialog } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, session, net, shell, dialog, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -68,10 +68,23 @@ let config = Object.assign({}, DEFAULT_CONFIG);
 const CHROME_HEIGHT = 84;          // px reserved at the top of the window for the HTML chrome (tabs + toolbar)
 const MAX_TEXT = 8000;             // truncate captured page text to ~8k chars (attention budget; privacy)
 const CAPTURE_DEBOUNCE_MS = 700;   // collapse rapid navigation events into one capture
+const INTEL_DEBOUNCE_MS = 900;     // collapse rapid navigation events into one co-reading intel fetch
+const SIDEBAR_WIDTH = 340;         // px reserved on the right for the co-reading panel when it's open
+
+// One shared snippet that reads {title, text} from a page in its OWN context — text only, no DOM mutation,
+// no screenshots. Used by capture (the always-on bridge), the explicit Clip/Save flow, and co-reading.
+const PAGE_READ_JS =
+  `(function(){
+     try {
+       var t = (document.body && document.body.innerText) ? document.body.innerText : '';
+       return { title: document.title || '', text: t.slice(0, ${MAX_TEXT}) };
+     } catch (e) { return { title: document.title || '', text: '' }; }
+   })()`;
 
 let win = null;                    // the BrowserWindow (its webContents renders the chrome HTML)
 let overlayOpen = false;           // when the renderer shows a full-window modal we hide content views
-let tabs = [];                     // [{ id, type:'workspace'|'browser', view, title, url, _debounce }]
+let sidebarOpen = false;           // co-reading side panel (off by default; explicit user opt-in)
+let tabs = [];                     // [{ id, type:'workspace'|'browser', view, title, url, _debounce, _intelDebounce }]
 let activeTabId = null;
 let nextId = 1;
 
@@ -121,6 +134,41 @@ async function postJson(pathName, body) {
   }
 }
 
+// Like postJson but also parses + returns the JSON response body (and supports GET). Used by the
+// explicit Clip/Save flow (/api/clip), the subject picker (/api/context/stats), and co-reading
+// (/api/context/page-intel) — all of which need the server's reply, not just the status.
+async function apiRequest(method, pathName, body) {
+  const base = serverBase();
+  if (!base) return { ok: false, reason: 'no-server' };
+  const headers = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (config.authToken) {
+    headers['X-CC-Token'] = config.authToken;
+    headers['Authorization'] = 'Bearer ' + config.authToken;
+  }
+  try {
+    const resp = await net.fetch(base + pathName, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined
+    });
+    let data = null;
+    try { data = await resp.json(); } catch (_) { /* non-JSON / empty body */ }
+    return { ok: resp.ok, status: resp.status, data };
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+}
+
+// Derive a friendly default subject from a URL's host, e.g. https://www.avenlur.com/x -> "Avenlur".
+function siteNameFromUrl(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./i, '');
+    const label = (host.split('.')[0] || host || '').trim();
+    return label ? label.charAt(0).toUpperCase() + label.slice(1) : '';
+  } catch (_) { return ''; }
+}
+
 async function captureAndReport(tab) {
   if (!config.captureEnabled) return;                 // HARD rule: never capture/report when OFF
   if (!tab || tab.type !== 'browser') return;         // Workspace = your own dashboard, not "browsing"
@@ -137,15 +185,7 @@ async function captureAndReport(tab) {
   let page;
   try {
     // Read text-only content in the page's own context. No screenshots, no DOM mutation.
-    page = await wc.executeJavaScript(
-      `(function(){
-         try {
-           var t = (document.body && document.body.innerText) ? document.body.innerText : '';
-           return { title: document.title || '', text: t.slice(0, ${MAX_TEXT}) };
-         } catch (e) { return { title: document.title || '', text: '' }; }
-       })()`,
-      false /* userGesture */
-    );
+    page = await wc.executeJavaScript(PAGE_READ_JS, false /* userGesture */);
   } catch (e) {
     notifyCapture(tab.id, 'error', url, 'read failed: ' + e.message);
     return;
@@ -172,6 +212,137 @@ function notifyCapture(tabId, status, url, reason) {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// EXPLICIT SAVE — "⭐ Save to ClaudeFather" / "📸 Clip".
+//
+// This is an explicit, user-initiated save and is INDEPENDENT of the always-on capture toggle: clicking
+// the button (or its hotkey) is the consent. We grab {url, title, page text, PNG screenshot} of the
+// active browser tab and hand it back to the renderer, which collects a subject + kind + note and then
+// calls clipSave() -> POST /api/clip. We never auto-send anything here.
+// ---------------------------------------------------------------------------------------------------
+async function captureClip(tab) {
+  if (!tab || tab.type !== 'browser') return { ok: false, reason: 'not a browser tab' };
+  const wc = tab.view && tab.view.webContents;
+  if (!wc || wc.isDestroyed()) return { ok: false, reason: 'no page' };
+
+  const url = wc.getURL();
+  if (!url || url === 'about:blank') return { ok: false, reason: 'blank page' };
+
+  // Page text (best-effort; a screenshot-only save is still valid if the read fails).
+  let page;
+  try { page = await wc.executeJavaScript(PAGE_READ_JS, false); }
+  catch (_) { page = { title: wc.getTitle() || '', text: '' }; }
+
+  // Full-view PNG screenshot. capturePage() grabs the rendered view; on the active tab it's on-screen.
+  // (Region select / full-scroll stitching would be a future enhancement.)
+  let image_b64 = '';
+  try {
+    const img = await wc.capturePage();
+    if (img && !img.isEmpty()) image_b64 = img.toPNG().toString('base64');
+  } catch (_) { /* screenshot is best-effort; text-only save still works */ }
+
+  return {
+    ok: true,
+    url,
+    title: (page && page.title) || wc.getTitle() || '',
+    text: (page && page.text) || '',
+    image_b64,
+    siteName: siteNameFromUrl(url)
+  };
+}
+
+// Candidate subjects for the picker — pulled from the server's context stats. Defensive about shape:
+// accepts an array of strings or of objects with a name/subject/title/id field, under a few likely keys.
+async function fetchSubjects() {
+  const r = await apiRequest('GET', '/api/context/stats');
+  if (!r.ok || !r.data) return [];
+  const d = r.data;
+  const raw = d.subjects || d.top_subjects || d.subject_list || (d.stats && d.stats.subjects) || [];
+  const out = [];
+  for (const s of (Array.isArray(raw) ? raw : [])) {
+    if (typeof s === 'string') { if (s.trim()) out.push(s.trim()); }
+    else if (s && typeof s === 'object') {
+      const v = s.subject || s.name || s.title || s.id;
+      if (v) out.push(String(v));
+    }
+  }
+  return out;
+}
+
+async function saveClip(payload) {
+  const p = payload || {};
+  const subject = (p.subject || '').trim();
+  if (!subject) return { ok: false, reason: 'subject required' };
+  const body = {
+    subject,
+    kind: p.kind || 'reference',
+    url: p.url || '',
+    title: p.title || '',
+    text: p.text || '',
+    note: p.note || '',
+    image_b64: p.image_b64 || ''
+  };
+  const r = await apiRequest('POST', '/api/clip', body);
+  if (r.ok) return { ok: true, id: r.data && r.data.id };
+  return { ok: false, reason: r.reason || ('HTTP ' + (r.status || '?')) };
+}
+
+// ---------------------------------------------------------------------------------------------------
+// AI CO-READING — a read-only side panel that, when open, asks the user's OWN server what it already
+// knows about the current page (POST /api/context/page-intel). OFF by default; opening it is the
+// consent. Sensitive pages are skipped just like capture. Only ever talks to the configured server.
+// ---------------------------------------------------------------------------------------------------
+function sendIntel(payload) {
+  if (win && !win.isDestroyed()) win.webContents.send('intel:state', payload);
+}
+
+async function fetchIntel(tab) {
+  if (!sidebarOpen) return;
+  if (!tab || tab.type !== 'browser') { sendIntel({ status: 'idle' }); return; }
+  const wc = tab.view && tab.view.webContents;
+  if (!wc || wc.isDestroyed()) return;
+
+  const url = wc.getURL();
+  if (!url || url === 'about:blank') { sendIntel({ status: 'idle' }); return; }
+  if (isSensitive(url)) { sendIntel({ status: 'skipped', url, reason: 'sensitive page' }); return; }
+
+  sendIntel({ status: 'loading', url });
+
+  let page;
+  try { page = await wc.executeJavaScript(PAGE_READ_JS, false); }
+  catch (_) { page = { title: wc.getTitle() || '', text: '' }; }
+
+  const r = await apiRequest('POST', '/api/context/page-intel', {
+    url, title: (page && page.title) || '', text: (page && page.text) || ''
+  });
+  // The active tab may have navigated again while we were waiting; only render if URL still matches.
+  const stillHere = !wc.isDestroyed() && wc.getURL() === url;
+  if (!stillHere) return;
+
+  if (r.ok && r.data) {
+    sendIntel({
+      status: 'ok',
+      url,
+      related: Array.isArray(r.data.related) ? r.data.related : [],
+      flags: Array.isArray(r.data.flags) ? r.data.flags : []
+    });
+  } else {
+    sendIntel({ status: 'error', url, reason: r.reason || ('HTTP ' + (r.status || '?')) });
+  }
+}
+
+function setSidebar(open) {
+  sidebarOpen = !!open;
+  layoutActiveView();          // reserve / release the right-hand strip for the panel
+  broadcastSidebar();
+  if (sidebarOpen) fetchIntel(getTab(activeTabId));
+  else sendIntel({ status: 'idle' });
+}
+
+function broadcastSidebar() {
+  if (win && !win.isDestroyed()) win.webContents.send('sidebar:state', { open: sidebarOpen });
+}
+
+// ---------------------------------------------------------------------------------------------------
 // Tab / view management
 // ---------------------------------------------------------------------------------------------------
 function browserPartitionFor(type) {
@@ -191,7 +362,7 @@ function createTab(type, url) {
     }
   });
 
-  const tab = { id, type, view, title: type === 'workspace' ? 'Workspace' : 'New Tab', url: url || '', _debounce: null };
+  const tab = { id, type, view, title: type === 'workspace' ? 'Workspace' : 'New Tab', url: url || '', _debounce: null, _intelDebounce: null };
   tabs.push(tab);
 
   const wc = view.webContents;
@@ -210,6 +381,11 @@ function createTab(type, url) {
     if (tab.type === 'browser') {
       clearTimeout(tab._debounce);
       tab._debounce = setTimeout(() => captureAndReport(tab), CAPTURE_DEBOUNCE_MS);
+      // Co-reading refresh (independent of capture): only when the panel is actually open.
+      if (sidebarOpen) {
+        clearTimeout(tab._intelDebounce);
+        tab._intelDebounce = setTimeout(() => fetchIntel(tab), INTEL_DEBOUNCE_MS);
+      }
     }
   };
 
@@ -268,6 +444,8 @@ function activateTab(id) {
   }
   layoutActiveView();
   broadcastTabs();
+  // Refresh the co-reading panel for the newly-active tab (no-op if the panel is closed).
+  if (sidebarOpen) fetchIntel(getTab(id));
 }
 
 function closeTab(id) {
@@ -276,6 +454,7 @@ function closeTab(id) {
   const [tab] = tabs.splice(idx, 1);
   try {
     clearTimeout(tab._debounce);
+    clearTimeout(tab._intelDebounce);
     if (win.contentView.children.includes(tab.view)) win.contentView.removeChildView(tab.view);
     if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
   } catch (_) {}
@@ -294,7 +473,11 @@ function layoutActiveView() {
   if (!tab) return;
   const [w, h] = win.getContentSize();
   const y = overlayOpen ? h : CHROME_HEIGHT;      // when overlay is up, park the view off-screen
-  tab.view.setBounds({ x: 0, y, width: Math.round(w), height: Math.max(0, Math.round(h - y)) });
+  // Reserve the right strip for the co-reading panel ONLY when it's open AND we're on a browser tab
+  // (the Workspace dashboard isn't co-read, so it keeps the full width). Matches the renderer's logic.
+  const reserve = (sidebarOpen && !overlayOpen && tab.type === 'browser') ? SIDEBAR_WIDTH : 0;
+  const width = Math.max(0, Math.round(w - reserve));
+  tab.view.setBounds({ x: 0, y, width, height: Math.max(0, Math.round(h - y)) });
 }
 
 // Push the full serializable tab list + capture/config state to the chrome renderer.
@@ -405,7 +588,36 @@ function wireIpc() {
     const tab = getTab(activeTabId);
     if (tab) await captureAndReport(tab);
   });
+
+  // --- Explicit Save / Clip (independent of the capture toggle) ---
+  // Grab {url,title,text,screenshot} of the active browser tab and hand it to the renderer's save dialog.
+  ipcMain.handle('clip:capture', async () => captureClip(getTab(activeTabId)));
+  // Subjects for the picker.
+  ipcMain.handle('clip:subjects', async () => ({ subjects: await fetchSubjects() }));
+  // Commit the save -> POST /api/clip.
+  ipcMain.handle('clip:save', async (_e, payload) => saveClip(payload));
+
+  // --- Co-reading side panel ---
+  ipcMain.handle('sidebar:toggle', () => { setSidebar(!sidebarOpen); return { open: sidebarOpen }; });
+  ipcMain.handle('sidebar:get', () => ({ open: sidebarOpen }));
+  ipcMain.handle('intel:refresh', () => { fetchIntel(getTab(activeTabId)); });
 }
+
+// ---------------------------------------------------------------------------------------------------
+// Global shortcuts — registered while OUR window is focused (and released on blur), so the hotkeys work
+// even when a content WebContentsView holds keyboard focus (a renderer keydown wouldn't fire then).
+//   ⌘/Ctrl + Shift + S  -> Save the current page to ClaudeFather
+//   ⌘/Ctrl + Shift + E  -> Toggle the AI co-reading panel
+// ---------------------------------------------------------------------------------------------------
+function registerShortcuts() {
+  try {
+    globalShortcut.register('CommandOrControl+Shift+S', () => {
+      if (win && !win.isDestroyed()) win.webContents.send('menu:save-clip');
+    });
+    globalShortcut.register('CommandOrControl+Shift+E', () => setSidebar(!sidebarOpen));
+  } catch (_) { /* a key may be held by another app; non-fatal */ }
+}
+function unregisterShortcuts() { try { globalShortcut.unregisterAll(); } catch (_) {} }
 
 // ---------------------------------------------------------------------------------------------------
 // Window
@@ -430,6 +642,7 @@ function createWindow() {
 
   win.webContents.on('did-finish-load', () => {
     broadcastConfig();
+    broadcastSidebar();
     // First run: no server configured -> the renderer shows the first-run overlay (no tabs yet).
     if (serverBase()) {
       const ws = createTab('workspace', serverBase());
@@ -441,7 +654,10 @@ function createWindow() {
   });
 
   win.on('resize', layoutActiveView);
-  win.on('closed', () => { win = null; });
+  // Hotkeys are live only while our window is focused (released otherwise so we never hold them globally).
+  win.on('focus', registerShortcuts);
+  win.on('blur', unregisterShortcuts);
+  win.on('closed', () => { unregisterShortcuts(); win = null; });
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -451,11 +667,14 @@ app.whenReady().then(() => {
   config = loadConfig();
   wireIpc();
   createWindow();
+  registerShortcuts();   // the window starts focused; 'focus' may not fire on first show
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+app.on('will-quit', () => { unregisterShortcuts(); });
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

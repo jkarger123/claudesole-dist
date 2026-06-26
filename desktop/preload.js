@@ -13,6 +13,16 @@ contextBridge.exposeInMainWorld('cf', {
   setCapture: (enabled) => ipcRenderer.invoke('capture:set', { enabled }),
   captureNow: () => ipcRenderer.invoke('capture:now'),
 
+  // --- explicit Save / Clip (independent of the capture toggle) ---
+  clipCapture: () => ipcRenderer.invoke('clip:capture'),          // grab {url,title,text,image_b64,siteName}
+  clipSubjects: () => ipcRenderer.invoke('clip:subjects'),         // candidate subjects for the picker
+  clipSave: (payload) => ipcRenderer.invoke('clip:save', payload), // POST /api/clip -> {ok,id}
+
+  // --- AI co-reading side panel ---
+  toggleSidebar: () => ipcRenderer.invoke('sidebar:toggle'),
+  getSidebar: () => ipcRenderer.invoke('sidebar:get'),
+  refreshIntel: () => ipcRenderer.invoke('intel:refresh'),
+
   // --- tabs ---
   createTab: (type, url) => ipcRenderer.invoke('tabs:create', { type, url }),
   activateTab: (id) => ipcRenderer.invoke('tabs:activate', { id }),
@@ -32,5 +42,8 @@ contextBridge.exposeInMainWorld('cf', {
   // --- events main -> renderer ---
   onTabs: (cb) => ipcRenderer.on('tabs:state', (_e, data) => cb(data)),
   onConfig: (cb) => ipcRenderer.on('config:state', (_e, data) => cb(data)),
-  onCaptureEvent: (cb) => ipcRenderer.on('capture:event', (_e, data) => cb(data))
+  onCaptureEvent: (cb) => ipcRenderer.on('capture:event', (_e, data) => cb(data)),
+  onSidebar: (cb) => ipcRenderer.on('sidebar:state', (_e, data) => cb(data)),   // co-reading open/closed
+  onIntel: (cb) => ipcRenderer.on('intel:state', (_e, data) => cb(data)),       // co-reading content
+  onSaveClip: (cb) => ipcRenderer.on('menu:save-clip', () => cb())              // hotkey -> open save dialog
 });
