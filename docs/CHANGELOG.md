@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.37.6 -- 2026-06-25
+- FIX/DIAGNOSE (mobile terminal resize still dead): now size the bigsess ELEMENT directly with inline
+  !important (height/flex/min-height) instead of relying on a CSS var the cascade may have been dropping;
+  added a tap counter to the readout (↕ NNNpx (N)) so we can distinguish "taps not reaching JS" from
+  "height won't change"; and gave the grip row 64px clearance above the dock so the buttons aren't tucked
+  behind the fixed dock. Per-device memory + drag retained.
+
 ## 0.37.5 -- 2026-06-25
 - FIX/DIAGNOSE (mobile terminal resize): added guaranteed − / ＋ step buttons (taps, not a gesture) flanking
   the drag bar, and the handle now shows the LIVE pixel height. If the buttons + number move but drag

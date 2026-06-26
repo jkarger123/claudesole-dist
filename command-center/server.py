@@ -12897,17 +12897,22 @@ function termKey(){ return termIsMobile()?'hpcc_term_h_m':'hpcc_term_h_d'; }
 function termBig(){ return document.querySelector('.focusonly .bigsess'); }
 function termScroller(){ return document.querySelector('#grid.wrap')||document.querySelector('.wrap')||document.scrollingElement||document.documentElement; }
 function termDockH(){ return parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cf-dock-h'))||0; }
-function termFitH(){ var el=termBig(); if(!el) return 320;   // height that fills the screen above the dock (the floor on mobile)
+function termFitH(){ var el=termBig(); if(!el) return 320;   // height that fills the screen above the dock, leaving room for the grip row (the floor on mobile)
   var top=el.getBoundingClientRect().top;
-  return Math.max(260, Math.round(window.innerHeight - top - termDockH() - 26)); }
+  return Math.max(260, Math.round(window.innerHeight - top - termDockH() - 64)); }
 function termCapH(){ return Math.round(window.innerHeight*3); }   // allow growing well past the viewport (the list scrolls)
-var TERM_MIN=260, TERM_DRAG=false;
-function termShowN(){ var n=document.getElementById('termGripN'); if(!n)return; var el=termBig(); n.textContent= el?('↕ '+Math.round(el.getBoundingClientRect().height)+'px'):''; }
-function termSet(h){ document.documentElement.style.setProperty('--cf-term-h', Math.max(TERM_MIN, Math.min(Math.round(h), termCapH()))+'px'); termShowN(); }
-function termSave(){ var v=parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cf-term-h'))||0; if(v){ try{ localStorage.setItem(termKey(),v); }catch(e){} } }
-// guaranteed-to-work step buttons (taps, no gesture) -- also the diagnostic: if these don't move the
-// terminal either, the problem is the CSS var not applying, not the touch handling.
-function termStep(d){ var el=termBig(); if(!el)return; TERM_MIN=termFitH(); termSet(el.getBoundingClientRect().height + d); termSave(); }
+var TERM_MIN=260, TERM_DRAG=false, TERM_H=0, TERM_TAPS=0;
+function termShowN(){ var n=document.getElementById('termGripN'); if(!n)return; var el=termBig(); var h=el?Math.round(el.getBoundingClientRect().height):0; n.textContent='↕ '+h+'px'+(TERM_TAPS?(' ('+TERM_TAPS+')'):''); }
+function termSet(h){ var px=Math.max(TERM_MIN, Math.min(Math.round(h), termCapH())); TERM_H=px;
+  var el=termBig(); if(el){ el.style.setProperty('height',px+'px','important'); el.style.setProperty('flex','none','important'); el.style.setProperty('min-height','0','important'); }   // size the ELEMENT directly: inline !important beats the stylesheet, bypassing any var/cascade problem
+  document.documentElement.style.setProperty('--cf-term-h',px+'px');
+  termShowN(); }
+function termSave(){ if(TERM_H){ try{ localStorage.setItem(termKey(),TERM_H); }catch(e){} } }
+// step buttons (plain taps). The (N) counter in the readout = how many times the handler has FIRED -- so we
+// can tell "taps not reaching JS" (N stays 0) from "height won't change" (N rises, px frozen).
+function termStep(d){ TERM_TAPS++; var el=termBig();
+  if(el){ TERM_MIN=termFitH(); termSet(el.getBoundingClientRect().height + d); termSave(); }
+  else { var n=document.getElementById('termGripN'); if(n) n.textContent='(no terminal) ('+TERM_TAPS+')'; } }
 function termApplySaved(){
   if(!termIsMobile()){ document.documentElement.style.removeProperty('--cf-term-h'); return; }   // desktop: CSS layout unchanged
   if(TERM_DRAG||!termBig()) return;                          // never fight an in-progress drag
