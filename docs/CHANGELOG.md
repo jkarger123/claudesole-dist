@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.54.0 -- 2026-06-26
+- REVERT the Projects-tab pin/hide curation (0.53) -- wrong surface. The logical launch-place picker is the
+  NEW SESSION button (Sessions topbar -> openLaunch): a curated tree of where you'd launch an agent (project
+  folder + subfolders, extensions, modules), drillable, with "Show all folders" as an escape hatch. The
+  Projects tab is back to the clean drill-down browser (no pin/hide). Removed /api/launch-curate + state.
+
 ## 0.53.0 -- 2026-06-26
 - PROJECTS tab = a curatable list of launch places (auto + pin/hide). Each project/module card now has a clear
   "▶ launch agent here", plus 📌 pin (float to top) and 🚫 hide (tuck behind a "show hidden" toggle). The list

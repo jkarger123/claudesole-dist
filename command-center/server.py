@@ -186,7 +186,6 @@ CCR = os.path.join(STATE_DIR, "_ccr.json")           # Core Change Request queue
 CCR_SENT = os.path.join(STATE_DIR, "_ccr_sent.json") # local echo of CCRs THIS node proposed up to Mission Control
 RESUMES = os.path.join(STATE_DIR, "_resumes.json")   # sid -> live session name (one live resume per conversation)
 MREG = os.path.join(STATE_DIR, "_managed_blocks.json")
-LAUNCH_CURATE = os.path.join(STATE_DIR, "_launch_curate.json")  # user curation of the Projects launch list: {pinned:[rel], hidden:[rel]}
 INSTANCES = os.path.join(STATE_DIR, "_instances.json")  # child ClaudeFathers this instance oversees (org/nesting)
 TMUX = __import__("shutil").which("tmux") or "/opt/homebrew/bin/tmux"  # resolve tmux portably (Homebrew path as fallback)
 STUDIO_TS = "100.109.63.56"
@@ -2584,24 +2583,6 @@ def launch_tree():
                 "children": [build(k, os.path.basename(k)) for k in kids]}
     return {"ok": True, "count": len(targets),
             "tree": build("", os.path.basename(PROJECT.rstrip("/")) or "project")}
-
-def launch_curate_get():
-    d = load(LAUNCH_CURATE, {}) or {}
-    return {"ok": True, "pinned": d.get("pinned") or [], "hidden": d.get("hidden") or []}
-
-def launch_curate_set(rel, action):
-    """Curate the Projects launch list: pin/unpin (sort to top) or hide/unhide (drop from the list). Per node."""
-    rel = (rel or "").strip().strip("/")
-    if not rel: return {"ok": False, "error": "no rel"}
-    d = load(LAUNCH_CURATE, {}) or {}
-    pinned = [x for x in (d.get("pinned") or []) if x != rel]
-    hidden = [x for x in (d.get("hidden") or []) if x != rel]
-    if action == "pin": pinned.insert(0, rel); hidden = [x for x in hidden if x != rel]
-    elif action == "hide": hidden.insert(0, rel); pinned = [x for x in pinned if x != rel]
-    # unpin / unhide are handled by the removals above (rel already stripped from both lists)
-    d["pinned"], d["hidden"] = pinned, hidden
-    save(LAUNCH_CURATE, d)
-    return {"ok": True, "pinned": pinned, "hidden": hidden}
 
 def backup_status(ttl=8):
     now = time.time()
@@ -7850,7 +7831,6 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/files":        return self._s(200, json.dumps(all_deliverables()))
         if u.path == "/api/browse":       return self._s(200, json.dumps(browse_dir(q.get("rel", [""])[0])))
         if u.path == "/api/launch-tree":  return self._s(200, json.dumps(launch_tree()))
-        if u.path == "/api/launch-curate": return self._s(200, json.dumps(launch_curate_get()))
         # ---- Google Workspace (live client) ----
         if u.path == "/api/google/status":   return self._s(200, json.dumps(google_status()))
         if u.path == "/api/google/gmail":    return self._s(200, json.dumps(gmail_list(q.get("view", ["inbox"])[0], q.get("q", [""])[0], q.get("max", ["25"])[0], fresh=(q.get("fresh", [""])[0] in ("1", "true")), page_token=q.get("page", [""])[0])))
@@ -8005,7 +7985,6 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(resume_session(body.get("machine", "studio"), body.get("id", ""), body.get("cwd", ""), body.get("fork", False), body.get("label", ""))))
         if u.path == "/api/ralph-launch":  return self._s(200, json.dumps(ralph_launch(body.get("name", ""))))
         if u.path == "/api/module-launch": return self._s(200, json.dumps(launch("studio", body.get("name") or (body.get("rel","").split("/")[-1] or "session"), rel=body.get("rel",""))))
-        if u.path == "/api/launch-curate": return self._s(200, json.dumps(launch_curate_set(body.get("rel",""), body.get("action",""))))
         if u.path == "/api/module-note":   return self._s(200, json.dumps(module_note(body.get("rel",""), body.get("text",""))))
         if u.path == "/api/module-add":    return self._s(200, json.dumps(module_add(body.get("parent",""), body.get("name",""), body.get("summary",""))))
         if u.path == "/api/module-remove": return self._s(200, json.dumps(module_remove(body.get("rel",""))))
@@ -9808,8 +9787,6 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 .nstree-row.nsfile:hover{background:none}
 .nstree-row.nsanc .nslabel{opacity:.55;font-weight:400}
 .nstree-row .nslabel{font-weight:600}
-.card.modpinned{box-shadow:inset 0 0 0 1px rgba(231,184,75,.45)}
-.card.modhidden{opacity:.7}
 </style>
 <a class="cfdesk-cta" onclick="cfDeskMenu(event)" title="Get the ClaudeFather Desktop app — a real browser + your dashboard in one window"><i class="ph-light ph-desktop"></i>Get the desktop app</a>
 <div id="cfDesktopMenu" style="display:none">
@@ -9978,7 +9955,6 @@ function modFind(n,rel){if(n.rel===rel)return n;for(const c of (n.children||[]))
 async function loadModules(rel){
   if(rel!==undefined&&rel!==null)MODREL=rel;syncHash(true);
   try{MODTREE=await(await fetch("/api/module-tree")).json();}catch(e){return;}
-  var CURATE={pinned:[],hidden:[]}; try{CURATE=await(await fetch("/api/launch-curate")).json();}catch(e){}
   const node=modFind(MODTREE,MODREL)||MODTREE;
   const segs=(MODREL?MODREL.split("/"):[]);
   const parent=segs.slice(0,-1).join("/");
@@ -10029,17 +10005,7 @@ async function loadModules(rel){
     // email <-> folder correspondence (self-hides when Google isn't configured)
     if(typeof mlFolderCard==='function'){ var _mlc=mlFolderCard(MODREL, (node.name||MODREL)); if(_mlc) h+=_mlc; }
   } else MODCONVOS=[];
-  // pin/hide curation: pinned float to top, hidden tuck behind a toggle (auto list + your control)
-  var _pin=(CURATE.pinned||[]), _hid=(CURATE.hidden||[]);
-  var _pk=[],_nk=[],_hk=[];
-  kids.forEach(function(c){ if(_hid.indexOf(c.rel)>=0)_hk.push(c); else if(_pin.indexOf(c.rel)>=0)_pk.push(c); else _nk.push(c); });
-  _pk.sort(function(a,b){return _pin.indexOf(a.rel)-_pin.indexOf(b.rel);});
-  var _vis=_pk.concat(_nk);
-  h+='<div class="modgrid">'+(_vis.map(function(c){return modCard(c,_pin.indexOf(c.rel)>=0,false);}).join("")||empty(MODREL?"No sub-tools here yet -- click + add sub-tool.":"No launch places here yet."))+'</div>';
-  if(_hk.length){
-    h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><span class="sub">'+_hk.length+' hidden from this list</span><button class="mini" id="hidToggle" style="margin-left:auto" onclick="toggleHidden()">show hidden</button></div>'
-      +'<div id="hiddenKids" style="display:none;margin-top:9px"><div class="modgrid">'+_hk.map(function(c){return modCard(c,false,true);}).join("")+'</div></div></div>';
-  }
+  h+='<div class="modgrid">'+(kids.map(modCard).join("")||empty(MODREL?"No sub-tools here yet -- click + add sub-tool.":"No modules found."))+'</div>';
   // stack the whole modules view in ONE full-width flex column so the page grid can't interleave the
   // conversations card with the sub-tool cards (was causing the cards to overlap a long convo list)
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
@@ -10051,23 +10017,17 @@ async function modResumeId(id,fork){const c=MODCONVOMAP[id]; if(!c)return;
   const r=await(await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({machine:"studio",id:c.id,cwd:c.cwd,fork:!!fork,label:c.label||""})})).json();
   if(!r||!r.ok){toast((fork?"Fork":"Resume")+" failed: "+((r||{}).error||"?"),5000); return;}
   _openTerm(r);}
-function modCard(c,pinned,isHidden){const n=(c.children||[]).length;
-  return '<div class="card'+(pinned?' modpinned':'')+(isHidden?' modhidden':'')+'" onclick="loadModules(\''+esc(c.rel)+'\')" style="cursor:pointer"><h3><span>'+(pinned?'📌':'🧩')+' '+esc(c.name)+'</span>'+(n?'<span class="badge" style="background:#3b82f622;color:#3b82f6">'+n+' inside</span>':'')+'</h3>'
+function modCard(c){const n=(c.children||[]).length;
+  return '<div class="card" onclick="loadModules(\''+esc(c.rel)+'\')" style="cursor:pointer"><h3><span>🧩 '+esc(c.name)+'</span>'+(n?'<span class="badge" style="background:#3b82f622;color:#3b82f6">'+n+' inside</span>':'')+'</h3>'
     +(c.summary?('<div class="meta"'+(c.summary_default?' style="opacity:.65;font-style:italic"':'')+'>'+esc(c.summary)+(c.summary_default?' <span class="sub">(suggested &mdash; set your own under the <code># title</code> in CLAUDE.md)</span>':'')+'</div>')
               :'<div class="meta sub" style="opacity:.55;font-style:italic">No summary yet &mdash; add a one-line description under the <code># title</code> in this module&#39;s CLAUDE.md and it shows here.</div>')
     +'<div class="meta sub" style="margin-top:4px"><code>'+esc(c.rel)+'</code>'+(c.last_convo?' · 💬 '+tago(c.last_convo):'')+'</div>'
     +'<div class="btns" style="margin-top:9px" onclick="event.stopPropagation()">'
-    +'<button class="mini go" onclick="modLaunch(\''+esc(c.rel)+'\')">▶ launch agent here</button>'
+    +'<button class="mini go" onclick="modLaunch(\''+esc(c.rel)+'\')">▶ launch</button>'
     +(n?'<button class="mini" onclick="loadModules(\''+esc(c.rel)+'\')">open ('+n+')</button>':'')
-    +(isHidden
-        ?'<button class="mini" onclick="curate(\''+esc(c.rel)+'\',\'unhide\')">↩ unhide</button>'
-        :('<button class="mini" title="'+(pinned?'unpin':'pin to top')+'" onclick="curate(\''+esc(c.rel)+'\',\''+(pinned?'unpin':'pin')+'\')">'+(pinned?'unpin':'📌 pin')+'</button>'
-          +'<button class="mini" title="hide from this list" onclick="curate(\''+esc(c.rel)+'\',\'hide\')">🚫 hide</button>'))
     +'<button class="mini" style="color:#f85149" onclick="modRemove(\''+esc(c.rel)+'\',\''+esc(c.name)+'\')">remove</button>'
     +'</div></div>';
 }
-async function curate(rel,action){try{await fetch('/api/launch-curate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rel:rel,action:action})});}catch(e){}loadModules(MODREL);}
-function toggleHidden(){var el=document.getElementById('hiddenKids'),b=document.getElementById('hidToggle');if(!el)return;var open=el.style.display!=='none';el.style.display=open?'none':'';if(b)b.textContent=open?'show hidden':'hide again';}
 async function modLaunch(rel){toast("Launching a session in "+rel+"…");
   const r=await(await fetch("/api/module-launch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rel})})).json();
   if(!r||!r.ok){toast("Launch failed: "+((r||{}).error||"?"),5000);return;}
