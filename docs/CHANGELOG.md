@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.37.4 -- 2026-06-25
+- FIX (mobile terminal resize STILL didn't move): two real bugs. (1) The scroll container on mobile is the
+  .wrap list, NOT the window -- my window.scrollBy/scrollY math was inert. (2) iOS fires `resize` during
+  scroll (address bar), so the resize handler was resetting the height mid-drag. Rewrote it: DELTA-based
+  sizing (height-at-grab + finger delta + container-scroll delta) so it always tracks the finger; scroll the
+  real .wrap container; claim the gesture on touchstart (non-passive preventDefault); and a TERM_DRAG flag so
+  resize/rotate never resets mid-drag. Bigger grip touch target (30px). Floor = full-screen fit (increase-only).
+
 ## 0.37.3 -- 2026-06-25
 - FIX (mobile terminal resize didn't grow): the drag grip lit up but wouldn't increase the terminal because
   the max-height clamp was computed BELOW the default height (so every drag clamped downward) and the grip sat

@@ -8324,9 +8324,9 @@ body.ss-tut-on #sessbar{z-index:9995!important;box-shadow:0 -6px 40px 8px rgba(v
   body.cf-sessions #tkstripwrap, body.cf-sessions .cf-sesshint{display:none!important}
   body.cf-sessions .focusonly{height:auto}
   body.cf-sessions .focusonly .bigsess{height:var(--cf-term-h, calc(100dvh - 76px - var(--cf-dock-h)))!important;min-height:0!important}   /* nav + grip + dock -> rest = terminal (header card gone; controls in the topbar). --cf-term-h = the user's drag-resized, remembered height (set by termResizeInit) */
-  body.cf-sessions .termgrip{display:flex;align-items:center;justify-content:center;height:20px;margin-top:4px;cursor:ns-resize;touch-action:none;-webkit-touch-callout:none;flex:0 0 auto}
-  body.cf-sessions .termgrip i{width:46px;height:5px;border-radius:3px;background:var(--line);transition:background .15s,width .15s}
-  body.cf-sessions .termgrip.drag i,body.cf-sessions .termgrip:active i{background:var(--accent);width:66px}
+  body.cf-sessions .termgrip{display:flex;align-items:center;justify-content:center;height:30px;margin-top:3px;cursor:ns-resize;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;flex:0 0 auto}
+  body.cf-sessions .termgrip i{width:56px;height:6px;border-radius:4px;background:var(--line);box-shadow:0 0 0 6px transparent;transition:background .15s,width .15s}
+  body.cf-sessions .termgrip.drag i,body.cf-sessions .termgrip:active i{background:var(--accent);width:78px;box-shadow:0 0 14px 1px rgba(var(--accent-rgb),.55)}
 }
 /* Sessions LENS: focus = ONLY the big terminal (littles removed); in-flow column, never floats over usage. */
 .focusonly{display:flex;flex-direction:column;
@@ -12880,41 +12880,44 @@ function renderFocus(s){
   return h;
 }
 // ---- Mobile focus-terminal resize: drag the grip below the terminal to make it TALLER (remembered per
-// device). On mobile the floor is the full-screen fit (you can only INCREASE), and you can grow PAST the
-// viewport -- the page auto-scrolls while you hold near the bottom edge so the grip stays reachable. The
-// chosen px height is stored per device (phone vs desktop-viewport keys) and re-clamped on load/rotate. ----
+// device). DELTA-based (new height = height-at-grab + how far you've dragged + how far the list scrolled),
+// so it always tracks your finger regardless of scroll-container quirks. Floor = the full-screen fit (mobile
+// = increase-only); you can grow PAST the viewport -- holding near the bottom auto-scrolls the REAL scroll
+// container (the .wrap list, not the window). A drag flag stops the resize/rotate handler resetting mid-drag.
 function termIsMobile(){ return !!(window.matchMedia&&window.matchMedia('(max-width:820px)').matches); }
 function termKey(){ return termIsMobile()?'hpcc_term_h_m':'hpcc_term_h_d'; }
 function termBig(){ return document.querySelector('.focusonly .bigsess'); }
+function termScroller(){ return document.querySelector('#grid.wrap')||document.querySelector('.wrap')||document.scrollingElement||document.documentElement; }
 function termDockH(){ return parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cf-dock-h'))||0; }
 function termFitH(){ var el=termBig(); if(!el) return 320;   // height that fills the screen above the dock (the floor on mobile)
-  var top=el.getBoundingClientRect().top+window.scrollY;
+  var top=el.getBoundingClientRect().top;
   return Math.max(260, Math.round(window.innerHeight - top - termDockH() - 26)); }
-function termCapH(){ return Math.round(window.innerHeight*3); }   // allow growing well past the viewport (page scrolls)
-var TERM_MIN=260;
+function termCapH(){ return Math.round(window.innerHeight*3); }   // allow growing well past the viewport (the list scrolls)
+var TERM_MIN=260, TERM_DRAG=false;
+function termSet(h){ document.documentElement.style.setProperty('--cf-term-h', Math.max(TERM_MIN, Math.min(Math.round(h), termCapH()))+'px'); }
 function termApplySaved(){
   if(!termIsMobile()){ document.documentElement.style.removeProperty('--cf-term-h'); return; }   // desktop: CSS layout unchanged
-  if(!termBig()) return;
-  var fit=termFitH(); TERM_MIN=fit;                          // mobile: fill the screen by default; only ever INCREASE from there
+  if(TERM_DRAG||!termBig()) return;                          // never fight an in-progress drag
+  TERM_MIN=termFitH();                                       // mobile: fill the screen by default; only ever INCREASE from there
   var v=parseInt(localStorage.getItem(termKey())||'0',10);
-  document.documentElement.style.setProperty('--cf-term-h', Math.max(fit, Math.min(v>0?v:fit, termCapH()))+'px');
+  termSet(v>0?v:TERM_MIN);
 }
 function termResizeInit(){
   if(!termResizeInit._r){ termResizeInit._r=1;
     window.addEventListener('resize',function(){ termApplySaved(); });
     window.addEventListener('orientationchange',function(){ setTimeout(termApplySaved,300); }); }
   var g=document.getElementById('termGrip'); if(!g||g._w) return; g._w=1;
-  var top0=0,lastY=0,drag=false,autoT=null;
-  function clampH(v){ return Math.max(TERM_MIN, Math.min(Math.round(v), termCapH())); }
-  function setH(clientY){ document.documentElement.style.setProperty('--cf-term-h', clampH((clientY+window.scrollY)-top0)+'px'); }
+  var startY=0,startH=0,startScroll=0,lastY=0,autoT=null;
+  function curH(){ var el=termBig(); return el?el.getBoundingClientRect().height:termFitH(); }
+  function recompute(){ var sc=termScroller(); var sct=sc?sc.scrollTop:0; termSet(startH + (lastY-startY) + (sct-startScroll)); }
   function autoOff(){ if(autoT){ clearInterval(autoT); autoT=null; } }
-  function autoOn(){ if(autoT)return; autoT=setInterval(function(){ if(!drag){autoOff();return;} window.scrollBy(0,16); setH(lastY); },30); }   // hold near the bottom edge -> keep scrolling + growing
-  function down(clientY){ var el=termBig(); if(!el)return; top0=el.getBoundingClientRect().top+window.scrollY; TERM_MIN=termFitH(); drag=true; lastY=clientY; g.classList.add('drag'); document.body.style.userSelect='none'; }
-  function move(clientY){ if(!drag)return; lastY=clientY; if(clientY>window.innerHeight-90){ autoOn(); } else { autoOff(); } setH(clientY); }
-  function up(){ if(!drag)return; drag=false; autoOff(); g.classList.remove('drag'); document.body.style.userSelect='';
+  function autoOn(){ if(autoT)return; autoT=setInterval(function(){ if(!TERM_DRAG){autoOff();return;} var sc=termScroller(); if(sc) sc.scrollTop+=14; recompute(); },30); }
+  function down(clientY){ var el=termBig(); if(!el)return; TERM_MIN=termFitH(); startH=curH(); startY=clientY; lastY=clientY; var sc=termScroller(); startScroll=sc?sc.scrollTop:0; TERM_DRAG=true; g.classList.add('drag'); document.body.style.userSelect='none'; }
+  function move(clientY){ if(!TERM_DRAG)return; lastY=clientY; if(clientY>window.innerHeight-100){ autoOn(); } else { autoOff(); } recompute(); }
+  function up(){ if(!TERM_DRAG)return; TERM_DRAG=false; autoOff(); g.classList.remove('drag'); document.body.style.userSelect='';
     var cur=parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cf-term-h'))||0; if(cur){ try{ localStorage.setItem(termKey(),cur); }catch(e){} } }
-  g.addEventListener('touchstart',function(e){ if(e.touches.length!==1)return; down(e.touches[0].clientY); },{passive:true});
-  g.addEventListener('touchmove',function(e){ if(!drag)return; e.preventDefault(); move(e.touches[0].clientY); },{passive:false});
+  g.addEventListener('touchstart',function(e){ if(e.touches.length!==1)return; e.preventDefault(); down(e.touches[0].clientY); },{passive:false});
+  g.addEventListener('touchmove',function(e){ if(!TERM_DRAG)return; e.preventDefault(); move(e.touches[0].clientY); },{passive:false});
   g.addEventListener('touchend',up); g.addEventListener('touchcancel',up);
   g.addEventListener('mousedown',function(e){ e.preventDefault(); down(e.clientY);
     var mm=function(ev){ move(ev.clientY); }, mu=function(){ up(); document.removeEventListener('mousemove',mm); document.removeEventListener('mouseup',mu); };
