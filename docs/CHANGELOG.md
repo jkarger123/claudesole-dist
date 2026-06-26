@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.37.11 -- 2026-06-25
+- FIX (mobile terminal resize -- now VERIFIED in a headless mobile browser, not guessed): two root causes
+  found by actually driving the page: (1) termAvail() called window.scrollTo(0,0), and mobile scrolling fires
+  'resize', so the page got pinned to the top = "can't scroll at all"; (2) the max was derived from the
+  unstable element top and equalled the current height, so + could never grow it. Now: max = innerHeight -
+  (measured dock height) - 18 (STABLE, no scrollTo, no scroll-lock); default = 78% of the screen (tall);
+  - shrinks, + and drag grow up to ~full screen; per-device save + restore-on-refresh confirmed. Test (Chrome
+  headless, iPhone viewport): default 658px, +x4 -> 779 saved, -x2 -> 599 saved, reload -> 599 (match), and
+  page scroll is no longer reset.
+
 ## 0.37.10 -- 2026-06-25
 - FIX (mobile terminal resize: page scrolled while dragging + forgot size): on mobile the PAGE (not .wrap) is
   the scroller, so the clientHeight max inflated and the terminal grew past the screen -> page scrolled, the
