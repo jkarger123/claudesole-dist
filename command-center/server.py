@@ -5425,8 +5425,9 @@ def _write_clip_image(subject, filename, b64):
     except Exception: return None
     try:
         rel = os.path.relpath(dest, PROJECT)
-        return rel if not rel.startswith("..") else None
-    except Exception: return None
+        if not rel.startswith(".."): return rel        # under PROJECT -> shows in the Files lens
+    except Exception: pass
+    return dest   # managed store / SSD (subject didn't resolve to a folder) -> keep the abs ref, never lose the screenshot
 
 def _file_clip_text(subject, clip):
     """File a text-only clip as a small markdown deliverable in the subject's deliverables/clips/. Returns True."""

@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.44.1 -- 2026-06-26
+- FIX (capture): a saved screenshot whose subject didn't resolve to a project folder was written to the
+  managed store but then DROPPED (image_rel returned None when the file landed outside PROJECT). Now it keeps
+  the reference (abs path) so a screenshot is never silently lost; resolvable subjects still file into the
+  client's deliverables/clips and show in Files. Found by the comprehensive test pass.
+
 ## 0.44.0 -- 2026-06-26
 - RUNTIME AWARENESS + agents understand the system (enterprise; works with OR without the desktop app):
   * The client reports its runtime -- the Electron desktop shell injects window.cfDesktop (runtime/platform/
