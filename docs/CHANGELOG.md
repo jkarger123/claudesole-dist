@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.38.0 -- 2026-06-25
+- NEW: THE CONTEXT LAYER (foundation for the "perfect context, every time" north star -- see docs/VISION.md).
+  command-center/context.py: a stdlib sqlite3 event store (append-only, WAL, FTS5) + entity/edge graph with
+  PROVENANCE + TRUST on every row, and THE ROUTER (assemble): retrieve (FTS + recency + subject) -> rank
+  relevance×recency×trust -> dedup -> budget to the window -> EDGE-PLACE the highest-signal items
+  (lost-in-the-middle) -> return a CITED bundle. Completeness lives in the store; agents get a small curated
+  slice (because context rot makes "more context" worse, not better). Idempotent ingest adapters backfill the
+  surfaces we already have (Gmail/Calendar/Granola/deliverables) on boot + every 15 min. New routes
+  /api/context/{stats,assemble,search,backfill} + a Context lens (watch the router assemble a cited slice for
+  a subject/question). Self-tested (python3 context.py selftest) and verified live (ranked, edge-placed,
+  cited). Grounded in deep 2025-26 research (context engineering, tiered memory, bi-temporal graphs,
+  federation security) captured in docs/VISION.md -- the new product north star (single-user sovereign +
+  federated combine layer, context-follows-intent, the trust dial, provenance-bound capability).
+
 ## 0.37.11 -- 2026-06-25
 - FIX (mobile terminal resize -- now VERIFIED in a headless mobile browser, not guessed): two root causes
   found by actually driving the page: (1) termAvail() called window.scrollTo(0,0), and mobile scrolling fires

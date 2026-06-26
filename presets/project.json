@@ -13,6 +13,7 @@
   ],
   "lenses": [
     "sessions",
+    "context",
     "modules",
     "files",
     "propose",

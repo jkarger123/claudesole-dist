@@ -9,6 +9,7 @@ Python stdlib only. Serves on 0.0.0.0:8799 -> reachable over Tailscale at http:/
 import base64, fcntl, glob, hashlib, hmac, json, os, pty, re, secrets, select, shutil, signal, socket, struct, subprocess, sys, termios, threading, time, urllib.parse, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import granola   # Granola -> agency tree module (calls + client CLAUDE.md updates + tasks/reminders)
+import context   # THE CONTEXT LAYER: event store + entity graph + the router that assembles perfect slices (docs/VISION.md)
 try:   # Ed25519 for asymmetric superadmin (public-key). Optional: nodes without it fall back to HMAC + a doctor warning.
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
     from cryptography.hazmat.primitives import serialization as _crypto_ser
@@ -5122,6 +5123,85 @@ def _agency_subfolders(absdir):
 
 granola.init({"CC": CC, "PROJECT": PROJECT, "STATE_DIR": STATE_DIR,
               "agency_dirs": _agency_dirs, "agency_subfolders": _agency_subfolders})
+# THE CONTEXT LAYER -- store the DB on the SSD (next to deliverables) when configured, else CC_HOME/data.
+try:
+    context.init({"PROJECT": PROJECT, "CC_HOME": CC_HOME,
+                  "DATA_DIR": (os.path.dirname(DELIV_LOCAL_ROOT) if DELIV_LOCAL_ROOT else os.path.join(CC_HOME, "data"))})
+except Exception as _e:
+    print("[context] init failed:", _e)
+
+def _context_backfill():
+    """Pull events from the surfaces we ALREADY have (Granola calls, deliverables, Gmail/Calendar caches) into
+    the context store. Idempotent (ext_id-keyed) so it can run on boot + periodically without duplicating.
+    This is the bridge from 'scattered per-feature state' to 'one provenance-stamped substrate'."""
+    n = 0
+    # --- Granola call transcripts (trust: owner -- your own calls) ---
+    try:
+        for p in (granola.gr_proposals().get("proposals") or []):
+            mid = p.get("meeting_id");
+            if not mid: continue
+            body = (p.get("summary") or "")
+            for k in ("notes", "decisions"):
+                body += "\n" + "\n".join(str(x) for x in (p.get(k) or []))
+            if context.ingest_event("call", "granola", p.get("title") or "call", body, ts=p.get("ts"),
+                                    subject=(p.get("client") or None), trust="owner", ext_id=mid,
+                                    refs={"meeting_id": mid}): n += 1
+    except Exception: pass
+    # --- Deliverables (trust: owner -- artifacts you produced) ---
+    try:
+        for f in (_deliv_listing("") or {}).get("files", [])[:500]:
+            rel = f.get("rel") or f.get("name");
+            if not rel: continue
+            context.ingest_event("deliverable", "files", f.get("name") or rel, "", ts=f.get("mtime"),
+                                 trust="owner", ext_id=rel, refs={"rel": rel}); n += 1
+    except Exception: pass
+    # --- Gmail (trust: external -- inbound mail is untrusted content) ---
+    try:
+        with _GM_LOCK: caches = list(_GM_CACHE.values())
+        for ent in caches:
+            for m in ((ent.get("data") or {}).get("messages") or [])[:80]:
+                mid = m.get("id");
+                if not mid: continue
+                context.ingest_event("email", "gmail", m.get("subject") or "(no subject)",
+                                     (m.get("snippet") or ""), ts=_epoch(m.get("date")), actor=m.get("from"),
+                                     trust="external", ext_id=mid, refs={"thread": m.get("threadId")}); n += 1
+    except Exception: pass
+    # --- Calendar (trust: internal -- your schedule) ---
+    try:
+        with _GC_LOCK: caches = list(_GC_CACHE.values())
+        for ent in caches:
+            d = ent.get("data") or {}
+            for e in (d.get("events") or d.get("items") or [])[:120]:
+                eid = e.get("id");
+                if not eid: continue
+                context.ingest_event("calendar", "calendar", e.get("summary") or "(busy)",
+                                     (e.get("description") or "") + " @ " + (e.get("location") or ""),
+                                     ts=_epoch(e.get("start")), trust="internal", ext_id=eid,
+                                     refs={"link": e.get("link")}); n += 1
+    except Exception: pass
+    return n
+
+def _epoch(s):
+    """Best-effort parse of an email (RFC822) or calendar (ISO8601) date string to epoch seconds (stdlib only)."""
+    if not s: return None
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(s).timestamp()   # RFC822 (Gmail headers)
+    except Exception: pass
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()   # ISO8601 (Calendar)
+    except Exception: pass
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try: return time.mktime(time.strptime(s[:19] if "T" in s else s[:10], fmt))
+        except Exception: continue
+    return None
+
+def _context_backfill_loop():
+    while True:
+        try: _context_backfill()
+        except Exception: pass
+        time.sleep(900)   # re-ingest every 15 min (idempotent)
 
 def _pretty_name(folder, title=None):
     """Canonical display name for a slugged folder. Prefer the folder's CLAUDE.md H1 title (the real,
@@ -7290,6 +7370,16 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/agency":        return self._s(200, json.dumps(agency_model()))
         if u.path == "/api/mesh":          return self._s(200, json.dumps(mesh_inbox()))
         if u.path == "/api/granola":       return self._s(200, json.dumps(granola.gr_proposals()))
+        if u.path == "/api/context/stats": return self._s(200, json.dumps(context.stats(), default=str))
+        if u.path == "/api/context/assemble":   # the ROUTER: assemble a cited, budgeted slice for a subject/query
+            return self._s(200, json.dumps(context.assemble(
+                query=(q.get("q", [None])[0]), subject=(q.get("subject", [None])[0]),
+                budget_tokens=int((q.get("budget", ["3500"])[0]) or 3500),
+                kinds=([k for k in (q.get("kinds", [""])[0] or "").split(",") if k] or None)), default=str))
+        if u.path == "/api/context/search":
+            return self._s(200, json.dumps(context.search((q.get("q", [""])[0]) or "", int((q.get("limit", ["30"])[0]) or 30)), default=str))
+        if u.path == "/api/context/backfill":   # manual re-ingest (also runs every 15 min)
+            return self._s(200, json.dumps({"ok": True, "ingested": _context_backfill(), "stats": context.stats()}, default=str))
         if u.path == "/api/past":
             return self._s(200, json.dumps(past_conversations(q.get("machine", ["studio"])[0], force=("force" in q))))
         if u.path == "/api/managed": return self._s(200, json.dumps(managed_overview()))
@@ -9283,6 +9373,7 @@ function render(){
   else if(LENS=="marketplace"){loadMarketplace();return;}
   else if(LENS=="agency"){loadAgency();return;}
   else if(LENS=="calls"){loadCalls();return;}
+  else if(LENS=="context"){loadContext();return;}
   else if(LENS=="comms"){loadComms();return;}
   else if(LENS=="skills"){loadSkills();return;}
   else if(LENS=="teams"){loadTeams();return;}
@@ -9845,6 +9936,45 @@ async function loadCalls(){
   });
   if(done.length){h+=secHead('Recently handled');done.slice(0,8).forEach(function(p){h+='<div class="card" style="cursor:default;grid-column:1/-1;opacity:.6"><div class="meta">'+(p.status==='applied'?'✓ applied':'– skipped')+' · '+esc(p.title||'')+(p.client?' → '+esc(p.client):'')+'</div></div>';});}
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
+}
+// ============ CONTEXT lens: the substrate behind "perfect context, every time" (docs/VISION.md). ============
+// Shows what ClaudeFather knows (with provenance + trust) and lets you watch the ROUTER assemble a small,
+// cited, budgeted, edge-placed slice for a subject/question -- the thing every agent will pull from.
+async function loadContext(){
+  let s={};try{s=await(await fetch('/api/context/stats')).json();}catch(e){}
+  const kinds=Object.entries(s.by_kind||{}).map(function(kv){return '<span class="badge" style="background:#1f6feb22;color:#58a6ff">'+esc(kv[0])+' '+kv[1]+'</span>';}).join(' ');
+  const srcs=Object.entries(s.by_source||{}).map(function(kv){return '<span class="badge" style="background:#3fb95022;color:#3fb950">'+esc(kv[0])+' '+kv[1]+'</span>';}).join(' ');
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#129504; Context</b> <span class="sub">'+(s.events||0)+' events &middot; '+(s.entities||0)+' entities &middot; '+(s.fts?'FTS5':'LIKE')+'</span><div style="margin-left:auto;display:flex;gap:6px"><button class="mini go" onclick="ctxBackfill()">&#8635; Re-ingest</button></div></div>'
+    +'<div class="meta" style="margin-top:8px">Everything ClaudeFather knows, each item carrying where it came from and how much to trust it. Completeness lives here; the router hands each agent a small, cited slice on demand &mdash; never the whole pile (too much context makes the model worse, not better).</div>'
+    +(kinds?'<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">'+kinds+'</div>':'')
+    +(srcs?'<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px">'+srcs+'</div>':'')
+    +(!s.events?'<div class="meta" style="margin-top:8px;color:#d29922">No events yet &mdash; hit Re-ingest to pull in your mail, calendar, calls and deliverables.</div>':'')+'</div>';
+  h+='<div class="card" style="cursor:default;grid-column:1/-1"><b>&#127919; Assemble the perfect context</b>'
+    +'<div class="meta" style="margin:6px 0">Give a subject + a question; see exactly what the agent would receive &mdash; ranked by relevance &times; recency &times; trust, budgeted, highest-signal at the edges, every item cited.</div>'
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
+    +'<input id="ctxSubj" placeholder="subject (e.g. a client/project)" style="'+COMMS_INP+';flex:1;min-width:140px">'
+    +'<input id="ctxQ" placeholder="what are you working on?" style="'+COMMS_INP+';flex:2;min-width:200px" onkeydown="if(event.key===\'Enter\')ctxAssemble()">'
+    +'<button class="mini go" onclick="ctxAssemble()">Assemble</button></div>'
+    +'<div id="ctxOut" style="margin-top:10px"></div></div>';
+  document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
+}
+async function ctxBackfill(){ toast('Re-ingesting your surfaces…',3500); try{const r=await(await fetch('/api/context/backfill')).json(); toast('Ingested '+(r.ingested||0)+' &mdash; '+((r.stats||{}).events||0)+' events total',5500);}catch(e){toast('Backfill failed',4000);} loadContext(); }
+async function ctxAssemble(){
+  const subj=((document.getElementById('ctxSubj')||{}).value||'').trim();
+  const qq=((document.getElementById('ctxQ')||{}).value||'').trim();
+  const out=document.getElementById('ctxOut'); if(out)out.innerHTML='<div class="meta">Assembling…</div>';
+  let b={};try{b=await(await fetch('/api/context/assemble?budget=3000&subject='+encodeURIComponent(subj)+'&q='+encodeURIComponent(qq))).json();}catch(e){if(out)out.innerHTML=empty('Assemble failed.');return;}
+  if(!b.items||!b.items.length){if(out)out.innerHTML=empty('No matching context yet — try Re-ingest, or a different subject/question.');return;}
+  let h='<div class="meta" style="margin-bottom:8px">'+b.count+' items &middot; ~'+b.used+' tokens &middot; ranked, edge-placed, cited</div>';
+  h+=b.items.map(function(it){
+    var tcol=it.trust>=3?'#3fb950':it.trust>=2?'#58a6ff':it.trust>=1?'#d29922':'#8b949e';
+    return '<div class="card" style="cursor:default;border-left:3px solid '+tcol+'"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b>'+e2(it.title||it.kind)+'</b>'
+      +'<span class="badge" style="background:#0006;color:var(--mut)">'+esc(it.kind)+' &middot; '+esc(it.source)+'</span>'
+      +'<span class="badge" style="background:'+tcol+'22;color:'+tcol+'">trust '+it.trust+'</span>'
+      +'<span class="sub" style="margin-left:auto">'+ago(Date.now()/1000-it.ts)+' ago &middot; score '+it.score+'</span></div>'
+      +(it.snippet?'<div class="meta" style="margin-top:5px">'+e2(it.snippet)+'</div>':'')+'</div>';
+  }).join('');
+  if(out)out.innerHTML=h;
 }
 // ---- Comms lens: the persistent mesh inbox. Renders the full inter-chief thread (in + out) from
 // /api/mesh, independent of TUI state, with a composer to message any peer chief or all of them. ----
@@ -13238,7 +13368,7 @@ async function treeResume(id,cwd,fork){const _c=CONVOMAP[id]||{};toast((fork?"Fo
   const r=await(await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({machine:"studio",id:id,cwd:cwd,fork:!!fork,label:_c.label||""})})).json();
   if(!r||!r.ok){toast("Failed: "+((r||{}).error||"?"),5000);return;}
   closeInfo();_openTerm(r);}
-const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',agency:'Agency',calls:'Calls',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Usage Analytics',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Claude Accounts'};
+const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',agency:'Agency',calls:'Calls',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Usage Analytics',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Claude Accounts'};
 // ---- Chief of Staff: your office (top-level command + a direct line to me) ----
 function gotoLens(l){const b=document.querySelector('#lens button[data-l="'+l+'"]');if(b)b.click();}
 async function talkChief(){toast("Opening your Chief of Staff…");
@@ -14557,6 +14687,7 @@ if __name__ == "__main__":
     threading.Thread(target=_gmail_sync_loop, daemon=True).start()      # keep recently-viewed Gmail lists warm (cache + outage fallback)
     threading.Thread(target=_gc_sync_loop, daemon=True).start()         # same for Calendar/Drive (resilient cache)
     threading.Thread(target=_warm_default_views, daemon=True).start()   # boot-warm the UI's default views + prime the OAuth token (non-blocking)
+    threading.Thread(target=_context_backfill_loop, daemon=True).start()   # CONTEXT LAYER: ingest existing surfaces into the store (idempotent, every 15 min)
     # Bind host: default 0.0.0.0 (existing nodes unchanged). Provisioned standalone bundles set bind_host
     # "127.0.0.1" so the ONLY tailnet-visible surface is the TLS `tailscale serve` URL -- no raw plain-HTTP
     # port on the tailnet for a browser to hit and get ERR_SSL_PROTOCOL_ERROR.
