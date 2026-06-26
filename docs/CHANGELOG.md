@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.52.0 -- 2026-06-26
+- OVERSEER "Projects" tab now matches the nodes: it used a different lens (a flat platform-component card list)
+  than the nodes' polished drill-down module browser, so it looked worse and didn't drill. Overseer preset now
+  uses the `modules` lens -> same breadcrumbed, click-to-drill, "launch here" browser, rooted at the control
+  plane (the overseer manages the ClaudeFather infrastructure itself: agents, command-center, extensions, etc.).
+  (presets/overseer.json: "projects" -> "modules".)
+
 ## 0.51.0 -- 2026-06-26
 - NEW SESSION tree is now CURATED (enterprise/installable): instead of the raw filesystem, it shows only
   INTENTIONAL launch targets -- folders that are recognized UNITS (carry a CLAUDE.md / extension.json, plus the
