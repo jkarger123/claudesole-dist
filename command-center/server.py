@@ -8324,9 +8324,13 @@ body.ss-tut-on #sessbar{z-index:9995!important;box-shadow:0 -6px 40px 8px rgba(v
   body.cf-sessions #tkstripwrap, body.cf-sessions .cf-sesshint{display:none!important}
   body.cf-sessions .focusonly{height:auto}
   body.cf-sessions .focusonly .bigsess{height:var(--cf-term-h, calc(100dvh - 76px - var(--cf-dock-h)))!important;min-height:0!important}   /* nav + grip + dock -> rest = terminal (header card gone; controls in the topbar). --cf-term-h = the user's drag-resized, remembered height (set by termResizeInit) */
-  body.cf-sessions .termgrip{display:flex;align-items:center;justify-content:center;height:30px;margin-top:3px;cursor:ns-resize;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;flex:0 0 auto}
-  body.cf-sessions .termgrip i{width:56px;height:6px;border-radius:4px;background:var(--line);box-shadow:0 0 0 6px transparent;transition:background .15s,width .15s}
-  body.cf-sessions .termgrip.drag i,body.cf-sessions .termgrip:active i{background:var(--accent);width:78px;box-shadow:0 0 14px 1px rgba(var(--accent-rgb),.55)}
+  body.cf-sessions .termgrip{display:flex;align-items:center;justify-content:center;gap:14px;height:36px;margin-top:3px;flex:0 0 auto;-webkit-user-select:none;user-select:none}
+  body.cf-sessions .termgrip-b{width:42px;height:32px;border-radius:9px;border:1px solid var(--line);background:var(--card2);color:var(--ink);font-size:19px;font-weight:800;line-height:1;cursor:pointer;flex:0 0 auto;touch-action:manipulation}
+  body.cf-sessions .termgrip-b:active{background:var(--accent);color:#fff;border-color:var(--accent)}
+  body.cf-sessions .termgrip-bar{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-width:96px;height:36px;cursor:ns-resize;touch-action:none;-webkit-touch-callout:none}
+  body.cf-sessions .termgrip-bar i{width:58px;height:6px;border-radius:4px;background:var(--line);transition:background .15s,width .15s}
+  body.cf-sessions .termgrip-bar.drag i,body.cf-sessions .termgrip-bar:active i{background:var(--accent);width:80px;box-shadow:0 0 14px 1px rgba(var(--accent-rgb),.55)}
+  body.cf-sessions .termgrip-bar b{font-size:10px;font-weight:700;color:var(--mut);font-family:ui-monospace,Menlo,monospace}
 }
 /* Sessions LENS: focus = ONLY the big terminal (littles removed); in-flow column, never floats over usage. */
 .focusonly{display:flex;flex-direction:column;
@@ -12875,7 +12879,11 @@ function renderFocus(s){
   // One big terminal + a visible attach bar (mobile/fallback) + a drag overlay (covers the iframe on dragover).
   var h='<div class="focusonly">'
     +'<div class="bigsess" data-ccsess="'+esc(big.name)+'">'+bigHead(big)+ccDropBar(big.name)+'<iframe class="stframe" src="/term?name='+encodeURIComponent(big.name)+'"></iframe>'+ccDropOverlay()+'</div>'
-    +'<div class="termgrip" id="termGrip" title="Drag to resize the terminal (remembered on this device)"><i></i></div>'
+    +'<div class="termgrip" id="termGrip">'
+      +'<button class="termgrip-b" type="button" title="Shorter" onclick="termStep(-90)">&minus;</button>'
+      +'<span class="termgrip-bar" id="termBar" title="Drag up/down to resize (remembered on this device)"><i></i><b id="termGripN"></b></span>'
+      +'<button class="termgrip-b" type="button" title="Taller" onclick="termStep(90)">&plus;</button>'
+    +'</div>'
     +'</div>';
   return h;
 }
@@ -12894,7 +12902,12 @@ function termFitH(){ var el=termBig(); if(!el) return 320;   // height that fill
   return Math.max(260, Math.round(window.innerHeight - top - termDockH() - 26)); }
 function termCapH(){ return Math.round(window.innerHeight*3); }   // allow growing well past the viewport (the list scrolls)
 var TERM_MIN=260, TERM_DRAG=false;
-function termSet(h){ document.documentElement.style.setProperty('--cf-term-h', Math.max(TERM_MIN, Math.min(Math.round(h), termCapH()))+'px'); }
+function termShowN(){ var n=document.getElementById('termGripN'); if(!n)return; var el=termBig(); n.textContent= el?('↕ '+Math.round(el.getBoundingClientRect().height)+'px'):''; }
+function termSet(h){ document.documentElement.style.setProperty('--cf-term-h', Math.max(TERM_MIN, Math.min(Math.round(h), termCapH()))+'px'); termShowN(); }
+function termSave(){ var v=parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cf-term-h'))||0; if(v){ try{ localStorage.setItem(termKey(),v); }catch(e){} } }
+// guaranteed-to-work step buttons (taps, no gesture) -- also the diagnostic: if these don't move the
+// terminal either, the problem is the CSS var not applying, not the touch handling.
+function termStep(d){ var el=termBig(); if(!el)return; TERM_MIN=termFitH(); termSet(el.getBoundingClientRect().height + d); termSave(); }
 function termApplySaved(){
   if(!termIsMobile()){ document.documentElement.style.removeProperty('--cf-term-h'); return; }   // desktop: CSS layout unchanged
   if(TERM_DRAG||!termBig()) return;                          // never fight an in-progress drag
@@ -12906,7 +12919,8 @@ function termResizeInit(){
   if(!termResizeInit._r){ termResizeInit._r=1;
     window.addEventListener('resize',function(){ termApplySaved(); });
     window.addEventListener('orientationchange',function(){ setTimeout(termApplySaved,300); }); }
-  var g=document.getElementById('termGrip'); if(!g||g._w) return; g._w=1;
+  var g=document.getElementById('termBar'); if(!g||g._w) return; g._w=1;
+  termShowN();
   var startY=0,startH=0,startScroll=0,lastY=0,autoT=null;
   function curH(){ var el=termBig(); return el?el.getBoundingClientRect().height:termFitH(); }
   function recompute(){ var sc=termScroller(); var sct=sc?sc.scrollTop:0; termSet(startH + (lastY-startY) + (sct-startScroll)); }
@@ -12914,8 +12928,7 @@ function termResizeInit(){
   function autoOn(){ if(autoT)return; autoT=setInterval(function(){ if(!TERM_DRAG){autoOff();return;} var sc=termScroller(); if(sc) sc.scrollTop+=14; recompute(); },30); }
   function down(clientY){ var el=termBig(); if(!el)return; TERM_MIN=termFitH(); startH=curH(); startY=clientY; lastY=clientY; var sc=termScroller(); startScroll=sc?sc.scrollTop:0; TERM_DRAG=true; g.classList.add('drag'); document.body.style.userSelect='none'; }
   function move(clientY){ if(!TERM_DRAG)return; lastY=clientY; if(clientY>window.innerHeight-100){ autoOn(); } else { autoOff(); } recompute(); }
-  function up(){ if(!TERM_DRAG)return; TERM_DRAG=false; autoOff(); g.classList.remove('drag'); document.body.style.userSelect='';
-    var cur=parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cf-term-h'))||0; if(cur){ try{ localStorage.setItem(termKey(),cur); }catch(e){} } }
+  function up(){ if(!TERM_DRAG)return; TERM_DRAG=false; autoOff(); g.classList.remove('drag'); document.body.style.userSelect=''; termSave(); }
   g.addEventListener('touchstart',function(e){ if(e.touches.length!==1)return; e.preventDefault(); down(e.touches[0].clientY); },{passive:false});
   g.addEventListener('touchmove',function(e){ if(!TERM_DRAG)return; e.preventDefault(); move(e.touches[0].clientY); },{passive:false});
   g.addEventListener('touchend',up); g.addEventListener('touchcancel',up);

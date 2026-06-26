@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.37.5 -- 2026-06-25
+- FIX/DIAGNOSE (mobile terminal resize): added guaranteed − / ＋ step buttons (taps, not a gesture) flanking
+  the drag bar, and the handle now shows the LIVE pixel height. If the buttons + number move but drag
+  doesn't, it's the touch gesture; if even the buttons don't move the terminal, it's the CSS var not
+  applying -- so this both gives a working control NOW and pinpoints the remaining issue. Drag bar retained
+  (delta-based). Increase-only floor + per-device memory unchanged.
+
 ## 0.37.4 -- 2026-06-25
 - FIX (mobile terminal resize STILL didn't move): two real bugs. (1) The scroll container on mobile is the
   .wrap list, NOT the window -- my window.scrollBy/scrollY math was inert. (2) iOS fires `resize` during
