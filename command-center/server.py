@@ -3006,6 +3006,7 @@ ACCT_POLL_LOCKFILE = os.path.expanduser("~/.claude/_cc_acct_poll.lock")    # whi
 ACCT_POLL_TTL = int(CC.get("account_poll_ttl") or 1800)            # background refresh cadence (s); default 30 min
 _ACCT_WIN_LOCK = threading.Lock()
 _ACCT_POLL_LOCK = threading.Lock()                                 # serialize the spawn-claude reads (one at a time)
+_ACCT_STORE_CACHE = {"at": 0.0, "data": None}                      # account_windows_store() does model scans -> cache it
 
 def _acct_windows_load():
     try:
@@ -3024,6 +3025,7 @@ def _acct_windows_save(d):
         try:
             tmp = ACCT_WINDOWS_FILE + ".tmp"; json.dump(d, open(tmp, "w")); os.replace(tmp, ACCT_WINDOWS_FILE)
         except Exception: pass
+    _ACCT_STORE_CACHE["data"] = None    # a new reading landed -> next store() recomputes (don't serve stale)
 def _acct_prefs_load():
     try:
         d = json.load(open(ACCT_PREFS_FILE))
@@ -3062,6 +3064,8 @@ def account_windows_refresh(email=None):
     now = int(time.time()); side = _side_label()
     if r.get("ok"):
         rec = {"email": live, "windows": r.get("windows") or {}, "ts": now, "ok": True, "side": side, "error": None}
+        try: _acct_calib_log(live, side, r.get("windows") or {}, now)   # pair this %-reading with our token telemetry
+        except Exception: pass
     else:
         # a flaky /usage scrape must NOT wipe a good prior reading -- keep the last good windows+ts, just note it.
         rec = dict(prev); rec["email"] = live
@@ -3122,12 +3126,22 @@ def account_windows_store():
     current live login + the last-known windows for any account previously live on this user. The windows are
     account-GLOBAL (server-side), so the freshest reading of an account -- from whichever user last had it live
     -- is the truth the overseer surfaces."""
-    store = _acct_windows_load()
-    accts = {em: {"email": em, "windows": rec.get("windows") or {}, "ts": rec.get("ts"),
-                  "ok": bool(rec.get("ok")), "side": rec.get("side") or _side_label(),
-                  "last_error": rec.get("last_error")}
-             for em, rec in store.items()}
-    return {"side": _side_label(), "store_id": _store_id(), "current_email": _current_email() or "", "accounts": accts}
+    now = time.time()
+    if _ACCT_STORE_CACHE["data"] is not None and now - _ACCT_STORE_CACHE["at"] < 25:
+        return _ACCT_STORE_CACHE["data"]
+    store = _acct_windows_load(); cur = _current_email() or ""; log = _acct_log_load()
+    accts = {}
+    for em, rec in store.items():
+        # each node fits + predicts for its OWN accounts (live one gets the live %-prediction + ETA); the overseer
+        # merges these so a model calibrated on sarahaios still shows on the grandfather.
+        mv = None
+        try: mv = _acct_model_view(em, rec.get("windows") or {}, now, live=(em == cur), log=log)
+        except Exception: mv = None
+        accts[em] = {"email": em, "windows": rec.get("windows") or {}, "ts": rec.get("ts"),
+                     "ok": bool(rec.get("ok")), "side": rec.get("side") or _side_label(),
+                     "last_error": rec.get("last_error"), "model": mv}
+    res = {"side": _side_label(), "store_id": _store_id(), "current_email": cur, "accounts": accts}
+    _ACCT_STORE_CACHE.update({"at": now, "data": res}); return res
 
 _ACCT_FLEET_CACHE = {"at": 0.0, "data": None}; _ACCT_FLEET_LOCK = threading.Lock()
 def _acct_fleet_reports(ttl=45):
@@ -3185,7 +3199,7 @@ def account_windows_all():
             "live_on": live_on.get(em, []), "in_rotation": em in rotset, "ok": bool(a.get("ok")),
             "windows": {"session": _win_view(w.get("session"), now), "week": _win_view(w.get("week"), now),
                         "week_sonnet": _win_view(w.get("week_sonnet"), now)},
-            "ts": a.get("ts"), "side": a.get("side"), "last_error": a.get("last_error")})
+            "ts": a.get("ts"), "side": a.get("side"), "last_error": a.get("last_error"), "model": a.get("model")})
     info, pick = _acct_recommend(accounts, now)
     for a in accounts:
         a.update(info.get(a["email"], {"status": "no_data", "why": "", "score": -9, "use_next": False}))
@@ -3254,6 +3268,125 @@ def _acct_poll_loop():
         else:                                       # success, or nothing to read / not the poll owner
             fails = 0
             time.sleep(max(300, ACCT_POLL_TTL))
+
+# ---- Limit-model calibration --------------------------------------------------------------------------------
+# Anthropic doesn't publish the token budget of a 5h/weekly window, but we have BOTH a continuous per-account
+# token telemetry stream (transcripts -> _ev_cost etc.) AND periodic ground-truth % readings from /usage. Pairing
+# "our cumulative usage since the window started" with the observed % lets us FIT the hidden capacity (and learn
+# which weighting -- $ cost, context size, billable tokens... -- best predicts %). Each scrape is a labeled data
+# point that validates + refines the model; once fit we can predict the live % between scrapes and the max-out ETA.
+ACCT_CALIB_FILE = os.path.expanduser("~/.claude/_cc_acct_calib.jsonl")   # shared per macOS user (append-only)
+_ACCT_CALIB_LOCK = threading.Lock()
+_WIN_LEN = {"5h": 5 * 3600, "session": 5 * 3600, "week": 7 * 86400, "week_sonnet": 7 * 86400}
+_WIN_MODEL = {"week_sonnet": "sonnet"}                                   # weekly-Sonnet window = Sonnet tokens only
+_CALIB_FEATURES = ("cost", "context", "billable", "raw")                 # candidate weightings; the fit picks best-R²
+
+def _acct_feature_since(account, since_ts, model_sub=None, log=None):
+    """Sum an account's token telemetry since since_ts into candidate 'weight' features. Attribution = which
+    account was live at each event's timestamp (the same per-user account timeline used everywhere else)."""
+    log = log if log is not None else _acct_log_load()
+    f = {"cost": 0.0, "context": 0, "billable": 0, "output": 0, "raw": 0, "n": 0}
+    with _TOK_LOCK:
+        _scan_tok()
+        for st in _TOK_STATE.values():
+            for ev in st["events"]:
+                ts = ev[0]
+                if ts < since_ts: continue
+                if model_sub and model_sub not in (ev[1] or "").lower(): continue
+                if _acct_active_at(ts, log) != account: continue
+                inp, out, cw, cr = ev[2], ev[3], ev[4], ev[5]
+                f["cost"] += _ev_cost(ev); f["context"] += inp + cr; f["billable"] += inp + out + cw
+                f["output"] += out; f["raw"] += inp + out + cw + cr; f["n"] += 1
+    return f
+
+def _acct_calib_log(account, side, windows, now):
+    """Append one calibration row per window: observed % + our cumulative feature-vector since the window start."""
+    if not account: return
+    log = _acct_log_load(); rows = []
+    for wkey, w in (windows or {}).items():
+        if not w: continue
+        pct = w.get("pct"); rts = w.get("resets_ts"); wl = _WIN_LEN.get(wkey)
+        if pct is None or not rts or not wl: continue
+        f = _acct_feature_since(account, rts - wl, _WIN_MODEL.get(wkey), log)
+        rows.append({"ts": int(now), "account": account, "side": side, "window": wkey, "reset_ts": int(rts),
+                     "pct": int(pct), "cost": round(f["cost"], 4), "context": f["context"],
+                     "billable": f["billable"], "raw": f["raw"], "nev": f["n"]})
+    if not rows: return
+    with _ACCT_CALIB_LOCK:
+        try:
+            with open(ACCT_CALIB_FILE, "a") as fh:
+                for r in rows: fh.write(json.dumps(r) + "\n")
+        except Exception: pass
+
+def _acct_calib_load(maxrows=8000):
+    try:
+        with open(ACCT_CALIB_FILE) as fh: lines = fh.readlines()[-maxrows:]
+    except Exception: return []
+    out = []
+    for ln in lines:
+        try: out.append(json.loads(ln))
+        except Exception: pass
+    return out
+
+def _fit_origin(xs, ys):
+    """Slope k of x = k*y through the origin (x = our feature, y = pct/100 -> k = capacity in feature units) + R²."""
+    syy = sum(y * y for y in ys)
+    if syy <= 0: return None, 0.0
+    k = sum(x * y for x, y in zip(xs, ys)) / syy
+    if k <= 0: return None, 0.0
+    ss_res = sum((x - k * y) ** 2 for x, y in zip(xs, ys))
+    mx = sum(xs) / len(xs); ss_tot = sum((x - mx) ** 2 for x in xs) or 1e-9
+    return k, max(0.0, 1 - ss_res / ss_tot)
+
+_ACCT_MODEL_CACHE = {"at": 0.0, "data": None}
+def _acct_model_fit(ttl=300):
+    """Per (account, window): fit capacity for each candidate feature, keep the best-R² one. 'ready' once there
+    are enough samples spanning >=2 distinct window instances with a decent fit. Cached."""
+    now = time.time()
+    if _ACCT_MODEL_CACHE["data"] is not None and now - _ACCT_MODEL_CACHE["at"] < ttl:
+        return _ACCT_MODEL_CACHE["data"]
+    groups = {}
+    for r in _acct_calib_load():
+        if not (1 <= (r.get("pct") or 0) <= 99): continue   # 0% uninformative; 100% is clipped/saturated
+        groups.setdefault((r.get("account"), r.get("window")), []).append(r)
+    model = {}
+    for (acct, win), rs in groups.items():
+        if not acct: continue
+        ys = [r["pct"] / 100.0 for r in rs]; wins = len(set(r.get("reset_ts") for r in rs)); best = None
+        for feat in _CALIB_FEATURES:
+            xs = [float(r.get(feat, 0) or 0) for r in rs]
+            if not any(xs): continue
+            k, r2 = _fit_origin(xs, ys)
+            if k is None: continue
+            if best is None or r2 > best["r2"]: best = {"feature": feat, "capacity": k, "r2": round(r2, 3)}
+        if best:
+            best.update({"n": len(rs), "windows": wins,
+                         "ready": (len(rs) >= 6 and wins >= 2 and best["r2"] >= 0.55)})
+            model.setdefault(acct, {})[win] = best
+    _ACCT_MODEL_CACHE.update({"at": now, "data": model})
+    return model
+
+def _acct_model_view(account, windows_now, now, live=False, log=None):
+    """Attach model-derived numbers for an account: capacity + confidence always; for the LIVE account also the
+    predicted live % (from continuous telemetry, between scrapes), recent burn rate, and max-out ETA."""
+    am = _acct_model_fit().get(account) or {}
+    if not am: return None
+    log = log if log is not None else _acct_log_load(); out = {}
+    for wkey, m in am.items():
+        v = {"feature": m["feature"], "capacity": round(m["capacity"], 4), "r2": m["r2"], "n": m["n"], "ready": m["ready"]}
+        w = (windows_now or {}).get(wkey) or {}; rts = w.get("resets_ts"); wl = _WIN_LEN.get(wkey)
+        if live and m.get("ready") and rts and wl and m["capacity"] > 0:
+            feat = m["feature"]
+            fnow = _acct_feature_since(account, rts - wl, _WIN_MODEL.get(wkey), log)[feat]
+            v["pred_pct"] = round(min(150.0, max(0.0, 100.0 * fnow / m["capacity"])), 1)
+            frec = _acct_feature_since(account, now - 1800, _WIN_MODEL.get(wkey), log)[feat]
+            rate_h = frec / 0.5                          # feature consumed per hour (last 30 min)
+            remaining = max(0.0, m["capacity"] - fnow)
+            v["eta_h"] = round(remaining / rate_h, 2) if rate_h > 0 else None
+            v["reset_h"] = round((rts - now) / 3600.0, 2)
+            v["maxout_before_reset"] = bool(v.get("eta_h") is not None and v["eta_h"] < v["reset_h"])
+        out[wkey] = v
+    return out
 
 _NEW_FOLDER_BRIEF = (
     "You're starting in a folder that has no CLAUDE.md yet. FIRST understand what this folder is for (read the "
@@ -10924,12 +11057,33 @@ function acctFuelCard(a){
       +awBar(w.session,'5-hour session')+awBar(w.week,'Weekly · all')+awBar(w.week_sonnet,'Weekly · Sonnet')+'</div>';
     if(a.why) h+='<div class="ucsub" style="margin-top:9px;color:'+(a.use_next?'#f0d05a':'#9aa0ad')+'">'+e2(a.why)+'</div>';
   } else { h+='<div class="ucsub" style="margin-top:10px">No reading yet — log into this account on a machine (it becomes readable only while it\'s the live login) and it\'ll report in.</div>'; }
+  h+=awModel(a);
   h+='<div class="btns" style="margin-top:11px">'
     +(a.active?'<button class="mini" onclick="awRefresh(\''+esc(a.email)+'\',this)">↻ refresh now</button>':'')
     +((!a.active && a.in_wallet)?'<button class="mini go" onclick="acctSwitch(\''+esc(a.label||a.email)+'\',\''+esc(a.email)+'\')" title="switch THIS machine\'s login to this account (one click; reads its windows right after)">▶ switch this machine to this</button>':'')
     +((!a.active && !a.in_wallet)?'<span class="sub">not in this machine\'s wallet — switch to it on '+(a.side?e2(a.side):'its machine')+'</span>':'')
     +'</div></div>';
   return h;
+}
+function awModel(a){
+  // The reverse-engineered limit model: capacity (in whatever weighting best fit the % vs our token telemetry),
+  // a live %-prediction between scrapes, and a max-out ETA. Shows 'calibrating' until enough samples.
+  var m=a.model; if(!m) return '';
+  function cap(v,feat){ return feat==='cost'?fmtUSD(v):fmtTok(v); }
+  var parts=[];
+  [['session','5h'],['week','weekly']].forEach(function(pr){
+    var x=m[pr[0]]; if(!x) return;
+    if(!x.ready){ parts.push(pr[1]+': calibrating ('+(x.n||0)+'/6 samples)'); return; }
+    var s=pr[1]+' cap ≈ '+cap(x.capacity,x.feature)+' ('+x.feature+', R²'+x.r2+', n'+x.n+')';
+    if(x.pred_pct!=null) s+=' · live ~'+x.pred_pct+'%';
+    if(x.eta_h!=null){ s+=' · '+(x.maxout_before_reset?'⚠ ':'')+'maxout in '+awDur(x.eta_h*3600)+(x.reset_h!=null?(' / resets '+awDur(x.reset_h*3600)):''); }
+    parts.push(s);
+  });
+  if(!parts.length) return '';
+  var any_warn=[['session'],['week']].some(function(k){var x=m[k[0]];return x&&x.maxout_before_reset;});
+  return '<div class="ucsub" style="margin-top:8px;border-top:1px dashed var(--line);padding-top:7px;color:'+(any_warn?'#ff8f73':'#9aa0ad')+'">'
+    +'<b style="color:#7cc4ff">📈 limit model</b> '+parts.map(e2).join(' &nbsp;·&nbsp; ')
+    +' <span style="opacity:.5;cursor:help" title="Reverse-engineered from observed /usage % vs our per-account token telemetry. Capacity is in the best-fitting weighting (cost=$, context=tokens). It refines as more samples land; predicts the live % between scrapes and when this window will max out.">ⓘ</span></div>';
 }
 function awTokenSetup(a){
   var id='awtok_'+(a.email||'').replace(/[^a-z0-9]/gi,'');

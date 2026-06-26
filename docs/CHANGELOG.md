@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.62.0 -- 2026-06-26
+- Account LIMIT MODEL (reverse-engineer the hidden window budgets) -- Anthropic doesn't publish the token
+  budget of a 5h/weekly window, so we LEARN it: at each /usage scrape we log the observed % alongside our
+  cumulative per-account token telemetry since the window started (cost / context / billable / raw), then fit
+  capacity = the slope of feature-vs-(%/100) through the origin, keeping the best-R² weighting per window. New
+  shared calibration log `~/.claude/_cc_acct_calib.jsonl` (per macOS user). Each node fits + predicts for its
+  OWN accounts and ships the model in `/api/account-windows-store`; the overseer merges so a model calibrated
+  on another user still shows. Once enough samples land it surfaces a per-account "limit model" panel:
+  estimated capacity, a LIVE %-prediction between scrapes, recent burn rate, and a MAX-OUT ETA vs reset (with a
+  warning when an account will cap before it resets). Shows "calibrating (n/6)" until ready. Foundation for the
+  predictive/auto-switch autopilot (not yet enabled).
+- account_windows_store cached 25s (it now does telemetry scans) + busted on every new reading.
+
 ## 0.61.1 -- 2026-06-26
 - Account fuel self-heals a flaked /usage read instead of waiting the full 30m poll: (1) the poller now
   RETRIES SOON after a failed live-account read -- escalating 3/6/9… min up to the normal interval -- so a
