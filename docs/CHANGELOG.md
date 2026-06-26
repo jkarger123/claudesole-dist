@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.61.1 -- 2026-06-26
+- Account fuel self-heals a flaked /usage read instead of waiting the full 30m poll: (1) the poller now
+  RETRIES SOON after a failed live-account read -- escalating 3/6/9… min up to the normal interval -- so a
+  transient scrape flake recovers in minutes; (2) opening the Accounts/Usage lens kicks a background re-read
+  when the live account's reading is stale (>10m) or errored (at most once / 5m). Failed reads still preserve
+  the last-good gauges (never blank).
+
 ## 0.61.0 -- 2026-06-26
 - Accounts/Usage -- merged the standalone "Claude Accounts" lens INTO the Usage lens (one "Accounts / Usage"
   tab) and added per-account RATE-LIMIT FUEL GAUGES: each Claude subscription account's 5-hour session + weekly

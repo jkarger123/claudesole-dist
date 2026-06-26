@@ -3217,10 +3217,12 @@ def account_set_token(email, token):
 
 def _acct_poll_once():
     """Refresh the LIVE login's windows (the only account readable on this macOS user). Other accounts' windows
-    come from when they were last live -- here or, via the overseer's mesh rollup, on another macOS user."""
+    come from when they were last live -- here or, via the overseer's mesh rollup, on another macOS user.
+    Returns True if the read succeeded, False if it flaked, None if there was nothing to read."""
     try:
-        if _current_email(): account_windows_refresh()
+        if _current_email(): return bool(account_windows_refresh().get("ok"))
     except Exception: pass
+    return None
 def _acct_poll_claim():
     """Per-user file lock so exactly ONE co-located instance runs the background poll (the cache is shared, so
     the others just display it). The owner rewrites the lock each cycle; a dead owner's lock goes stale after
@@ -3240,11 +3242,18 @@ def _acct_poll_claim():
         return False
 def _acct_poll_loop():
     time.sleep(50)                                  # let boot settle before the first (session-spawning) poll
+    fails = 0
     while True:
+        res = None
         try:
-            if _acct_poll_claim(): _acct_poll_once()
+            if _acct_poll_claim(): res = _acct_poll_once()
         except Exception: pass
-        time.sleep(max(300, ACCT_POLL_TTL))
+        if res is False:                            # the /usage scrape flaked -> retry SOON (escalating 3,6,9…min)
+            fails += 1
+            time.sleep(min(max(300, ACCT_POLL_TTL), 180 * fails))   # so a transient flake self-heals in minutes, not 30
+        else:                                       # success, or nothing to read / not the poll owner
+            fails = 0
+            time.sleep(max(300, ACCT_POLL_TTL))
 
 _NEW_FOLDER_BRIEF = (
     "You're starting in a folder that has no CLAUDE.md yet. FIRST understand what this folder is for (read the "
@@ -10865,8 +10874,14 @@ async function loadUsage(){document.getElementById("grid").innerHTML=empty("Load
   clearInterval(window.UTIMER);window.UTIMER=setInterval(async()=>{if(LENS!='usage'){clearInterval(window.UTIMER);return;}
     try{USAGE=await(await fetch('/api/usage')).json();renderUsage();}catch(e){} loadFleet(); if(window.CC&&window.CC.accountWallet) loadAcctWin();},15000);}
 // ---- Account fuel gauges (per-account rate-limit windows, merged into the Accounts/Usage lens) ----
-let ACCTWIN=null;
-async function loadAcctWin(){ try{ ACCTWIN=await(await fetch('/api/account-windows')).json(); }catch(e){ ACCTWIN=null; } if(LENS==='usage') renderUsage(); }
+let ACCTWIN=null, _awAutoAt=0;
+async function loadAcctWin(){ try{ ACCTWIN=await(await fetch('/api/account-windows')).json(); }catch(e){ ACCTWIN=null; } if(LENS==='usage') renderUsage();
+  // self-heal a flaked/stale live reading: if the live account's reading is >10m old or errored, kick ONE
+  // background re-read (at most once / 5m) so the moment you open the lens it's already refreshing.
+  try{ var d=ACCTWIN, nowS=Date.now()/1000, live=((d&&d.accounts)||[]).find(function(a){return a.active;});
+    if(live && (!live.ts || (nowS-live.ts>600) || live.last_error) && (nowS-_awAutoAt>300)){ _awAutoAt=nowS;
+      fetch('/api/account-windows/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(function(){loadAcctWin();}).catch(function(){}); } }catch(e){}
+}
 function awDur(s){ if(s==null)return '?'; s=Math.max(0,s); return s<3600?Math.round(s/60)+'m':s<86400?(s/3600).toFixed(1)+'h':(s/86400).toFixed(1)+'d'; }
 function awBar(w,label){ if(!w) return '<div class="awrow"><div class="awlbl">'+label+'</div><div class="awtrack"></div><div class="awsub" style="opacity:.45">no data</div></div>';
   var p=Math.max(0,Math.min(100,w.pct||0)), col=p>=85?'#f85149':p>=60?'#d29922':'#3fb950';
