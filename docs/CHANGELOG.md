@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.37.2 -- 2026-06-25
+- UI (reclaim the Sessions lens -- two control bars -> one): the Sessions controls (🟢 live count, ⊞/▦/☰
+  view modes, 🔑 Admin shell) are now MERGED into the always-visible global topbar via a new #lensTools slot
+  (sessToolsHTML/paintSessTools), and the redundant full-width header card (title + hint + duplicate ＋New)
+  is DELETED. Only the slim metered-usage strip remains above the terminal. ＋Add is hidden on Sessions
+  (▶ New session is the action). Reclaimed vertical space goes to the terminal: focus height offset 300->255px
+  desktop, 104->72px mobile. Generic framework pattern (#lensTools) any lens can use to avoid a 2nd bar.
+
 ## 0.37.1 -- 2026-06-25
 - WIRE + TEACH (drag-anything, round 2): (1) Granola CALL TRANSCRIPTS are now draggable from the Calls lens
   -- the card carries data-ss {kind:granola, id:meeting_id} (keyed on meeting_id, what get_transcript wants,

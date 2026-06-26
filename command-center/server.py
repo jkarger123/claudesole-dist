@@ -8153,6 +8153,11 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .topbar{display:flex;align-items:center;gap:12px;padding:15px 24px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 .topbar h2{margin:0;font-size:19px;font-weight:800;flex:0 0 auto;letter-spacing:.2px}
 .topbar #search{flex:1;min-width:140px;max-width:520px}
+/* lensTools: per-lens controls merged INTO the always-visible topbar (e.g. Sessions view-modes + Admin + live count) so a lens needs no second control bar */
+.lenstools{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
+.lenstools:empty{display:none}
+.lenstools .sesslive{font-size:12px;font-weight:800;color:var(--mut);white-space:nowrap}
+.lenstools .mini{padding:6px 10px}
 input,select,textarea{background:var(--bg2);border:1px solid var(--line);color:var(--ink);padding:9px 12px;border-radius:9px;font-size:14px;outline:none}
 input:focus,select:focus,textarea:focus{border-color:var(--accent)}#search{flex:1;min-width:150px}
 textarea{width:100%;min-height:240px;font-family:ui-monospace,Menlo,Monaco,monospace;font-size:12.5px;line-height:1.55;resize:vertical}
@@ -8318,11 +8323,11 @@ body.ss-tut-on #sessbar{z-index:9995!important;box-shadow:0 -6px 40px 8px rgba(v
   /* sessions lens: drop the usage strip + hint and maximize the focus terminal between the nav and the dock */
   body.cf-sessions #tkstripwrap, body.cf-sessions .cf-sesshint{display:none!important}
   body.cf-sessions .focusonly{height:auto}
-  body.cf-sessions .focusonly .bigsess{height:calc(100dvh - 104px - var(--cf-dock-h))!important;min-height:0!important}   /* nav + compact header + dock -> rest = terminal */
+  body.cf-sessions .focusonly .bigsess{height:calc(100dvh - 72px - var(--cf-dock-h))!important;min-height:0!important}   /* nav + dock -> rest = terminal (the compact header card is gone; controls moved into the topbar) */
 }
 /* Sessions LENS: focus = ONLY the big terminal (littles removed); in-flow column, never floats over usage. */
 .focusonly{display:flex;flex-direction:column;
-  height:calc(100vh - 300px);min-height:420px}   /* offset accounts for header card + usage strip + the bottom taskbar so the terminal fits without overlapping */
+  height:calc(100vh - 255px);min-height:420px}   /* offset = topbar + slim usage strip + bottom taskbar (the old title/control card is gone -> ~45px reclaimed for the terminal) */
 .focusonly .bigsess{flex:1;min-height:0}
 .focusonly .bigsess .stframe{flex:1;min-height:0}
 @media(max-width:820px){.focusonly{height:auto}.focusonly .bigsess{height:calc(100dvh - 200px);min-height:380px}}
@@ -9192,7 +9197,7 @@ body.gm-resizing iframe{pointer-events:none}
 <div class="health" id="svchealth"></div>
 </aside>
 <main id="main">
-<div class="topbar"><h2 id="viewtitle">Sessions</h2><button class="btn" id="refreshBtn" title="Refresh" onclick="location.reload()" style="padding:7px 11px">⟳</button><button class="btn" id="helpBtn" title="How this works" onclick="ccHelp(LENS)" style="padding:7px 11px">?</button><button class="btn cf-srbtn" id="searchTog" title="Search" onclick="cfTopSearch()" style="padding:7px 11px">🔍</button><input id="search" placeholder="Search…"><button class="btn" id="agentBtn" style="display:none" onclick="openAgent(LENS)">🤖 Agent</button><button class="btn" id="addBtn" onclick="openAdd()">＋ Add</button><button class="btn go" id="newSessBtn" onclick="openLaunch()">▶ New session</button><button class="btn go" id="cfTopBtn" style="display:none" onclick="cfAddWizard()">➕ Add a ClaudeFather</button></div>
+<div class="topbar"><h2 id="viewtitle">Sessions</h2><button class="btn" id="refreshBtn" title="Refresh" onclick="location.reload()" style="padding:7px 11px">⟳</button><button class="btn" id="helpBtn" title="How this works" onclick="ccHelp(LENS)" style="padding:7px 11px">?</button><button class="btn cf-srbtn" id="searchTog" title="Search" onclick="cfTopSearch()" style="padding:7px 11px">🔍</button><input id="search" placeholder="Search…"><span id="lensTools" class="lenstools"></span><button class="btn" id="agentBtn" style="display:none" onclick="openAgent(LENS)">🤖 Agent</button><button class="btn" id="addBtn" onclick="openAdd()">＋ Add</button><button class="btn go" id="newSessBtn" onclick="openLaunch()">▶ New session</button><button class="btn go" id="cfTopBtn" style="display:none" onclick="cfAddWizard()">➕ Add a ClaudeFather</button></div>
 <div class="wrap" id="grid"></div>
 </main>
 </div>
@@ -9213,9 +9218,10 @@ function lensTopbar(){var isPf=(LENS=="portfolio");
   document.body.classList.toggle("cf-glens",isG);             // -> CSS hides the whole topbar on mobile for these lenses
   var cb=document.getElementById("cfTopBtn"),ab=document.getElementById("addBtn"),nb=document.getElementById("newSessBtn");
   if(cb)cb.style.display=isPf?"":"none";
-  if(ab)ab.style.display=(isPf||isG)?"none":"";               // Add / New-session are meaningless in Gmail/Calendar/Drive
+  if(ab)ab.style.display=(isPf||isG||LENS=="sessions")?"none":"";  // Add is meaningless in Gmail/Calendar/Drive AND on Sessions (▶ New session is the action there)
   if(nb)nb.style.display=(isPf||isG)?"none":"";
   document.body.classList.toggle("cf-sessions",LENS=="sessions");   // -> mobile shows the bottom session dock only here
+  if(typeof paintSessTools==='function')paintSessTools(null);       // merge the Sessions controls (view modes + Admin + live count) INTO the always-visible topbar; loadSessions fills the count; clears on other lenses
 }
 const CST={production:["Production","#3fb950"],live:["Live","#3fb950"],stable:["Stable","#58a6ff"],wip:["WIP","#d29922"],building:["Building","#d29922"],blocked:["Blocked","#f85149"],idea:["Idea","#a371f7"],running:["Running","#3fb950"],paused:["Paused","#a0a0b0"],done:["Done","#3fb950"]};
 function badge(s){const x=CST[s]||[s||"?","#a0a0b0"];return '<span class="badge" style="background:'+x[1]+'22;color:'+x[1]+'">'+x[0]+'</span>';}
@@ -9529,6 +9535,13 @@ function renderStrip(){const w=document.getElementById('tkstripwrap');if(w)w.inn
 async function refreshTokens(){let d;try{d=await(await fetch('/api/token-usage')).json();}catch(e){return;}TOKDATA=d||{};
   renderStrip();
   const ss=TOKDATA.sessions||{};for(const nm in ss){const el=document.getElementById('ctx_'+cssid(nm));if(!el)continue;const pct=Math.round(ss[nm].pct),col=ctxCol(pct);el.textContent=pct+'%';el.style.color=col;el.style.borderColor=col+'55';el.title='context: '+fmtTok(ss[nm].used)+' / '+fmtTok(ss[nm].window)+' used · '+pct+'% free';}}
+// Sessions controls, rendered INTO the topbar's #lensTools (no second bar): live count + view-mode toggles + Admin shell.
+function sessToolsHTML(count){
+  var modes=[['focus','⊞ Focus'],['grid','▦ Grid'],['list','☰ List']].map(function(m){return '<button class="mini'+(SESSVIEW==m[0]?' go':'')+'" onclick="setSessView(\''+m[0]+'\')">'+m[1]+'</button>';}).join("");
+  var live=(count!=null)?('<span class="sesslive" title="'+count+' live session'+(count==1?'':'s')+'">🟢 '+count+'</span>'):'<span class="sesslive"></span>';
+  return live+modes+'<button class="mini" title="Admin shell — a plain shell in this project for sudo / interactive commands (type your password here)" onclick="openAdminShell()">🔑 Admin</button>';
+}
+function paintSessTools(count){var el=document.getElementById('lensTools');if(el)el.innerHTML=(LENS=='sessions')?sessToolsHTML(count):'';}
 function setSessView(v){SESSVIEW=v;localStorage.setItem('hpcc_sessview',v);loadSessions(true);syncHash();}
 function sessHint(){return SESSVIEW=='focus'?'One big working terminal. Switch which session is big with the chips above it; the bottom taskbar holds every session (hover to blow one up).':
   SESSVIEW=='grid'?'Equal tiles, all live (auto-refresh). Click a tile header to maximize it into a full terminal.':'Plain list with controls.';}
@@ -12783,11 +12796,10 @@ async function loadSessions(quiet){
   if(_cn && !s.find(x=>x.chief)) s.push({name:_cn,label:"Chief of Staff",attached:false,protected:true,chief:true,down:true});  // constant endpoint -- show even when not yet started
   var _ci=s.findIndex(x=>x.chief); if(_ci>0){s.unshift(s.splice(_ci,1)[0]);}   // pin the Chief of Staff to the top
   SESSDATA=s;
-  const modes=[['focus','⊞ Focus'],['grid','▦ Grid'],['list','☰ List']].map(m=>'<button class="mini'+(SESSVIEW==m[0]?' go':'')+'" onclick="setSessView(\''+m[0]+'\')">'+m[1]+'</button>').join("");
-  let head='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🟢 Sessions</b> <span class="sub">'+s.length+' live</span><div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">'+modes+'<button class="mini" title="a plain shell in this project for sudo / interactive commands -- type your password here" onclick="openAdminShell()">🔑 Admin shell</button><button class="mini go" onclick="openLaunch(\'studio\',\'\')">＋ New</button></div></div>'
-    +'<div class="meta cf-sesshint" style="margin-top:6px">'+sessHint()+'</div><div id="tkstripwrap">'+totalsStrip()+'</div></div>';
+  paintSessTools(s.length);   // controls (live count + view modes + Admin) now live in the always-visible topbar -- no second bar
+  let head='<div id="tkstripwrap" style="grid-column:1/-1;margin:0 0 7px">'+totalsStrip()+'</div>';   // slim: just the metered-usage strip (hidden on mobile); the old title/control card + hint are gone -> the terminal moves up
   let body;
-  if(!s.length)body=empty("No live sessions — click ＋ New to start one.");
+  if(!s.length)body=empty("No live sessions — click ▶ New session above to start one.");
   else if(SESSVIEW=='list')body=s.map(sessRow).join("");
   else if(SESSVIEW=='grid')body='<div id="desk" class="desk desk-grid">'+s.map((x,i)=>sessTile(x,i)).join("")+'</div>';
   else body=renderFocus(s);
