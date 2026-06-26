@@ -2563,7 +2563,7 @@ def browse_dir(rel):
             dirs.append(rec)
         else: rec["size"] = st.st_size; files.append(rec)
     return {"ok": True, "rel": rel, "parent": (os.path.dirname(rel) if rel else None),
-            "dirs": dirs, "files": files, "project": os.path.basename(PROJECT.rstrip("/"))}
+            "dirs": dirs, "files": files, "sessions": (sbr.get(rel) or []), "project": os.path.basename(PROJECT.rstrip("/"))}
 
 def _launch_designated(absdir):
     """A folder is an INTENTIONAL launch target if it's a recognized UNIT -- it carries a CLAUDE.md (a module/
@@ -9920,29 +9920,42 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 .cfdesk-link{display:block;padding:7px 9px;border-radius:7px;color:var(--fg,#e8e8ee);font-size:12.5px;text-decoration:none}
 .cfdesk-link:hover{background:rgba(255,255,255,.07)}
 .cfdesk-ft{font-size:10.5px;color:var(--mut,#9aa3b2);margin:7px 4px 2px;line-height:1.45}
-.nstree{max-height:340px;overflow-y:auto;overflow-x:hidden;border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:6px;background:rgba(0,0,0,.18);font-size:13px}
-.nstree-row{display:flex;align-items:flex-start;gap:5px;padding:4px 5px;border-radius:7px;cursor:pointer;max-width:100%}
-.nstree-row:hover{background:rgba(255,255,255,.06)}
-.nstree-row.sel{background:rgba(231,184,75,.16);outline:1px solid rgba(231,184,75,.4)}
-.nscaret{flex:0 0 14px;width:14px;text-align:center;color:var(--mut,#8a92a3);cursor:pointer;user-select:none;font-size:10px;line-height:20px}
-.nsmain{flex:1;min-width:0}
-.nstop{display:flex;align-items:center;gap:6px;line-height:20px}
-.nsname{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
-.nstree-row.nsanc .nsname{opacity:.62;font-weight:500}
-.nssess{flex:0 0 auto;font-size:10px;font-weight:700;color:#3fb950}
-.nsact{margin-left:auto;flex:0 0 auto;opacity:0;transition:opacity .1s}
-.nstree-row:hover .nsact{opacity:1}
-.nsbtn{background:rgba(255,255,255,.09);border:none;color:var(--mut,#8a92a3);border-radius:6px;padding:0 7px;cursor:pointer;font-size:13px;line-height:18px}
-.nsbtn:hover{background:var(--accent,#e7b84b);color:#15120a}
-.nsdesc{font-size:11px;opacity:.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nslabel{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:20px}
-.nssrow .nslabel{font-weight:500;color:#cfe8d6}
-.nsopen{font-size:10px;color:#3fb950;opacity:.85}
-.nsgroup{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--mut,#8a92a3);margin:9px 2px 2px;padding:5px 4px 4px;border-top:1px solid rgba(255,255,255,.07);cursor:pointer;border-radius:6px}
-.nsgroup:hover{background:rgba(255,255,255,.05)}
-.nsgroup:first-child{border-top:none;margin-top:0}
-.nsgcaret{font-size:9px;width:10px;display:inline-block;text-align:center}
-.nsgcount{margin-left:auto;opacity:.5}
+.modal:has(.lp){padding:0;overflow:hidden;display:flex;flex-direction:column;width:min(620px,96vw)}
+.lp{display:flex;flex-direction:column;min-height:0;flex:1;max-height:88vh}
+.lphead{padding:18px 18px 11px;border-bottom:1px solid var(--line,rgba(255,255,255,.08))}
+.lphead h2{margin:0 0 12px;font-size:19px;font-weight:700}
+.lpsearch{width:100%;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:10px;padding:10px 12px;font-size:14px;outline:none}
+.lpsearch:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(var(--accent-rgb),.18)}
+.lpcrumb{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-top:11px;font-size:12px}
+.lpcrumb a{color:var(--mut,#8a92a3);cursor:pointer;text-decoration:none;white-space:nowrap}
+.lpcrumb a:hover{color:var(--accent,#e7b84b)}
+.lpcrumb a.here{color:var(--ink,#e8e8ee);font-weight:700}
+.lpcrumb .sep{color:var(--mut);opacity:.5}
+.lpcrumb .addbtn{margin-left:auto;background:rgba(255,255,255,.09);border:none;color:var(--ink,#e8e8ee);border-radius:7px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap}
+.lpcrumb .addbtn:hover{background:var(--accent,#e7b84b);color:#15120a}
+.lpbody{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;padding:8px 12px}
+.lpgrp{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--mut,#8a92a3);margin:13px 6px 4px}
+.lpgrp:first-child{margin-top:2px}
+.lprow{display:flex;align-items:center;gap:10px;min-height:46px;padding:7px 10px;border-radius:10px;cursor:pointer}
+.lprow:hover,.lprow.hi{background:rgba(255,255,255,.07)}
+.lpicon{flex:0 0 auto;font-size:16px;width:20px;text-align:center}
+.lptext{flex:1;min-width:0}
+.lprow .nm{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lprow .sub{font-size:11px;opacity:.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lpbadge{flex:0 0 auto;font-size:10px;font-weight:700;color:#3fb950;cursor:pointer;padding:2px 5px}
+.lpgo{flex:0 0 auto;background:var(--accent,#e7b84b);color:#15120a;border:none;border-radius:7px;padding:5px 11px;cursor:pointer;font-size:12px;font-weight:700}
+.lpgo:hover{filter:brightness(1.08)}
+.lpresume{display:flex;align-items:center;gap:10px;min-height:42px;padding:7px 10px;border-radius:10px;cursor:pointer;background:rgba(63,185,80,.09);margin-bottom:3px}
+.lpresume:hover{background:rgba(63,185,80,.16)}
+.lpresume .nm{font-weight:600;color:#cfe8d6}
+.lpresume .go{margin-left:auto;font-size:11px;color:#3fb950;font-weight:600}
+.lpadd{display:flex;align-items:center;gap:8px;min-height:44px;padding:9px 11px;margin-top:8px;border-radius:10px;cursor:pointer;border:1px dashed rgba(255,255,255,.2);color:var(--mut,#8a92a3);font-weight:600;font-size:13px}
+.lpadd:hover{border-color:var(--accent,#e7b84b);color:var(--ink,#e8e8ee)}
+.lpfoot{padding:13px 18px 16px;border-top:1px solid var(--line,rgba(255,255,255,.08));display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.lpfoot .lpname{flex:1;min-width:140px;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:9px 11px;font-size:13px;outline:none}
+.lpfoot .lpname:focus{border-color:var(--accent)}
+.lpfoot select{background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:9px;font-size:13px}
+.lpempty{color:var(--mut);font-size:13px;padding:20px 6px;text-align:center}
 </style>
 <a class="cfdesk-cta" onclick="cfDeskMenu(event)" title="Get the ClaudeFather Desktop app — a real browser + your dashboard in one window"><i class="ph-light ph-desktop"></i>Get the desktop app</a>
 <div id="cfDesktopMenu" style="display:none">
@@ -10298,101 +10311,125 @@ function PROJ(){return (window.CC&&window.CC.project)||"/Volumes/Samsung990PRO/h
 // New session: pick a working dir by BROWSING the project/client tree (each folder expands lazily to show its
 // contents). The machine selector ("Run on") only appears when there's actually more than one machine -- on a
 // single-box deployment a session always runs here, so we don't ask.
-var NSV={sel:'',nodes:{},seq:0,mode:'curated'};
+// ===== New-session launch picker: search-first DRILL palette. The launch target IS your current location
+// (breadcrumb) -- no separate "select" step. Sticky header (search + breadcrumb) + sticky footer (name +
+// launch); the BODY is the only scroller so nothing is ever cut off. Folders only; live sessions surfaced;
+// add-subfolder anywhere (reuses the Projects /api/module-add). =====
+var LP={loc:'',target:'',crumbs:[],q:'',rows:[],hi:-1,mach:'studio',flat:[],cur:null,proj:'project',nameEdited:false};
 function openLaunch(pt,pc){
   var machs=(D.machines||[]).slice();
   if(!machs.some(function(m){return m.id==='studio';})) machs.unshift({id:'studio',name:'This machine'});
-  NSV={sel:'',nodes:{},seq:0,mode:'curated'};
-  var whereRow = (machs.length>1)
-    ? ('<div class="row"><label>Run on</label><select id="lT">'+machs.map(m=>'<option value="'+m.id+'"'+(m.id==(pt||'studio')?' selected':'')+'>'+esc(m.name||m.id)+'</option>').join('')+'</select></div>')
-    : ('<input type="hidden" id="lT" value="studio">');
-  showM('<h2>New Claude session</h2>'+whereRow
-   +'<div class="row" style="align-items:flex-start"><label>Folder</label><div style="flex:1;min-width:0">'
-     +'<div class="nstree" id="nsTree">Loading…</div>'
-     +'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:5px">'
-       +'<span class="dim" id="nsSelPath" style="font-size:11px">Launch in: project root</span>'
-       +'<a id="nsModeLink" onclick="nsToggleMode()" style="font-size:11px;color:var(--mut,#8a92a3);cursor:pointer;white-space:nowrap">Show all folders</a></div>'
-   +'</div></div>'
-   +'<div class="row"><label>Name</label><input id="lN" value="session" placeholder="e.g. e92cls-aux"></div>'
-   +'<div class="btns"><button class="btn" onclick="closeM()">Cancel</button><button class="btn go" onclick="doLaunchForm()">▶ Launch &amp; open terminal</button></div>');
-  nsTreeInit();}
-async function nsFetch(rel){try{return await(await fetch('/api/browse?rel='+encodeURIComponent(rel||''))).json();}catch(e){return null;}}
-async function nsTops(){try{var r=await(await fetch('/api/launch-tree')).json();return (r&&r.ok)?(r.groups||[]):null;}catch(e){return null;}}
-function nsToggleMode(){NSV.mode=(NSV.mode==='all'?'curated':'all');var l=document.getElementById('nsModeLink');if(l)l.textContent=(NSV.mode==='all'?'Show launch places only':'Show all folders');NSV.nodes={};NSV.seq=0;nsTreeInit();}
-function nsSelectRoot(){NSV.sel='';var sp=document.getElementById('nsSelPath');if(sp)sp.textContent='Launch in: project root';}
-// THE TREE: organized into the recognizable GROUPS (Projects / Agents / Extensions) a user already knows;
-// each launch place then drills into WHATEVER REAL FOLDERS live inside it (browse), designated places 🧩.
-// "Show all folders" drops the grouping and shows the raw project folder tree.
-async function nsTreeInit(){
-  var box=document.getElementById('nsTree'); if(!box)return; box.innerHTML='Loading…';
-  if(NSV.mode==='all'){
-    var rb=await nsFetch(''); if(!rb||!rb.ok){box.innerHTML='<div class="dim">Could not load folders.</div>';return;}
-    box.innerHTML=''; nsPaint(box, rb, 0); nsSelectRoot(); return;
-  }
-  var groups=await nsTops();
-  if(!groups||!groups.length){   // no recognized launch places -> show the real folders
-    var rb2=await nsFetch(''); box.innerHTML=''; if(rb2&&rb2.ok)nsPaint(box,rb2,0); nsSelectRoot(); return;
-  }
-  box.innerHTML='';
-  groups.forEach(function(g,gi){
-    var gid='nsg'+gi;
-    var hdr=document.createElement('div'); hdr.className='nsgroup'; hdr.id=gid+'h';
-    hdr.innerHTML='<span class="nsgcaret">▸</span>'+((g.icon?g.icon+' ':'')+esc(g.name))+'<span class="nsgcount">'+(g.places||[]).length+'</span>';
-    hdr.onclick=function(){nsGroupToggle(gid);};
-    box.appendChild(hdr);
-    var gc=document.createElement('div'); gc.id=gid; gc.style.display='none'; box.appendChild(gc);   // collapsed by default
-    (g.places||[]).forEach(function(pl){ nsRow(gc, pl, 0); });
-  });
-  nsSelectRoot();}
-function nsGroupToggle(gid){var c=document.getElementById(gid),h=document.getElementById(gid+'h');if(!c)return;var open=c.style.display!=='none';c.style.display=open?'none':'';if(h){var cr=h.querySelector('.nsgcaret');if(cr)cr.textContent=open?'▸':'▾';}}
-// Two-line launch-place row: bold name (+ live-session badge + hover actions) over a clipped description.
-function nsRow(container,rec,depth){
-  var id=NSV.seq++; var designated=(rec.designated!==false); var sess=rec.sessions||[];
-  NSV.nodes[id]={rel:rec.rel,name:rec.name,depth:depth,loaded:false,expanded:false,sessions:sess};
-  var row=document.createElement('div'); row.className='nstree-row'+(designated?'':' nsanc'); row.id='nsrow'+id; row.style.paddingLeft=(depth*15+4)+'px';
-  var badge=sess.length?'<span class="nssess" title="'+sess.length+' agent session'+(sess.length>1?'s':'')+' open here">● '+sess.length+'</span>':'';
-  row.innerHTML='<span class="nscaret" id="nsc'+id+'">▸</span>'
-    +'<div class="nsmain"><div class="nstop"><span class="nsname">'+(rec.icon||(designated?'🧩':'📁'))+' '+esc(rec.name)+'</span>'+badge
-      +'<span class="nsact"><button class="nsbtn" title="Add a subfolder here" onclick="nsAddSub(event,'+id+')">＋</button></span></div>'
-      +(rec.description?'<div class="nsdesc">'+esc(rec.description)+'</div>':'')+'</div>';
-  row.querySelector('.nscaret').onclick=function(e){nsToggle(id,e);};
-  row.querySelector('.nsname').onclick=function(){nsSelectRow(id);};
-  container.appendChild(row);
-  var kids=document.createElement('div'); kids.id='nskids'+id; kids.style.display='none'; container.appendChild(kids);
-  return id;}
-// a live session running in this folder -> click to jump into it (instead of launching a new one)
-function nsSessRow(kids,s,depth){
-  var d=document.createElement('div'); d.className='nstree-row nssrow'; d.style.paddingLeft=(depth*15+18)+'px';
-  d.innerHTML='<span class="nscaret"></span><span class="nslabel">🟢 '+esc(s.label||s.name)+' <span class="nsopen">resume →</span></span>';
-  d.onclick=function(){ if(typeof closeM==='function')closeM(); openInSessions(s.name); };
-  kids.appendChild(d);}
-// FOLDERS only -- never individual files (you launch an agent IN a folder, not on a file)
-function nsPaint(kids,r,depth){
-  (r.dirs||[]).forEach(function(d){ nsRow(kids, d, depth); });
-  if(!(r.dirs||[]).length){var e=document.createElement('div'); e.className='dim'; e.style.cssText='padding-left:'+(depth*15+20)+'px;font-size:12px'; e.textContent='(no subfolders)'; kids.appendChild(e);}}
-async function nsToggle(id,e){if(e)e.stopPropagation(); var node=NSV.nodes[id]; var kids=document.getElementById('nskids'+id); if(!node||!kids)return;
-  if(!node.loaded){
-    kids.innerHTML='<div class="dim" style="padding-left:'+((node.depth+1)*15+20)+'px;font-size:12px">…</div>';
-    var r=await nsFetch(node.rel); node.loaded=true; kids.innerHTML='';
-    (node.sessions||[]).forEach(function(s){ nsSessRow(kids,s,node.depth+1); });   // live agents here, first
-    if(r&&r.ok)nsPaint(kids,r,node.depth+1);
-  }
-  node.expanded=!node.expanded; kids.style.display=node.expanded?'block':'none'; nsSetCaret(id,node.expanded);}
-// add a subfolder at ANY node, the same way the Projects tab does (module-add -> CLAUDE.md scaffold)
-async function nsAddSub(e,id){ if(e)e.stopPropagation(); var node=NSV.nodes[id]; if(!node)return;
-  var name=(prompt('New subfolder name (letters/numbers/-_):')||'').trim(); if(!name)return;
-  try{ await fetch('/api/module-add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parent:node.rel,name:name,summary:''})}); }catch(err){}
-  if(typeof toast==='function')toast('Created '+name+' — select it + launch to set it up');
-  node.loaded=false; node.expanded=false; var kids=document.getElementById('nskids'+id); if(kids)kids.innerHTML='';
-  nsToggle(id);   // reload + expand to reveal the new folder
+  LP={loc:'',target:'',crumbs:[],q:'',rows:[],hi:-1,mach:(pt||'studio'),flat:[],cur:null,proj:'project',nameEdited:false};
+  var machSel=(machs.length>1)
+    ?('<select id="lpMach" title="Run on">'+machs.map(function(m){return '<option value="'+esc(m.id)+'"'+(m.id===(pt||'studio')?' selected':'')+'>'+esc(m.name||m.id)+'</option>';}).join('')+'</select>')
+    :('<input type="hidden" id="lpMach" value="studio">');
+  showM('<div class="lp">'
+    +'<div class="lphead"><h2>▶ New session</h2>'
+      +'<input id="lpSearch" class="lpsearch" placeholder="Search projects, agents, extensions, folders…" oninput="lpSearch()" onkeydown="lpKey(event)" autocomplete="off" spellcheck="false">'
+      +'<div class="lpcrumb" id="lpCrumb"></div></div>'
+    +'<div class="lpbody" id="lpBody"></div>'
+    +'<div class="lpfoot"><input id="lpName" class="lpname" value="session" placeholder="session name" oninput="LP.nameEdited=true">'+machSel
+      +'<button class="btn" onclick="closeM()">Cancel</button>'
+      +'<button class="btn go" id="lpGo" onclick="lpLaunch(LP.target)">▶ Launch</button></div>'
+    +'</div>');
+  setTimeout(function(){var s=document.getElementById('lpSearch'); if(s)s.focus();},60);
+  lpNav('');
 }
-function nsSetCaret(id,open){var c=document.getElementById('nsc'+id); if(c)c.textContent=open?'▾':'▸';}
-function nsSelectRow(id){var node=NSV.nodes[id]; if(!node)return;
-  var prev=document.querySelector('.nstree-row.sel'); if(prev)prev.classList.remove('sel');
-  var row=document.getElementById('nsrow'+id); if(row)row.classList.add('sel');
-  NSV.sel=node.rel; var sp=document.getElementById('nsSelPath'); if(sp)sp.textContent='Launch in: '+(node.rel||'project root');
-  var ln=document.getElementById('lN'); if(ln){var slug=(node.name||'session').replace(/[^A-Za-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,36)||'session'; ln.value=slug;}}
-function doLaunchForm(){var t=(document.getElementById('lT')||{}).value||'studio',n=document.getElementById('lN').value.trim()||'session';doLaunch(t,'',n,NSV.sel);}
+async function lpFetch(u){ try{ return await(await fetch(u)).json(); }catch(e){ return null; } }
+async function lpNav(rel){
+  LP.q=''; var s=document.getElementById('lpSearch'); if(s)s.value=''; LP.hi=-1;
+  if(rel===''||rel==null){
+    var t=await lpFetch('/api/launch-tree'); if(!t||!t.ok){ lpHTML('<div class="lpempty">Couldn\'t load launch places.</div>'); return; }
+    LP.proj=t.project||'project'; LP.loc=''; LP.target='';
+    LP.crumbs=[{rel:'',name:LP.proj}];
+    LP.cur={groups:(t.groups||[]), sessions:[]};
+    LP.flat=[]; (t.groups||[]).forEach(function(g){ (g.places||[]).forEach(function(p){ LP.flat.push({rel:p.rel,name:p.name,description:p.description||'',sessions:p.sessions||[],designated:p.designated!==false,icon:p.icon,grp:g.name}); }); });
+  } else {
+    var b=await lpFetch('/api/browse?rel='+encodeURIComponent(rel)); if(!b||!b.ok){ lpHTML('<div class="lpempty">Couldn\'t open that folder.</div>'); return; }
+    LP.loc=rel; LP.target=rel;
+    LP.crumbs=[{rel:'',name:LP.proj}]; var acc=''; rel.split('/').forEach(function(seg){ acc=acc?acc+'/'+seg:seg; LP.crumbs.push({rel:acc,name:seg}); });
+    LP.cur={dirs:(b.dirs||[]), sessions:(b.sessions||[])};
+  }
+  lpPrefill(); lpCrumb(); lpFoot(); lpRender();
+  var bd=document.getElementById('lpBody'); if(bd)bd.scrollTop=0;
+}
+function lpPrefill(){ var ln=document.getElementById('lpName'); if(!ln||LP.nameEdited)return;
+  var base=LP.loc?LP.loc.split('/').pop():(LP.proj||'session');
+  ln.value=(base||'session').replace(/[^A-Za-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,36)||'session'; }
+function lpCrumb(){ var c=document.getElementById('lpCrumb'); if(!c)return;
+  var h=LP.crumbs.map(function(cr,i){ var here=(i===LP.crumbs.length-1); return '<a class="'+(here?'here':'')+'" onclick="lpNav(\''+esc(cr.rel)+'\')">'+esc(cr.name)+'</a>'; }).join('<span class="sep">›</span>');
+  h+='<button class="addbtn" onclick="lpAddSub()">＋ New folder</button>';
+  c.innerHTML=h; }
+function lpFoot(){ var g=document.getElementById('lpGo'); if(g)g.textContent='▶ Launch in '+(LP.target||'project root'); }
+function lpHTML(h){ var b=document.getElementById('lpBody'); if(b)b.innerHTML=h; }
+function lpRender(){
+  LP.rows=[]; var parts=[];
+  (LP.cur.sessions||[]).forEach(function(ss){ parts.push(lpResumeHTML(ss)); });
+  if(LP.cur.groups){
+    (LP.cur.groups||[]).forEach(function(grp){
+      parts.push('<div class="lpgrp">'+(grp.icon?esc(grp.icon)+' ':'')+esc(grp.name)+'</div>');
+      (grp.places||[]).forEach(function(p){ parts.push(lpRowHTML(p)); LP.rows.push(p); });
+    });
+  } else {
+    (LP.cur.dirs||[]).forEach(function(d){ parts.push(lpRowHTML(d)); LP.rows.push(d); });
+    if(!(LP.cur.dirs||[]).length && !(LP.cur.sessions||[]).length) parts.push('<div class="lpempty">No subfolders here yet.</div>');
+  }
+  var locn=LP.loc?LP.loc.split('/').pop():(LP.proj);
+  parts.push('<div class="lpadd" onclick="lpAddSub()">＋ New subfolder in “'+esc(locn)+'”</div>');
+  lpHTML(parts.join(''));
+}
+function lpRowHTML(p){
+  var ic=p.icon||((p.designated!==false)?'🧩':'📁');
+  var sess=p.sessions||[];
+  var badge=sess.length?'<span class="lpbadge" title="'+sess.length+' running here — open to resume" onclick="lpBadge(event,\''+esc(p.rel)+'\')">● '+sess.length+'</span>':'';
+  var sub=p.description?esc(p.description):'<span style="opacity:.6">(no description yet)</span>';
+  return '<div class="lprow" onclick="lpNav(\''+esc(p.rel)+'\')"><span class="lpicon">'+ic+'</span>'
+    +'<span class="lptext"><div class="nm">'+esc(p.name)+'</div><div class="sub">'+sub+'</div></span>'
+    +badge+'<button class="lpgo" title="Launch an agent in this folder" onclick="event.stopPropagation();lpLaunch(\''+esc(p.rel)+'\')">▶ launch</button></div>';
+}
+function lpResumeHTML(s){
+  return '<div class="lpresume" onclick="closeM();openInSessions(\''+esc(s.name)+'\')"><span class="lpicon">🟢</span>'
+    +'<span class="lptext"><div class="nm">'+esc(s.label||s.name)+'</div><div class="sub">running here — click to resume</div></span><span class="go">resume →</span></div>';
+}
+function lpBadge(e,rel){ if(e)e.stopPropagation(); lpNav(rel); }
+function lpLaunch(rel){
+  var t=(document.getElementById('lpMach')||{}).value||'studio';
+  var nm=((document.getElementById('lpName')||{}).value||'').trim()||'session';
+  doLaunch(t,'',nm,rel||'');
+}
+async function lpAddSub(){
+  var name=(prompt('New subfolder name (letters/numbers/-_):')||'').trim(); if(!name)return;
+  var summary=(prompt('One line — what is this folder?')||'').trim();
+  var r=null; try{ r=await(await fetch('/api/module-add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parent:LP.target,name:name,summary:summary})})).json(); }catch(e){}
+  if(!(r&&r.ok)){ toast('Couldn\'t create folder: '+((r||{}).error||'?'),5000); return; }
+  toast('Folder created in '+(LP.loc||'project root'));
+  lpNav(LP.loc);
+}
+function lpSearch(){
+  var q=((document.getElementById('lpSearch')||{}).value||''); LP.q=q.trim().toLowerCase(); LP.hi=-1;
+  if(!LP.q){ lpCrumb(); lpRender(); return; }
+  var res=LP.flat.filter(function(p){ return (p.name+' '+p.rel).toLowerCase().indexOf(LP.q)>=0; }).slice(0,50);
+  LP.rows=res;
+  if(!res.length){ lpHTML('<div class="lpempty">No matches for “'+esc(q.trim())+'”.</div>'); return; }
+  lpHTML(res.map(function(p){
+    var ic=p.icon||(p.designated?'🧩':'📁');
+    var badge=(p.sessions&&p.sessions.length)?'<span class="lpbadge">● '+p.sessions.length+'</span>':'';
+    return '<div class="lprow" onclick="lpNav(\''+esc(p.rel)+'\')"><span class="lpicon">'+ic+'</span>'
+      +'<span class="lptext"><div class="nm">'+esc(p.name)+'</div><div class="sub">'+esc(p.rel)+'</div></span>'
+      +badge+'<button class="lpgo" onclick="event.stopPropagation();lpLaunch(\''+esc(p.rel)+'\')">▶ launch</button></div>';
+  }).join(''));
+}
+function lpKey(e){
+  if(e.key==='Escape'){ if(LP.q){ var s=document.getElementById('lpSearch'); s.value=''; lpSearch(); } else closeM(); return; }
+  if(e.key==='Enter'){ e.preventDefault(); if(e.metaKey||e.ctrlKey){ lpLaunch(LP.target); return; }
+    var r=(LP.hi>=0?LP.rows[LP.hi]:LP.rows[0]); if(r)lpNav(r.rel); return; }
+  if(e.key==='Backspace' && !LP.q){ if(LP.crumbs.length>1){ e.preventDefault(); lpNav(LP.crumbs[LP.crumbs.length-2].rel); } return; }
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){ e.preventDefault();
+    var rows=[].slice.call(document.querySelectorAll('#lpBody .lprow')); if(!rows.length)return;
+    LP.hi=Math.max(0,Math.min(rows.length-1,(LP.hi<0?-1:LP.hi)+(e.key==='ArrowDown'?1:-1)));
+    rows.forEach(function(el,i){ el.classList.toggle('hi',i===LP.hi); });
+    if(rows[LP.hi])rows[LP.hi].scrollIntoView({block:'nearest'}); }
+}
 async function doLaunch(target,comp,name,rel){
   toast("Launching…");
   const r=await(await fetch("/api/launch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({target,component:comp,name:(name||"session"),rel:(rel||"")})})).json();

@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.58.0 -- 2026-06-26
+- NEW-SESSION PICKER rebuilt from scratch (the old nested tree was scrapped entirely). Researched against
+  best-in-class pickers (VS Code Quick Open, Raycast, Linear). It is now a SEARCH-FIRST DRILL palette:
+  * The launch TARGET is your current location -- no separate "select" step. The breadcrumb AND the footer
+    button always name exactly where it'll launch ("▶ Launch in agents/cost"). Fixes "who knows where I'm
+    launching."
+  * Sticky header (search + breadcrumb + "＋ New folder") and sticky footer (name + machine + Launch); the
+    BODY is the only scroller (flex column, overflow on the list) -- nothing is ever cut off, any-size group
+    scrolls (the root cause of the old cut-off was nested scroll containers).
+  * Type to fuzzy-search every launch place (all projects/agents/extensions) -- one keystroke to any of them.
+  * Tap a row = drill in (it becomes the target); per-row "▶ launch" = launch there directly; folders only.
+  * Live sessions surfaced as "resume →" rows (jump into a running agent); ● N badge per folder.
+  * ＋ Add subfolder at any location (header button + permanent last row) -- reuses the Projects /api/module-add.
+  * Full keyboard: ↑/↓ highlight, Enter drill, Cmd/Ctrl+Enter launch, Backspace up, Esc clear/close. Touch-OK
+    (no hover-only actions). Removed ALL old ns*/nstree code + CSS.
+
 ## 0.57.1 -- 2026-06-26
 - FIX Claude Accounts: the "save this account" button was HIDDEN once an account was saved, so there was no way
   to RE-SNAPSHOT (refresh) a stale/expired saved login -> switching to it 401'd with no recourse. Now there's
