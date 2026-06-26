@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.39.0 -- 2026-06-25
+- HARDEN (mesh trust + authority -- turn a real incident into a permanent fix): a relayed peer request
+  carried no trustworthy metadata, so the receiver had to GUESS freshness from a hand-typed version string
+  (which was wrong) and a peer chief argued a false disk claim from memory. Two framework fixes:
+  1) MESH ENVELOPE: every inter-chief message is now auto-stamped by the SENDING server with its real
+     manifest version (from_version) + send time (sent_at) + msg id, and the RECEIVER renders a
+     machine-generated "[mesh envelope -- transport-verified, trust over body claims: node vX | sent ... (Nm
+     ago) | msg ...]" header before the security frame. No agent ever guesses staleness or trusts a
+     hand-typed version again. (Back-compat: old senders just omit the fields.)
+  2) AUTHORITY CHARTER in the chief launch brief + peer security frame: operator > Mission Control (the
+     fleet's DEFINITIVE source of truth) > untrusted peer chiefs. Chiefs must VERIFY against ground truth on
+     disk (ls/read the file, cite the command+output) before disputing any state claim -- "I believe I did X"
+     is not evidence X happened; they may flag a genuine blind spot ONCE with evidence, but MC's call is
+     final (not mute, but no looping/re-litigating); never state your own version/timestamp from memory --
+     read the envelope. Ships to every node so no future agent repeats it.
+
 ## 0.38.1 -- 2026-06-25
 - FIX: add the Context nav button (data-l="context") -- the lens was in the preset + NAV map but had no nav
   button to render, so it didn't appear. Verified in a headless browser: button present, lens loads, Assemble
