@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.38.1 -- 2026-06-25
+- FIX: add the Context nav button (data-l="context") -- the lens was in the preset + NAV map but had no nav
+  button to render, so it didn't appear. Verified in a headless browser: button present, lens loads, Assemble
+  works.
+
 ## 0.38.0 -- 2026-06-25
 - NEW: THE CONTEXT LAYER (foundation for the "perfect context, every time" north star -- see docs/VISION.md).
   command-center/context.py: a stdlib sqlite3 event store (append-only, WAL, FTS5) + entity/edge graph with

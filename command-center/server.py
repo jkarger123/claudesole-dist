@@ -9258,6 +9258,7 @@ body.gm-resizing iframe{pointer-events:none}
 <button data-l="portfolio"><i class="ph-light ph-broadcast"></i>Portfolio</button>
 <button data-l="projects"><i class="ph-light ph-tree-structure"></i>Projects</button>
 <button data-l="sessions" class="on"><i class="ph-light ph-terminal-window"></i>Sessions</button>
+<button data-l="context"><i class="ph-light ph-brain"></i>Context</button>
 <button data-l="modules"><i class="ph-light ph-folders"></i>Projects</button>
 <button data-l="files"><i class="ph-light ph-folder"></i>Files</button>
 <button data-l="gmail"><i class="ph-light ph-envelope-simple"></i>Gmail<span id="gmailBadge" style="display:none;margin-left:6px;background:#ea4335;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
