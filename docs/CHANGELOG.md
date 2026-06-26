@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.40.0 -- 2026-06-26
+- VISION Phase 2 -- the context layer becomes USED, not just visible: "CATCH ME UP". /api/context/brief +
+  a "Brief a session" button on the Context lens: name a subject/question, the ROUTER assembles the cited,
+  budgeted, edge-placed slice, and it's injected straight into a chosen session (reusing the upload path-
+  injection) -- the agent rides in ALREADY KNOWING. Plus VISION Phase 1 seed: ingest now deterministically
+  seeds the entity graph (person from the actor/email, keyed so the same person resolves across sources; +
+  subject entities), so the flat log becomes a real graph the lens + router can use. No new deps; stdlib.
+
 ## 0.39.0 -- 2026-06-25
 - HARDEN (mesh trust + authority -- turn a real incident into a permanent fix): a relayed peer request
   carried no trustworthy metadata, so the receiver had to GUESS freshness from a hand-typed version string

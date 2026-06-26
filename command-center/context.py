@@ -137,10 +137,24 @@ def ingest_event(kind, source, title="", body="", ts=None, ingested=None, actor=
         try:
             cur = c.execute("""INSERT INTO events(ts,ingested,kind,source,trust,actor,subject,title,body,refs,meta,ext_id)
                                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", row)
-            c.commit(); return cur.lastrowid
+            c.commit(); eid = cur.lastrowid
         except sqlite3.IntegrityError:
             r = c.execute("SELECT id FROM events WHERE source=? AND ext_id=?", (source, ext_id)).fetchone()
-            return r["id"] if r else None
+            eid = r["id"] if r else None
+    _index_entities(actor, subject)   # seed the graph on BOTH insert AND dup (idempotent upsert) so a
+    return eid                         # re-backfill of already-known events still populates people/subjects
+
+def _index_entities(actor, subject):
+    """Deterministic, cheap entity seeding (no LLM): a person from the actor (keyed by email so the same
+    person across sources resolves to one), and a subject/project entity. Turns the flat log into a graph."""
+    try:
+        if actor:
+            em = re.search(r"[\w.+-]+@[\w.-]+\.\w+", actor)
+            name = re.sub(r"<[^>]*>", "", actor).strip().strip('"').strip() or (em.group(0) if em else actor)
+            upsert_entity("person", name[:80], keys=([em.group(0).lower()] if em else []))
+        if subject:
+            upsert_entity("subject", str(subject)[:80])
+    except Exception: pass
 
 def upsert_entity(etype, name, keys=None, meta=None):
     c = _connect(); nkey = _norm(name); now = time.time()

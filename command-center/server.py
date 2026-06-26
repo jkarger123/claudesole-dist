@@ -5944,6 +5944,24 @@ def session_send(session, kind, desc, note="", enter=False):
     r = _deliver_to_session(sess, out.get("filename", "item"), out.get("mime", ""), bytes(raw), full_note, enter)
     r["kind"] = kind; return r
 
+def context_brief(session, subject=None, query=None, budget=4000):
+    """CATCH ME UP: ask the context router to assemble the cited slice for a subject/question, then hand it to
+    a session so the agent rides in ALREADY KNOWING. Reuses the same path-injection as uploads/sendables --
+    completeness in the store, a small curated brief into the window. (docs/VISION.md, Phase 2.)"""
+    sess = re.sub(r"[^A-Za-z0-9_-]", "", session or "")[:64]
+    if not sess: return {"ok": False, "error": "no session given"}
+    if sh([TMUX, "has-session", "-t", sess])[0] != 0:
+        return {"ok": False, "error": "session not found (it may have closed)"}
+    try: b = context.assemble(query=(query or subject or None), subject=(subject or None), budget_tokens=int(budget or 4000))
+    except Exception as e: return {"ok": False, "error": "assemble failed: " + str(e)[:140]}
+    if not b.get("items"): return {"ok": False, "error": "no context found for that subject yet -- try Re-ingest or a different subject"}
+    label = (subject or query or "context").strip()
+    fn = "brief-" + (re.sub(r"[^A-Za-z0-9_-]+", "-", label).strip("-")[:40] or "context") + ".md"
+    note = "(context brief on '%s' -- %d cited items, assembled by the context router)" % (label[:60], b["count"])
+    r = _deliver_to_session(sess, fn, "text/markdown", b["text"].encode("utf-8"), note)
+    if isinstance(r, dict): r["count"] = b["count"]; r["used"] = b["used"]
+    return r
+
 # ======================================================================================================
 # AGENTIC LEVERAGE LAYER -- vertical slice 1 (Action Queue + "Smart Reply with 360 context").
 # Generalizes granola's propose->approve->apply spine into ONE fleet-wide queue (_actions.json) and adds
@@ -7416,6 +7434,9 @@ class H(BaseHTTPRequestHandler):
                 kinds=([k for k in (q.get("kinds", [""])[0] or "").split(",") if k] or None)), default=str))
         if u.path == "/api/context/search":
             return self._s(200, json.dumps(context.search((q.get("q", [""])[0]) or "", int((q.get("limit", ["30"])[0]) or 30)), default=str))
+        if u.path == "/api/context/brief":   # CATCH ME UP: assemble a subject's cited slice + inject it into a session
+            return self._s(200, json.dumps(context_brief((q.get("session", [""])[0]), (q.get("subject", [None])[0]),
+                (q.get("q", [None])[0]), int((q.get("budget", ["4000"])[0]) or 4000)), default=str))
         if u.path == "/api/context/backfill":   # manual re-ingest (also runs every 15 min)
             return self._s(200, json.dumps({"ok": True, "ingested": _context_backfill(), "stats": context.stats()}, default=str))
         if u.path == "/api/past":
@@ -9994,10 +10015,29 @@ async function loadContext(){
     +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
     +'<input id="ctxSubj" placeholder="subject (e.g. a client/project)" style="'+COMMS_INP+';flex:1;min-width:140px">'
     +'<input id="ctxQ" placeholder="what are you working on?" style="'+COMMS_INP+';flex:2;min-width:200px" onkeydown="if(event.key===\'Enter\')ctxAssemble()">'
-    +'<button class="mini go" onclick="ctxAssemble()">Assemble</button></div>'
+    +'<button class="mini go" onclick="ctxAssemble()">Assemble</button>'
+    +'<button class="mini" onclick="ctxBrief()" title="Assemble this context and hand it to a session -- the agent rides in already knowing">&#128203; Brief a session</button></div>'
     +'<div id="ctxOut" style="margin-top:10px"></div></div>';
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
 }
+var CTX_BRIEF=null;
+function ctxBrief(){
+  var subj=((document.getElementById('ctxSubj')||{}).value||'').trim();
+  var qq=((document.getElementById('ctxQ')||{}).value||'').trim();
+  if(!subj&&!qq){ toast('Enter a subject or question first',3500); return; }
+  var list=(window.SB&&SB.list)||[];
+  if(!list.length){ toast('No open sessions to brief.',4000); return; }
+  CTX_BRIEF={subj:subj,q:qq};
+  var h='<h3 style="margin:0 0 10px">&#128203; Brief which session on &ldquo;'+e2(subj||qq)+'&rdquo;?</h3><div class="ss-pick">'
+    +list.slice().sort(function(a,b){var x=(a.label||a.name),y=(b.label||b.name);return x<y?-1:x>y?1:0;}).map(function(s){return '<button class="ss-pickb" onclick="ctxBriefGo(\''+esc(s.name)+'\')">'+(s.chief?'&#11088; ':'')+e2(s.label||s.name)+'</button>';}).join('')
+    +'</div><div style="margin-top:12px;text-align:right"><button class="mini" onclick="closeM()">Cancel</button></div>';
+  showM(h);
+}
+async function ctxBriefGo(name){ var d=CTX_BRIEF||{}; CTX_BRIEF=null; closeM(); toast('Briefing '+esc(name)+' on &ldquo;'+esc(d.subj||d.q)+'&rdquo;…',4000);
+  try{ var r=await(await fetch('/api/context/brief?session='+encodeURIComponent(name)+'&subject='+encodeURIComponent(d.subj||'')+'&q='+encodeURIComponent(d.q||''))).json();
+    if(r&&r.ok) toast('&#128203; Briefed '+esc(name)+' &mdash; '+(r.count||0)+' cited items typed in. Review &amp; press Enter.',6500);
+    else toast('Brief failed: '+((r||{}).error||'?'),5500);
+  }catch(e){ toast('Brief failed.',5000); } }
 async function ctxBackfill(){ toast('Re-ingesting your surfaces…',3500); try{const r=await(await fetch('/api/context/backfill')).json(); toast('Ingested '+(r.ingested||0)+' &mdash; '+((r.stats||{}).events||0)+' events total',5500);}catch(e){toast('Backfill failed',4000);} loadContext(); }
 async function ctxAssemble(){
   const subj=((document.getElementById('ctxSubj')||{}).value||'').trim();
