@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.57.1 -- 2026-06-26
+- FIX Claude Accounts: the "save this account" button was HIDDEN once an account was saved, so there was no way
+  to RE-SNAPSHOT (refresh) a stale/expired saved login -> switching to it 401'd with no recourse. Now there's
+  an always-available "📸 Snapshot this login" button (labeled "Re-snapshot (refresh)" when already saved).
+  Fix a 401 account: switch to it (or /login it) -> /login to re-auth -> 📸 Re-snapshot to save fresh creds.
+
 ## 0.57.0 -- 2026-06-26
 - NEW-SESSION TREE revamp (sleek, two-line, session-aware):
   * Two-line rows -- bold name over a CLIPPED one-line description (readable but can never overflow the modal;

@@ -14550,7 +14550,7 @@ async function loadAccounts(){
   var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🪪 Claude Accounts</b> <span class="sub">switch the Claude login for ALL sessions in one click — like /login, but instant from your saved accounts</span></div>'
     +'<div style="margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
     +'<div>Currently logged in (all sessions): <b>'+e2(cur)+'</b></div>'
-    +(d.current_saved?'':'<button class="mini go" onclick="acctSnapshot()">＋ Save this account to the wallet</button>')
+    +'<button class="mini go" onclick="acctSnapshot()" title="Capture the current login to the wallet -- re-run this after a /login to REFRESH a stale/expired saved account">📸 '+(d.current_saved?'Re-snapshot (refresh) this login':'Snapshot this login to the wallet')+'</button>'
     +'<button class="mini" onclick="acctUsage(this)">↻ check usage</button></div>'
     +'<div id="acctUsageBox" style="margin-top:10px"></div>'
     +'<div class="sub" style="margin-top:8px">To add another account: log into it (here or in a terminal with <code>/login</code>), then come back and <b>Save this account</b>. After that, switching between saved accounts is one click and applies to every session live.</div></div>';
