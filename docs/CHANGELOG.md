@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.51.0 -- 2026-06-26
+- NEW SESSION tree is now CURATED (enterprise/installable): instead of the raw filesystem, it shows only
+  INTENTIONAL launch targets -- folders that are recognized UNITS (carry a CLAUDE.md / extension.json, plus the
+  configured pillars) + the ancestors needed to reach them. Convention-driven (zero config -> works on any
+  install). Designated units are bold; navigation-only ancestors are dimmed.
+  * New GET /api/launch-tree -> nested curated tree (depth-capped walk, CC_SKIP-pruned, fast).
+  * "Show all folders" toggle = escape hatch to the full filesystem browse when you need to launch somewhere
+    without a CLAUDE.md. If a deployment has NO designated targets (a non-ClaudeFather project) it auto-falls
+    back to all-folders so the picker is never empty.
+
 ## 0.50.0 -- 2026-06-26
 - FIX (New session tree): the root auto-expanded its caret but its children container stayed display:none, so
   only the project root row showed ("just shows hptuners-control"). nsTreeInit now actually reveals the root's

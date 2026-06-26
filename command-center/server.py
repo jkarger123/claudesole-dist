@@ -2548,6 +2548,42 @@ def browse_dir(rel):
     return {"ok": True, "rel": rel, "parent": (os.path.dirname(rel) if rel else None),
             "dirs": dirs, "files": files, "project": os.path.basename(PROJECT.rstrip("/"))}
 
+def _launch_designated(absdir):
+    """A folder is an INTENTIONAL launch target if it's a recognized UNIT -- it carries a CLAUDE.md (a module/
+    agent/client/pillar charter) or an extension.json (an extension). Convention-driven, so it works on ANY
+    installed deployment without per-deploy config."""
+    return (os.path.isfile(os.path.join(absdir, "CLAUDE.md"))
+            or os.path.isfile(os.path.join(absdir, "extension.json")))
+
+def launch_tree():
+    """Curated launch targets for the New Session picker: ONLY intentional units (folders with a CLAUDE.md /
+    extension.json, plus the configured pillars) + the ancestors needed to reach them -- never the raw
+    filesystem (no node_modules/build/archives/etc., already pruned by CC_SKIP + dotfile skip). Returns a
+    nested tree rooted at the project. Enterprise/installable: zero config, pure convention."""
+    targets, walked, MAXDEPTH = set(), 0, 5
+    for root, dirs, _ in os.walk(PROJECT):
+        walked += 1
+        if walked > 40000: break                             # generous backstop on pathological trees
+        rel = os.path.relpath(root, PROJECT)
+        depth = 0 if rel == "." else rel.count(os.sep) + 1
+        # prune junk + cap DEPTH (launch targets are shallow; never descend into huge deep subtrees -- this also
+        # keeps the walk from exhausting on a depth-first dive into one giant first child, which returned 0 before)
+        dirs[:] = [] if depth >= MAXDEPTH else [d for d in dirs if d not in CC_SKIP and not d.startswith(".") and not re.match(r"^iter\d", d)]
+        if rel == ".": continue
+        if _launch_designated(root) or rel in PILLARS: targets.add(rel)
+    nodes = set(targets)                                       # add ancestors so every target is reachable
+    for t in list(targets):
+        parts = t.split(os.sep)
+        for i in range(1, len(parts)): nodes.add(os.sep.join(parts[:i]))
+    children = {}
+    for n in nodes: children.setdefault(os.path.dirname(n), []).append(n)   # dirname("")=="" => top-level
+    def build(rel, name):
+        kids = sorted(children.get(rel, []), key=lambda r: os.path.basename(r).lower())
+        return {"rel": rel, "name": name, "designated": (rel in targets) if rel else True,
+                "children": [build(k, os.path.basename(k)) for k in kids]}
+    return {"ok": True, "count": len(targets),
+            "tree": build("", os.path.basename(PROJECT.rstrip("/")) or "project")}
+
 def backup_status(ttl=8):
     now = time.time()
     if _BK_CACHE["data"] and now - _BK_CACHE["at"] < ttl:
@@ -7794,6 +7830,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/module-files": return self._s(200, json.dumps(module_files(q.get("rel", [""])[0])))
         if u.path == "/api/files":        return self._s(200, json.dumps(all_deliverables()))
         if u.path == "/api/browse":       return self._s(200, json.dumps(browse_dir(q.get("rel", [""])[0])))
+        if u.path == "/api/launch-tree":  return self._s(200, json.dumps(launch_tree()))
         # ---- Google Workspace (live client) ----
         if u.path == "/api/google/status":   return self._s(200, json.dumps(google_status()))
         if u.path == "/api/google/gmail":    return self._s(200, json.dumps(gmail_list(q.get("view", ["inbox"])[0], q.get("q", [""])[0], q.get("max", ["25"])[0], fresh=(q.get("fresh", [""])[0] in ("1", "true")), page_token=q.get("page", [""])[0])))
@@ -9748,6 +9785,8 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 .nslabel{flex:1;overflow:hidden;text-overflow:ellipsis}
 .nstree-row.nsfile{color:var(--mut,#8a92a3);opacity:.65;font-size:12px;cursor:default}
 .nstree-row.nsfile:hover{background:none}
+.nstree-row.nsanc .nslabel{opacity:.55;font-weight:400}
+.nstree-row .nslabel{font-weight:600}
 </style>
 <a class="cfdesk-cta" onclick="cfDeskMenu(event)" title="Get the ClaudeFather Desktop app — a real browser + your dashboard in one window"><i class="ph-light ph-desktop"></i>Get the desktop app</a>
 <div id="cfDesktopMenu" style="display:none">
@@ -10103,29 +10142,59 @@ function PROJ(){return (window.CC&&window.CC.project)||"/Volumes/Samsung990PRO/h
 // New session: pick a working dir by BROWSING the project/client tree (each folder expands lazily to show its
 // contents). The machine selector ("Run on") only appears when there's actually more than one machine -- on a
 // single-box deployment a session always runs here, so we don't ask.
-var NSV={sel:'',nodes:{},seq:0};
+var NSV={sel:'',nodes:{},seq:0,mode:'curated'};
 function openLaunch(pt,pc){
   var machs=(D.machines||[]).slice();
   if(!machs.some(function(m){return m.id==='studio';})) machs.unshift({id:'studio',name:'This machine'});
-  NSV={sel:'',nodes:{},seq:0};
+  NSV={sel:'',nodes:{},seq:0,mode:'curated'};
   var whereRow = (machs.length>1)
     ? ('<div class="row"><label>Run on</label><select id="lT">'+machs.map(m=>'<option value="'+m.id+'"'+(m.id==(pt||'studio')?' selected':'')+'>'+esc(m.name||m.id)+'</option>').join('')+'</select></div>')
     : ('<input type="hidden" id="lT" value="studio">');
   showM('<h2>New Claude session</h2>'+whereRow
    +'<div class="row" style="align-items:flex-start"><label>Folder</label><div style="flex:1;min-width:0">'
      +'<div class="nstree" id="nsTree">Loading…</div>'
-     +'<div class="dim" id="nsSelPath" style="font-size:11px;margin-top:5px">Launch in: project root</div></div></div>'
+     +'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:5px">'
+       +'<span class="dim" id="nsSelPath" style="font-size:11px">Launch in: project root</span>'
+       +'<a id="nsModeLink" onclick="nsToggleMode()" style="font-size:11px;color:var(--mut,#8a92a3);cursor:pointer;white-space:nowrap">Show all folders</a></div>'
+   +'</div></div>'
    +'<div class="row"><label>Name</label><input id="lN" value="session" placeholder="e.g. e92cls-aux"></div>'
    +'<div class="btns"><button class="btn" onclick="closeM()">Cancel</button><button class="btn go" onclick="doLaunchForm()">▶ Launch &amp; open terminal</button></div>');
   nsTreeInit();}
 async function nsFetch(rel){try{return await(await fetch('/api/browse?rel='+encodeURIComponent(rel||''))).json();}catch(e){return null;}}
+function nsToggleMode(){NSV.mode=(NSV.mode==='all'?'curated':'all');var l=document.getElementById('nsModeLink');if(l)l.textContent=(NSV.mode==='all'?'Show launch targets only':'Show all folders');NSV.nodes={};NSV.seq=0;nsTreeInit();}
 async function nsTreeInit(){
-  var box=document.getElementById('nsTree'); if(!box)return;
+  var box=document.getElementById('nsTree'); if(!box)return; box.innerHTML='Loading…';
+  if(NSV.mode==='all') return nsInitAll(box);
+  // CURATED (default): only intentional launch targets (folders with a CLAUDE.md / extension.json + pillars).
+  var r; try{ r=await(await fetch('/api/launch-tree')).json(); }catch(e){ r=null; }
+  if(!r||!r.ok){ box.innerHTML='<div class="dim">Could not load launch targets.</div>'; return; }
+  if(!r.tree||!(r.tree.children||[]).length){   // nothing designated (a non-ClaudeFather project) -> fall back
+    NSV.mode='all'; var lk=document.getElementById('nsModeLink'); if(lk)lk.textContent='Show launch targets only';
+    return nsInitAll(box); }
+  box.innerHTML='';
+  var rid=nsNode(box,r.tree,0); nsExpandCur(rid); nsSelectRow(rid);}
+function nsNode(container,node,depth){
+  var id=NSV.seq++; NSV.nodes[id]={rel:node.rel,name:node.name,depth:depth,kids:node.children||[],rendered:false,expanded:false};
+  var hasKids=!!(node.children&&node.children.length);
+  var row=document.createElement('div'); row.className='nstree-row'+(node.designated?'':' nsanc'); row.id='nsrow'+id; row.style.paddingLeft=(depth*15+4)+'px';
+  row.innerHTML='<span class="nscaret" id="nsc'+id+'">'+(hasKids?'▸':'<span style="opacity:.25">•</span>')+'</span><span class="nslabel">📁 '+esc(node.name)+'</span>';
+  if(hasKids) row.querySelector('.nscaret').onclick=function(e){nsToggleCur(id,e);};
+  row.querySelector('.nslabel').onclick=function(){nsSelectRow(id);};
+  container.appendChild(row);
+  var kids=document.createElement('div'); kids.id='nskids'+id; kids.style.display='none'; container.appendChild(kids);
+  return id;}
+function nsExpandCur(id){var node=NSV.nodes[id],kids=document.getElementById('nskids'+id);if(!node||!kids)return;
+  if(!node.rendered){node.kids.forEach(function(ch){nsNode(kids,ch,node.depth+1);});node.rendered=true;}
+  node.expanded=true;kids.style.display='block';nsSetCaret(id,true);}
+function nsToggleCur(id,e){if(e)e.stopPropagation();var node=NSV.nodes[id],kids=document.getElementById('nskids'+id);if(!node||!kids)return;
+  if(!node.rendered){node.kids.forEach(function(ch){nsNode(kids,ch,node.depth+1);});node.rendered=true;}
+  node.expanded=!node.expanded;kids.style.display=node.expanded?'block':'none';nsSetCaret(id,node.expanded);}
+async function nsInitAll(box){
   var r=await nsFetch(''); if(!r||!r.ok){box.innerHTML='<div class="dim">Could not load folders.</div>';return;}
   box.innerHTML='';
   var rid=nsMakeRow(box,'',(r.project||'project root'),0);
   NSV.nodes[rid].loaded=true; nsRenderChildren(rid,r);
-  var kids=document.getElementById('nskids'+rid); if(kids)kids.style.display='block';   // actually SHOW the root's children
+  var kids=document.getElementById('nskids'+rid); if(kids)kids.style.display='block';
   NSV.nodes[rid].expanded=true; nsSetCaret(rid,true);
   nsSelectRow(rid);}
 function nsMakeRow(container,rel,name,depth){
