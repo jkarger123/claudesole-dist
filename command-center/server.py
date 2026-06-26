@@ -2898,28 +2898,239 @@ def account_list():
     return {"enabled": ACCOUNT_WALLET, "current_email": cur,
             "current_saved": any(a["active"] for a in out), "accounts": out}
 
-def _parse_usage(text):
-    """Parse the three windows out of `/usage`: pct used + reset time (None if that layout isn't shown)."""
+_USAGE_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+def _parse_reset_ts(txt, now=None):
+    """A /usage 'Resets ...' string -> the future epoch seconds it refers to. Handles a bare time
+    ('6:29pm (America/Chicago)') and an explicit date ('Jul 3 at 6:59am (America/Chicago)'). Uses the
+    named timezone when zoneinfo can load it, else falls back to local time."""
+    if not txt: return None
+    import datetime
+    now = now or time.time()
+    tz = None
+    mtz = re.search(r"\(([A-Za-z]+/[A-Za-z_]+)\)", txt)
+    if mtz:
+        try:
+            from zoneinfo import ZoneInfo; tz = ZoneInfo(mtz.group(1))
+        except Exception: tz = None
+    mt = re.search(r"(\d{1,2})(?::(\d{2}))?\s*([ap])m", txt, re.I)   # '7am' and '6:59am' both
+    if not mt: return None
+    hh = int(mt.group(1)) % 12 + (12 if mt.group(3).lower() == "p" else 0); mm = int(mt.group(2) or 0)
+    try:
+        nowdt = datetime.datetime.fromtimestamp(now, tz)
+        md = re.search(r"\b(" + "|".join(_USAGE_MONTHS) + r")\s+(\d{1,2})", txt)
+        if md:
+            dt = datetime.datetime(nowdt.year, _USAGE_MONTHS.index(md.group(1)) + 1, int(md.group(2)), hh, mm, tzinfo=tz)
+            if dt.timestamp() < now - 86400: dt = dt.replace(year=nowdt.year + 1)  # rolled into next year
+        else:
+            dt = nowdt.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if dt.timestamp() <= now: dt = dt + datetime.timedelta(days=1)          # bare time already passed -> tomorrow
+        return dt.timestamp()
+    except Exception:
+        return None
+def _parse_usage(text, now=None):
+    """Parse the three /usage windows: pct used + reset text + reset epoch (any field None if not shown).
+    The 'Current week (Sonnet only)' row often shows a bare percent with no Resets line, which is fine."""
+    now = now or time.time()
     def grab(lbl):
-        m = re.search(re.escape(lbl) + r"[^\n]*\n[^\n]*?(\d+)%\s*used[^\n]*\n\s*Resets ([^\n(]+)", text)
-        if not m: m = re.search(re.escape(lbl) + r".{0,160}?(\d+)%\s*used.{0,120}?Resets ([^\n(]+)", text, re.S)
-        return {"pct": int(m.group(1)), "resets": m.group(2).strip()} if m else None
+        m = re.search(re.escape(lbl), text or "")
+        if not m: return None
+        seg = (text or "")[m.end(): m.end() + 240]   # this window's block, before the next label
+        mp = re.search(r"(\d+)%\s*used", seg)
+        if not mp: return None
+        mr = re.search(r"Resets ([^\n]+)", seg)
+        rtxt = mr.group(1).strip() if mr else None
+        return {"pct": int(mp.group(1)), "resets": rtxt, "resets_ts": _parse_reset_ts(rtxt, now)}
     return {"session": grab("Current session"), "week": grab("Current week (all models)"),
             "week_sonnet": grab("Current week (Sonnet")}
-def account_usage_current():
-    """Run /usage in a brief session (uses the CURRENT keychain login) and parse the windows. Reflects whichever
-    account is active right now (switching is global, so 'current account usage' is the meaningful view)."""
-    sess = "cc-acct-usage"
+def _read_usage_session(token=None, label="cur"):
+    """Spawn a throwaway `claude` session, run /usage, scrape + parse the three rate-limit windows, kill it.
+    When `token` is given it is exported as CLAUDE_CODE_OAUTH_TOKEN, which authenticates as THAT account
+    independently of the macOS keychain (precedence above the subscription login) -- so we read any account's
+    limits with ZERO disruption to the live login every running session uses. token=None => the live login.
+    NOTE: this itself costs a few hundred tokens against that account's session window (negligible, ~$0.04)."""
+    import shlex
+    sess = "cc-uw-" + re.sub(r"[^A-Za-z0-9]", "", (label or "cur"))[:28]
     sh([TMUX, "kill-session", "-t", sess])
-    cl = 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude'
+    env = ("export CLAUDE_CODE_OAUTH_TOKEN=%s; " % shlex.quote(token)) if token else ""
+    cl = 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + env + 'claude'
     if sh([TMUX, "new-session", "-d", "-s", sess, "-x", "200", "-y", "50", cl])[0] != 0:
-        return {"error": "could not start session"}
-    time.sleep(7)
-    sh([TMUX, "send-keys", "-t", sess, "/usage"]); time.sleep(1.2); sh([TMUX, "send-keys", "-t", sess, "Enter"])
-    time.sleep(7)
-    txt = sh([TMUX, "capture-pane", "-t", sess, "-J", "-p", "-S", "-120"])[1] or ""
+        return {"ok": False, "error": "could not start session"}
+    time.sleep(8)
+    sh([TMUX, "send-keys", "-t", sess, "/usage"]); time.sleep(1.4); sh([TMUX, "send-keys", "-t", sess, "Enter"])
+    time.sleep(9)
+    txt = sh([TMUX, "capture-pane", "-t", sess, "-J", "-p", "-S", "-160"])[1] or ""
     sh([TMUX, "send-keys", "-t", sess, "C-c"]); sh([TMUX, "kill-session", "-t", sess])
-    return {"email": _current_email(), "usage": _parse_usage(txt), "ts": int(time.time())}
+    w = _parse_usage(txt)
+    return {"ok": bool(w.get("session") or w.get("week")), "windows": w}
+
+def account_usage_current():
+    """Read the CURRENT keychain login's /usage windows (back-compat shape for the old single-account view)."""
+    r = _read_usage_session()
+    return {"email": _current_email(), "usage": r.get("windows") or {}, "ts": int(time.time())}
+
+# ---- Per-account rate-limit fuel gauges -------------------------------------------------------------------
+# Tracks each saved Claude account's /usage windows (5-hour session + weekly all-models + weekly Sonnet) so the
+# operator can play accounts against each other: drain the one that resets SOONEST while it still has headroom,
+# rest the one that's near its slow-resetting weekly cap. Accounts with a stored setup-token are polled in the
+# background with zero disruption; token-less accounts can only be read while they're the live login.
+ACCT_WINDOWS_FILE = os.path.join(STATE_DIR, "_acct_windows.json")   # email -> last reading {windows, ts, ok, via}
+ACCT_PREFS_FILE = os.path.join(STATE_DIR, "_acct_prefs.json")      # {rotation: [emails] | None}  (None = all saved)
+ACCT_POLL_TTL = int(CC.get("account_poll_ttl") or 1800)            # background refresh cadence (s); default 30 min
+_ACCT_WIN_LOCK = threading.Lock()
+_ACCT_POLL_LOCK = threading.Lock()                                 # serialize the spawn-claude reads (one at a time)
+
+def _acct_windows_load():
+    try:
+        d = json.load(open(ACCT_WINDOWS_FILE)); return d if isinstance(d, dict) else {}
+    except Exception: return {}
+def _acct_windows_save(d):
+    with _ACCT_WIN_LOCK:
+        try:
+            tmp = ACCT_WINDOWS_FILE + ".tmp"; json.dump(d, open(tmp, "w")); os.replace(tmp, ACCT_WINDOWS_FILE)
+        except Exception: pass
+def _acct_prefs_load():
+    try:
+        d = json.load(open(ACCT_PREFS_FILE))
+        if isinstance(d, dict): return d
+    except Exception: pass
+    return {"rotation": None}
+def _acct_prefs_save(d):
+    try:
+        tmp = ACCT_PREFS_FILE + ".tmp"; json.dump(d, open(tmp, "w")); os.replace(tmp, ACCT_PREFS_FILE)
+    except Exception: pass
+
+def _saved_accounts():
+    """[(label, email)] for every wallet account + the live login (even if not yet saved)."""
+    al = account_list(); out = []; seen = set()
+    for a in al.get("accounts", []):
+        em = a.get("email")
+        if em and em not in seen: seen.add(em); out.append((a.get("label") or em, em))
+    cur = al.get("current_email")
+    if cur and cur not in seen: out.append((cur, cur))
+    return out, (al.get("current_email") or "")
+
+def account_windows_refresh(email):
+    """Refresh ONE account's windows. Prefers its setup-token (zero-disruption); otherwise only works while
+    it's the live login. Persists the reading to _acct_windows.json. Blocks ~18s (spawns a claude session)."""
+    email = (email or "").strip()
+    if not email: return {"ok": False, "error": "no email"}
+    token = _tok_read(email)
+    live = _current_email() or ""
+    if not token and email != live:
+        return {"ok": False, "error": "no setup-token, and this isn't the live login", "need_token": True}
+    with _ACCT_POLL_LOCK:
+        r = _read_usage_session(token=token or None, label=email)
+    rec = {"email": email, "windows": r.get("windows") or {}, "ts": int(time.time()),
+           "ok": bool(r.get("ok")), "via": ("token" if token else "live"), "error": r.get("error")}
+    store = _acct_windows_load(); store[email] = rec; _acct_windows_save(store)
+    return rec
+
+def _acct_dur(s):
+    if s is None: return "?"
+    s = max(0, int(s))
+    if s < 3600: return "%dm" % (s // 60)
+    if s < 86400: return "%.1fh" % (s / 3600.0)
+    return "%.1fd" % (s / 86400.0)
+def _win_view(x, now):
+    """A parsed window -> UI shape with free% + seconds-to-reset."""
+    if not x: return None
+    pct = max(0, min(100, x.get("pct") or 0)); rts = x.get("resets_ts")
+    return {"pct": pct, "free": 100 - pct, "resets": x.get("resets"),
+            "resets_ts": rts, "ttr": (rts - now) if rts else None}
+
+def _acct_recommend(accounts, now):
+    """Decide which in-rotation account to USE NEXT, optimizing to MINIMIZE WASTED CAPACITY: prefer the
+    account whose 5-hour window resets soonest while it still has free headroom (that unused capacity
+    evaporates at the reset), gated so we never recommend one whose slow weekly cap is nearly spent.
+    Returns {email: {status, why, score, use_next}} plus the single pick email."""
+    info = {}
+    for a in accounts:
+        em = a["email"]; w = a.get("windows") or {}; s = w.get("session"); wk = w.get("week")
+        if not a.get("in_rotation"):
+            info[em] = {"status": "tracked", "why": "tracked, not in your rotation", "score": -9, "use_next": False}; continue
+        if not a.get("ok") or not s:
+            need = (not a.get("has_token")) and (not a.get("active"))
+            info[em] = {"status": ("need_token" if need else "no_data"),
+                        "why": ("enable zero-disruption polling (paste a setup-token)" if need else "no reading yet — hit refresh"),
+                        "score": -9, "use_next": False}; continue
+        s_free = s.get("free", 0); s_ttr = s.get("ttr"); s_ttr_h = max(0.1, (s_ttr if s_ttr else 360) / 3600.0)
+        wk_free = (wk.get("free", 100) if wk else 100); wk_ttr = wk.get("ttr") if wk else None
+        perish = s_free / s_ttr_h                       # unused 5h capacity lost per idle hour (higher = use sooner)
+        if wk_free <= 8:
+            st, why, score = "resting", ("weekly nearly spent (%d%% used%s) — rest it" %
+                (100 - wk_free, (", resets in " + _acct_dur(wk_ttr)) if wk_ttr else "")), -1
+        elif s_free <= 8:
+            st, why, score = "cooling", ("5h window almost full (%d%% used) — resets in %s" %
+                (100 - s_free, _acct_dur(s_ttr))), 0
+        else:
+            st, score = "ready", perish
+            why = ("%d%% of the 5h window free, resets in %s · weekly %d%% used" %
+                   (s_free, _acct_dur(s_ttr), 100 - wk_free))
+        info[em] = {"status": st, "why": why, "score": score, "use_next": False,
+                    "usable": min(s_free, wk_free)}
+    ready = [(em, d) for em, d in info.items() if d["status"] == "ready"]
+    pick = max(ready, key=lambda kv: kv[1]["score"])[0] if ready else None
+    if pick:
+        info[pick]["status"] = "use_next"; info[pick]["use_next"] = True
+    return info, pick
+
+def account_windows_all():
+    """Everything the Accounts/Usage fuel-gauge UI needs: per saved account -> decorated windows + countdowns,
+    rotation membership, token status, last-read age, and the 'use this next' recommendation."""
+    now = time.time()
+    saved, cur = _saved_accounts()
+    prefs = _acct_prefs_load(); rot = prefs.get("rotation")
+    rotset = set(e for _, e in saved) if rot is None else set(rot)
+    store = _acct_windows_load()
+    accounts = []
+    for label, em in saved:
+        rec = store.get(em) or {}; w = rec.get("windows") or {}
+        accounts.append({
+            "email": em, "label": label, "active": em == cur, "in_rotation": em in rotset,
+            "has_token": bool(_tok_read(em)), "ok": bool(rec.get("ok")),
+            "windows": {"session": _win_view(w.get("session"), now), "week": _win_view(w.get("week"), now),
+                        "week_sonnet": _win_view(w.get("week_sonnet"), now)},
+            "ts": rec.get("ts"), "via": rec.get("via")})
+    info, pick = _acct_recommend(accounts, now)
+    for a in accounts:
+        a.update(info.get(a["email"], {"status": "no_data", "why": "", "score": -9, "use_next": False}))
+    order = {"use_next": 0, "ready": 1, "cooling": 2, "resting": 3, "tracked": 4, "no_data": 5, "need_token": 6}
+    accounts.sort(key=lambda a: (order.get(a.get("status"), 9), -(a.get("score") or -9)))
+    pa = next((a for a in accounts if a["email"] == pick), None)
+    return {"accounts": accounts, "now": now, "current_email": cur, "poll_ttl": ACCT_POLL_TTL,
+            "rotation_default_all": rot is None, "pick": pick, "pick_why": (pa["why"] if pa else None)}
+
+def account_rotation_set(email, want_in):
+    """Add/remove an account from the recommendation rotation (we still TRACK all accounts either way)."""
+    email = (email or "").strip()
+    saved, _ = _saved_accounts(); prefs = _acct_prefs_load(); rot = prefs.get("rotation")
+    cur_set = set(e for _, e in saved) if rot is None else set(rot)
+    cur_set.add(email) if want_in else cur_set.discard(email)
+    prefs["rotation"] = sorted(cur_set); _acct_prefs_save(prefs)
+    return {"ok": True, "rotation": prefs["rotation"]}
+
+def account_set_token(email, token):
+    """Store a `claude setup-token` for an account (enables zero-disruption polling), then read once to verify."""
+    email = (email or "").strip(); token = (token or "").strip()
+    if not email or not token: return {"ok": False, "error": "email and token required"}
+    if not _tok_write(email, token): return {"ok": False, "error": "could not store token"}
+    r = account_windows_refresh(email)
+    return {"ok": bool(r.get("ok")), "email": email, "error": r.get("error")}
+
+def _acct_poll_once():
+    """Refresh every account we can read non-disruptively (has a setup-token) plus the live login. Sequential."""
+    try:
+        saved, cur = _saved_accounts()
+        targets = [em for _, em in saved if _tok_read(em) or em == cur]
+        for em in targets:
+            try: account_windows_refresh(em)
+            except Exception: pass
+    except Exception: pass
+def _acct_poll_loop():
+    time.sleep(50)                                  # let boot settle before the first (session-spawning) poll
+    while True:
+        _acct_poll_once()
+        time.sleep(max(300, ACCT_POLL_TTL))
 
 _NEW_FOLDER_BRIEF = (
     "You're starting in a folder that has no CLAUDE.md yet. FIRST understand what this folder is for (read the "
@@ -7144,12 +7355,13 @@ def _task_fp(title, src_ref):
 
 def task_add(title, detail="", due=None, client="", source="manual", source_ref="", source_link="",
              status="open", confidence=None, kind="task", priority="normal", brief=""):
-    title = (title or "").strip()
+    title = _html.unescape(re.sub(r"<[^>]+>", " ", (title or ""))).strip()   # no raw HTML entities/tags in titles
+    title = re.sub(r"\s+", " ", title)
     if not title: return {"ok": False, "error": "empty title"}
     lst = tasks_load()
     fp = _task_fp(title, source_ref or title)
-    for t in lst:                                    # dedupe: same source+title still live -> skip
-        if t.get("fp") == fp and t.get("status") not in ("done", "dismissed"):
+    for t in lst:                                    # dedupe: a fingerprint we've ALREADY seen never re-adds --
+        if t.get("fp") == fp:                        # in ANY status, so dismissed/done suggestions don't resurrect
             return {"ok": True, "id": t["id"], "dup": True}
     tid = "task-%d" % int(time.time() * 1000)
     lst.insert(0, {"id": tid, "fp": fp, "title": title[:200], "detail": (detail or "")[:2000], "due": due,
@@ -7169,6 +7381,7 @@ def task_update(tid, **fields):
 
 # ---- programmatic (FREE, no AI) extraction: requests TO you + commitments YOU made + deadlines ----
 import datetime as _dt
+import html as _html
 _WD = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
 _MON = {m: i + 1 for i, m in enumerate(["january", "february", "march", "april", "may", "june", "july",
                                         "august", "september", "october", "november", "december"])}
@@ -7204,8 +7417,21 @@ def _parse_due(text):
         except Exception: pass
     return None
 
-_REQ_PAT = re.compile(r"\b(can you|could you|would you|can we|please (?:can you|could you|send|share|review|confirm|let)|need(?:s| you)? to|let me know|following up on|follow(?:ing)? up|action item|to-?do\b|don'?t forget|make sure (?:you|to)|when you (?:get|have) a (?:chance|sec|moment)|get back to me|circle back|waiting (?:on|for) you|by (?:eod|cob|tomorrow|monday|tuesday|wednesday|thursday|friday|next week))\b", re.I)
-_COMMIT_PAT = re.compile(r"\b(i'?ll|i will|i'?m going to|i'?m gonna|we'?ll|we will|i can (?:send|get|share|put|pull)|let me (?:send|get|pull|put|check|circle)|on my end i|i'?ll follow up|i'?ll send|i'?ll get you|i'?ll have)\b", re.I)
+_REQ_PAT = re.compile(r"\b(can you|could you|would you|can we|please (?:can you|could you|send|share|review|confirm|let)|need(?:s| you)? to|let me know if|following up on|action item|to-?do\b|don['’]?t forget|make sure (?:you|to)|when you (?:get|have) a (?:chance|sec|moment)|get back to me|circle back|waiting (?:on|for) you|by (?:eod|cob|tomorrow|monday|tuesday|wednesday|thursday|friday|next week))\b", re.I)
+# NOTE: contraction forms REQUIRE an apostrophe (straight ' or curly '). The old `i'?ll`/`we'?ll` (optional
+# apostrophe) also matched the plain words "ill"/"well", so "Hope you're well!" got tagged "(you committed)"
+# -- which flooded a bulk-outreach inbox with junk tasks. Do NOT reintroduce optional-apostrophe contractions.
+_COMMIT_PAT = re.compile(r"(\bi['’]ll\b|\bi will\b|\bi['’]m going to\b|\bi['’]m gonna\b|\bwe['’]ll\b|\bwe will\b|\bi can (?:send|get|share|put|pull)\b|\blet me (?:send|get|pull|put|check|circle)\b|\bon my end i\b)", re.I)
+# greetings / sign-offs / pleasantries are NOT tasks -- never extract them (the bulk-outreach failure mode)
+_TASK_BOILER = ("hope you're well","hope you are well","hope youre well","hope all is well","hope this finds you",
+                "hope this email finds you","hope you had","hope your week","hope you're having","just checking in",
+                "just following up","let me know what you think","looking forward","thanks so much","thank you so much",
+                "talk soon","best regards","warm regards","kind regards","happy to help","great to connect",
+                "nice to meet","nice to connect","this is incredibly helpful","hope all is going","hope you enjoy")
+def _is_task_boiler(s):
+    low = (s or "").lower().strip()
+    if re.match(r"^(hi|hello|hey|dear|good (morning|afternoon|evening))\b", low): return True   # pure greeting opener
+    return any(b in low for b in _TASK_BOILER)
 def _split_sentences(text):
     return [s.strip() for s in re.split(r"(?<=[.!?\n])\s+", (text or "").replace("\r", " ")) if 8 <= len(s.strip()) <= 240]
 
@@ -7213,8 +7439,10 @@ def _extract_tasks_from_text(text, outgoing):
     """BALANCED: a candidate per sentence that's a clear request (incoming) or commitment (outgoing). No AI."""
     out = []
     for s in _split_sentences(text)[:40]:
+        s = _html.unescape(s)
         pat = _COMMIT_PAT if outgoing else _REQ_PAT
         if not pat.search(s): continue
+        if _is_task_boiler(s): continue                  # skip greetings / pleasantries / sign-offs
         if s.startswith(">") or "unsubscribe" in s.lower() or "http" in s.lower() and len(s) > 160: continue
         due = _parse_due(s)
         conf = 0.5 + (0.25 if due else 0) + (0.15 if re.search(r"\b(action item|please|need)\b", s, re.I) else 0)
@@ -7981,6 +8209,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/google/gmail-unread": return self._s(200, json.dumps(gmail_unread()))
         if u.path == "/api/session-bar":   return self._s(200, json.dumps(session_bar()))
         if u.path == "/api/claude-accounts": return self._s(200, json.dumps(account_list()))
+        if u.path == "/api/account-windows": return self._s(200, json.dumps(account_windows_all()))
         if u.path == "/api/google/gmail-thread":  return self._s(200, json.dumps(gmail_thread(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-att":
             b, err = gmail_attachment_bytes(q.get("id", [""])[0], q.get("att", [""])[0])
@@ -8107,6 +8336,14 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(account_remove(body.get("label", ""))))
         if u.path == "/api/claude-account/usage":
             return self._s(200, json.dumps(account_usage_current()))
+        if u.path == "/api/account-windows/refresh":
+            return self._s(200, json.dumps(account_windows_refresh(body.get("email", ""))))
+        if u.path == "/api/account-windows/refresh-all":
+            _acct_poll_once(); return self._s(200, json.dumps(account_windows_all()))
+        if u.path == "/api/account-rotation":
+            return self._s(200, json.dumps(account_rotation_set(body.get("email", ""), bool(body.get("in", True)))))
+        if u.path == "/api/account-set-token":
+            return self._s(200, json.dumps(account_set_token(body.get("email", ""), body.get("token", ""))))
         if u.path == "/api/term-mouse":     # per-session tmux mouse: on=wheel-scroll, off=drag-select+copy
             nm = re.sub(r"[^A-Za-z0-9_-]", "", body.get("name", ""))[:48]
             on = bool(body.get("on", True))
@@ -8833,6 +9070,15 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .sparkwrap{display:inline-flex;align-items:flex-end;cursor:pointer;border:1px solid var(--line);border-radius:8px;padding:3px 6px;background:var(--card2)}
 .sparkwrap:hover{border-color:var(--accent)}
 /* Usage analytics lens */
+/* account fuel gauges (per-account rate-limit windows) */
+.awrow{display:flex;align-items:center;gap:11px}
+.awlbl{flex:0 0 122px;font-size:12px;color:#9aa0ad;white-space:nowrap}
+.awtrack{flex:1;min-width:70px;height:11px;border-radius:6px;background:#0008;overflow:hidden;box-shadow:inset 0 0 0 1px #ffffff0a}
+.awfill{height:100%;border-radius:6px;transition:width .45s ease}
+.awsub{flex:0 0 auto;font-size:11.5px;color:#9aa0ad;white-space:nowrap}
+.awbadge{font-size:10.5px;font-weight:700;border-radius:8px;padding:2px 9px;letter-spacing:.2px;white-space:nowrap}
+.awtog{font-size:11.5px;color:#9aa0ad;display:inline-flex;align-items:center;gap:5px;cursor:pointer;user-select:none}
+@media(max-width:680px){.awrow{flex-wrap:wrap}.awlbl{flex-basis:100%}.awsub{flex-basis:100%}}
 .ucards{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:12px}
 .ucard{background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:14px}
 .tokrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(146px,1fr));gap:10px;margin-top:11px}
@@ -9994,7 +10240,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="chief"><i class="ph-light ph-medal"></i>Chief of Staff</button>
 <button data-l="tree"><i class="ph-light ph-git-branch"></i>Convo Tree</button>
 <button data-l="desktop"><i class="ph-light ph-monitor"></i>Remote Desktop</button>
-<button data-l="usage"><i class="ph-light ph-chart-line-up"></i>Usage</button>
+<button data-l="usage"><i class="ph-light ph-chart-line-up"></i>Accounts / Usage</button>
 <button data-l="backup"><i class="ph-light ph-floppy-disk"></i>Backup</button>
 <button data-l="security"><i class="ph-light ph-shield-check"></i>Security</button>
 <button data-l="agents"><i class="ph-light ph-robot"></i>Agents</button>
@@ -10008,7 +10254,6 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="ideas"><i class="ph-light ph-lightbulb"></i>Ideas</button>
 <button data-l="docs"><i class="ph-light ph-book-open"></i>Docs</button>
 <button data-l="doctor"><i class="ph-light ph-stethoscope"></i>Doctor</button>
-<button data-l="accounts"><i class="ph-light ph-identification-badge"></i>Claude Accounts</button>
 <button data-l="settings"><i class="ph-light ph-gear"></i>Settings</button></nav>
 <div id="navmode" title="Tabs reorder themselves by how often you use them. Drag any tab to pin a custom order."></div>
 <div class="health" id="svchealth"></div>
@@ -10494,12 +10739,74 @@ const URANGES=[{k:'60m',span:3600,lbl:'1 hr',tot:'hour',desc:'last hour'},{k:'5h
 function uRange(){return URANGES.find(r=>r.k==USAGERANGE)||URANGES[2];}
 const UMC={Opus:'#e8c547',Sonnet:'#58a6ff',Haiku:'#3fb950',Fable:'#bc8cff','?':'#8b949e'};
 function setURange(r){USAGERANGE=r;renderUsage();}
-async function loadUsage(){document.getElementById("grid").innerHTML=empty("Loading usage analytics…");
+async function loadUsage(){document.getElementById("grid").innerHTML=empty("Loading accounts + usage…");
   try{USAGE=await(await fetch('/api/usage')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load usage.");return;}
   renderUsage();
   loadFleet();   // fleet rollup pulls from every node over the mesh (async; re-renders when it lands)
+  if(window.CC&&window.CC.accountWallet) loadAcctWin();   // per-account fuel gauges (cached server-side; cheap)
   clearInterval(window.UTIMER);window.UTIMER=setInterval(async()=>{if(LENS!='usage'){clearInterval(window.UTIMER);return;}
-    try{USAGE=await(await fetch('/api/usage')).json();renderUsage();}catch(e){} loadFleet();},15000);}
+    try{USAGE=await(await fetch('/api/usage')).json();renderUsage();}catch(e){} loadFleet(); if(window.CC&&window.CC.accountWallet) loadAcctWin();},15000);}
+// ---- Account fuel gauges (per-account rate-limit windows, merged into the Accounts/Usage lens) ----
+let ACCTWIN=null;
+async function loadAcctWin(){ try{ ACCTWIN=await(await fetch('/api/account-windows')).json(); }catch(e){ ACCTWIN=null; } if(LENS==='usage') renderUsage(); }
+function awDur(s){ if(s==null)return '?'; s=Math.max(0,s); return s<3600?Math.round(s/60)+'m':s<86400?(s/3600).toFixed(1)+'h':(s/86400).toFixed(1)+'d'; }
+function awBar(w,label){ if(!w) return '<div class="awrow"><div class="awlbl">'+label+'</div><div class="awtrack"></div><div class="awsub" style="opacity:.45">no data</div></div>';
+  var p=Math.max(0,Math.min(100,w.pct||0)), col=p>=85?'#f85149':p>=60?'#d29922':'#3fb950';
+  var rt=(w.ttr!=null)?(' · resets in '+awDur(w.ttr)):(w.resets?(' · resets '+e2(w.resets)):'');
+  return '<div class="awrow"><div class="awlbl">'+label+'</div>'
+    +'<div class="awtrack"><div class="awfill" style="width:'+p+'%;background:'+col+'"></div></div>'
+    +'<div class="awsub"><b style="color:#e8e8ea">'+p+'%</b> used · '+(100-p)+'% free'+rt+'</div></div>'; }
+function awBadge(st){ var M={use_next:['▶ USE NEXT','#1a1606','#e8c547',1],ready:['ready','#3fb95022','#3fb950',0],cooling:['cooling','#58a6ff22','#58a6ff',0],resting:['resting','#6b6b7822','#9aa0ad',0],tracked:['not in rotation','#6b6b7814','#8b949e',0],need_token:['enable polling','#d2992222','#d29922',0],no_data:['no data','#6b6b7814','#8b949e',0]};
+  var m=M[st]||M.no_data; return '<span class="awbadge" style="background:'+m[1]+';color:'+m[2]+(m[3]?';border:1px solid #e8c547':'')+'">'+m[0]+'</span>'; }
+function acctFuelSection(){
+  var d=ACCTWIN;
+  if(!d) return '<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🔋 Account fuel</b> <span class="sub"><span class="spin"></span> reading each account\'s limits…</span></div></div>';
+  var accts=d.accounts||[];
+  var h='<div class="card" style="cursor:default;grid-column:1/-1;background:linear-gradient(135deg,#16140c,#0d0f17);border-color:#e8c54744;box-shadow:0 0 22px #e8c54712">'
+   +'<div class="modnav"><b>🔋 Account fuel — which login to burn next</b> <span class="sub">per-account rate limits · '+(d.poll_ttl?('auto every '+Math.round(d.poll_ttl/60)+'m'):'manual')+' · zero-disruption</span> <button class="mini" onclick="awRefreshAll(this)">↻ refresh all</button></div>';
+  if(d.pick){ h+='<div style="margin-top:11px;padding:13px 15px;border:1px solid #e8c54766;border-radius:12px;background:#e8c5470d">'
+      +'<div style="font-size:19px;font-weight:800;color:#f0d05a;letter-spacing:-.2px">▶ Use '+e2(d.pick)+' next</div>'
+      +'<div class="ucsub" style="margin-top:3px">'+e2(d.pick_why||'')+'</div></div>'; }
+  else { h+='<div style="margin-top:11px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:#0006"><div class="sub">No in-rotation account has 5-hour headroom right now — they\'re cooling or resting. See the gauges below.</div></div>'; }
+  h+='<div class="ucsub" style="margin-top:11px">Live login (all sessions): <b style="color:#e8e8ea">'+e2(d.current_email||'?')+'</b> <button class="mini" onclick="acctSnapshot()" title="save / refresh the current login in the wallet">📸 snapshot</button></div></div>';
+  accts.forEach(function(a){ h+=acctFuelCard(a); });
+  return h;
+}
+function acctFuelCard(a){
+  var w=a.windows||{}, dim=(!a.in_rotation)?'opacity:.6;':'';
+  var h='<div class="card" style="cursor:default;grid-column:1/-1;'+dim+(a.use_next?'border-color:#e8c547;box-shadow:0 0 18px #e8c54722;':'')+'">'
+   +'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+   +'<b style="font-size:14.5px">'+(a.active?'🟢 ':'⚪ ')+e2(a.email)+'</b>'
+   +awBadge(a.status)
+   +(a.active?'<span class="awbadge" style="background:#3fb95018;color:#3fb950">live</span>':'')
+   +(a.has_token?'<span class="awbadge" style="background:#58a6ff14;color:#58a6ff" title="setup-token stored — polled without touching your live login">🔑 polling</span>':'')
+   +'<label class="awtog" title="include in the recommendation rotation (all accounts stay tracked either way)"><input type="checkbox" '+(a.in_rotation?'checked':'')+' onchange="awRotate(\''+esc(a.email)+'\',this.checked)"> in rotation</label>'
+   +'<span style="margin-left:auto" class="sub">'+(a.ts?('updated '+tago(a.ts)+(a.via?(' · via '+a.via):'')):'never read')+'</span>'
+   +'</div>';
+  if(a.ok){
+    h+='<div style="margin-top:11px;display:flex;flex-direction:column;gap:9px">'
+      +awBar(w.session,'5-hour session')+awBar(w.week,'Weekly · all')+awBar(w.week_sonnet,'Weekly · Sonnet')+'</div>';
+    if(a.why) h+='<div class="ucsub" style="margin-top:9px;color:'+(a.use_next?'#f0d05a':'#9aa0ad')+'">'+e2(a.why)+'</div>';
+  } else if(!a.has_token && !a.active){ h+=awTokenSetup(a); }
+  else { h+='<div class="ucsub" style="margin-top:10px">No reading yet'+(a.error?(' — '+e2(a.error)):'')+'. <button class="mini" onclick="awRefresh(\''+esc(a.email)+'\',this)">↻ read now (~20s)</button></div>'; }
+  h+='<div class="btns" style="margin-top:11px">'
+    +'<button class="mini" onclick="awRefresh(\''+esc(a.email)+'\',this)">↻ refresh</button>'
+    +(a.active?'':'<button class="mini go" onclick="acctSwitch(\''+esc(a.label||a.email)+'\',\''+esc(a.email)+'\')">▶ switch all sessions to this</button>')
+    +'</div></div>';
+  return h;
+}
+function awTokenSetup(a){
+  var id='awtok_'+(a.email||'').replace(/[^a-z0-9]/gi,'');
+  return '<div style="margin-top:11px;padding:12px;border:1px dashed #d2992255;border-radius:11px;background:#d299220a">'
+   +'<div class="sub" style="color:#e0b84a;font-weight:600">Enable zero-disruption polling for this account</div>'
+   +'<div class="ucsub" style="margin-top:5px">To read this account\'s limits without switching your live login, store a long-lived token. In a terminal logged in as <b>'+e2(a.email)+'</b>, run <code style="user-select:all;background:#0007;padding:1px 5px;border-radius:4px">claude setup-token</code> (one-time, opens a browser, ~1-year token), then paste the printed token here:</div>'
+   +'<div style="display:flex;gap:7px;margin-top:9px;flex-wrap:wrap"><input id="'+id+'" class="mini" style="flex:1;min-width:230px" placeholder="paste setup-token (sk-ant-oat…)" autocomplete="off">'
+   +'<button class="mini go" onclick="awSaveToken(\''+esc(a.email)+'\',\''+id+'\',this)">save + verify</button></div></div>';
+}
+async function awRefresh(email,btn){ if(btn){btn.disabled=true;btn.textContent='reading… ~20s';} try{ await fetch('/api/account-windows/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})}); }catch(e){} await loadAcctWin(); }
+async function awRefreshAll(btn){ if(btn){btn.disabled=true;btn.textContent='reading all… (~20s each)';} try{ await fetch('/api/account-windows/refresh-all',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); }catch(e){} await loadAcctWin(); if(btn){btn.disabled=false;btn.textContent='↻ refresh all';} }
+async function awRotate(email,on){ try{ await fetch('/api/account-rotation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email,in:on})}); }catch(e){} loadAcctWin(); }
+async function awSaveToken(email,inputId,btn){ var el=document.getElementById(inputId),v=((el||{}).value||'').trim(); if(!v){toast('paste the token first');return;} if(btn){btn.disabled=true;btn.textContent='saving + verifying… ~20s';} var r={}; try{ r=await(await fetch('/api/account-set-token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email,token:v})})).json(); }catch(e){} if(r&&r.ok){toast('✓ polling enabled for '+email,4000);}else{toast('token saved but the test read failed: '+((r&&r.error)||'?'),6000);} loadAcctWin(); }
 function udur(s){s=Math.max(0,s);return s<3600?Math.round(s/60)+'m':s<86400?(s/3600).toFixed(1)+'h':(s/86400).toFixed(1)+'d';}
 function ubLabel(i,n,span){const a=(n-i-0.5)*(span/n);return a<3600?Math.round(a/60)+'m ago':a<86400?(a/3600).toFixed(1)+'h ago':(a/86400).toFixed(1)+'d ago';}
 function uBarChart(series,key,span){const n=series.length||1,W=1000,H=210,pad=16,bw=W/n,vals=series.map(b=>b[key]||0),mx=Math.max(1,...vals);
@@ -10566,8 +10873,8 @@ function fleetCard(){
 }
 function renderUsage(){if(!USAGE)return;const u=USAGE,t=u.totals,cur=uRange(),ser=u.series[cur.k]||[],span=cur.span,tw=(t[cur.tot]||{total:0,cost:0,calls:0,output:0});
   const n=ser.length||1,bdur=span/n,peak=Math.max(0,...ser.map(b=>b.tok||0)),rate=tw.total/Math.max(1/60,span/3600);
-  // TOP: fleet rollup (overall + by-account + by-node across all nodes), then the metered-value hero.
-  let h=fleetCard()+heroBanner(cur);
+  // TOP: per-account fuel gauges (rate-limit windows) when the wallet is on, then fleet rollup + metered hero.
+  let h=((window.CC&&window.CC.accountWallet)?acctFuelSection():'')+fleetCard()+heroBanner(cur);
   h+='<div class="card" style="cursor:default"><div class="modnav"><b>🪙 Metered value by window</b> <span class="sub">live · every window at a glance · click one to drive the charts below</span></div>'
     +'<div class="tokrow">'+URANGES.map(tokCard).join('')+'</div>'
     +'<div class="ucsub" style="margin-top:10px"><b style="color:#e8c547">'+cur.lbl+'</b> detail: <b>'+fmtTok(tw.total)+'</b> processed · <b>'+fmtTok(tw.bill||0)+'</b> billable · <b>'+fmtTok(tw.output)+'</b> out · <b>'+fmtTok(rate)+'/hr</b> · peak '+udur(bdur)+' bucket <b>'+fmtTok(peak)+'</b> · this node <b style="color:#e8c547">'+fmtUSD((tw.self||{}).cost||0)+'</b> of '+fmtUSD(tw.cost)+'</div></div>';
@@ -14363,7 +14670,7 @@ async function treeResume(id,cwd,fork){const _c=CONVOMAP[id]||{};toast((fork?"Fo
   const r=await(await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({machine:"studio",id:id,cwd:cwd,fork:!!fork,label:_c.label||""})})).json();
   if(!r||!r.ok){toast("Failed: "+((r||{}).error||"?"),5000);return;}
   closeInfo();_openTerm(r);}
-const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',agency:'Agency',calls:'Calls',capture:'Capture',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Usage Analytics',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Claude Accounts'};
+const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',agency:'Agency',calls:'Calls',capture:'Capture',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Accounts / Usage',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Accounts / Usage'};
 // ---- Chief of Staff: your office (top-level command + a direct line to me) ----
 function gotoLens(l){const b=document.querySelector('#lens button[data-l="'+l+'"]');if(b)b.click();}
 async function talkChief(){toast("Opening your Chief of Staff…");
@@ -15740,6 +16047,8 @@ if __name__ == "__main__":
                 if _ao.get("moved"): print("icloud deliverables: aged off %d file(s) internal->SSD" % _ao["moved"])
             except Exception: pass
     threading.Thread(target=_boot_housekeeping, daemon=True).start()
+    if ACCOUNT_WALLET:
+        threading.Thread(target=_acct_poll_loop, daemon=True).start()  # per-account /usage fuel gauges (token-isolated)
     threading.Thread(target=_autoapprove_loop, daemon=True).start()   # keep agents off the permission-prompt wall
     threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
     threading.Thread(target=_gmail_sync_loop, daemon=True).start()      # keep recently-viewed Gmail lists warm (cache + outage fallback)

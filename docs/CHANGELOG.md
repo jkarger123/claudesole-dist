@@ -3,7 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
-## 0.59.0 -- 2026-06-26
+## 0.60.0 -- 2026-06-26
+- TASKS hardening -- fix the "list full of repeat/junk tasks" failure (hit on a bulk-outreach inbox):
+  * ROOT CAUSE: the commitment regex used optional-apostrophe contractions (`i'?ll`/`we'?ll`), which ALSO
+    match the plain words "ill"/"well" -- so every "Hope you're well!" outreach greeting was extracted as a
+    "(you committed)" task. Contractions now REQUIRE an apostrophe (straight or curly); "ill"/"well" no longer match.
+  * Greeting/pleasantry/sign-off denylist (`_is_task_boiler`): "hope you're well", "let me know what you think",
+    "looking forward", "thanks so much", "hi/hello/dear ...", etc. are never extracted as tasks.
+  * Titles are HTML-unescaped + tag-stripped in task_add (no more raw `&#39;`); whitespace collapsed.
+  * Dedup hardened: a fingerprint already seen never re-adds in ANY status -- dismissed/done suggestions don't
+    resurrect on the next scan (the morning loop is now safely idempotent).
+  Verified: greetings/"ill"/"well" no longer match; real commitments/requests still do. AFP task list cleaned.
 - TASKBAR drag-to-reorder: press-and-hold a session tile in the bottom dock -> the dock WIGGLES and the tile
   lifts (clearly grabbable) -> drag left/right to reposition -> release. The order is saved PER DEVICE
   (localStorage `hpcc_sb_order`) and survives refresh; new sessions append after your arranged ones. Pointer-
