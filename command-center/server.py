@@ -9408,13 +9408,16 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .us-brow{display:flex;align-items:center;margin-top:4px}
 .us-bl{flex:0 0 54px;padding-right:9px;font-size:8.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--dim);font-weight:600;text-align:right}
 .us-bat{flex:1;display:flex;gap:4px;height:8px}
-.us-slot{flex:1;background:#14120c;border-radius:3px;overflow:hidden;box-shadow:inset 0 0 0 1px #ffffff07;cursor:pointer}
-.us-slot.use{box-shadow:inset 0 0 0 1px #ffffff07,0 0 0 1px #d8bd6a55,0 0 4px #b8922e33}
+.us-slot{flex:1;background:#14120c;border-radius:3px;overflow:hidden;box-shadow:inset 0 0 0 1px #b8922e40;cursor:pointer}
+.us-slot.use{box-shadow:inset 0 0 0 1px #d8bd6a99,0 0 5px #cda63f44}
 .us-fill{height:100%;border-radius:3px;transition:width .4s ease}
 .us-flabels{display:flex;margin-top:6px}.us-fsp{flex:0 0 54px}.us-flrow{flex:1;display:flex;gap:4px}
 .us-fl{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0}
 .us-nm{font-size:11px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.us-st{color:var(--accent-light);font-size:10px}
+.us-st{color:var(--accent-light);font-size:10px;margin-left:3px}
+.us-live{font-size:8.5px;font-weight:600;color:#3fb950;margin-left:5px;white-space:nowrap}
+.us-live.on{color:#57d56c}
+.us-live.off{color:#5a5a68}
 .us-nums{font-size:9.5px;color:var(--mut);white-space:nowrap}.us-nums b{color:#cdcdd6;font-weight:600}.us-nums .x{color:var(--dim)}
 .sparkwrap:hover{border-color:var(--accent)}
 /* Usage analytics lens */
@@ -11058,13 +11061,18 @@ function cycleSpendWin(){var ks=US_WINS.map(function(w){return w[0];}),i=ks.inde
 var STRIPMIN=(localStorage.getItem('hpcc_stripmin')==='1');
 function toggleStripMin(){STRIPMIN=!STRIPMIN;try{localStorage.setItem('hpcc_stripmin',STRIPMIN?'1':'0');}catch(e){}renderStrip();}
 function stripMinBar(){ // collapsed: a sleek title bar (remembers the choice); a faint live summary keeps it glanceable
-  var sum='';try{var c=((TOKDATA.totals||{}).day||{}).cost,pick=(ACCTWIN&&ACCTWIN.pick)?(''+ACCTWIN.pick).split('@')[0]:'';
-    var b=[];if(pick)b.push('▶ <b>'+e2(pick)+'</b>');if(c!=null)b.push(fmtUSD(c)+' 24h');sum=b.join(' &nbsp;·&nbsp; ');}catch(e){}
+  var sum='';try{var c=((TOKDATA.totals||{}).day||{}).cost,b=[];
+    var la=((ACCTWIN&&ACCTWIN.accounts)||[]).filter(function(a){return a.active;})[0];
+    if(la)b.push('<span class="us-live on">●</span> <b>'+e2(shortName(la.email))+'</b> live');
+    var pick=(ACCTWIN&&ACCTWIN.pick)?shortName(ACCTWIN.pick):'';
+    if(pick)b.push('<span class="us-st">▶</span> '+e2(pick));
+    if(c!=null)b.push(fmtUSD(c)+' 24h');sum=b.join(' &nbsp;·&nbsp; ');}catch(e){}
   return '<div class="us-minbar" onclick="toggleStripMin()" title="expand the usage / account meter">'
     +'<span class="us-mb-l"><span class="us-mb-i">📊</span> Usage · Account Meter</span>'
     +'<span class="us-mb-r">'+sum+'<span class="us-mb-exp" title="expand"></span></span></div>';}
 // fill = % USED (gauge fills as the account is consumed); a touch warmer/brighter as it nears the limit
 function fuelShade(u){return u>=85?['#c99a2e','#e2bb48']:['#a37f27','#b8922e'];}
+function shortName(em){return (em||'').split('@')[0].split('.')[0];}  // sarah.a.karger -> sarah (full email stays in tooltips)
 function totalsStrip(){if(STRIPMIN)return stripMinBar();const t=TOKDATA.totals;if(!t)return '';
   var sel=SPENDWIN,selIdx=Math.max(0,US_WINS.map(function(w){return w[0];}).indexOf(sel));
   var rail=US_WINS.map(function(w){var o=t[w[2]]||{},rt=o.ratio||0,over=rt>1,x=over?rt:(rt>0?1/rt:0);
@@ -11095,9 +11103,17 @@ function fleetFuel(){
       var fill=u<=1?'':'<div class="us-fill" style="width:'+u+'%;background:linear-gradient(90deg,'+g[0]+','+g[1]+')"></div>';
       return '<div class="us-slot'+(a.use_next?' use':'')+'" title="'+e2(tipOf(a))+'" onclick="gotoLens(\'usage\')">'+fill+'</div>';}).join('')
     +'</div></div>';}
-  var labels=accts.map(function(a){var s=(a.windows||{}).session,wk=(a.windows||{}).week,nm=(a.email||'').split('@')[0];
-    return '<div class="us-fl"><span class="us-nm" title="'+e2(a.email)+'">'+e2(nm)+(a.use_next?' <span class="us-st">▶</span>':'')+'</span>'
-      +'<span class="us-nums"><span class="x">5h</span> <b>'+(s?s.pct:'—')+'%</b> <span class="x">· wk</span> <b>'+(wk?wk.pct:'—')+'%</b>'+((wk&&wk.pct>=98)?' <span style="color:#c99a2e">maxed</span>':'')+'</span></div>';}).join('');
+  var labels=accts.map(function(a){var s=(a.windows||{}).session,wk=(a.windows||{}).week,nm=shortName(a.email);
+    var ls=(a.live_on||[]).join(', ');
+    // LIVE marker (green ● — which user is logged into this account) is distinct from the gold ▶ "use next" recommendation
+    var live=a.active?'<span class="us-live on" title="you are logged into this account on THIS machine">● live</span>'
+      :(ls?'<span class="us-live" title="logged in on '+e2(ls)+'">● '+e2(ls)+'</span>'
+          :'<span class="us-live off" title="not logged in anywhere — showing last-known usage + resets">○ idle</span>');
+    var rec=a.use_next?'<span class="us-st" title="recommended account to use NEXT (most headroom, resets soonest)">▶</span>':'';
+    var ttrs=[];if(s&&s.ttr!=null)ttrs.push(s.ttr);if(wk&&wk.ttr!=null)ttrs.push(wk.ttr);
+    var rs=ttrs.length?(' <span class="x">· ↻'+awDur(Math.min.apply(null,ttrs))+'</span>'):'';
+    return '<div class="us-fl"><span class="us-nm" title="'+e2(a.email)+'">'+e2(nm)+' '+live+rec+'</span>'
+      +'<span class="us-nums"><span class="x">5h</span> <b>'+(s?s.pct:'—')+'%</b> <span class="x">· wk</span> <b>'+(wk?wk.pct:'—')+'%</b>'+((wk&&wk.pct>=98)?' <span style="color:#c99a2e">maxed</span>':'')+rs+'</span></div>';}).join('');
   return '<div class="us-vr"></div><div class="us-sec us-fuel">'
     +row('5-hr','session')+row('weekly','week')
     +'<div class="us-flabels"><span class="us-fsp"></span><div class="us-flrow">'+labels+'</div></div></div>';

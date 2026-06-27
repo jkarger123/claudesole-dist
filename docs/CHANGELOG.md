@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.65.0 -- 2026-06-26
+- Sessions strip — distinguish LIVE from RECOMMENDED (the overseer already tracked which macOS user is on which
+  account via current_email/live_on per store; this SURFACES it). Each account in the fleet-fuel barometer now
+  shows a green ● LIVE marker — "● live" when it's the login on the machine you're viewing, "● <user>" when it's
+  live on another user (e.g. sarah ● sarahaios), "○ idle" when logged in nowhere (last-known usage + reset
+  dates remembered) — DISTINCT from the gold ▶ "use next" recommendation. Fixes mistaking ▶ for "logged in"
+  (e.g. on AFP, where sarah is live but getcalibrated is the pick).
+- Plus: a ↻ soonest-reset countdown per account, display names shortened to first-name, and a subtle gold
+  border on every battery slot so each gauge shows its full footprint even at 0% used.
+
 ## 0.64.0 -- 2026-06-26
 - Sessions "Usage · Account Meter" strip — ground-up redesign of the bar above the Sessions terminal into ONE
   cohesive instrument (design "A3"; no bordered boxes, tabular-mono numbers, monochrome gold, hairline dividers):
