@@ -11377,6 +11377,7 @@ function render(){
   else if(LENS=="agents"){loadAgents();return;}
   else if(LENS=="marketplace"){loadMarketplace();return;}
   else if(LENS=="affiliate"){loadAffiliate();return;}
+  else if(LENS=="aisearch"){loadAisearch();return;}
   else if(LENS=="agency"){loadAgency();return;}
   else if(LENS=="calls"){loadCalls();return;}
   else if(LENS=="capture"){loadCapture();return;}
@@ -15157,6 +15158,57 @@ async function affRunSync(){
   try{var r=await(await fetch('/api/routine-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Skimlinks weekly sync'})})).json();
     toast(r&&r.ok?'Sync started — watch the Routines lens for status.':('Could not start sync: '+((r||{}).error||'?')),5000);}catch(e){toast('Failed to start sync',4000);}
 }
+// ===== AI Visibility lens (AISearch Pro) -- KPI strip + 2-col (request table | reports/accounts side). Reuses .aff-* layout. =====
+var AISEXT='aisearch-pro', AIS={ep:''};
+async function aisData(resource,extra){try{return await(await fetch('/api/ext-data?ext='+encodeURIComponent(AISEXT)+'&resource='+resource+(extra||''))).json();}catch(e){return {ok:false,error:String(e)};}}
+function aisCost(v,dp){v=parseFloat(v);return isNaN(v)?'—':'$'+v.toFixed(dp==null?4:dp);}
+function aisProv(p){try{var a=(typeof p==='string')?JSON.parse(p):p;return Array.isArray(a)?a.join(', '):(a?Object.keys(a).join(', '):'');}catch(e){return '';}}
+async function loadAisearch(){
+  var g=document.getElementById('grid');g.innerHTML=empty('Loading AI visibility…');
+  var rc=await aisData('requests','&count=1');
+  if(!rc.ok){
+    var m=(rc.error||'').toLowerCase();
+    var hint=/not configured/.test(m)?'Set AISEARCH_SUPABASE_URL/KEY in this node\'s deploy env (run Set up).':(/not licensed/.test(m)?'This node isn\'t licensed for AISearch — Mission Control must grant a signed entitlement.':(/not installed/.test(m)?'AISearch isn\'t installed on this node.':'Could not reach the data: '+esc(rc.error||'?')));
+    g.innerHTML='<div class="card" style="cursor:default"><h3><span>🔎 AI Visibility</span></h3><div class="meta" style="margin-top:8px">'+hint+'</div></div>';return;
+  }
+  var pc=await aisData('reports','&count=1'); var ac=await aisData('accounts','&count=1');
+  var reqs=((await aisData('requests',(AIS.ep?('&endpoint='+encodeURIComponent(AIS.ep)):'')+'&limit=500')).rows)||[];
+  var reports=((await aisData('reports','&limit=25')).rows)||[];
+  var accts=((await aisData('accounts','&limit=50')).rows)||[];
+  var totCost=reqs.reduce(function(s,r){return s+(parseFloat(r.cost_total)||0);},0);
+  var oks=reqs.filter(function(r){return r.success;}).length;
+  var succ=reqs.length?Math.round(100*oks/reqs.length):0;
+  var avgLat=reqs.length?Math.round(reqs.reduce(function(s,r){return s+(parseFloat(r.latency_ms)||0);},0)/reqs.length):0;
+  var eps=Array.from(new Set(reqs.map(function(r){return r.endpoint;}).filter(Boolean)));
+  var pill=function(v,l){return '<button class="mini'+(AIS.ep===v?' go':'')+'" onclick="AIS.ep=\''+v+'\';loadAisearch()">'+l+'</button>';};
+  var h=affCss()+'<div class="aff-wrap">'
+    +'<div class="aff-head"><b style="font-size:16px">🔎 AI Visibility</b><span class="sub">AISearch Pro — brand visibility across AI engines</span>'
+      +'<span style="margin-left:auto"><a class="mini go" href="https://aisearch-pro.pages.dev" target="_blank" rel="noopener" style="text-decoration:none">↗ Open product</a></span></div>'
+    +'<div class="aff-kpis">'+affKpi(Number(rc.count||reqs.length).toLocaleString(),'requests')+affKpi(aisCost(totCost,2),'total cost (shown)')
+      +affKpi(succ+'%','success rate')+affKpi(avgLat?(avgLat+'ms'):'—','avg latency')
+      +affKpi(Number((pc&&pc.count)||0).toLocaleString(),'cached reports')+affKpi(Number((ac&&ac.count)||0).toLocaleString(),'accounts')+'</div>'
+    +'<div class="aff-tools">'+pill('','All endpoints')+eps.map(function(e){return pill(e,e.replace('/api/',''));}).join('')+'</div>'
+    +'<div class="aff-panels">'
+      +'<div class="aff-pane"><h3><span>Requests</span><span class="sub">'+reqs.length+' shown</span></h3><div class="aff-scroll"><table class="aff-tbl">'
+        +'<thead><tr><th>When</th><th>Endpoint</th><th>Brand</th><th>Providers</th><th class="num">Cost</th><th class="num">Latency</th><th>OK</th></tr></thead><tbody>'
+        +(reqs.map(aisReqRow).join('')||'<tr><td colspan="7" style="padding:16px;text-align:center;color:var(--dim)">no requests yet</td></tr>')+'</tbody></table></div></div>'
+      +'<div class="aff-pane"><h3><span>📄 Recent reports</span><span class="sub">'+reports.length+'</span></h3><div class="aff-scroll" style="max-height:32vh">'
+        +(reports.length?reports.map(aisReportRow).join(''):'<div class="meta" style="padding:13px">no reports yet</div>')
+        +'</div><h3 style="border-top:1px solid var(--line)"><span>👤 Accounts</span><span class="sub">'+accts.length+'</span></h3><div class="aff-scroll" style="max-height:22vh">'
+        +(accts.length?accts.map(aisAcctRow).join(''):'<div class="meta" style="padding:13px">no accounts</div>')+'</div></div>'
+    +'</div></div>';
+  g.innerHTML=h;
+}
+function aisReqRow(r){
+  var brand=r.brand||'';
+  var ss=brand?ssAttr({kind:'entity',name:brand,title:brand+' — AI visibility',kind_label:'brand',fields:{Brand:brand,Endpoint:r.endpoint||'',Cost:aisCost(r.cost_total),"Sources found":r.sources_found,When:r.created_at}}):'';
+  return '<tr '+ss+'><td style="color:var(--dim);white-space:nowrap">'+tago(r.created_at)+'</td>'
+    +'<td>'+esc((r.endpoint||'').replace('/api/',''))+'</td><td style="font-weight:600">'+esc(brand||'—')+(r.competitor?(' <span class="sub">vs '+esc(r.competitor)+'</span>'):'')+'</td>'
+    +'<td class="sub">'+esc(aisProv(r.providers_used))+'</td><td class="num">'+aisCost(r.cost_total)+'</td><td class="num" style="color:var(--dim)">'+(r.latency_ms?(r.latency_ms+'ms'):'—')+'</td>'
+    +'<td style="color:'+(r.success?'#3fb950':'#f85149')+'">'+(r.success?'✓':'✕')+'</td></tr>';
+}
+function aisReportRow(c){return '<div class="aff-mv"><span style="overflow:hidden;text-overflow:ellipsis"><b>'+esc((c.brand||'?')).slice(0,28)+'</b><div class="sub">'+esc((c.query||'')).slice(0,38)+' · '+tago(c.created_at)+'</div></span><span class="sub" style="white-space:nowrap">'+(c.sources_count!=null?(c.sources_count+' src'):'')+'</span></div>';}
+function aisAcctRow(a){return '<div class="aff-mv"><span><b>'+esc(a.display_name||'?')+'</b> <span class="sub">'+esc(a.role||'')+'</span></span><span class="sub">'+(a.is_active?'active':'inactive')+'</span></div>';}
 async function extUninstall(id){if(!confirm('Remove extension "'+id+'"? (your accounts/keys are NOT deleted)'))return;
   const r=await(await fetch('/api/extension-uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})).json();
   if(r&&r.ok){toast('Removed '+id);loadMarketplace();}else toast('Failed: '+((r||{}).error||'?'),5000);}

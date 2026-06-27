@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.76.0 -- 2026-06-27
+- AISearch Pro -- 2nd paid extension ($5/mo, BYOK). The Mac daemon/tunnel are GONE: the worker is redeployed as a
+  serverless Cloudflare Pages Function (aisearch-pro.pages.dev) under MC -- killing the TCC/launchd/SSD headache.
+  Per-account BYOK: each account uses its own AI keys (effEnv override + 402 gate for external accounts with no
+  keys; owner/admin falls back to MC's Pages secrets = Sarah's keys, auto-filled). Stale model IDs refreshed
+  (claude-sonnet-4-5, gemini-2.5-flash; gpt-5.2 via Responses API) -- verified all 4 providers return live results.
+  New "AI Visibility" lens (KPI strip + 2-col request table | reports/accounts side panel; no stacked cards),
+  reading the analytics tables via the read-only /api/ext-data proxy; draggable brand rows. extension.json declares
+  the BYOK keys + data_sources + lens; schema.sql adds per-account api_keys/byok. (External-BYOK needs a one-time
+  SQL migration in Supabase -- the mgmt API is unreachable from the build env.)
+
 ## 0.75.0 -- 2026-06-27
 - Host-designated extension routines: an extension's scheduled routine now registers on install ONLY where
   `cc.config extension_routine_host` is true (default true -> single-node installs run their own routines). In a
