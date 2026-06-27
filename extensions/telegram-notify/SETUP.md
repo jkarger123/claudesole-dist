@@ -46,7 +46,25 @@ Two or three real things the user can now do:
   (wire into the relevant agent-tools / loop hooks).
 - Inbound: message the bot to ask an agent something from your phone; the bridge relays it.
 - Quick status: text the bot "status" and have an agent reply with the current project posture.
-  (Inbound relay is the deeper build -- see TWO_WAY_COMMS_RESEARCH.md in the text2tune tree for prior design.)
+
+### Per-session comms (the built-in smart router)
+Once this extension is installed AND the env has the token + chat id, every session terminal gets a
+**Telegram** toggle in its bar (the more-menu, next to Compact). Flip it ON for a session and:
+- When that session goes busy -> idle (task done OR blocked waiting) the bot **pings your phone** with
+  the pane tail. Reply and it's injected straight back INTO that session.
+- **Many sessions on at once?** Each gets a stable number. The ping is tagged `#N node/Title`. To answer:
+  reply-TO the ping, or start your message with the number (`2 ship it`). If only ONE session is on,
+  just reply -- no number needed.
+- **Bot commands** (text the bot): `/list` (numbered sessions + status), `/focus N [30m|2h]` (stick plain
+  replies to #N; bare = 1h; `/focus off` to clear), `/off N` (turn Telegram off for #N from your phone),
+  `/mute N [time]` + `/unmute N`, `/help`.
+
+## Per-instance creds (co-located nodes)
+One bot per NODE. If several ClaudeFather instances run on the same machine and share one
+`.env.claudefather`, give each its OWN bot so they don't fight over `getUpdates` (only one consumer per
+bot token -- a second is rejected with 409). Set the per-instance token/chat in that instance's
+`cc.config.json` (`telegram_bot_token` / `telegram_chat_id`); it overrides the shared env. Simplest path:
+only install + configure telegram-notify on the one node you want on your phone.
 
 ## Best practices / Safety
 - The bot token is a full credential -- gitignored env only, never printed in full, never committed.

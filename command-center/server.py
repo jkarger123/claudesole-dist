@@ -3832,45 +3832,74 @@ def notify_send(text):
         out["skipped"].append("no notify channel installed (install telegram-notify in the Marketplace)")
     return out
 
-# ==== TELEGRAM PER-SESSION COMMS -- route a session's correspondence to your phone, toggle per session ========
-# Built on telegram-notify (the bot + creds). Per session you can flip ON: when it goes busy->idle (task done OR
-# blocked waiting), it pings your phone with the tail; you REPLY (reply-to the message, or prefix 'name: ...') and
-# it's injected back INTO that session. Toggle on/off mid-conversation. State + getUpdates offset are node-local.
+# ==== TELEGRAM PER-SESSION COMMS -- route any session's correspondence to your phone, smart multi-session =======
+# Built on telegram-notify (the bot + creds; one bot per NODE). Toggle a session ON: when it goes busy->idle (task
+# done OR blocked waiting) it pings your phone with the tail; you REPLY and it's injected back INTO that session.
+# Smart routing for MANY enabled sessions on this node (you never need the cryptic tmux name):
+#   - EXACTLY ONE enabled  -> plain replies auto-route to it.
+#   - reply-TO a ping       -> goes to that exact session (msgmap).
+#   - leading number        -> 'N your text' routes to session #N for this one message; bare 'N' sets focus to #N.
+#   - FOCUS mode            -> '/focus N [30m|2h]' (bare = 1h) makes plain replies stick to #N; '/focus off' clears.
+#   - else (ambiguous)      -> the bot replies with the numbered /list and asks you to pick.
+# Manage from the phone: /list, /focus N [time]|off, /off N (disable), /mute N [time] + /unmute N, /help.
+# Bot creds resolve PER-INSTANCE (cc.config telegram_bot_token/telegram_chat_id) then the shared deploy env -- so
+# co-located nodes can each carry a DISTINCT bot (one getUpdates consumer per token; a 409 = another consumer ->
+# back off). State (routed list, stable number index, focus, mute, getUpdates offset, msgmap) is node-local.
 TG_STATE_FILE = os.path.join(STATE_DIR, "_tg_sessions.json")
 _TG_LOCK = threading.Lock(); _TG_BUSY = {}
+def _tg_token():   return CC.get("telegram_bot_token") or _deploy_env("TELEGRAM_BOT_TOKEN")
+def _tg_chat_id(): return CC.get("telegram_chat_id") or _deploy_env("TELEGRAM_CHAT_ID")
 def _tg_load():
     try: return json.load(open(TG_STATE_FILE))
-    except Exception: return {"routed": [], "offset": 0, "msgmap": {}}
+    except Exception: return {"routed": [], "offset": 0, "msgmap": {}, "index": {}, "focus": {}, "mute": {}}
 def _tg_save(d):
     with _TG_LOCK:
         try:
             fd = os.open(TG_STATE_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, json.dumps(d).encode()); os.close(fd)
         except Exception: pass
 def _tg_routed(): return set(_tg_load().get("routed", []))
-def _tg_ready(): return bool(_deploy_env("TELEGRAM_BOT_TOKEN") and _deploy_env("TELEGRAM_CHAT_ID") and "telegram-notify" in _ext_installed())
+def _tg_ready(): return bool(_tg_token() and _tg_chat_id() and "telegram-notify" in _ext_installed())
+def _tg_index():
+    """Assign each enabled session a STABLE small number (reusing freed numbers). Returns (by_session, by_num)."""
+    d = _tg_load(); routed = d.get("routed", []); idx = {s: n for s, n in (d.get("index") or {}).items() if s in routed}
+    used = set(idx.values())
+    for s in routed:
+        if s not in idx:
+            n = 1
+            while n in used: n += 1
+            idx[s] = n; used.add(n)
+    if idx != (d.get("index") or {}): d["index"] = idx; _tg_save(d)
+    return idx, {n: s for s, n in idx.items()}
+def _tg_label(session): return "%s/%s" % (INSTANCE_ID, _session_label(session))
 def telegram_session(name, on=None):
     name = re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:48]
     d = _tg_load(); r = set(d.get("routed", []))
     if on is True and name: r.add(name)
     elif on is False: r.discard(name)
     d["routed"] = sorted(r); _tg_save(d)
-    return {"ok": True, "on": name in r, "routed": d["routed"],
-            "configured": bool(_deploy_env("TELEGRAM_BOT_TOKEN") and _deploy_env("TELEGRAM_CHAT_ID")),
+    idx, _ = _tg_index()
+    return {"ok": True, "on": name in r, "num": idx.get(name), "count": len(r), "routed": d["routed"],
+            "configured": bool(_tg_token() and _tg_chat_id()),
             "installed": "telegram-notify" in _ext_installed()}
 def _tg_api(method, params, timeout=35):
-    tok = _deploy_env("TELEGRAM_BOT_TOKEN")
+    tok = _tg_token()
     if not tok: return None
     try:
         req = urllib.request.Request("https://api.telegram.org/bot%s/%s" % (tok, method), data=urllib.parse.urlencode(params).encode())
         with urllib.request.urlopen(req, timeout=timeout) as r: return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        try: return json.loads(e.read().decode())
+        except Exception: return {"ok": False, "error_code": getattr(e, "code", 0)}
     except Exception: return None
 def _tg_chat(text):
-    c = _deploy_env("TELEGRAM_CHAT_ID")
+    c = _tg_chat_id()
     if c: _tg_api("sendMessage", {"chat_id": c, "text": text[:3900], "disable_web_page_preview": "true"})
-def _tg_send_session(session, text):
-    c = _deploy_env("TELEGRAM_CHAT_ID")
+def _tg_send_session(session, body):
+    c = _tg_chat_id()
     if not c: return
-    res = _tg_api("sendMessage", {"chat_id": c, "text": ("[%s] %s" % (session, text))[:3900], "disable_web_page_preview": "true"})
+    idx, _ = _tg_index(); multi = len(idx) > 1
+    head = (("#%d " % idx[session]) if (multi and session in idx) else "") + _tg_label(session)
+    res = _tg_api("sendMessage", {"chat_id": c, "text": ("%s\n%s" % (head, body))[:3900], "disable_web_page_preview": "true"})
     try:
         mid = res["result"]["message_id"]; d = _tg_load(); mm = d.get("msgmap", {}); mm[str(mid)] = session
         if len(mm) > 200: mm = dict(list(mm.items())[-200:])
@@ -3881,16 +3910,110 @@ def _tg_pane_tail(name, n=14):
         o = sh([TMUX, "capture-pane", "-t", name, "-p"])[1]
         return "\n".join([l for l in o.splitlines() if l.strip()][-n:])[-1400:]
     except Exception: return ""
+def _tg_parse_dur(s, default=3600):
+    m = re.match(r"^(\d+)\s*(m|min|mins|h|hr|hour|hours)?$", (s or "").strip().lower())
+    if not m: return default
+    n = int(m.group(1)); u = m.group(2) or "m"
+    return n * 3600 if u.startswith("h") else n * 60
+def _tg_fmt_dur(sec):
+    sec = int(sec)
+    return ("%dh" % round(sec / 3600.0)) if sec >= 3600 else ("%dm" % max(1, round(sec / 60.0)))
+def _tg_num(arg, by_num):
+    try: n = int(re.sub(r"[^0-9]", "", arg or ""))
+    except Exception: return None
+    return n if n in by_num else None
+def _tg_fmt_list():
+    idx, by_num = _tg_index()
+    if not by_num: return "No sessions have Telegram on. Toggle 'Telegram' in a session's terminal bar to add one."
+    d = _tg_load(); f = d.get("focus") or {}; mu = d.get("mute") or {}
+    foc = f.get("session") if f.get("until", 0) > time.time() else None
+    lines = ["Telegram sessions on %s:" % INSTANCE_ID]
+    for n in sorted(by_num):
+        s = by_num[n]; alive = sh([TMUX, "has-session", "-t", s])[0] == 0
+        st = ("busy" if _pane_busy(s) else "idle") if alive else "closed"
+        tags = ([("focus")] if s == foc else []) + (["muted"] if mu.get(s, 0) > time.time() else [])
+        lines.append("#%d  %s -- %s%s" % (n, _session_label(s), st, (" [" + ",".join(tags) + "]" if tags else "")))
+    lines.append("Reply 'N your text' to one - or /focus N to stick to it - /off N to disable - /help")
+    return "\n".join(lines)
+def _tg_help():
+    return ("ClaudeFather Telegram -- reply to your sessions from here.\n"
+            "- reply-TO a ping, or 'N your text' -> send to session #N\n"
+            "- bare 'N' -> focus #N (plain replies go there)\n"
+            "- /list -> numbered sessions (status, focus, muted)\n"
+            "- /focus N [30m|2h] -> stick replies to #N (bare = 1h); /focus off -> clear\n"
+            "- /off N -> turn Telegram OFF for #N\n"
+            "- /mute N [time] -> pause pings for #N (still routable); /unmute N\n"
+            "If only one session is on, just reply -- no number needed.")
+def _tg_set_focus(session, dur):
+    if dur is None: dur = 3600
+    d = _tg_load(); d["focus"] = {"session": session, "until": time.time() + dur}; _tg_save(d)
+    idx, _ = _tg_index()
+    _tg_chat("Focused on #%d %s for %s. Plain replies go here; /focus off to clear." % (idx.get(session, 0), _session_label(session), _tg_fmt_dur(dur)))
+def _tg_command(text, idx, by_num):
+    """Handle a /command. Returns True if it was a recognized command (so the inbound loop stops there)."""
+    parts = text.split(); cmd = parts[0].lower().lstrip("/"); arg = parts[1] if len(parts) > 1 else ""
+    if cmd in ("list", "ls", "sessions"): _tg_chat(_tg_fmt_list()); return True
+    if cmd in ("help", "start", "h", "?"): _tg_chat(_tg_help()); return True
+    if cmd == "focus":
+        if arg.lower() in ("off", "clear", "none", ""):
+            d = _tg_load(); d["focus"] = {}; _tg_save(d); _tg_chat("Focus cleared -- replies route by number again."); return True
+        n = _tg_num(arg, by_num)
+        if not n: _tg_chat("Focus which? " + _tg_fmt_list()); return True
+        _tg_set_focus(by_num[n], _tg_parse_dur(parts[2] if len(parts) > 2 else "", default=3600)); return True
+    if cmd in ("off", "disable", "stop"):
+        n = _tg_num(arg, by_num)
+        if not n: _tg_chat("Turn off which? " + _tg_fmt_list()); return True
+        s = by_num[n]; telegram_session(s, False); _tg_chat("Telegram OFF for #%d %s." % (n, _session_label(s))); return True
+    if cmd == "mute":
+        n = _tg_num(arg, by_num)
+        if not n: _tg_chat("Mute which? " + _tg_fmt_list()); return True
+        s = by_num[n]; dur = _tg_parse_dur(parts[2] if len(parts) > 2 else "", default=3600)
+        d = _tg_load(); mu = d.get("mute") or {}; mu[s] = time.time() + dur; d["mute"] = mu; _tg_save(d)
+        _tg_chat("Muted #%d %s for %s (still routable; /unmute %d to undo)." % (n, _session_label(s), _tg_fmt_dur(dur), n)); return True
+    if cmd == "unmute":
+        n = _tg_num(arg, by_num)
+        if not n: _tg_chat("Unmute which? " + _tg_fmt_list()); return True
+        s = by_num[n]; d = _tg_load(); mu = d.get("mute") or {}; mu.pop(s, None); d["mute"] = mu; _tg_save(d)
+        _tg_chat("Unmuted #%d %s." % (n, _session_label(s))); return True
+    return False   # not a recognized command -> fall through ('/s name text' is handled below)
+def _tg_handle_inbound(msg, text):
+    idx, by_num = _tg_index(); routed = sorted(idx, key=lambda s: idx[s])
+    if text.startswith("/") and _tg_command(text, idx, by_num): return
+    target = None; payload = text
+    rt = msg.get("reply_to_message") or {}
+    if rt.get("message_id"): target = _tg_load().get("msgmap", {}).get(str(rt["message_id"]))
+    if not target:                                                        # explicit 'name: text' / 's name text'
+        m = re.match(r"^/?s(?:ession)?\s+(\S+)\s+(.*)$", text, re.S) or re.match(r"^(\S+):\s+(.*)$", text, re.S)
+        if m and m.group(1) in routed: target = m.group(1); payload = m.group(2).strip()
+    if not target:                                                        # 'N text' -> one-shot to #N; bare 'N' -> focus #N
+        m = re.match(r"^#?(\d+)\s*(.*)$", text, re.S)
+        if m:
+            n = int(m.group(1)); rest = m.group(2).strip()
+            if n in by_num:
+                if rest: target = by_num[n]; payload = rest
+                else: _tg_set_focus(by_num[n], None); return
+            else: _tg_chat("No session #%d.\n%s" % (n, _tg_fmt_list())); return
+    if not target:                                                        # active focus
+        f = _tg_load().get("focus") or {}
+        if f.get("session") in routed and f.get("until", 0) > time.time(): target = f["session"]
+    if not target and len(routed) == 1: target = routed[0]                # only one on -> obvious
+    if not target:
+        _tg_chat("Which session? Reply with a number ('N your text'), reply-TO a session's message, or /focus N.\n" + _tg_fmt_list()); return
+    if sh([TMUX, "has-session", "-t", target])[0] != 0:
+        _tg_chat("[%s] that session has closed." % _session_label(target)); return
+    _mesh_deliver(target, payload)
+    _tg_chat("-> %s%s: delivered." % (("#%d " % idx[target]) if len(routed) > 1 else "", _session_label(target)))
 def _tg_outbound_loop():
     time.sleep(20)
     while True:
         try:
             if _tg_ready():
-                for s in _tg_routed():
+                idx, _ = _tg_index(); mu = _tg_load().get("mute") or {}
+                for s in list(idx.keys()):
                     if sh([TMUX, "has-session", "-t", s])[0] != 0: continue
                     busy = _pane_busy(s)
-                    if _TG_BUSY.get(s) is True and not busy:   # busy -> idle: done or blocked-waiting
-                        _tg_send_session(s, "ready for you (finished or waiting). Reply to this message to respond.\n---\n" + _tg_pane_tail(s))
+                    if _TG_BUSY.get(s) is True and not busy and mu.get(s, 0) <= time.time():   # busy->idle (done/blocked) & not muted
+                        _tg_send_session(s, "ready for you (finished or waiting). Reply to this message, or use the number.\n---\n" + _tg_pane_tail(s))
                     _TG_BUSY[s] = busy
         except Exception: pass
         time.sleep(8)
@@ -3901,22 +4024,13 @@ def _tg_inbound_loop():
             if not _tg_ready(): time.sleep(20); continue
             off = _tg_load().get("offset", 0)
             res = _tg_api("getUpdates", {"offset": off + 1, "timeout": 25})
-            if not res or not res.get("ok"): time.sleep(4); continue
+            if res is None: time.sleep(4); continue
+            if not res.get("ok"):
+                time.sleep(30 if res.get("error_code") == 409 else 5); continue   # 409 = another consumer on this bot token
             for upd in res.get("result", []):
                 d = _tg_load(); d["offset"] = max(d.get("offset", 0), upd.get("update_id", 0)); _tg_save(d)
                 msg = upd.get("message") or {}; text = (msg.get("text") or "").strip()
-                if not text: continue
-                target = None
-                rt = msg.get("reply_to_message") or {}
-                if rt.get("message_id"): target = _tg_load().get("msgmap", {}).get(str(rt["message_id"]))
-                if not target:
-                    mm = re.match(r"^/?s(?:ession)?\s+(\S+)\s+(.*)$", text, re.S) or re.match(r"^(\S+):\s+(.*)$", text, re.S)
-                    if mm and mm.group(1) in _tg_routed(): target = mm.group(1); text = mm.group(2).strip()
-                if not target:
-                    _tg_chat("Which session? Reply TO a session's message, or prefix 'name: your text'. On now: " + (", ".join(sorted(_tg_routed())) or "none"))
-                    continue
-                if sh([TMUX, "has-session", "-t", target])[0] != 0: _tg_chat("[%s] that session has closed." % target); continue
-                _mesh_deliver(target, text); _tg_chat("[%s] delivered." % target)
+                if text: _tg_handle_inbound(msg, text)
         except Exception: time.sleep(5)
 
 def _ext_mcp_template(eid):
@@ -9992,7 +10106,7 @@ function compactSess(){if(!confirm('Compact this session?\n\nThe agent writes a 
   st.textContent=name+' - compact: starting…';
   fetch('/api/compact-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(r=>{if(!r||!r.ok){st.textContent='compact failed: '+((r||{}).error||'?');return;}compactPoll();}).catch(()=>{st.textContent='compact request failed';});}
 function compactPoll(){fetch('/api/compact-state?name='+encodeURIComponent(name)).then(r=>r.json()).then(s=>{if(!s||!s.step)return;st.textContent=name+' - compact: '+(s.msg||s.step);if(['done','aborted','error'].indexOf(s.step)<0)setTimeout(compactPoll,3000);}).catch(()=>{});}
-function tgPaint(s){var b=document.getElementById('tgbtn');if(!b)return;if(!s||!s.installed){b.style.display='none';return;}b.style.display='';b.innerHTML='&#128241; Telegram: '+(s.on?'on':'off');b.style.color=s.on?'#26a5e4':'#8a8a99';b.title=s.configured?('Telegram '+(s.on?'ON -- you get pinged when this session finishes/blocks; reply to interact':'off')+' for this session'):'Telegram bot not set up -- install + Set up telegram-notify in the Marketplace';}
+function tgPaint(s){var b=document.getElementById('tgbtn');if(!b)return;if(!s||!s.installed){b.style.display='none';return;}b.style.display='';var n=(s.on&&s.num)?(' #'+s.num):'';b.innerHTML='&#128241; Telegram'+n+': '+(s.on?'on':'off');b.style.color=s.on?'#26a5e4':'#8a8a99';b.title=s.configured?('Telegram '+(s.on?('ON'+(s.num?(' as #'+s.num):'')+' -- pinged on your phone when this finishes/blocks; reply to interact. '+(s.count>1?(s.count+' sessions on -- reply with the number'):'')):'off')+' for this session'):'Telegram bot not set up -- install + Set up telegram-notify in the Marketplace';}
 function tgState(){fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(tgPaint).catch(()=>{});}
 function toggleTg(){fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(function(cur){if(!cur.configured){st.textContent='Telegram not set up -- install + Set up telegram-notify (Marketplace), then toggle';return;}fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:!cur.on})}).then(r=>r.json()).then(function(s){tgPaint(s);st.textContent=name+' - Telegram '+(s.on?'ON (phone alerts + reply-to-interact)':'off');});});}
 ws.onopen=()=>{st.textContent=name+' - connected';fitNow();term.focus();applyMouse();tgState();};

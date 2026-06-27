@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.82.0 -- 2026-06-27
+- Telegram per-session comms got SMART for many sessions on one node (one bot per node). Each enabled
+  session now has a STABLE number; pings are tagged `#N node/Title`. Reply routing, in order: reply-TO a
+  ping -> that session; `N your text` -> session #N (one-shot); bare `N` -> set focus to #N; an active
+  FOCUS -> there; if exactly ONE session is on -> it auto-routes (no number needed); else the bot replies
+  with the numbered list and asks you to pick -- so you never need the cryptic tmux name. Manage from the
+  phone: `/list` (numbered sessions + busy/idle/focus/muted), `/focus N [30m|2h]` (bare = 1h) + `/focus off`,
+  `/off N` (disable from your phone), `/mute N [time]` + `/unmute N`, `/help`. Bot creds now resolve
+  PER-INSTANCE (cc.config `telegram_bot_token`/`telegram_chat_id`) then the shared deploy env, so co-located
+  nodes can each carry a distinct bot; a `getUpdates` 409 (two consumers on one token) backs off instead of
+  spinning. The term-bar toggle shows the session's number ("Telegram #2: on"). State (routed/index/focus/
+  mute/offset/msgmap) stays node-local. (server.py TG module + telegram-notify SETUP.md.)
+
 ## 0.81.0 -- 2026-06-27
 - Telegram per-session comms -- route ANY tmux session to your phone. Toggle "Telegram" in a session's terminal
   bar (the moremenu, next to compact): when that session goes busy->idle (task finished OR blocked waiting), the
