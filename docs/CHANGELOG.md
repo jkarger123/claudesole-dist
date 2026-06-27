@@ -3,6 +3,24 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.68.0 -- 2026-06-27
+- Enterprise auto-update — the fleet now converges itself; updates are no longer "whoever remembers to push to
+  each node." Root cause this kills: shopos sat 39 versions behind (0.28 vs 0.67) because the push ritual only
+  ever named AFP — detection (Fleet-drift lens) existed but was decoupled from action. Two idempotent,
+  version-gated convergence paths: (A) PULL — every TENANT node self-checks the public dist (~150s after boot,
+  then every auto_update_check_min=30) and, if behind, overlays the latest framework via `cc-update.sh <git-url>`
+  (real git clone, so freshness never depends on a local mirror) and self-restarts WHEN QUIESCENT (no session
+  mid-turn; 2h grace backstop for always-busy nodes). This is the guarantee — nobody has to remember a node, and
+  NEW/just-provisioned nodes converge on their own first boot. (B) PUSH — Mission Control's `fleet_converge`
+  refreshes the dist mirror then drives cc_update + a SEPARATE safe restart into every behind tenant in one shot;
+  exposed as "⬆ Update all behind" / "⟳ Force all" on the Fleet-drift lens + `POST /api/fleet-update`, plus a 3h
+  MC backstop sweep. SOURCE nodes (the authoring checkout — git remote claudesole-core — and the dist mirror) are
+  detected and NEVER self-update or get pushed to, so a converge can't clobber in-progress edits. Cross-user
+  restart (AFP) always uses the node's own superadmin `restart`, never `cc_update restart:true`. Config: auto_update,
+  auto_update_check_min, auto_update_restart(+_grace), update_source, update_role, fleet_auto_converge. APIs:
+  GET /api/update-status, POST /api/update-now, POST /api/autoupdate, POST /api/fleet-update. Log: _autoupdate.log.
+  Full design + invariants + ops: command-center/update/ (CLAUDE.md + UPGRADE_SYSTEM.md).
+
 ## 0.67.0 -- 2026-06-27
 - Auto-compact: a session's context never blows its window unattended. A server-side daemon watches every
   session's context fill level; when one crosses the threshold (default 95% full) it runs the SAME graceful

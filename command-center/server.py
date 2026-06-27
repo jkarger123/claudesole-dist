@@ -8120,6 +8120,7 @@ def drift_report():
                 fp = json.loads(r.read().decode())
             node["reachable"] = True
             node["version"] = fp.get("version")
+            node["home"] = fp.get("home")
             files = fp.get("files", {}) or {}
             if not dist_ok:
                 node["status"] = "no-dist"
@@ -8138,6 +8139,174 @@ def drift_report():
             node["error"] = str(e)[:120]
         nodes.append(node)
     return {"dist_dir": dist, "dist_version": dist_ver, "dist_ok": dist_ok, "self": INSTANCE_ID, "nodes": nodes}
+
+# ==== AUTO-UPDATE: the anti-drift backbone's ACTION half =========================================
+# Detection (drift_report, above) is decoupled from action by design no longer. Two convergence paths,
+# both idempotent + version-gated, so a node can NEVER silently rot and a NEW node converges with zero
+# human memory:
+#   (A) PULL  -- every tenant node self-checks the public dist on a timer + at boot; if behind it overlays
+#               the latest framework (cc-update.sh against the git URL) and self-restarts when quiescent.
+#               This is the guarantee: nobody has to remember to push to any node, ever. Full design +
+#               rationale: command-center/update/CLAUDE.md.
+#   (B) PUSH  -- Mission Control can converge the whole fleet in one shot (fleet_converge): refresh the
+#               local dist mirror, then drive cc_update+restart into every BEHIND tenant. Operator override
+#               + backstop loop. Co-located SOURCE nodes (the authoring checkout) are always skipped so a
+#               push can never clobber in-progress edits.
+_AUTOUPDATE_LOG = os.path.join(STATE_DIR, "_autoupdate.log")
+_UPDATE_STATE = {"last_check": 0, "latest": "", "applied": "", "staged": "", "staged_at": 0, "behind": False, "msg": "(not checked yet)", "source": False}
+
+def _aupd_log(msg):
+    try:
+        with open(_AUTOUPDATE_LOG, "a") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + INSTANCE_ID + " " + msg + "\n")
+    except Exception: pass
+
+def _update_source():
+    """The canonical upstream a tenant pulls from: the PUBLIC dist git repo (so freshness never depends on
+    anyone having git-pulled a local mirror). Override per node via cc.config 'update_source'."""
+    return CC.get("update_source") or "https://github.com/jkarger123/claudesole-dist.git"
+
+def _update_manifest_url():
+    """Raw URL of the upstream manifest -- the cheap 'what is the latest version' probe (no clone)."""
+    u = CC.get("update_manifest_url")
+    if u: return u
+    m = re.match(r"^https?://github\.com/([^/]+)/([^/.]+?)(?:\.git)?/?$", _update_source())
+    if m: return "https://raw.githubusercontent.com/%s/%s/main/claudesole.manifest.json" % (m.group(1), m.group(2))
+    return ""
+
+def _remote_latest_version():
+    url = _update_manifest_url()
+    if not url: return ""
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            return (json.loads(r.read().decode()).get("version") or "").strip()
+    except Exception: return ""
+
+def _is_update_source():
+    """A SOURCE node authors framework code -- it must NEVER self-update (that would overwrite in-progress
+    edits with the published copy). Identified by explicit config, by being the dist mirror, or by the
+    authoring checkout's git remote pointing at the private core repo (covers all co-located dev nodes)."""
+    if str(CC.get("update_role", "")).lower() == "source": return True
+    try:
+        if os.path.realpath(CC_HOME) == os.path.realpath(_dist_dir()): return True
+    except Exception: pass
+    try:
+        code, out, _ = sh(["git", "-C", CC_HOME, "remote", "-v"], timeout=8)
+        if code == 0 and ("claudesole-core" in out or "hptuners-autonomous" in out): return True
+    except Exception: pass
+    return False
+
+def _local_quiescent():
+    """True only if NO local session is mid-turn -- so an auto-restart can't interrupt active work."""
+    try:
+        for s in tmux_sessions():
+            if _pane_busy(s["name"]): return False
+        return True
+    except Exception:
+        return False   # unknown -> treat as busy (conservative: don't restart)
+
+def update_status():
+    """This node's update posture (for the UI + /api/update-status). Spread the rolling state FIRST so the
+    freshly-computed fields below always win (state carries a stale 'source' seed)."""
+    return {**_UPDATE_STATE, "id": INSTANCE_ID, "version": _manifest_version(),
+            "auto_update": CC.get("auto_update", True) is not False,
+            "source": _is_update_source(), "check_min": int(CC.get("auto_update_check_min", 30)),
+            "auto_restart": CC.get("auto_update_restart", True) is not False,
+            "update_source": _update_source()}
+
+def _autoupdate_tick():
+    """One self-update pass: probe latest -> if behind, overlay once -> restart when safe. Idempotent."""
+    _UPDATE_STATE["last_check"] = time.time()
+    if _is_update_source():
+        _UPDATE_STATE.update({"source": True, "behind": False, "msg": "source node — self-update disabled (authors framework)"}); return
+    if CC.get("auto_update", True) is False:
+        _UPDATE_STATE["msg"] = "auto-update disabled (cc.config auto_update=false)"; return
+    local = _manifest_version() or "0"
+    latest = _remote_latest_version()
+    _UPDATE_STATE["latest"] = latest
+    if not latest:
+        _UPDATE_STATE["msg"] = "could not reach update source (%s)" % _update_manifest_url(); return
+    behind = _semver(latest) > _semver(local)
+    _UPDATE_STATE["behind"] = behind
+    if not behind:
+        _UPDATE_STATE["msg"] = "current (v%s)" % local; return
+    # behind -> overlay the latest framework ONCE per target version (cc-update.sh git-clones the URL)
+    if _UPDATE_STATE.get("staged") != latest:
+        sh_path = os.path.join(CC_HOME, "cc-update.sh")
+        if not os.path.isfile(sh_path):
+            _UPDATE_STATE["msg"] = "no cc-update.sh on this node"; _aupd_log("ERROR no cc-update.sh"); return
+        code, out, err = sh(["env", "CC_HOME=" + CC_HOME, "bash", sh_path, _update_source()], timeout=300)
+        if code != 0:
+            _UPDATE_STATE["msg"] = "update apply FAILED"; _aupd_log("apply %s->%s FAILED: %s" % (local, latest, (err or out)[-200:])); return
+        _UPDATE_STATE.update({"staged": latest, "applied": latest, "staged_at": time.time()})
+        _aupd_log("applied %s -> %s (files overlaid, pending restart)" % (local, latest))
+    # restart to load the new code -- when no session is busy, or force after a grace window so a node that
+    # is ALWAYS busy still converges within a bounded time.
+    if CC.get("auto_update_restart", True) is False:
+        _UPDATE_STATE["msg"] = "staged v%s — restart to apply (auto-restart off)" % latest; return
+    grace = float(CC.get("auto_update_restart_grace", 7200))   # 2h backstop
+    forced = (time.time() - _UPDATE_STATE.get("staged_at", 0)) > grace
+    if _local_quiescent() or forced:
+        _aupd_log("restarting to apply v%s%s" % (latest, " (forced after grace)" if forced else ""))
+        _UPDATE_STATE["msg"] = "restarting to apply v%s" % latest
+        threading.Thread(target=_self_restart, daemon=True).start()
+    else:
+        _UPDATE_STATE["msg"] = "staged v%s — waiting for an idle moment to restart" % latest
+
+def _autoupdate_loop():
+    time.sleep(150)   # let boot housekeeping settle before the first check
+    while True:
+        try: _autoupdate_tick()
+        except Exception as e:
+            try: _aupd_log("tick error: %s" % str(e)[:160])
+            except Exception: pass
+        time.sleep(max(300, int(CC.get("auto_update_check_min", 30)) * 60))
+
+def fleet_converge(force=False):
+    """Mission Control: converge every TENANT node to the dist's latest in one operation. Refreshes the
+    local dist mirror (git pull) so a push can't ship stale code, then for each behind (or all, if force)
+    reachable tenant: superadmin cc_update (from the fresh local mirror) + a separate safe restart.
+    SKIPS co-located source nodes (same CC_HOME as MC) so the authoring checkout is never overwritten."""
+    res = {"mirror": "", "ran": [], "skipped": []}
+    mirror = _dist_dir()
+    try:
+        code, out, err = sh(["git", "-C", mirror, "pull", "--ff-only"], timeout=90)
+        res["mirror"] = "pulled" if code == 0 else ("pull failed: " + (err or out)[-160:])
+    except Exception as e:
+        res["mirror"] = "pull error: " + str(e)[:120]
+    rep = drift_report()
+    for n in rep.get("nodes", []):
+        nid, status = n.get("id"), n.get("status")
+        # never push to ourselves or to a co-located source node (shares the authoring checkout)
+        if nid == INSTANCE_ID or (n.get("home") and os.path.realpath(n["home"]) == os.path.realpath(CC_HOME)):
+            res["skipped"].append({"id": nid, "why": "source/self"}); continue
+        if not n.get("reachable"):
+            res["skipped"].append({"id": nid, "why": "unreachable"}); continue
+        if status in ("current", "ahead") and not force:
+            res["skipped"].append({"id": nid, "why": status}); continue
+        upd = superadmin_send(nid, "cc_update", {"upstream": mirror})
+        ok = bool(upd.get("ok") and (upd.get("result") or {}).get("ok"))
+        rec = {"id": nid, "from": status, "update": ok}
+        if ok:
+            rst = superadmin_send(nid, "restart")   # SEPARATE safe self-restart (never cc_update restart:true)
+            rec["restart"] = bool(rst.get("ok") and (rst.get("result") or {}).get("ok"))
+            _aupd_log("MC converged %s (%s) update=%s restart=%s" % (nid, status, ok, rec.get("restart")))
+        else:
+            rec["error"] = (upd.get("error") or (upd.get("result") or {}).get("error") or "update failed")[:160]
+        res["ran"].append(rec)
+    return res
+
+def _fleet_converge_loop():
+    """MC-only backstop: even though every tenant self-updates (path A), MC sweeps the fleet periodically to
+    catch any node that couldn't self-converge (offline at release, self-update disabled, etc.). Off unless
+    this node is the overseer/source AND fleet_auto_converge isn't disabled."""
+    time.sleep(600)
+    while True:
+        try:
+            if _is_update_source() and CC.get("fleet_auto_converge", True) is not False:
+                fleet_converge(force=False)
+        except Exception: pass
+        time.sleep(max(1800, int(CC.get("fleet_converge_min", 180)) * 60))   # default 3h
 
 # ---- Settings: configure this node's Tier + Type from the UI instead of hand-editing cc.config.json ----
 # Taxonomy (presentation over existing primitives, no data-model change):
@@ -8432,6 +8601,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/ccr-sent": return self._s(200, json.dumps({"sent": ccr_sent_list(), "self": INSTANCE_ID, "mc": _mc_url()}))
         if u.path == "/api/fw-fingerprint": return self._s(200, json.dumps(fw_fingerprint()))
         if u.path == "/api/ccr-drift": return self._s(200, json.dumps(drift_report()))
+        if u.path == "/api/update-status": return self._s(200, json.dumps(update_status()))
         if u.path == "/api/settings": return self._s(200, json.dumps(settings_get()))
         if u.path == "/api/chief": return self._s(200, json.dumps(chief_overview()))
         if u.path == "/term": return self._s(200, TERM_PAGE, "text/html; charset=utf-8")
@@ -8685,6 +8855,20 @@ class H(BaseHTTPRequestHandler):
                 cfg["autocompact"] = CC.get("autocompact", True); cfg["autocompact_pct"] = _autocompact_pct()
                 tmp = _CC_CONFIG + ".tmp"; json.dump(cfg, open(tmp, "w")); os.chmod(tmp, 0o600); os.replace(tmp, _CC_CONFIG)
                 return self._s(200, json.dumps({"ok": True, "on": _autocompact_on(), "pct": _autocompact_pct()}))
+            except Exception as e:
+                return self._s(200, json.dumps({"ok": False, "error": str(e)[:120]}))
+        if u.path == "/api/update-now":       # force THIS node to self-check + self-update right now
+            threading.Thread(target=_autoupdate_tick, daemon=True).start()
+            return self._s(200, json.dumps({"ok": True, "note": "self-update check started", "status": update_status()}))
+        if u.path == "/api/fleet-update":      # MC: converge the whole fleet (refresh mirror -> cc_update+restart every behind tenant)
+            return self._s(200, json.dumps(fleet_converge(bool(body.get("force")))))
+        if u.path == "/api/autoupdate":        # toggle this node's auto-update on/off (persists to cc.config, live)
+            try:
+                if "on" in body: CC["auto_update"] = bool(body.get("on"))
+                cfg = json.load(open(_CC_CONFIG)) if os.path.isfile(_CC_CONFIG) else {}
+                cfg["auto_update"] = CC.get("auto_update", True)
+                tmp = _CC_CONFIG + ".tmp"; json.dump(cfg, open(tmp, "w")); os.chmod(tmp, 0o600); os.replace(tmp, _CC_CONFIG)
+                return self._s(200, json.dumps({"ok": True, "auto_update": CC.get("auto_update", True)}))
             except Exception as e:
                 return self._s(200, json.dumps({"ok": False, "error": str(e)[:120]}))
         if u.path == "/api/resume":
@@ -15305,7 +15489,12 @@ async function loadCcr(){
   let h="";
   if(drift){
     const dv=drift.dist_version||"?";
-    h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🛰 Fleet drift</b> <span class="sub">vs dist v'+e2(dv)+(drift.dist_ok?'':' · <span style="color:#f85149">dist unreadable</span>')+' · <code>'+e2(drift.dist_dir||"")+'</code></span> <button class="mini" onclick="loadCcr()">⟳</button></div>';
+    const nbehind=(drift.nodes||[]).filter(function(n){return n.status=='behind'||n.status=='drifted';}).length;
+    h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🛰 Fleet drift</b> <span class="sub">vs dist v'+e2(dv)+(drift.dist_ok?'':' · <span style="color:#f85149">dist unreadable</span>')+' · <code>'+e2(drift.dist_dir||"")+'</code></span> '
+      +'<span style="margin-left:auto;display:flex;gap:6px">'
+      +'<button class="mini'+(nbehind?' go':'')+'" title="Refresh the dist mirror, then drive cc_update + restart into EVERY behind tenant node in one shot. Co-located source/dev nodes are skipped automatically." onclick="fleetUpdate(false)">⬆ Update all behind'+(nbehind?(' ('+nbehind+')'):'')+'</button>'
+      +'<button class="mini" title="Force: re-converge every reachable tenant even if it already looks current (re-overlays + restarts)." onclick="fleetUpdate(true)">⟳ Force all</button>'
+      +'<button class="mini" onclick="loadCcr()">⟳</button></span></div>';
     h+='<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">'+(drift.nodes||[]).map(function(n){
       const c=DRIFT_COL[n.status]||"#8b949e",ic=DRIFT_ICO[n.status]||"❔";
       const tip=(n.diff&&n.diff.length)?(' title="differs: '+esc(n.diff.join(", "))+'"'):'';
@@ -15323,6 +15512,14 @@ async function loadCcr(){
     +'<textarea id="ccr_sum" placeholder="summary: what + why (optional)" style="width:100%;margin-top:8px;min-height:48px;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 11px;font:inherit;resize:vertical"></textarea></div>';
   h+=CCRS.map(ccrCard).join("")||empty("No change requests yet — nodes propose them, or file one above.");
   g.innerHTML=h;
+}
+async function fleetUpdate(force){
+  if(!confirm(force?'Force re-converge EVERY reachable tenant node (re-overlay + restart), even if current?':'Update all behind nodes now? This refreshes the dist mirror, then runs cc_update + restart on each behind tenant. (Source/dev nodes are skipped.)'))return;
+  let r;try{r=await(await fetch('/api/fleet-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:!!force})})).json();}catch(e){alert('fleet update failed: '+e);return;}
+  const ran=(r.ran||[]).map(function(n){return (n.update?'✅':'❌')+' '+n.id+' (was '+n.from+')'+(n.restart===false?' — update ok, restart failed':'')+(n.error?(' — '+n.error):'');}).join('\n')||'(nothing to update)';
+  const skip=(r.skipped||[]).map(function(n){return '• '+n.id+': '+n.why;}).join('\n');
+  alert('Mirror: '+(r.mirror||'?')+'\n\nConverged:\n'+ran+(skip?('\n\nSkipped:\n'+skip):''));
+  loadCcr();
 }
 function ccrCard(c){
   const col=CCR_COL[c.status]||"#8b949e";const ico=CCR_KIND_ICO[c.kind]||"⚙️";
@@ -16584,6 +16781,8 @@ if __name__ == "__main__":
         threading.Thread(target=_acct_poll_loop, daemon=True).start()  # per-account /usage fuel gauges (token-isolated)
     threading.Thread(target=_autoapprove_loop, daemon=True).start()   # keep agents off the permission-prompt wall
     threading.Thread(target=_autocompact_loop, daemon=True).start()    # graceful auto-compact when a session's context fills past the threshold
+    threading.Thread(target=_autoupdate_loop, daemon=True).start()     # PULL convergence: every tenant self-updates from the dist (boot + timer); source nodes self-skip
+    threading.Thread(target=_fleet_converge_loop, daemon=True).start() # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
     threading.Thread(target=_gmail_sync_loop, daemon=True).start()      # keep recently-viewed Gmail lists warm (cache + outage fallback)
     threading.Thread(target=_gc_sync_loop, daemon=True).start()         # same for Calendar/Drive (resilient cache)
