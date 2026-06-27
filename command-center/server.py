@@ -9374,6 +9374,48 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .tkcell b{font:700 14px/1 ui-monospace,Menlo,monospace;color:var(--ink)}
 .tkcell i{font-style:normal;font-size:10px;color:var(--mut);letter-spacing:.4px}
 .sparkwrap{display:inline-flex;align-items:flex-end;cursor:pointer;border:1px solid var(--line);border-radius:8px;padding:3px 6px;background:var(--card2)}
+/* Sessions usage strip "A3": SPEND stat-rail + click-to-cycle trend + monochrome-gold FLEET FUEL gauges */
+.us-strip{position:relative;display:flex;align-items:stretch;flex-wrap:wrap;gap:8px 0;margin-top:7px;padding-top:8px;padding-right:26px;border-top:1px solid var(--line)}
+.us-min{position:absolute;top:5px;right:0;width:22px;height:18px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:4px;border-radius:5px;cursor:pointer;color:var(--dim);transition:background .15s,color .15s;z-index:2}
+.us-min:hover{background:#ffffff12;color:var(--ink)}
+.us-min i{display:block;width:11px;height:1.6px;background:currentColor;border-radius:1px}
+/* collapsed title bar */
+.us-minbar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:7px;padding:8px 2px 7px;border-top:1px solid var(--line);cursor:pointer}
+.us-mb-l{font-size:10px;font-weight:600;letter-spacing:.13em;text-transform:uppercase;color:var(--mut);display:flex;align-items:center;gap:8px}
+.us-mb-i{font-size:12px;filter:grayscale(.2)}
+.us-mb-r{display:flex;align-items:center;gap:14px;font-size:11px;color:var(--dim)}
+.us-mb-r b{color:var(--mut);font-weight:600}
+.us-minbar:hover .us-mb-exp{border-color:var(--ink)}
+.us-mb-exp{width:10px;height:9px;border:1.4px solid var(--dim);border-radius:2px;transition:border-color .15s}
+.us-vr{width:1px;background:linear-gradient(180deg,transparent,var(--line) 22%,var(--line) 78%,transparent);margin:0 18px;align-self:stretch}
+.us-sec{display:flex;flex-direction:column;justify-content:center;gap:6px}
+.us-cap{font-size:9px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+.us-stats{display:flex;gap:16px;align-items:flex-end}
+.us-stat{display:flex;flex-direction:column;gap:4px;cursor:pointer;padding-bottom:4px;border-bottom:1.5px solid transparent;transition:border-color .15s}
+.us-stat:hover{border-bottom-color:#3a3a48}.us-stat.on{border-bottom-color:var(--accent-light)}
+.us-l{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);font-weight:600}
+.us-stat.on .us-l{color:var(--accent-light)}
+.us-v{font-size:15px;font-weight:600;line-height:1;color:#cfcfd8;white-space:nowrap}.us-stat.on .us-v{color:#fff}
+.us-d{font-size:10px;font-weight:600;margin-left:4px}.us-d.up{color:#e7b86a}.us-d.dn{color:#8f8f9c}
+.us-graph{cursor:pointer;align-items:flex-start;gap:6px}
+.us-gl{display:flex;align-items:center;gap:8px}
+.us-gw{font-size:12.5px;font-weight:700;color:#fff}.us-gc{font-size:12px;color:var(--dim)}
+.us-gd{display:flex;gap:4px}.us-gd i{width:5px;height:5px;border-radius:50%;background:#33333f}.us-gd i.on{background:var(--accent-light)}
+.us-fuel{flex:1 1 340px;min-width:300px}
+.us-fhead{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.us-rec{font-size:12px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.us-rec b{color:var(--accent-light)}.us-rec .us-s{color:var(--mut);font-weight:400}
+.us-brow{display:flex;align-items:center;margin-top:4px}
+.us-bl{flex:0 0 54px;padding-right:9px;font-size:8.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--dim);font-weight:600;text-align:right}
+.us-bat{flex:1;display:flex;gap:4px;height:8px}
+.us-slot{flex:1;background:#14120c;border-radius:3px;overflow:hidden;box-shadow:inset 0 0 0 1px #ffffff07;cursor:pointer}
+.us-slot.use{box-shadow:inset 0 0 0 1px #ffffff07,0 0 0 1px #d8bd6a55,0 0 4px #b8922e33}
+.us-fill{height:100%;border-radius:3px;transition:width .4s ease}
+.us-flabels{display:flex;margin-top:6px}.us-fsp{flex:0 0 54px}.us-flrow{flex:1;display:flex;gap:4px}
+.us-fl{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0}
+.us-nm{font-size:11px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.us-st{color:var(--accent-light);font-size:10px}
+.us-nums{font-size:9.5px;color:var(--mut);white-space:nowrap}.us-nums b{color:#cdcdd6;font-weight:600}.us-nums .x{color:var(--dim)}
 .sparkwrap:hover{border-color:var(--accent)}
 /* Usage analytics lens */
 /* account fuel gauges (per-account rate-limit windows) */
@@ -11006,16 +11048,63 @@ function cssid(name){return (name||'').replace(/[^A-Za-z0-9]/g,'_');}
 function ctxCol(pct){return pct<10?'#f85149':(pct<20?'#d29922':'#3fb950');}
 function ctxChip(name){const c=(TOKDATA.sessions||{})[name];if(!c)return '';const pct=Math.round(c.pct);const col=ctxCol(pct);
   return '<span class="ctxchip" id="ctx_'+cssid(name)+'" title="context: '+fmtTok(c.used)+' / '+fmtTok(c.window)+' used · '+pct+'% free" style="color:'+col+';border-color:'+col+'55">'+pct+'%</span>';}
-function totalsStrip(){const t=TOKDATA.totals;if(!t)return '';
-  // All windows visible at once (no selecting) -- the strip mirrors the Usage lens token cards, compact.
-  const cell=(lbl,o)=>{o=o||{};var rt=o.ratio||0,over=rt>1,x=over?rt:(rt>0?1/rt:0),g=rt>0?('<em style="font-style:normal;color:'+(over?'#ff8f73':'#5fd07a')+'"> '+(over?'▲':'▼')+x.toFixed(x>=10?0:1)+'×</em>'):'';
-    return '<span class="tkcell" style="'+uTint(rt)+'" title="'+fmtUSD(o.cost||0)+' · '+fmtTok(o.total||0)+' tok · avg '+fmtUSD(o.avg_cost||0)+' / '+fmtTok(o.avg||0)+' tok'+(rt?(' ('+(over?'over':'under')+' your 30-day average)'):'')+' · in '+fmtTok(o.input||0)+' out '+fmtTok(o.output||0)+'"><b>'+fmtUSD(o.cost||0)+'</b><i>'+lbl+g+'</i></span>';};
-  return '<div class="tkstrip"><span>💰 metered</span>'
-    +cell('1hr',t.hour)+cell('5hr',t['5h'])+cell('24hr',t.day)+cell('week',t.week)+cell('month',t.month)
-    +'<span id="sparkwrap" class="sparkwrap" title="last 24h — tap for full analytics" onclick="gotoLens(\'usage\')">'+sparkSVG((TOKDATA.series||{})['24h']||TOKDATA.spark||[])+'</span>'
-    +'<button class="mini go" style="margin-left:2px" onclick="gotoLens(\'usage\')">📊 Usage</button></div>';}
+// ---- Sessions usage strip (design "A3"): SPEND stat-rail + click-to-cycle trend graph + monochrome-gold
+// FLEET FUEL (N equal per-account gauges per window; gold = headroom left, dark = used). ----
+// window defs: [key, label, totals-key, series-key]
+var US_WINS=[['1h','1h','hour','60m'],['5h','5h','5h','5h'],['24h','24h','day','24h'],['wk','wk','week','7d'],['mo','mo','month','30d']];
+var SPENDWIN=localStorage.getItem('hpcc_spendwin')||'24h';
+function setSpendWin(k){SPENDWIN=k;try{localStorage.setItem('hpcc_spendwin',k);}catch(e){}renderStrip();}
+function cycleSpendWin(){var ks=US_WINS.map(function(w){return w[0];}),i=ks.indexOf(SPENDWIN);setSpendWin(ks[(i+1)%ks.length]);}
+var STRIPMIN=(localStorage.getItem('hpcc_stripmin')==='1');
+function toggleStripMin(){STRIPMIN=!STRIPMIN;try{localStorage.setItem('hpcc_stripmin',STRIPMIN?'1':'0');}catch(e){}renderStrip();}
+function stripMinBar(){ // collapsed: a sleek title bar (remembers the choice); a faint live summary keeps it glanceable
+  var sum='';try{var c=((TOKDATA.totals||{}).day||{}).cost,pick=(ACCTWIN&&ACCTWIN.pick)?(''+ACCTWIN.pick).split('@')[0]:'';
+    var b=[];if(pick)b.push('▶ <b>'+e2(pick)+'</b>');if(c!=null)b.push(fmtUSD(c)+' 24h');sum=b.join(' &nbsp;·&nbsp; ');}catch(e){}
+  return '<div class="us-minbar" onclick="toggleStripMin()" title="expand the usage / account meter">'
+    +'<span class="us-mb-l"><span class="us-mb-i">📊</span> Usage · Account Meter</span>'
+    +'<span class="us-mb-r">'+sum+'<span class="us-mb-exp" title="expand"></span></span></div>';}
+// fill = % USED (gauge fills as the account is consumed); a touch warmer/brighter as it nears the limit
+function fuelShade(u){return u>=85?['#c99a2e','#e2bb48']:['#a37f27','#b8922e'];}
+function totalsStrip(){if(STRIPMIN)return stripMinBar();const t=TOKDATA.totals;if(!t)return '';
+  var sel=SPENDWIN,selIdx=Math.max(0,US_WINS.map(function(w){return w[0];}).indexOf(sel));
+  var rail=US_WINS.map(function(w){var o=t[w[2]]||{},rt=o.ratio||0,over=rt>1,x=over?rt:(rt>0?1/rt:0);
+    var dl=rt>0?('<span class="us-d '+(over?'up':'dn')+'">'+(over?'↑':'↓')+x.toFixed(x>=10?0:1)+'×</span>'):'';
+    return '<div class="us-stat'+(w[0]===sel?' on':'')+'" onclick="setSpendWin(\''+w[0]+'\')" title="'+w[1]+' metered · '+fmtTok(o.total||0)+' tok'+(rt?(' · '+(over?'over':'under')+' 30-day avg '+x.toFixed(1)+'×'):'')+'"><span class="us-l">'+w[1]+'</span><span class="us-v mono">'+fmtUSD(o.cost||0)+dl+'</span></div>';}).join('');
+  var ser=(TOKDATA.series||{})[US_WINS[selIdx][3]]||[];
+  var dots=US_WINS.map(function(w,i){return '<i'+(i===selIdx?' class="on"':'')+'></i>';}).join('');
+  var graph='<div class="us-vr"></div><div class="us-sec us-graph" onclick="cycleSpendWin()" title="click to cycle the trend window">'
+    +'<div class="us-gl"><span class="us-gw mono">'+US_WINS[selIdx][1].toUpperCase()+'</span><span class="us-gc">◂ ▸</span><span class="us-gd">'+dots+'</span></div>'
+    +sparkSVG(ser,170,34,'usg')+'</div>';
+  return '<div class="us-strip"><div class="us-min" onclick="toggleStripMin()" title="minimize"><i></i></div>'
+    +'<div class="us-sec"><div class="us-cap">Metered spend · vs 30-day avg</div><div class="us-stats">'+rail+'</div></div>'
+    +graph+fleetFuel()+'</div>';}
+function fleetFuel(){
+  if(!(window.CC&&window.CC.accountWallet)) return '';
+  var d=ACCTWIN; if(!d) return '';
+  var accts=(d.accounts||[]).filter(function(a){return a.in_rotation&&a.ok;});
+  if(!accts.length) accts=(d.accounts||[]).filter(function(a){return a.ok;});
+  if(!accts.length) return '';
+  function usedOf(a,win){var w=(a.windows||{})[win];return w?Math.max(0,Math.min(100,w.pct)):0;}
+  function tipOf(a){var w5=(a.windows||{}).session,ww=(a.windows||{}).week,m=a.model||{},me=m.session||m.week;
+    return a.email+'\n5h: '+(w5?(w5.pct+'% used · '+w5.free+'% free'+(w5.ttr!=null?(' · resets '+awDur(w5.ttr)):'')):'—')
+      +'\nweekly: '+(ww?(ww.pct+'% used'+(ww.ttr!=null?(' · resets '+awDur(ww.ttr)):'')):'—')
+      +'\nstatus: '+a.status+((a.live_on&&a.live_on.length)?(' · live on '+a.live_on.join(', ')):'')
+      +((me&&me.ready&&me.eta_h!=null)?('\nmodel: '+(me.pred_pct!=null?('~'+me.pred_pct+'% · '):'')+'maxout in '+awDur(me.eta_h*3600)):'');}
+  function row(lbl,win){return '<div class="us-brow"><span class="us-bl">'+lbl+'</span><div class="us-bat">'
+    +accts.map(function(a){var u=usedOf(a,win),g=fuelShade(u);
+      var fill=u<=1?'':'<div class="us-fill" style="width:'+u+'%;background:linear-gradient(90deg,'+g[0]+','+g[1]+')"></div>';
+      return '<div class="us-slot'+(a.use_next?' use':'')+'" title="'+e2(tipOf(a))+'" onclick="gotoLens(\'usage\')">'+fill+'</div>';}).join('')
+    +'</div></div>';}
+  var labels=accts.map(function(a){var s=(a.windows||{}).session,wk=(a.windows||{}).week,nm=(a.email||'').split('@')[0];
+    return '<div class="us-fl"><span class="us-nm" title="'+e2(a.email)+'">'+e2(nm)+(a.use_next?' <span class="us-st">▶</span>':'')+'</span>'
+      +'<span class="us-nums"><span class="x">5h</span> <b>'+(s?s.pct:'—')+'%</b> <span class="x">· wk</span> <b>'+(wk?wk.pct:'—')+'%</b>'+((wk&&wk.pct>=98)?' <span style="color:#c99a2e">maxed</span>':'')+'</span></div>';}).join('');
+  return '<div class="us-vr"></div><div class="us-sec us-fuel">'
+    +row('5-hr','session')+row('weekly','week')
+    +'<div class="us-flabels"><span class="us-fsp"></span><div class="us-flrow">'+labels+'</div></div></div>';
+}
 function renderStrip(){const w=document.getElementById('tkstripwrap');if(w)w.innerHTML=totalsStrip();}
 async function refreshTokens(){let d;try{d=await(await fetch('/api/token-usage')).json();}catch(e){return;}TOKDATA=d||{};
+  if(window.CC&&window.CC.accountWallet){try{ACCTWIN=await(await fetch('/api/account-windows')).json();}catch(e){}}
   renderStrip();
   const ss=TOKDATA.sessions||{};for(const nm in ss){const el=document.getElementById('ctx_'+cssid(nm));if(!el)continue;const pct=Math.round(ss[nm].pct),col=ctxCol(pct);el.textContent=pct+'%';el.style.color=col;el.style.borderColor=col+'55';el.title='context: '+fmtTok(ss[nm].used)+' / '+fmtTok(ss[nm].window)+' used · '+pct+'% free';}}
 // Sessions controls, rendered INTO the topbar's #lensTools (no second bar): live count + view-mode toggles + Admin shell.

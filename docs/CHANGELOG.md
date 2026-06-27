@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.64.0 -- 2026-06-26
+- Sessions "Usage · Account Meter" strip — ground-up redesign of the bar above the Sessions terminal into ONE
+  cohesive instrument (design "A3"; no bordered boxes, tabular-mono numbers, monochrome gold, hairline dividers):
+  * SPEND stat-rail — the 5 metered windows (1h/5h/24h/wk/mo) each with $ + an over/under-30-day-avg caret;
+    click a window OR the trend graph to cycle which window the sparkline shows (persisted).
+  * FLEET FUEL barometer — two rows (5-hour + weekly), each N EQUAL per-account gauges that FILL with % used
+    (monochrome gold rises as an account is consumed; warms slightly near the limit); names + 5h/wk used%
+    underneath, the recommended account marked ▶. Reads /api/token-usage + /api/account-windows.
+  * Minimize + remember — a Windows-style `_` button collapses the strip to a slim "📊 Usage · Account Meter"
+    title bar (with a faint live summary); the choice persists in localStorage.
+  Designed by iterating standalone retina HTML mockups delivered to the Files lens, then porting the final.
+
 ## 0.63.0 -- 2026-06-26
 - Autopilot CAPTURE layer (prerequisites for safe unattended account-switching; the switch LOOP is intentionally
   NOT enabled yet -- let the limit model bake first):
