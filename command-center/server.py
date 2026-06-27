@@ -3983,6 +3983,42 @@ def _ext_unregister_routine(eid):
         try: json.dump(reg, open(ROUTINES, "w"), indent=2)
         except Exception: pass
 
+def ext_action(eid, action, payload):
+    """GENERIC action proxy: forward an in-console request to an extension's hosted WORKER (e.g. AISearch's
+    Cloudflare Pages Function), injecting the per-node auth (access code) from the deploy env SERVER-SIDE so it
+    never sits in the browser. Lets a lens RUN the product in-console (not link out). The extension declares a
+    `worker` block (url_env/url_default, auth_header/auth_env, actions{name:{method,path}}). BYOK: the worker
+    resolves the AI keys from the account the access code maps to. Installed + entitled only."""
+    eid, d = _ext_dir(eid)
+    if not d: return {"ok": False, "error": "no such extension"}
+    if eid not in _ext_installed(): return {"ok": False, "error": "extension not installed on this node"}
+    m = _ext_meta(eid)
+    if _ext_is_paid(m) and not _entitled(eid, m): return {"ok": False, "error": "extension not licensed on this node"}
+    w = m.get("worker") or {}
+    spec = (w.get("actions") or {}).get(action)
+    if not spec: return {"ok": False, "error": "unknown action '%s'" % action}
+    base = (_deploy_env(w.get("url_env", "")) or w.get("url_default", "")).rstrip("/")
+    if not base: return {"ok": False, "error": "worker url not configured"}
+    # Browser-like UA so Cloudflare's bot/WAF (error 1010 on default Python-urllib) doesn't block the proxy.
+    hdr = {"Content-Type": "application/json",
+           "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+    if w.get("auth_header") and w.get("auth_env"):
+        code = _deploy_env(w["auth_env"])
+        if not code: return {"ok": False, "error": "no access code configured (set %s in the deploy env / Settings)" % w["auth_env"], "needs_auth": True}
+        hdr[w["auth_header"]] = code
+    url = base + spec["path"]
+    try:
+        req = urllib.request.Request(url, data=json.dumps(payload or {}).encode(), headers=hdr, method=spec.get("method", "POST"))
+        with urllib.request.urlopen(req, timeout=int(spec.get("timeout", 120))) as r:
+            return {"ok": True, "result": json.loads(r.read().decode() or "{}")}
+    except urllib.error.HTTPError as e:
+        body = ""
+        try: body = e.read().decode()[:300]
+        except Exception: pass
+        return {"ok": False, "error": "worker %d" % e.code, "body": body}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:160]}
+
 def ext_data(eid, resource, params):
     """GENERIC read-only data proxy for an INSTALLED + ENTITLED extension's declared data_sources (today:
     Supabase REST via stdlib urllib, GET-only). The DB key stays SERVER-SIDE -- never returned to the browser.
@@ -9558,6 +9594,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/agent-create":  return self._s(200, json.dumps(agent_create(body.get("name", ""), body.get("summary", ""))))
         if u.path == "/api/agent-delete":  return self._s(200, json.dumps(agent_delete(body.get("slug", ""))))
         if u.path == "/api/routine-run":         return self._s(200, json.dumps(routine_run_now(body.get("name", ""))))
+        if u.path == "/api/ext-action":          return self._s(200, json.dumps(ext_action(body.get("ext", ""), body.get("action", ""), body.get("payload") or {})))
         if u.path == "/api/extension-install":   return self._s(200, json.dumps(extension_install(body.get("id", ""))))
         if u.path == "/api/entitlement-grant":   return self._s(200, json.dumps(entitlement_grant(body.get("node", INSTANCE_ID), body.get("ext", ""), int(body.get("days", 0) or 0))))
         if u.path == "/api/entitlement-revoke":  return self._s(200, json.dumps(entitlement_revoke(body.get("node", INSTANCE_ID), body.get("ext", ""))))
@@ -15159,17 +15196,72 @@ async function affRunSync(){
     toast(r&&r.ok?'Sync started — watch the Routines lens for status.':('Could not start sync: '+((r||{}).error||'?')),5000);}catch(e){toast('Failed to start sync',4000);}
 }
 // ===== AI Visibility lens (AISearch Pro) -- KPI strip + 2-col (request table | reports/accounts side). Reuses .aff-* layout. =====
-var AISEXT='aisearch-pro', AIS={ep:''};
+var AISEXT='aisearch-pro', AIS={tab:'search',ep:'',brand:'',query:'',competitor:'',mode:'analyze',result:null,busy:false,err:''};
 async function aisData(resource,extra){try{return await(await fetch('/api/ext-data?ext='+encodeURIComponent(AISEXT)+'&resource='+resource+(extra||''))).json();}catch(e){return {ok:false,error:String(e)};}}
 function aisCost(v,dp){v=parseFloat(v);return isNaN(v)?'—':'$'+v.toFixed(dp==null?4:dp);}
 function aisProv(p){try{var a=(typeof p==='string')?JSON.parse(p):p;return Array.isArray(a)?a.join(', '):(a?Object.keys(a).join(', '):'');}catch(e){return '';}}
-async function loadAisearch(){
-  var g=document.getElementById('grid');g.innerHTML=empty('Loading AI visibility…');
+function loadAisearch(){
+  var g=document.getElementById('grid');
+  g.innerHTML=affCss()+'<div class="aff-wrap"><div class="aff-head"><b style="font-size:16px">🔎 AI Visibility</b><span class="sub">AISearch Pro — brand visibility across AI engines (BYOK)</span>'
+    +'<span style="margin-left:auto;display:flex;gap:6px">'
+      +'<button class="mini'+(AIS.tab==='search'?' go':'')+'" onclick="AIS.tab=\'search\';loadAisearch()">🔎 Search</button>'
+      +'<button class="mini'+(AIS.tab==='analytics'?' go':'')+'" onclick="AIS.tab=\'analytics\';loadAisearch()">📊 Analytics</button>'
+    +'</span></div><div id="aisbody"></div></div>';
+  if(AIS.tab==='analytics') aisAnalytics(); else aisSearchView();
+}
+function aisSearchView(){
+  var inp='background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 11px;width:100%';
+  var modepill=function(v,l){return '<button class="mini'+(AIS.mode===v?' go':'')+'" onclick="AIS.mode=\''+v+'\';loadAisearch()">'+l+'</button>';};
+  var h='<div class="aff-pane" style="padding:14px;margin-bottom:14px">'
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">'+modepill('analyze','Brand visibility')+modepill('compare','vs Competitor')+'</div>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">'
+      +'<label style="flex:1;min-width:170px"><span class="sub">Brand</span><input id="aisbrand" value="'+esc(AIS.brand)+'" placeholder="e.g. Cabeau" style="'+inp+'" onkeydown="if(event.key===\'Enter\')aisRun()"></label>'
+      +(AIS.mode==='compare'?('<label style="flex:1;min-width:150px"><span class="sub">Competitor</span><input id="aiscomp" value="'+esc(AIS.competitor)+'" placeholder="e.g. Trtl" style="'+inp+'"></label>'):'')
+      +'<label style="flex:2;min-width:200px"><span class="sub">Query</span><input id="aisquery" value="'+esc(AIS.query)+'" placeholder="best travel pillow" style="'+inp+'" onkeydown="if(event.key===\'Enter\')aisRun()"></label>'
+      +'<button class="mini go" onclick="aisRun()"'+(AIS.busy?' disabled':'')+'>'+(AIS.busy?'Running…':'▶ Run')+'</button></div>'
+    +'<div class="meta" style="margin-top:7px">Runs live across ChatGPT · Claude · Gemini · Perplexity using your account\'s own keys (BYOK). Each run costs real AI spend.</div></div>';
+  if(AIS.err) h+='<div class="aff-pane" style="padding:16px;color:#f85149">'+esc(AIS.err)+'</div>';
+  else if(AIS.busy) h+='<div class="aff-pane" style="padding:26px;text-align:center;color:var(--dim)">Querying the AI engines… (~20–40s)</div>';
+  else if(AIS.result) h+=aisResultHTML(AIS.result);
+  else h+='<div class="aff-pane" style="padding:26px;text-align:center;color:var(--dim)">Enter a brand and Run to see how the AI engines surface it.</div>';
+  var el=document.getElementById('aisbody'); if(el) el.innerHTML=h;
+}
+async function aisRun(){
+  var b=document.getElementById('aisbrand'),q=document.getElementById('aisquery'),c=document.getElementById('aiscomp');
+  AIS.brand=b?b.value.trim():''; AIS.query=q?q.value.trim():''; AIS.competitor=c?c.value.trim():'';
+  if(!AIS.brand){toast('Enter a brand first');return;}
+  AIS.busy=true; AIS.err=''; AIS.result=null; aisSearchView();
+  var action=(AIS.mode==='compare')?'compare':'analyze';
+  var payload=(AIS.mode==='compare')?{brand:AIS.brand,competitor:AIS.competitor,query:AIS.query}:{brand:AIS.brand,query:AIS.query};
+  try{
+    var r=await(await fetch('/api/ext-action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ext:AISEXT,action:action,payload:payload})})).json();
+    AIS.busy=false;
+    if(r&&r.ok) AIS.result=r.result;
+    else AIS.err=(r&&r.needs_auth)?'No access code set for this node — set AISEARCH_ACCESS_CODE in the deploy env.':('Search failed: '+((r||{}).error||'?')+((r||{}).body?(' — '+String(r.body).slice(0,140)):''));
+  }catch(e){AIS.busy=false;AIS.err='Request failed: '+e;}
+  aisSearchView();
+}
+function aisResultHTML(d){
+  var models=d.models||[];
+  var rate=(d.mention_rate!=null)?Math.round(d.mention_rate*100):null;
+  var cards=models.map(function(m){
+    var col=m.success?(m.mentioned?'#3fb950':'#8b949e'):'#f85149';
+    return '<div class="aff-kpi" style="border-left-color:'+col+'"><div style="font-weight:700">'+esc(m.name||m.provider||'?')+'</div>'
+      +'<div class="sub" style="margin:3px 0">'+(m.success?(m.mentioned?('✓ mentioned'+(m.position?(' · '+esc(m.position)):'')):'✕ not found'):('⚠ '+esc(String(m.error||'error').slice(0,38))))+'</div>'
+      +((m.top_brands&&m.top_brands.length)?('<div class="meta">top: '+esc(m.top_brands.slice(0,3).join(', '))+'</div>'):'')+'</div>';
+  }).join('')||'<div class="meta" style="padding:10px">no model results</div>';
+  return '<div class="aff-pane" style="padding:16px">'
+    +'<div style="display:flex;align-items:baseline;gap:12px;margin-bottom:12px"><b style="font-size:18px">'+esc(d.brand||'')+(d.competitor?(' <span class="sub" style="font-size:14px">vs '+esc(d.competitor)+'</span>'):'')+'</b>'
+      +(rate!=null?('<span style="margin-left:auto;font-size:24px;font-weight:800;color:'+(rate>=50?'#3fb950':(rate>0?'#d29922':'#f85149'))+'">'+rate+'%</span> <span class="sub">AI visibility</span>'):'')+'</div>'
+    +'<div class="aff-kpis" style="grid-template-columns:repeat(auto-fit,minmax(190px,1fr))">'+cards+'</div></div>';
+}
+async function aisAnalytics(){
+  var body=document.getElementById('aisbody'); if(body) body.innerHTML=empty('Loading analytics…');
   var rc=await aisData('requests','&count=1');
   if(!rc.ok){
     var m=(rc.error||'').toLowerCase();
-    var hint=/not configured/.test(m)?'Set AISEARCH_SUPABASE_URL/KEY in this node\'s deploy env (run Set up).':(/not licensed/.test(m)?'This node isn\'t licensed for AISearch — Mission Control must grant a signed entitlement.':(/not installed/.test(m)?'AISearch isn\'t installed on this node.':'Could not reach the data: '+esc(rc.error||'?')));
-    g.innerHTML='<div class="card" style="cursor:default"><h3><span>🔎 AI Visibility</span></h3><div class="meta" style="margin-top:8px">'+hint+'</div></div>';return;
+    var hint=/not configured/.test(m)?'Set AISEARCH_SUPABASE_URL/KEY in this node\'s deploy env.':(/not licensed/.test(m)?'This node isn\'t licensed for AISearch.':(/not installed/.test(m)?'AISearch isn\'t installed on this node.':'Could not reach the data: '+esc(rc.error||'?')));
+    if(body) body.innerHTML='<div class="aff-pane" style="padding:14px"><div class="meta">'+hint+'</div></div>'; return;
   }
   var pc=await aisData('reports','&count=1'); var ac=await aisData('accounts','&count=1');
   var reqs=((await aisData('requests',(AIS.ep?('&endpoint='+encodeURIComponent(AIS.ep)):'')+'&limit=500')).rows)||[];
@@ -15180,11 +15272,8 @@ async function loadAisearch(){
   var succ=reqs.length?Math.round(100*oks/reqs.length):0;
   var avgLat=reqs.length?Math.round(reqs.reduce(function(s,r){return s+(parseFloat(r.latency_ms)||0);},0)/reqs.length):0;
   var eps=Array.from(new Set(reqs.map(function(r){return r.endpoint;}).filter(Boolean)));
-  var pill=function(v,l){return '<button class="mini'+(AIS.ep===v?' go':'')+'" onclick="AIS.ep=\''+v+'\';loadAisearch()">'+l+'</button>';};
-  var h=affCss()+'<div class="aff-wrap">'
-    +'<div class="aff-head"><b style="font-size:16px">🔎 AI Visibility</b><span class="sub">AISearch Pro — brand visibility across AI engines</span>'
-      +'<span style="margin-left:auto"><a class="mini go" href="https://aisearch-pro.pages.dev" target="_blank" rel="noopener" style="text-decoration:none">↗ Open product</a></span></div>'
-    +'<div class="aff-kpis">'+affKpi(Number(rc.count||reqs.length).toLocaleString(),'requests')+affKpi(aisCost(totCost,2),'total cost (shown)')
+  var pill=function(v,l){return '<button class="mini'+(AIS.ep===v?' go':'')+'" onclick="AIS.ep=\''+v+'\';aisAnalytics()">'+l+'</button>';};
+  var h='<div class="aff-kpis">'+affKpi(Number(rc.count||reqs.length).toLocaleString(),'requests')+affKpi(aisCost(totCost,2),'total cost (shown)')
       +affKpi(succ+'%','success rate')+affKpi(avgLat?(avgLat+'ms'):'—','avg latency')
       +affKpi(Number((pc&&pc.count)||0).toLocaleString(),'cached reports')+affKpi(Number((ac&&ac.count)||0).toLocaleString(),'accounts')+'</div>'
     +'<div class="aff-tools">'+pill('','All endpoints')+eps.map(function(e){return pill(e,e.replace('/api/',''));}).join('')+'</div>'
@@ -15196,8 +15285,8 @@ async function loadAisearch(){
         +(reports.length?reports.map(aisReportRow).join(''):'<div class="meta" style="padding:13px">no reports yet</div>')
         +'</div><h3 style="border-top:1px solid var(--line)"><span>👤 Accounts</span><span class="sub">'+accts.length+'</span></h3><div class="aff-scroll" style="max-height:22vh">'
         +(accts.length?accts.map(aisAcctRow).join(''):'<div class="meta" style="padding:13px">no accounts</div>')+'</div></div>'
-    +'</div></div>';
-  g.innerHTML=h;
+    +'</div>';
+  if(body) body.innerHTML=h;
 }
 function aisReqRow(r){
   var brand=r.brand||'';

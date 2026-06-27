@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.77.0 -- 2026-06-27
+- AISearch runs IN-CONSOLE now (was a link-out to the website). The AI Visibility lens gained a Search tab: enter a
+  brand + query (or brand vs competitor), Run, and see the live result inline -- a grid of per-engine cards
+  (ChatGPT/Claude/Gemini/Perplexity: mentioned? position, top brands) + an overall AI-visibility %. BYOK: the
+  search runs as the node's account (access code), so it uses that account's own AI keys; the access code stays
+  SERVER-SIDE. New generic `/api/ext-action` proxy forwards an in-console request to an extension's hosted worker
+  (auth header from the deploy env; browser UA so Cloudflare doesn't 1010-block) -- reusable for any worker-backed
+  extension. extension.json gains a `worker` block (url/auth/actions). Analytics moved to a second tab.
+
 ## 0.76.0 -- 2026-06-27
 - AISearch Pro -- 2nd paid extension ($5/mo, BYOK). The Mac daemon/tunnel are GONE: the worker is redeployed as a
   serverless Cloudflare Pages Function (aisearch-pro.pages.dev) under MC -- killing the TCC/launchd/SSD headache.

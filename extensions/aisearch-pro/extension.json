@@ -64,5 +64,17 @@
     "POST /api/analyze", "POST /api/trace", "POST /api/compare",
     "POST /api/visibility-report", "POST /api/brand-intelligence", "POST /api/affiliate-intel",
     "GET /api/report-history"
-  ]
+  ],
+  "worker": {
+    "url_env": "AISEARCH_WORKER_URL",
+    "url_default": "https://aisearch-pro.pages.dev",
+    "auth_header": "X-Access-Code",
+    "auth_env": "AISEARCH_ACCESS_CODE",
+    "actions": {
+      "analyze": {"method": "POST", "path": "/api/analyze", "timeout": 90},
+      "compare": {"method": "POST", "path": "/api/compare", "timeout": 90},
+      "trace": {"method": "POST", "path": "/api/trace", "timeout": 90},
+      "report": {"method": "POST", "path": "/api/visibility-report", "timeout": 120}
+    }
+  }
 }
