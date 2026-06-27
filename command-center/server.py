@@ -404,6 +404,31 @@ def _sa_load_pub():
     except Exception:
         return None
 
+# ---- RECOVERY / BREAK-GLASS key: a SECOND owner keypair every node trusts ALONGSIDE the primary. Its public
+# key ships (recovery.pub); its PRIVATE key is kept OFFLINE by the owner (paper/USB in a safe), used ONLY if the
+# primary is lost or compromised. So losing the primary is RECOVERABLE without bricking the fleet: restore the
+# recovery key, sign with it (still verifies everywhere), and rotate in a fresh primary. See docs/RECOVERY.md.
+RECOVERY_PUBKEY_PATH = os.environ.get("CF_RECOVERY_PUBKEY") or CC.get("recovery_pubkey") or os.path.join(CC_HOME, "recovery.pub")   # SHIPPED (public)
+RECOVERY_PRIVKEY_PATH = os.environ.get("CF_RECOVERY_PRIVKEY") or CC.get("recovery_privkey") or os.path.join(CC_HOME, ".recovery_ed25519")  # OFFLINE -- normally NOT on any box
+def _load_pub(path):
+    if not _HAS_CRYPTO: return None
+    try:
+        with open(path, "rb") as f: return _crypto_ser.load_pem_public_key(f.read())
+    except Exception: return None
+def _trusted_pubkeys():
+    """All owner public keys this node trusts: the PRIMARY superadmin key + the RECOVERY/break-glass key (if
+    present). Any one verifying is sufficient -- this is what guarantees the owner can always re-establish
+    authority (restore either key) without locking the fleet out."""
+    return [k for k in (_load_pub(SA_PUBKEY_PATH), _load_pub(RECOVERY_PUBKEY_PATH)) if k is not None]
+def _verify_trusted(sig_bytes, msg_bytes):
+    """True if ANY trusted owner key verifies the signature. Single point for every authority check
+    (grants, core integrity, licenses, entitlements) so adding the recovery key covers them all at once."""
+    for pub in _trusted_pubkeys():
+        try:
+            pub.verify(sig_bytes, msg_bytes); return True
+        except Exception: continue
+    return False
+
 def superadmin_keygen():
     """MC: generate the owner's Ed25519 keypair ONCE. Private stays here (0600, gitignored); public is written
     to the shipped framework file (superadmin.pub) so every install auto-trusts it. Refuses to clobber an
@@ -419,6 +444,24 @@ def superadmin_keygen():
     with open(SA_PUBKEY_PATH, "wb") as f: f.write(pem_pub)
     return {"ok": True, "privkey": SA_PRIVKEY_PATH, "pubkey": SA_PUBKEY_PATH,
             "note": "SHIP/commit superadmin.pub (it's public); NEVER commit the private key (.superadmin_ed25519 is gitignored)."}
+
+def recovery_keygen():
+    """MC: generate the RECOVERY / break-glass keypair ONCE. recovery.pub SHIPS (every node trusts it alongside
+    the primary). The recovery PRIVATE key is written here ONCE so you can move it OFFLINE (paper/USB in a safe)
+    and then DELETE it from the box -- it must NOT live online. If the primary key is ever lost or compromised,
+    restore this recovery private key and you can immediately sign (it verifies everywhere) + rotate a fresh
+    primary. This is the second independent way back in -- see docs/RECOVERY.md."""
+    if not _HAS_CRYPTO: return {"ok": False, "error": "cryptography not installed"}
+    if not _authoring(): return {"ok": False, "error": "recovery keygen is authoring-only"}
+    if os.path.isfile(RECOVERY_PUBKEY_PATH): return {"ok": False, "error": "recovery.pub already exists (rotation must be deliberate)"}
+    priv = Ed25519PrivateKey.generate()
+    pem_priv = priv.private_bytes(_crypto_ser.Encoding.PEM, _crypto_ser.PrivateFormat.PKCS8, _crypto_ser.NoEncryption())
+    pem_pub = priv.public_key().public_bytes(_crypto_ser.Encoding.PEM, _crypto_ser.PublicFormat.SubjectPublicKeyInfo)
+    fd = os.open(RECOVERY_PRIVKEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f: f.write(pem_priv)
+    with open(RECOVERY_PUBKEY_PATH, "wb") as f: f.write(pem_pub)
+    return {"ok": True, "recovery_pub": RECOVERY_PUBKEY_PATH, "recovery_priv": RECOVERY_PRIVKEY_PATH,
+            "WARNING": "Move the recovery PRIVATE key OFFLINE now (paper + USB in a safe), then DELETE %s from this box. SHIP recovery.pub (public, every node trusts it). See docs/RECOVERY.md." % RECOVERY_PRIVKEY_PATH}
 
 def _sa_canon(payload):
     """Deterministic serialization so the same payload always signs/verifies to the same bytes."""
@@ -462,11 +505,8 @@ def _sa_verify(grant):
     if payload.get("node") != INSTANCE_ID: return (False, "grant not bound to this node")
     alg = payload.get("alg", "hmac")
     if alg == "ed25519":
-        pub = _sa_load_pub()
-        if pub is None: return (False, "ed25519 unavailable (cryptography missing or no superadmin.pub)")
-        try:
-            pub.verify(base64.b64decode(sig), _sa_canon(payload).encode())   # raises on bad signature
-        except Exception:
+        if not _trusted_pubkeys(): return (False, "ed25519 unavailable (cryptography missing or no superadmin.pub)")
+        if not _verify_trusted(base64.b64decode(sig), _sa_canon(payload).encode()):   # primary OR recovery key
             return (False, "bad signature")
     elif alg == "hmac":
         if not SA_NODE_KEY: return (False, "no superadmin_node_key provisioned on this node")
@@ -1432,7 +1472,7 @@ def drive_content(fid):
 # programmatic/curl use, or a valid `X-Mesh-Token` for peer traffic. Constant-time compared. ----
 AUTH_TOKEN = os.environ.get("CC_AUTH_TOKEN") or CC.get("auth_token") or ""
 AUTH_COOKIE = "cc_auth"
-AUTH_EXEMPT = ("/login", "/api/login", "/api/logout", "/api/health", "/favicon.ico", "/manifest.webmanifest")
+AUTH_EXEMPT = ("/login", "/api/login", "/api/logout", "/api/health", "/favicon.ico", "/manifest.webmanifest", "/api/license-activate")
 
 def _web_manifest():
     """PWA manifest -> lets the operator 'Add to Dock' / Install this dashboard as a standalone, resizable
@@ -4599,10 +4639,8 @@ def _ent_verify_token(tok):
     if not isinstance(payload, dict) or payload.get("kind") != "entitlement": return None
     if payload.get("node") not in (INSTANCE_ID, "*"): return None
     if payload.get("alg") != "ed25519": return None     # entitlements MUST be asymmetric-signed (no HMAC self-issue path)
-    pub = _sa_load_pub()
-    if pub is None: return None
-    try: pub.verify(base64.b64decode(sig), _sa_canon(payload).encode())
-    except Exception: return None
+    if not _trusted_pubkeys(): return None
+    if not _verify_trusted(base64.b64decode(sig), _sa_canon(payload).encode()): return None   # primary OR recovery key
     try:
         exp = int(payload.get("exp", 0))
         if exp and int(time.time()) > exp: return None
@@ -9108,13 +9146,9 @@ def _core_manifest_trusted():
     """Load core.sig.json and verify ITS signature with superadmin.pub. Returns the payload or None."""
     try: doc = json.load(open(CORE_SIG_FILE))
     except Exception: return None
-    pub = _sa_load_pub(); payload = doc.get("payload") or {}; sig = doc.get("sig", "")
-    if pub is None or not payload or not sig: return None
-    try:
-        pub.verify(base64.b64decode(sig), _sa_canon(payload).encode())   # raises on bad signature
-        return payload
-    except Exception:
-        return None
+    payload = doc.get("payload") or {}; sig = doc.get("sig", "")
+    if not _trusted_pubkeys() or not payload or not sig: return None
+    return payload if _verify_trusted(base64.b64decode(sig), _sa_canon(payload).encode()) else None   # primary OR recovery
 def _core_heal_file(rel, expected):
     """Restore one file from the SIGNED dist mirror -- only if the dist copy matches the signed hash."""
     try:
@@ -9204,11 +9238,11 @@ def license_install(doc):
     except Exception as e: return {"ok": False, "error": "could not write license: " + str(e)[:100]}
     return {"ok": True, **license_status()}
 def _license_check(doc):
-    pub = _sa_load_pub(); payload = (doc or {}).get("payload") or {}; sig = (doc or {}).get("sig", "")
-    if pub is None: return {"licensed": False, "reason": "no crypto/pubkey"}
+    payload = (doc or {}).get("payload") or {}; sig = (doc or {}).get("sig", "")
+    if not _trusted_pubkeys(): return {"licensed": False, "reason": "no crypto/pubkey"}
     if not payload or not sig: return {"licensed": False, "reason": "malformed license"}
-    try: pub.verify(base64.b64decode(sig), _sa_canon(payload).encode())
-    except Exception: return {"licensed": False, "reason": "bad signature"}
+    if not _verify_trusted(base64.b64decode(sig), _sa_canon(payload).encode()):   # primary OR recovery key
+        return {"licensed": False, "reason": "bad signature"}
     if payload.get("fingerprint") != _hw_fingerprint():
         return {"licensed": False, "reason": "hardware mismatch (license bound to a different machine)"}
     exp = payload.get("exp", 0)
@@ -9223,6 +9257,58 @@ def _license_load():
     try: return json.load(open(LICENSE_FILE))
     except Exception: return None
 def _licensed(): return license_status().get("licensed", False)
+
+# ---- AUTO-ACTIVATION: a sold box self-activates by sending its fingerprint + a single-use purchase CODE to our
+# activation server (the authoring/MC node), which mints the hardware-bound signed license and returns it. ----
+ACT_CODES_FILE = os.path.join(STATE_DIR, "_activation_codes.json")   # MC side: {code:{customer,days,used_by,used_at}}
+def _act_load():
+    try: return json.load(open(ACT_CODES_FILE))
+    except Exception: return {}
+def _act_save(d):
+    try:
+        fd = os.open(ACT_CODES_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, json.dumps(d, indent=2).encode()); os.close(fd)
+    except Exception: pass
+def license_code_new(customer="", days=365):
+    """AUTHORING/MC: mint a single-use activation code to hand a customer at purchase."""
+    if not _authoring(): return {"ok": False, "error": "authoring-only"}
+    code = "CF-" + "-".join(secrets.token_hex(2).upper() for _ in range(4))
+    d = _act_load(); d[code] = {"customer": customer or "unspecified", "days": int(days), "created": int(time.time()), "used_by": None, "used_at": None}; _act_save(d)
+    return {"ok": True, "code": code, "customer": customer or "unspecified", "days": int(days)}
+def license_codes():
+    return {"ok": True, "codes": [{"code": c, **v} for c, v in sorted(_act_load().items(), key=lambda kv: kv[1].get("created", 0), reverse=True)]}
+def license_activate(fingerprint, code=None, family=False, customer=""):
+    """MC/authoring: issue a hardware-bound license for a calling box. Authorized by a valid single-use CODE
+    (external customer) OR a family mesh token (internal fleet). A code binds to the first fingerprint that uses it."""
+    if not _authoring(): return {"ok": False, "error": "activation must hit the authoring/MC node"}
+    fp = re.sub(r"[^a-f0-9]", "", (fingerprint or "").lower())[:64]
+    if not fp: return {"ok": False, "error": "missing fingerprint"}
+    days, cust = 365, customer
+    if not family:
+        d = _act_load(); rec = d.get((code or "").strip())
+        if not rec: return {"ok": False, "error": "invalid activation code"}
+        if rec.get("used_by") and rec["used_by"] != fp: return {"ok": False, "error": "activation code already used on another machine"}
+        days = rec.get("days", 365); cust = rec.get("customer") or customer
+        rec["used_by"] = fp; rec["used_at"] = int(time.time()); d[(code or "").strip()] = rec; _act_save(d)
+    return license_issue(fp, customer=cust, days=days)
+def license_self_activate():
+    """Node-side: get a license from our activation server (cc.config activation_url) using activation_code."""
+    url = (CC.get("activation_url") or "").rstrip("/"); code = CC.get("activation_code")
+    if not url: return {"ok": False, "error": "no activation_url configured"}
+    if _licensed(): return {"ok": True, "already": True, **license_status()}
+    try:
+        body = json.dumps({"fingerprint": _hw_fingerprint(), "code": code, "node": INSTANCE_ID}).encode()
+        req = urllib.request.Request(url + "/api/license-activate", data=body, headers={"Content-Type": "application/json"})
+        if MESH_TOKEN: req.add_header("X-Mesh-Token", MESH_TOKEN)
+        with urllib.request.urlopen(req, timeout=12) as r: res = json.loads(r.read().decode())
+        if res.get("ok") and res.get("license"): return license_install(res["license"])
+        return {"ok": False, "error": res.get("error", "activation failed")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+def _license_activate_loop():
+    time.sleep(18)
+    try:
+        if not _authoring() and not _licensed() and CC.get("activation_url"): license_self_activate()
+    except Exception: pass
 
 def _local_quiescent():
     """True only if NO local session is mid-turn -- so an auto-restart can't interrupt active work."""
@@ -10312,12 +10398,24 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/core-sign":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(core_sign()))
+        if u.path == "/api/recovery-keygen":
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(recovery_keygen()))
         if u.path == "/api/license-issue":            # AUTHORING/MC: mint a signed license for a customer box's fingerprint
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(license_issue(body.get("fingerprint", ""), body.get("customer", ""), body.get("days", 365))))
         if u.path == "/api/license-install":          # THIS node: store a signed license we were issued
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(license_install(body.get("license") or body)))
+        if u.path == "/api/license-activate":         # PUBLIC activation: a sold box posts {fingerprint, code} (or a family node w/ mesh token)
+            fam = _mesh_token_ok(self.headers.get("X-Mesh-Token", ""))
+            return self._s(200, json.dumps(license_activate(body.get("fingerprint", ""), body.get("code"), family=fam, customer=body.get("customer", ""))))
+        if u.path == "/api/license-activate-self":     # THIS node: go fetch our license from the configured activation server
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(license_self_activate()))
+        if u.path == "/api/license-code":              # AUTHORING/MC: mint a single-use purchase code
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(license_code_new(body.get("customer", ""), body.get("days", 365))))
         if u.path == "/api/vault-set":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(vault_set(body.get("id", ""), body.get("value"), label=body.get("label"), scope=body.get("scope"), node=body.get("node") or None)))
@@ -18325,6 +18423,7 @@ if __name__ == "__main__":
     threading.Thread(target=_tg_inbound_loop, daemon=True).start()     # Telegram: relay your replies back into the routed session
     threading.Thread(target=_autoupdate_loop, daemon=True).start()     # PULL convergence: every tenant self-updates from the dist (boot + timer); source nodes self-skip
     threading.Thread(target=_core_integrity_loop, daemon=True).start() # INTEGRITY: verify framework files vs the signed manifest; appliances self-heal drift from the signed dist
+    threading.Thread(target=_license_activate_loop, daemon=True).start() # LICENSE: a sold box auto-activates from its configured activation server on boot if unlicensed
     threading.Thread(target=_fleet_converge_loop, daemon=True).start() # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     threading.Thread(target=_routines_loop, daemon=True).start()       # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts
     threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)

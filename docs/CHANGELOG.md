@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.88.0 -- 2026-06-27
+- SUPER-CREATOR RECOVERY (never get locked out) + LICENSE AUTO-ACTIVATION. Recovery: every node now trusts a
+  SECOND owner key (`recovery.pub`, ships) ALONGSIDE the primary -- all four authority checks (superadmin grants,
+  core integrity, licenses, entitlements) route through `_verify_trusted` (primary OR recovery). So losing/
+  compromising the primary is RECOVERABLE without bricking the fleet: restore the offline recovery key, sign
+  (verifies everywhere), rotate a fresh primary. Three independent recovery paths: encrypted multi-location
+  bundle, paper/QR backup, and the cold recovery key. New `recovery_keygen` (POST /api/recovery-keygen),
+  `cf-key-backup.sh` (AES-256 bundle + printable paper backup of the crown jewels), `cf-key-restore.sh`
+  (reinstate onto a new MC; --verify mode). Runbook: docs/RECOVERY.md. Auto-activation: a sold box self-activates
+  by POSTing its hardware fingerprint + a single-use purchase CODE to the activation server (cc.config
+  activation_url) on boot; `license_code_new` (POST /api/license-code) mints codes, `POST /api/license-activate`
+  (public, code- or family-mesh-gated) issues the hardware-bound license, codes are single-use + bound to the
+  first machine. `POST /api/license-activate-self` + a boot loop. All tested (recovery-key-signed licenses verify;
+  code single-use/hardware-bind/family-bypass).
+
 ## 0.87.0 -- 2026-06-27
 - CODEBASE / IP PROTECTION (anti-clone) -- phase 3a: LICENSE ACTIVATION shipped (soft-enforce). A license is
   Ed25519-signed by us, BOUND to the machine's hardware fingerprint (macOS IOPlatformUUID), and EXPIRES -- so
