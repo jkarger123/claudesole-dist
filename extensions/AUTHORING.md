@@ -20,6 +20,9 @@ it works, and the safe way to run it. No extension ships without this.
   "requires": [ {"key":"X","label":"plain-language thing the user must have/get"} ],
   "setup_doc": "SETUP.md",
   "setup_agent": true,              // true => the Marketplace 'Set up' button opens a guided agent
+  "tier": "free",                   // OPTIONAL: "free" (default) | "paid" -- paid = locked until entitled
+  "pricing": {"monthly_usd": 49},  // OPTIONAL (paid only): shown on the card; billing automation is separate
+  "publisher": "ClaudeFather",     // OPTIONAL: who authors/houses it (official vs third-party)
   "launch_group": "Tools",         // OPTIONAL: which group this extension's launch points show under
                                    //   in the New-session picker (defaults to "Extensions")
   "launch_points": [               // OPTIONAL: the logical places a user would launch an AGENT for this
@@ -57,6 +60,22 @@ It MUST contain these sections, in this order:
 - `agent-tool`: payload is an `agents/<id>/` dir (charter + tools/run.py) -> appears in the Agents lens.
 - `skill`: payload is a `SKILL.md` -> copied into `<scope>/.claude/skills/` -> appears in the Skills lens.
 - `theme`: provides a `data-theme` palette + brand assets.
+
+## Paid extensions (entitlements) -- the monetization layer
+A `"tier": "paid"` extension is **locked by default** and unlocks ONLY when this node holds a valid
+**Mission-Control-signed entitlement** (Ed25519, same owner key as superadmin; private key MC-only,
+`superadmin.pub` shipped to every install). This is deliberately un-bypassable by an agent on the node:
+forging a token needs the private key, and editing the stored grant file just produces a token that fails
+signature verification. There is **no honor-system plan flag** that unlocks paid extensions -- the signature
+is the only authority. Default = locked, so a sold/downloaded product never leaks paid features.
+- **Internal fleet nodes** are unlocked by issuing each a perpetual wildcard grant (`ext:"*"`, `days:0`).
+- **External customers** get a per-extension grant with an expiry (`days:31`), re-issued monthly to renew;
+  on lapse the extension re-locks (existing data the extension wrote to the tenant's own store is untouched).
+- Mechanism (server.py): `entitlement_grant(node, ext, days)` mints + delivers (local, or pushed to a peer
+  via the signed superadmin `set_entitlement`); `_entitled(eid)` is the gate checked at install (and callable
+  at run-time by a payload). APIs: `GET /api/entitlements`, `POST /api/entitlement-grant|entitlement-revoke`.
+- Billing automation (charging the card) is SEPARATE and not required: a future Stripe webhook simply calls
+  `entitlement_grant` on payment. Authors only declare `tier`/`pricing`/`publisher`; the platform enforces.
 
 ## Hard rules
 - ASCII only. Secrets ONLY in the gitignored deployment env; never in extension.json/SETUP.md/git; never echo

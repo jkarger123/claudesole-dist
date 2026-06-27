@@ -3,6 +3,26 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.70.0 -- 2026-06-27
+- Paid extensions / entitlements — the monetization layer for the Marketplace, built so it can't be self-granted.
+  A `"tier":"paid"` extension is LOCKED by default and unlocks ONLY with a Mission-Control-SIGNED entitlement
+  token (Ed25519, the same owner key as superadmin — private key MC-only, superadmin.pub already shipped to every
+  install). A node/agent cannot forge one (no private key) and editing the stored `_entitlements.json` just yields
+  a token that fails signature verification (PROVEN: a tampered grant is rejected on read). No honor-system plan
+  flag — the signature is the only authority. Internal fleet nodes get a perpetual wildcard grant; external
+  customers get a per-extension grant with an expiry, re-minted monthly to renew (lapse re-locks; tenant data
+  untouched). Mechanism: extension.json gains optional `tier`/`pricing`/`publisher`; `_entitled()` gates install;
+  `entitlement_grant(node,ext,days)` mints+delivers (local or via signed superadmin set_entitlement); superadmin
+  actions set_entitlement/del_entitlement; APIs GET /api/entitlements + POST /api/entitlement-grant|revoke;
+  Marketplace cards show 💳 Paid · $X/mo + ✓ licensed / 🔒 locked and a "Request access" path. Billing automation
+  (Stripe) stays separate — a future webhook just calls entitlement_grant. Docs: extensions/AUTHORING.md.
+- Usage/metered-spend portability fixes (from the enterprise audit): CTX_WINDOW is now `context_window`-configurable
+  (non-1M models like Haiku 200K get a correct per-session gauge AND autocompact threshold); `_PRICING` accepts a
+  cc.config `pricing` override so a tenant can patch a stale rate without a core release; the Accounts "no reading
+  yet" hint no longer leaks our macOS usernames into a tenant's UI; the shared `~/.claude/_cc_acct_windows.json` +
+  account-log are written 0600 (account emails/usage no longer world-readable to other users on a shared box).
+  Audit verdict: pricing current, secrets clean, graceful zero-config degrade, multi-tenant isolation holds.
+
 ## 0.69.0 -- 2026-06-27
 - Auto-update HARDENED for packaged/white-label installs (was tuned to our one fleet). Update identity is now
   ONE white-label point — three named constants in server.py (OFFICIAL_DIST_GIT / OFFICIAL_DIST_DIR /

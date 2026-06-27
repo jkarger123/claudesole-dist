@@ -506,6 +506,10 @@ def superadmin_exec(grant):
             return {"ok": True, "action": action, "set": {key: params.get("value")}, "note": "restart to apply"}
         except Exception as e:
             return {"ok": False, "error": str(e)[:120]}
+    if action == "set_entitlement":   # deliver a SIGNED paid-extension entitlement to this node
+        return {"ok": True, "action": action, **entitlement_store(params.get("token"))}
+    if action == "del_entitlement":   # revoke a paid-extension entitlement on this node
+        return {"ok": True, "action": action, **entitlement_remove(params.get("ext"))}
     if action == "set_claude_setting":
         # DETERMINISTIC settings push: write one allowlisted key into the user's ~/.claude/settings.json and
         # return the result SYNCHRONOUSLY (no chief, no inbox -- guaranteed request->response). 'tui':'default'
@@ -1797,7 +1801,7 @@ def tmux_sessions():
 # summed from the Claude Code transcripts (~/.claude/projects/<slug>/<sessionId>.jsonl)
 # bucketed into rolling 1h / 24h / 7d / 30d windows. Scanning is incremental (each
 # transcript is append-only -- we only read newly-appended bytes) and cached (TTL).
-CTX_WINDOW = 1_000_000
+CTX_WINDOW = int(CC.get("context_window") or 1_000_000)   # config-overridable: non-1M models (e.g. Haiku 200K) set this so the per-session gauge + autocompact threshold are correct
 CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
 
 def _cwd_slug(cwd):
@@ -1973,6 +1977,10 @@ _PRICING = {
     "sonnet": (3.0,  15.0, 0.30, 3.75),
     "haiku":  (1.0,  5.0,  0.10, 1.25),
 }
+try:   # tenant override: cc.config "pricing":{"opus":[in,out,cache_read,cache_write], ...} -> patch stale rates without a core release
+    for _k, _v in (CC.get("pricing") or {}).items():
+        if isinstance(_v, (list, tuple)) and len(_v) == 4: _PRICING[_k] = tuple(float(x) for x in _v)
+except Exception: pass
 def _price_for(model):
     m = (model or "").lower()
     if "haiku" in m: return _PRICING["haiku"]
@@ -2860,7 +2868,9 @@ def _acct_log_active(email):
         if log and log[-1].get("email") == email: return
         log.append({"ts": int(time.time()), "email": email}); log = log[-500:]
         try:
-            tmp = _ACCT_LOG + ".tmp"; json.dump(log, open(tmp, "w")); os.replace(tmp, _ACCT_LOG)
+            tmp = _ACCT_LOG + ".tmp"; json.dump(log, open(tmp, "w")); os.chmod(tmp, 0o600); os.replace(tmp, _ACCT_LOG)
+            try: os.chmod(_ACCT_LOG, 0o600)               # account-email history is not for other local users
+            except Exception: pass
         except Exception: pass
 def _acct_active_at(ts, log):
     """The account email active at time ts. Events BEFORE tracking began (the first log entry) can't be
@@ -3071,7 +3081,9 @@ def _acct_windows_load():
 def _acct_windows_save(d):
     with _ACCT_WIN_LOCK:
         try:
-            tmp = ACCT_WINDOWS_FILE + ".tmp"; json.dump(d, open(tmp, "w")); os.replace(tmp, ACCT_WINDOWS_FILE)
+            tmp = ACCT_WINDOWS_FILE + ".tmp"; json.dump(d, open(tmp, "w")); os.chmod(tmp, 0o600); os.replace(tmp, ACCT_WINDOWS_FILE)
+            try: os.chmod(ACCT_WINDOWS_FILE, 0o600)        # account emails + usage telemetry are not for other local users (shared multi-user box)
+            except Exception: pass
         except Exception: pass
     _ACCT_STORE_CACHE["data"] = None    # a new reading landed -> next store() recomputes (don't serve stale)
 def _acct_prefs_load():
@@ -3149,7 +3161,7 @@ def _acct_recommend(accounts, now):
             info[em] = {"status": "tracked", "why": "tracked, not in your rotation", "score": -9, "use_next": False}; continue
         if not a.get("ok") or not s:
             info[em] = {"status": "no_data", "score": -9, "use_next": False,
-                        "why": "no reading yet — log into it on any node (hptuner or sarahaios) to read it"}; continue
+                        "why": "no reading yet — log into this account on any node to read it"}; continue
         s_free = s.get("free", 0); s_ttr = s.get("ttr"); s_ttr_h = max(0.1, (s_ttr if s_ttr else 360) / 3600.0)
         wk_free = (wk.get("free", 100) if wk else 100); wk_ttr = wk.get("ttr") if wk else None
         perish = s_free / s_ttr_h                       # unused 5h capacity lost per idle hour (higher = use sooner)
@@ -3771,6 +3783,9 @@ def extensions_list():
             except Exception: continue
             m["installed"] = m.get("id", d) in inst
             m["has_setup"] = os.path.isfile(os.path.join(EXT_DIR, d, m.get("setup_doc", "SETUP.md")))
+            m["paid"] = _ext_is_paid(m)                 # commercial annotation (tier/pricing already in m from extension.json)
+            m["entitled"] = _entitled(m.get("id", d), m)
+            m["locked"] = m["paid"] and not m["entitled"]
             out.append(m)
     return {"extensions": out, "version": _manifest_version(), "n": len(out)}
 
@@ -3909,6 +3924,11 @@ def _ext_apply_payload(eid, d, remove=False):
 def extension_install(eid):
     eid, d = _ext_dir(eid)
     if not d: return {"ok": False, "error": "no such extension"}
+    m = _ext_meta(eid)
+    if _ext_is_paid(m) and not _entitled(eid, m):       # paid + no valid signed grant -> locked (cannot self-grant)
+        return {"ok": False, "locked": True, "error": "locked",
+                "tier": m.get("tier"), "pricing": m.get("pricing"), "publisher": m.get("publisher"),
+                "note": "This is a paid extension. Purchase / request access to receive a signed entitlement, then install."}
     s = _ext_installed(); s.add(eid); _ext_save(s)
     wired = _ext_wire_mcp(eid)
     out = {"ok": True, "installed": eid, "mcp_servers": wired,
@@ -3946,6 +3966,121 @@ def extension_setup(eid):
                 sh([TMUX, "send-keys", "-t", sess, "Enter"]); return
     threading.Thread(target=_trust, daemon=True).start()
     return {"ok": True, "term": "/term?name=" + sess, "note": "started"}
+
+# ==== PAID EXTENSIONS / ENTITLEMENTS =============================================================
+# A paid extension is unlocked ONLY by a Mission-Control-SIGNED entitlement token -- reusing the same
+# Ed25519 owner key as superadmin (private key MC-only; superadmin.pub shipped to every install). A node
+# (or an agent running on it) CANNOT self-grant: forging a token needs the private key, and editing the
+# stored file just produces a token that fails signature verification. There is deliberately NO honor-system
+# "plan" flag that unlocks paid extensions -- the signature is the ONLY authority. (Tampering with the check
+# itself is framework drift, which drift_report/fw-fingerprint already surfaces.) Default = locked: an install
+# with no signed grant treats every paid extension as locked, so a sold/downloaded product never leaks paid
+# features. Internal fleet nodes are unlocked by issuing each a perpetual wildcard ('*') grant.
+ENTITLEMENTS_FILE = os.path.join(STATE_DIR, "_entitlements.json")   # PRESERVE + gitignored: {"grants":[{payload,sig}]}
+
+def _ent_load():
+    try: return json.load(open(ENTITLEMENTS_FILE)).get("grants", [])
+    except Exception: return []
+
+def _ent_save(grants):
+    try:
+        fd = os.open(ENTITLEMENTS_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f: json.dump({"grants": grants}, f, indent=2)
+        return True
+    except Exception: return False
+
+def _ent_verify_token(tok):
+    """A long-lived, RE-checkable signed entitlement (NOT single-use like a superadmin grant -- it is verified
+    on every access). Checks: Ed25519 sig vs the shipped owner pubkey, kind==entitlement, bound to THIS node
+    (or '*'), and unexpired (exp==0 => perpetual). Returns the payload or None."""
+    if not isinstance(tok, dict): return None
+    payload = tok.get("payload") or {}; sig = tok.get("sig") or ""
+    if not isinstance(payload, dict) or payload.get("kind") != "entitlement": return None
+    if payload.get("node") not in (INSTANCE_ID, "*"): return None
+    if payload.get("alg") != "ed25519": return None     # entitlements MUST be asymmetric-signed (no HMAC self-issue path)
+    pub = _sa_load_pub()
+    if pub is None: return None
+    try: pub.verify(base64.b64decode(sig), _sa_canon(payload).encode())
+    except Exception: return None
+    try:
+        exp = int(payload.get("exp", 0))
+        if exp and int(time.time()) > exp: return None
+    except Exception: return None
+    return payload
+
+def _ext_meta(eid):
+    eid, d = _ext_dir(eid)
+    if not d: return {}
+    try: return json.load(open(os.path.join(d, "extension.json"))) or {}
+    except Exception: return {}
+
+def _ext_is_paid(m):
+    return str((m or {}).get("tier", "free")).lower() in ("paid", "premium")
+
+def _entitled(eid, m=None):
+    """May THIS node use extension `eid`? Free extensions: always. Paid: only with a valid signed grant
+    covering (this node, this-ext-or-'*'). A node cannot grant itself -- there is no plan/config bypass."""
+    if m is None: m = _ext_meta(eid)
+    if not _ext_is_paid(m): return True
+    for tok in _ent_load():
+        p = _ent_verify_token(tok)
+        if p and (p.get("ext") in (eid, "*")): return True
+    return False
+
+def entitlements_status():
+    """This node's active (valid) entitlements + whether it can MINT (i.e. is Mission Control)."""
+    out = []
+    for tok in _ent_load():
+        p = _ent_verify_token(tok)
+        if p: out.append({"ext": p.get("ext"), "exp": p.get("exp"), "plan": p.get("plan"), "issued": p.get("issued")})
+    return {"node": INSTANCE_ID, "entitlements": out, "can_mint": _sa_load_priv() is not None,
+            "wildcard": any(e["ext"] == "*" for e in out)}
+
+def entitlement_mint(node_id, ext, days=0):
+    """MC ONLY: mint a signed entitlement for a node (ext id, or '*' for all paid). days=0 => perpetual
+    (internal fleet); days>0 => expires (external subscription -- re-mint monthly to renew)."""
+    priv = _sa_load_priv()
+    if priv is None: return {"ok": False, "error": "no signing key here -- mint entitlements from Mission Control"}
+    node_id = re.sub(r"[^A-Za-z0-9_*-]", "", node_id or "")[:48]
+    ext = re.sub(r"[^a-z0-9_*-]", "", (ext or "").lower())[:48]
+    if not node_id or not ext: return {"ok": False, "error": "node and ext required"}
+    now = int(time.time())
+    payload = {"v": 1, "kind": "entitlement", "node": node_id, "ext": ext,
+               "plan": ("internal" if not days else "external"),
+               "issued": now, "exp": (0 if not days else now + int(days) * 86400),
+               "nonce": secrets.token_hex(8), "alg": "ed25519"}
+    sig = base64.b64encode(priv.sign(_sa_canon(payload).encode())).decode()
+    return {"ok": True, "token": {"payload": payload, "sig": sig}}
+
+def entitlement_store(tok):
+    """Node-side: accept a signed entitlement (verify first; replace any existing grant for the same ext)."""
+    p = _ent_verify_token(tok)
+    if not p: return {"ok": False, "error": "invalid / not-for-this-node / expired entitlement"}
+    grants = [g for g in _ent_load() if ((g.get("payload") or {}).get("ext")) != p.get("ext")]
+    grants.append(tok); _ent_save(grants)
+    return {"ok": True, "ext": p.get("ext"), "exp": p.get("exp"), "plan": p.get("plan")}
+
+def entitlement_remove(ext):
+    ext = re.sub(r"[^a-z0-9_*-]", "", (ext or "").lower())[:48]
+    grants = [g for g in _ent_load() if ((g.get("payload") or {}).get("ext")) != ext]
+    _ent_save(grants); return {"ok": True, "removed": ext}
+
+def entitlement_grant(node_id, ext, days=0):
+    """MC: mint + DELIVER an entitlement to a node -- stored locally if it's us, else pushed to the peer via
+    the signed superadmin channel (set_entitlement)."""
+    m = entitlement_mint(node_id, ext, days)
+    if not m.get("ok"): return m
+    tok = m["token"]
+    if node_id == INSTANCE_ID:
+        return {"ok": True, "node": node_id, "delivered": "local", "result": entitlement_store(tok)}
+    g = superadmin_send(node_id, "set_entitlement", {"token": tok})
+    return {"ok": bool(g.get("ok") and (g.get("result") or {}).get("ok")), "node": node_id, "delivered": "superadmin", "result": g.get("result") or g}
+
+def entitlement_revoke(node_id, ext):
+    """MC: revoke -- locally if us, else push a del_entitlement to the peer (immediate; otherwise it lapses at exp)."""
+    if node_id == INSTANCE_ID: return {"ok": True, "node": node_id, "result": entitlement_remove(ext)}
+    g = superadmin_send(node_id, "del_entitlement", {"ext": ext})
+    return {"ok": bool(g.get("ok")), "node": node_id, "result": g.get("result") or g}
 
 def security_status():
     """Read the latest security posture report written by agents/security/tools/scan.py."""
@@ -8674,6 +8809,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/security":      return self._s(200, json.dumps(security_status()))
         if u.path == "/api/agents":        return self._s(200, json.dumps(agents_list()))
         if u.path == "/api/extensions":    return self._s(200, json.dumps(extensions_list()))
+        if u.path == "/api/entitlements":  return self._s(200, json.dumps(entitlements_status()))
         if u.path == "/api/version-check": return self._s(200, json.dumps(version_check()))
         if u.path == "/api/agent-report":  return self._s(200, json.dumps(agent_report(q.get("slug", [""])[0])))
         if u.path == "/api/skills":        return self._s(200, json.dumps(skills_list()))
@@ -9114,6 +9250,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/agent-create":  return self._s(200, json.dumps(agent_create(body.get("name", ""), body.get("summary", ""))))
         if u.path == "/api/agent-delete":  return self._s(200, json.dumps(agent_delete(body.get("slug", ""))))
         if u.path == "/api/extension-install":   return self._s(200, json.dumps(extension_install(body.get("id", ""))))
+        if u.path == "/api/entitlement-grant":   return self._s(200, json.dumps(entitlement_grant(body.get("node", INSTANCE_ID), body.get("ext", ""), int(body.get("days", 0) or 0))))
+        if u.path == "/api/entitlement-revoke":  return self._s(200, json.dumps(entitlement_revoke(body.get("node", INSTANCE_ID), body.get("ext", ""))))
         if u.path == "/api/extension-uninstall": return self._s(200, json.dumps(extension_uninstall(body.get("id", ""))))
         if u.path == "/api/extension-setup":     return self._s(200, json.dumps(extension_setup(body.get("id", ""))))
         if u.path == "/api/notify":              return self._s(200, json.dumps(notify_send(body.get("text", ""))))
@@ -14579,19 +14717,27 @@ async function loadMarketplace(){document.getElementById("grid").innerHTML=empty
   const hdr='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🏛 Marketplace</b> <span class="sub">'+ex.filter(e=>e.installed).length+' installed / '+ex.length+' available · '+esc(((window.CC&&window.CC.product)||"ClaudeFather").replace(/^the /i,""))+' v'+(d.version||'?')+'</span> <button class="mini" onclick="checkUpdates()">⟳ Check for updates</button></div></div>';
   const cards=ex.filter(e=>!q||((e.name||'')+(e.summary||'')+(e.category||'')).toLowerCase().includes(q)).map(e=>{
     const req=(e.requires||[]).map(r=>'<li>'+esc(r.label||r.key)+'</li>').join('');
+    const price=(e.pricing&&(e.pricing.monthly_usd||e.pricing.monthly))?('$'+(e.pricing.monthly_usd||e.pricing.monthly)+'/mo'):'';
+    const tierBadge=e.paid?(' <span class="badge" title="Paid extension'+(e.publisher?(' · by '+esc(e.publisher)):'')+'" style="background:#c9a22722;color:#e3b341">💳 Paid'+(price?(' · '+esc(price)):'')+'</span>'
+        +(e.entitled?' <span class="badge" title="This node holds a valid signed entitlement" style="background:#22c55e22;color:#22c55e">✓ licensed</span>'
+                    :' <span class="badge" title="Locked — needs a Mission-Control-signed entitlement" style="background:#f8514922;color:#f85149">🔒 locked</span>')):'';
     return '<div class="card" style="cursor:default">'
       +'<h3 style="margin:0 0 4px">'+esc(e.icon||'•')+' '+esc(e.name||e.id)
-        +' <span class="badge" style="background:#8b5cf622;color:#a78bfa">'+esc(e.category||'extension')+'</span>'
+        +' <span class="badge" style="background:#8b5cf622;color:#a78bfa">'+esc(e.category||'extension')+'</span>'+tierBadge
         +(e.installed?' <span class="badge" style="background:#22c55e22;color:#22c55e">installed</span>':'')+'</h3>'
       +'<div class="sub" style="margin:2px 0 6px">'+esc(e.summary||e.description||'')+'</div>'
       +(req?'<div class="meta" style="margin-bottom:6px">needs:<ul style="margin:3px 0 0 16px;padding:0">'+req+'</ul></div>':'')
       +'<div class="modnav" style="gap:6px">'
         +(e.installed?('<button class="mini" onclick="extSetup(\''+esc(e.id)+'\')">🧭 Set up</button><button class="mini" style="color:#f85149" onclick="extUninstall(\''+esc(e.id)+'\')">remove</button>')
-                     :'<button class="mini go" onclick="extInstall(\''+esc(e.id)+'\')">＋ Install</button>')
+          :(e.locked?('<button class="mini" title="Requires a paid entitlement signed by Mission Control" onclick="extRequest(\''+esc(e.id)+'\','+JSON.stringify(price||'').replace(/"/g,"&quot;")+')">🔒 Request access</button>')
+                    :'<button class="mini go" onclick="extInstall(\''+esc(e.id)+'\')">＋ Install</button>'))
       +'</div></div>';}).join("")||empty("No extensions in the catalog yet.");
   document.getElementById("grid").innerHTML=hdr+cards;}
 async function extInstall(id){const r=await(await fetch('/api/extension-install',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})).json();
-  if(r&&r.ok){toast('Installed '+id+' — opening the setup guide…');loadMarketplace();extSetup(id);}else toast('Install failed: '+((r||{}).error||'?'),5000);}
+  if(r&&r.ok){toast('Installed '+id+' — opening the setup guide…');loadMarketplace();extSetup(id);}
+  else if(r&&r.locked){toast('🔒 '+id+' is a paid extension'+(r.pricing&&(r.pricing.monthly_usd||r.pricing.monthly)?(' ($'+(r.pricing.monthly_usd||r.pricing.monthly)+'/mo)'):'')+' — needs a Mission-Control-signed entitlement.',7000);}
+  else toast('Install failed: '+((r||{}).error||'?'),5000);}
+function extRequest(id,price){alert('🔒 “'+id+'” is a paid extension'+(price?(' ('+price+')'):'')+'.\n\nIt unlocks only with a Mission-Control-signed entitlement — it cannot be self-granted.\n\nInternal fleet nodes are licensed automatically. External customers: purchase/request access and Mission Control issues a signed entitlement to this node.');}
 async function extUninstall(id){if(!confirm('Remove extension "'+id+'"? (your accounts/keys are NOT deleted)'))return;
   const r=await(await fetch('/api/extension-uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})).json();
   if(r&&r.ok){toast('Removed '+id);loadMarketplace();}else toast('Failed: '+((r||{}).error||'?'),5000);}
