@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.66.0 -- 2026-06-26
+- Live-login integrity — the account switch (`_kc_write`) now writes `~/.claude.json` AND VERIFIES it persisted
+  (retry + a loud WARN to `~/.cc-credential-changes.log` on failure), so the keychain login and the
+  displayed/attributed account can never silently desync — the live-account the overseer trusts stays truthful.
+  (Investigation confirmed detection was already correct: each node's live account is fingerprinted by its real
+  `/usage` reading — sarahaios→sarah at 73% weekly vs getcalibrated at 11% — so attribution was never wrong.)
+- Friendly machine labels: `side_label` = "hptuners" (the 3 hptuner-user nodes) and "AFP" (sarahaios), so the
+  Sessions strip's "● live on <machine>" markers read unmistakably across the fleet.
+
 ## 0.65.0 -- 2026-06-26
 - Sessions strip — distinguish LIVE from RECOMMENDED (the overseer already tracked which macOS user is on which
   account via current_email/live_on per store; this SURFACES it). Each account in the fleet-fuel barometer now

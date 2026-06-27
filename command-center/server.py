@@ -2816,10 +2816,18 @@ def _kc_write(blob, account):
         except Exception: pass
     ok = sh(["security", "add-generic-password", "-U", "-s", KC_SERVICE, "-a", _kc_acct(), "-w", blob or ""])[0] == 0
     if account is not None:
-        try:
-            pth = _home_json(); d = json.load(open(pth)); d["oauthAccount"] = account
-            tmp = pth + ".tmp"; json.dump(d, open(tmp, "w")); os.replace(tmp, pth)
-        except Exception: pass
+        em = (account or {}).get("emailAddress") or ""
+        synced = False
+        for _ in range(2):   # write ~/.claude.json AND verify it persisted -- the keychain and the displayed
+            try:             # account MUST stay in lockstep, or attribution would report the wrong live login
+                pth = _home_json(); d = json.load(open(pth)); d["oauthAccount"] = account
+                tmp = pth + ".tmp"; json.dump(d, open(tmp, "w")); os.replace(tmp, pth)
+                if ((json.load(open(pth)).get("oauthAccount") or {}).get("emailAddress")) == em: synced = True; break
+            except Exception: pass
+        if not synced:       # never fail silently -- a desync means the live-account readout is unreliable
+            try: open(os.path.expanduser("~/.cc-credential-changes.log"), "a").write(
+                time.strftime("%Y-%m-%d %H:%M:%S") + "  WARN: switched keychain login but ~/.claude.json did NOT sync to " + em + " -- live-account readout may be stale until next /login\n")
+            except Exception: pass
     if ok: _acct_log_active((account or {}).get("emailAddress"))   # record the switch for per-account usage
     return ok
 
