@@ -8420,6 +8420,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"text": term_snapshot((q.get("name") or [""])[0], (q.get("lines") or ["60"])[0])}))
         if u.path == "/api/compact-state":
             return self._s(200, json.dumps(_COMPACT_STATE.get((q.get("name") or [""])[0], {})))
+        if u.path == "/api/autocompact":
+            return self._s(200, json.dumps({"on": _autocompact_on(), "pct": _autocompact_pct()}))
         if u.path == "/api/ideas": return self._s(200, json.dumps(ideas_list()))
         if u.path == "/api/tasks": return self._s(200, json.dumps({"tasks": tasks_load(), "today": _dt.date.today().isoformat()}))
         if u.path == "/api/platform-map":
@@ -8675,6 +8677,16 @@ class H(BaseHTTPRequestHandler):
                 body.get("note", ""), bool(body.get("enter", False)))))
         if u.path == "/api/compact-session":  # handoff -> /compact -> re-read handoff (preserve agent memory)
             return self._s(200, json.dumps(compact_session(body.get("name", ""))))
+        if u.path == "/api/autocompact":      # turn graceful auto-compact on/off + set the % threshold (persists to cc.config, live)
+            try:
+                if "on" in body: CC["autocompact"] = bool(body.get("on"))
+                if "pct" in body: CC["autocompact_pct"] = max(50.0, min(99.0, float(body.get("pct"))))
+                cfg = json.load(open(_CC_CONFIG)) if os.path.isfile(_CC_CONFIG) else {}
+                cfg["autocompact"] = CC.get("autocompact", True); cfg["autocompact_pct"] = _autocompact_pct()
+                tmp = _CC_CONFIG + ".tmp"; json.dump(cfg, open(tmp, "w")); os.chmod(tmp, 0o600); os.replace(tmp, _CC_CONFIG)
+                return self._s(200, json.dumps({"ok": True, "on": _autocompact_on(), "pct": _autocompact_pct()}))
+            except Exception as e:
+                return self._s(200, json.dumps({"ok": False, "error": str(e)[:120]}))
         if u.path == "/api/resume":
             return self._s(200, json.dumps(resume_session(body.get("machine", "studio"), body.get("id", ""), body.get("cwd", ""), body.get("fork", False), body.get("label", ""))))
         if u.path == "/api/ralph-launch":  return self._s(200, json.dumps(ralph_launch(body.get("name", ""))))
@@ -11133,10 +11145,25 @@ async function refreshTokens(){let d;try{d=await(await fetch('/api/token-usage')
   renderStrip();
   const ss=TOKDATA.sessions||{};for(const nm in ss){const el=document.getElementById('ctx_'+cssid(nm));if(!el)continue;const pct=Math.round(ss[nm].pct),col=ctxCol(pct);el.textContent=pct+'%';el.style.color=col;el.style.borderColor=col+'55';el.title='context: '+fmtTok(ss[nm].used)+' / '+fmtTok(ss[nm].window)+' used · '+pct+'% free';}}
 // Sessions controls, rendered INTO the topbar's #lensTools (no second bar): live count + view-mode toggles + Admin shell.
+var ACMP={on:true,pct:95};
+function acmpBtn(){
+  var on=ACMP.on!==false, p=Math.round(ACMP.pct||95);
+  return '<button class="mini'+(on?' go':'')+'" id="acmpbtn" title="Auto-compact: when any session\'s context fills past '+p+'%, it automatically writes a full handoff, runs /compact, then re-reads the handoff — so a long session never blows its context window. Click to toggle; Shift-click to set the %." '
+    +'onclick="toggleAutocompact(event)">♻ Auto-compact '+(on?('on · '+p+'%'):'off')+'</button>';
+}
+function toggleAutocompact(ev){
+  if(ev&&ev.shiftKey){
+    var v=prompt('Auto-compact at what % full? (50–99)', Math.round(ACMP.pct||95)); if(v==null)return;
+    var n=parseFloat(v); if(isNaN(n))return;
+    fetch('/api/autocompact',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pct:n,on:true})}).then(r=>r.json()).then(r=>{if(r){ACMP={on:r.on,pct:r.pct};paintSessTools(SESSDATA?SESSDATA.length:null);}});
+    return;
+  }
+  fetch('/api/autocompact',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:ACMP.on===false})}).then(r=>r.json()).then(r=>{if(r){ACMP={on:r.on,pct:r.pct};paintSessTools(SESSDATA?SESSDATA.length:null);}});
+}
 function sessToolsHTML(count){
   var modes=[['focus','⊞ Focus'],['grid','▦ Grid'],['list','☰ List']].map(function(m){return '<button class="mini'+(SESSVIEW==m[0]?' go':'')+'" onclick="setSessView(\''+m[0]+'\')">'+m[1]+'</button>';}).join("");
   var live=(count!=null)?('<span class="sesslive" title="'+count+' live session'+(count==1?'':'s')+'">🟢 '+count+'</span>'):'<span class="sesslive"></span>';
-  return live+modes+'<button class="mini" title="Admin shell — a plain shell in this project for sudo / interactive commands (type your password here)" onclick="openAdminShell()">🔑 Admin</button>';
+  return live+modes+acmpBtn()+'<button class="mini" title="Admin shell — a plain shell in this project for sudo / interactive commands (type your password here)" onclick="openAdminShell()">🔑 Admin</button>';
 }
 function paintSessTools(count){var el=document.getElementById('lensTools');if(el)el.innerHTML=(LENS=='sessions')?sessToolsHTML(count):'';}
 function setSessView(v){SESSVIEW=v;localStorage.setItem('hpcc_sessview',v);loadSessions(true);syncHash();}
@@ -14688,7 +14715,7 @@ async function loadSessions(quiet){
   document.body.classList.add("cf-sessions");document.body.classList.remove("cf-glens");   // set directly here (the landing lens may not route through render()/lensTopbar) -> mobile session dock + layout apply
   if(!quiet)document.getElementById("grid").innerHTML=empty("Loading sessions…");
   let s=[],tok={};
-  try{const[a,b]=await Promise.all([fetch("/api/sessions"),fetch("/api/token-usage")]);s=await a.json();tok=await b.json();}catch(e){}
+  try{const[a,b,c]=await Promise.all([fetch("/api/sessions"),fetch("/api/token-usage"),fetch("/api/autocompact")]);s=await a.json();tok=await b.json();try{ACMP=(await c.json())||ACMP;}catch(e){}}catch(e){}
   TOKDATA=tok||{};
   s=s.filter(x=>!x.protected||x.name==SESSBIG||x.chief);   // protected (bridge/crons/loops) stay hidden -- EXCEPT the focused big AND the Chief of Staff (the always-on mesh comms endpoint is always shown)
   if(SESSBIG && !s.find(x=>x.name==SESSBIG)) s.unshift({name:SESSBIG,label:SESSBIG,attached:true,protected:false});
@@ -16450,6 +16477,48 @@ def _autoapprove_loop():
         except Exception: pass
         time.sleep(6)
 
+# ---- auto-compact: when a session's context fills past the threshold, run the SAME graceful compact the
+# operator runs by hand (write a full handoff -> /compact -> re-read it) -- automatically, so a long session
+# never blows its context window. Reuses compact_session()/_compact_worker() wholesale; this is just the
+# threshold watcher. Config (cc.config.json): autocompact (bool, default on) + autocompact_pct (% FULL,
+# default 95). Server-side daemon so it fires even with no browser open.
+_AUTOCOMPACT_LOG = os.path.join(STATE_DIR, "_autocompact.log")
+_AUTOCOMPACT_LAST = {}    # session name -> ts of last auto-fire (cooldown, so we don't re-fire while the
+                          # post-compact context measurement still lags on the last assistant turn)
+def _autocompact_on():    return CC.get("autocompact", True) is not False
+def _autocompact_pct():
+    try: return max(50.0, min(99.0, float(CC.get("autocompact_pct", 95))))
+    except Exception: return 95.0
+def _autocompact_scan():
+    if not _autocompact_on(): return
+    thresh = _autocompact_pct()
+    try: sess = tmux_sessions()
+    except Exception: return
+    tmap = _session_transcripts(sess)
+    now = time.time()
+    for s in sess:
+        name = s["name"]
+        try:
+            used = _last_usage(tmap.get(name))
+            if used is None: continue
+            full = 100.0 * used / CTX_WINDOW
+            if full < thresh: continue
+            st = _COMPACT_STATE.get(name, {})
+            if st.get("step") in ("starting", "handoff", "compacting", "restoring"): continue   # already compacting
+            if now - _AUTOCOMPACT_LAST.get(name, 0) < 900: continue                              # 15-min cooldown
+            _AUTOCOMPACT_LAST[name] = now
+            try:
+                with open(_AUTOCOMPACT_LOG, "a") as f:
+                    f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + name + " -> auto-compact @ %.1f%% full (threshold %.0f%%)\n" % (full, thresh))
+            except Exception: pass
+            compact_session(name)
+        except Exception: continue
+def _autocompact_loop():
+    while True:
+        try: _autocompact_scan()
+        except Exception: pass
+        time.sleep(60)
+
 if __name__ == "__main__":
     print("%s Command Center on http://0.0.0.0:%d  (tailnet http://%s:%d)" % (BRAND, PORT, STUDIO_TS, PORT))
     # Lock secret-bearing per-deployment files to owner-only (0600) -- fast + security-critical, so it stays
@@ -16514,6 +16583,7 @@ if __name__ == "__main__":
     if ACCOUNT_WALLET:
         threading.Thread(target=_acct_poll_loop, daemon=True).start()  # per-account /usage fuel gauges (token-isolated)
     threading.Thread(target=_autoapprove_loop, daemon=True).start()   # keep agents off the permission-prompt wall
+    threading.Thread(target=_autocompact_loop, daemon=True).start()    # graceful auto-compact when a session's context fills past the threshold
     threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
     threading.Thread(target=_gmail_sync_loop, daemon=True).start()      # keep recently-viewed Gmail lists warm (cache + outage fallback)
     threading.Thread(target=_gc_sync_loop, daemon=True).start()         # same for Calendar/Drive (resilient cache)

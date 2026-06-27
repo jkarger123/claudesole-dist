@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.67.0 -- 2026-06-27
+- Auto-compact: a session's context never blows its window unattended. A server-side daemon watches every
+  session's context fill level; when one crosses the threshold (default 95% full) it runs the SAME graceful
+  compact the operator runs by hand — write a COMPREHENSIVE handoff -> /compact -> re-read the handoff — so the
+  agent keeps its memory across compaction. Reuses compact_session()/_compact_worker() wholesale; the new code
+  is just the threshold watcher + a 15-min per-session cooldown (so it can't re-fire while the post-compact
+  context measurement still lags). Fires even with no browser open. Aborts untouched if the handoff can't be
+  written (same safety as the manual flow). Config (cc.config.json): `autocompact` (bool, default on) +
+  `autocompact_pct` (% full, default 95). UI: a "♻ Auto-compact on · 95%" toggle in the Sessions toolbar —
+  click to flip, Shift-click to set the %. API: GET/POST `/api/autocompact`. Log: `_autocompact.log`.
+
 ## 0.66.1 -- 2026-06-27
 - Sessions strip fuel: the account LIVE on the machine you're viewing now LEADS the row and gets the bright slot
   outline — previously the ▶ recommendation got first-position + the glow, which on a node you're NOT logged
