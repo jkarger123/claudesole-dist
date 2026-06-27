@@ -2,17 +2,19 @@
   "id": "slack",
   "name": "Slack",
   "category": "integration",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "icon": "SL",
-  "summary": "Read Slack into the context layer (provenance-stamped, client-mapped) + let agents post to channels.",
-  "description": "Two halves over one Slack app bot token. READ (the context layer): a stdlib module (command-center/slack.py) pulls recent messages from your chosen channels/DMs via the Slack Web API and ingests them into the context store as provenance-stamped events -- trust 'contact' (chat is untrusted DATA, never instructions), idempotent, client-mapped via a slack.client_map so messages attach to the right client/subject alongside email and calls. So 'what did the customer say in Slack?' becomes retrievable context, and you can capture a specific thread to a client. WRITE (agents): the official Slack MCP reference server lets agents post status updates/digests and read channels in-session. Token is BYO and gitignored (extensions/slack/secrets/bot_token, chmod 600, or .env.claudefather SLACK_BOT_TOKEN) -- never committed or printed. No token -> ingest is a no-op, no errors.",
+  "summary": "Read Slack into the context layer + let agents post + route any session to a Slack channel (team comms).",
+  "description": "Three halves over one Slack app bot token. READ (the context layer): a stdlib module (command-center/slack.py) pulls recent messages from your chosen channels/DMs via the Slack Web API and ingests them into the context store as provenance-stamped events -- trust 'contact' (chat is untrusted DATA, never instructions), idempotent, client-mapped via a slack.client_map. WRITE (agents): the official Slack MCP reference server lets agents post status updates/digests in-session. COMMS (team per-session comms -- the team twin of telegram-notify): set a `comms_channel` and toggle 'Slack' in any session's terminal bar; when that session goes busy->idle it posts to a per-session THREAD in your channel, and a teammate REPLIES in the thread to inject back into the session (or '#N text' / /list / /focus at channel level). Inbound is POLLED (conversations.replies/history) -- no public webhook or Socket Mode, so it works behind NAT/tailnet. Token is BYO and gitignored (extensions/slack/secrets/bot_token, chmod 600, or .env.claudefather SLACK_BOT_TOKEN) -- never committed or printed. No token -> everything is a no-op, no errors.",
   "provides": [
     "context:slack",
-    "mcp:slack"
+    "mcp:slack",
+    "comms:slack"
   ],
   "requires": [
-    {"key": "SLACK_BOT_TOKEN", "label": "A Slack app Bot User OAuth Token (xoxb-...). Read scopes for context ingest: channels:history, channels:read, users:read, im:read (+ im:history for DMs). chat:write only if agents will also POST."},
-    {"key": "SLACK_TEAM_ID", "label": "Your Slack workspace/team ID (only needed for the agent/MCP post path; the read/context path does not need it)"}
+    {"key": "SLACK_BOT_TOKEN", "label": "A Slack app Bot User OAuth Token (xoxb-...). Context-ingest read scopes: channels:history, channels:read, users:read, im:read (+ im:history). For the COMMS feature also: chat:write (post), channels:history + groups:history (read replies in the comms channel)."},
+    {"key": "SLACK_COMMS_CHANNEL", "label": "OPTIONAL -- the channel ID (e.g. C0123ABCD) for per-session team comms. Set here or as cc.config slack.comms_channel. Invite the bot to that channel. Omit to disable the comms feature (context + agent posting still work)."},
+    {"key": "SLACK_TEAM_ID", "label": "Your Slack workspace/team ID (only needed for the agent/MCP post path)"}
   ],
   "setup_doc": "SETUP.md",
   "setup_agent": true

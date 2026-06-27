@@ -4212,6 +4212,212 @@ def _tg_inbound_loop():
                 if text: _tg_handle_inbound(msg, text)
         except Exception: time.sleep(5)
 
+# ==== SLACK PER-SESSION COMMS -- the TEAM twin of the Telegram tool. Route a session to a Slack channel; when
+# it goes busy->idle the bot posts to a per-session THREAD; a teammate REPLIES in that thread and it's injected
+# back into the session. Built on the `slack` extension (bot token via slack._token). Inbound is POLLED
+# (conversations.replies per session thread + conversations.history for channel-level commands) -- no public
+# webhook / Socket Mode needed, so it works behind NAT / on a tailnet. Same smart routing as Telegram, but a
+# reply IN a session's thread is inherently unambiguous (thread -> that session). State is node-local.
+SK_STATE_FILE = os.path.join(STATE_DIR, "_sk_sessions.json")
+_SK_LOCK = threading.Lock(); _SK_BUSY = {}; _SK_BOTID = [None]
+def _safe_slack_configured():
+    try: return bool(slack.configured())
+    except Exception: return False
+def _sk_channel():
+    try: c = (slack._cfg() or {}).get("comms_channel")
+    except Exception: c = None
+    return c or _deploy_env("SLACK_COMMS_CHANNEL")
+def _sk_load():
+    try: return json.load(open(SK_STATE_FILE))
+    except Exception: return {"routed": [], "index": {}, "focus": {}, "mute": {}, "threads": {}, "seen": {}}
+def _sk_save(d):
+    with _SK_LOCK:
+        try:
+            fd = os.open(SK_STATE_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, json.dumps(d).encode()); os.close(fd)
+        except Exception: pass
+def _sk_mark(seen=None, threads=None):   # the inbound loop touches ONLY machine-state (seen/threads), never user-state (routed/focus/mute)
+    d = _sk_load()
+    if seen is not None: d["seen"] = seen
+    if threads is not None: d["threads"] = threads
+    _sk_save(d)
+def _sk_ready(): return bool(_safe_slack_configured() and _sk_channel() and "slack" in _ext_installed())
+def _sk_routed(): return set(_sk_load().get("routed", []))
+def _sk_index():
+    d = _sk_load(); routed = d.get("routed", []); idx = {s: n for s, n in (d.get("index") or {}).items() if s in routed}
+    used = set(idx.values())
+    for s in routed:
+        if s not in idx:
+            n = 1
+            while n in used: n += 1
+            idx[s] = n; used.add(n)
+    if idx != (d.get("index") or {}): d["index"] = idx; _sk_save(d)
+    return idx, {n: s for s, n in idx.items()}
+def _sk_label(session): return "%s/%s" % (INSTANCE_ID, _session_label(session))
+def slack_session(name, on=None):
+    name = re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:48]
+    d = _sk_load(); r = set(d.get("routed", []))
+    if on is True and name: r.add(name)
+    elif on is False: r.discard(name)
+    d["routed"] = sorted(r); _sk_save(d)
+    idx, _ = _sk_index()
+    return {"ok": True, "on": name in r, "num": idx.get(name), "count": len(r), "routed": d["routed"],
+            "configured": bool(_safe_slack_configured() and _sk_channel()),
+            "installed": "slack" in _ext_installed(), "channel": _sk_channel() or None}
+def _sk_botid():
+    if _SK_BOTID[0] is None:
+        try: _SK_BOTID[0] = (slack._api("auth.test") or {}).get("user_id") or ""
+        except Exception: _SK_BOTID[0] = ""
+    return _SK_BOTID[0]
+def _sk_post(text, thread_ts=None):
+    ch = _sk_channel()
+    if not ch: return None
+    try: return slack._api("chat.postMessage", {"channel": ch, "text": text[:3500], "thread_ts": thread_ts, "unfurl_links": "false"})
+    except Exception: return None
+def _sk_chat(text): _sk_post(text)
+def _sk_post_session(session, body):
+    """Post into the session's dedicated thread (creating it on first post); record thread_ts -> session."""
+    d = _sk_load(); idx, _ = _sk_index(); multi = len(idx) > 1
+    head = (("#%d " % idx[session]) if (multi and session in idx) else "") + _sk_label(session)
+    tts = (d.get("threads") or {}).get(session)
+    res = _sk_post("%s\n%s" % (head, body), thread_ts=tts)
+    try:
+        if res and res.get("ok"):
+            root = tts or res.get("ts")
+            th = d.get("threads", {}); th[session] = root
+            sn = d.get("seen", {}); sn.setdefault(root, root)
+            _sk_mark(seen=sn, threads=th)
+    except Exception: pass
+def _sk_num(arg, by_num): return _tg_num(arg, by_num)
+def _sk_fmt_list():
+    idx, by_num = _sk_index()
+    if not by_num: return "No sessions routed to Slack. Toggle 'Slack' in a session's terminal bar to add one."
+    d = _sk_load(); f = d.get("focus") or {}; mu = d.get("mute") or {}
+    foc = f.get("session") if f.get("until", 0) > time.time() else None
+    lines = ["Slack sessions on %s:" % INSTANCE_ID]
+    for n in sorted(by_num):
+        s = by_num[n]; alive = sh([TMUX, "has-session", "-t", s])[0] == 0
+        st = ("busy" if _pane_busy(s) else "idle") if alive else "closed"
+        tags = ([("focus")] if s == foc else []) + (["muted"] if mu.get(s, 0) > time.time() else [])
+        lines.append("#%d  %s -- %s%s" % (n, _session_label(s), st, (" [" + ",".join(tags) + "]" if tags else "")))
+    lines.append("Reply IN a session's thread, or '#N your text' at channel level - /focus N - /off N - /help")
+    return "\n".join(lines)
+def _sk_help():
+    return ("ClaudeFather Slack -- talk to your sessions from this channel.\n"
+            "- reply IN a session's thread -> goes to that session (the simplest way)\n"
+            "- '#N your text' at channel level -> session #N; bare '#N' -> focus #N\n"
+            "- /list, /focus N [30m|2h] (bare=1h) | /focus off, /off N, /mute N [time] | /unmute N")
+def _sk_set_focus(session, dur):
+    if dur is None: dur = 3600
+    d = _sk_load(); d["focus"] = {"session": session, "until": time.time() + dur}; _sk_save(d)
+    idx, _ = _sk_index()
+    _sk_chat("Focused on #%d %s for %s. Channel-level replies go here; /focus off to clear." % (idx.get(session, 0), _session_label(session), _tg_fmt_dur(dur)))
+def _sk_command(text, idx, by_num):
+    parts = text.split(); cmd = parts[0].lower().lstrip("/"); arg = parts[1] if len(parts) > 1 else ""
+    if cmd in ("list", "ls", "sessions"): _sk_chat(_sk_fmt_list()); return True
+    if cmd in ("help", "h", "?"): _sk_chat(_sk_help()); return True
+    if cmd == "focus":
+        if arg.lower() in ("off", "clear", "none", ""):
+            d = _sk_load(); d["focus"] = {}; _sk_save(d); _sk_chat("Focus cleared."); return True
+        n = _sk_num(arg, by_num)
+        if not n: _sk_chat("Focus which? " + _sk_fmt_list()); return True
+        _sk_set_focus(by_num[n], _tg_parse_dur(parts[2] if len(parts) > 2 else "", default=3600)); return True
+    if cmd in ("off", "disable", "stop"):
+        n = _sk_num(arg, by_num)
+        if not n: _sk_chat("Turn off which? " + _sk_fmt_list()); return True
+        s = by_num[n]; slack_session(s, False); _sk_chat("Slack OFF for #%d %s." % (n, _session_label(s))); return True
+    if cmd == "mute":
+        n = _sk_num(arg, by_num)
+        if not n: _sk_chat("Mute which? " + _sk_fmt_list()); return True
+        s = by_num[n]; dur = _tg_parse_dur(parts[2] if len(parts) > 2 else "", default=3600)
+        d = _sk_load(); mu = d.get("mute") or {}; mu[s] = time.time() + dur; d["mute"] = mu; _sk_save(d)
+        _sk_chat("Muted #%d %s for %s." % (n, _session_label(s), _tg_fmt_dur(dur))); return True
+    if cmd == "unmute":
+        n = _sk_num(arg, by_num)
+        if not n: _sk_chat("Unmute which? " + _sk_fmt_list()); return True
+        s = by_num[n]; d = _sk_load(); mu = d.get("mute") or {}; mu.pop(s, None); d["mute"] = mu; _sk_save(d)
+        _sk_chat("Unmuted #%d %s." % (n, _session_label(s))); return True
+    return False
+def _sk_handle_channel_msg(text):
+    """A channel-level (non-threaded) message: commands, or '#N text' / 'name: text' / focus / single-auto."""
+    idx, by_num = _sk_index(); routed = sorted(idx, key=lambda s: idx[s])
+    if text.startswith("/") and _sk_command(text, idx, by_num): return
+    target = None; payload = text
+    m = re.match(r"^/?s(?:ession)?\s+(\S+)\s+(.*)$", text, re.S) or re.match(r"^(\S+):\s+(.*)$", text, re.S)
+    if m and m.group(1) in routed: target = m.group(1); payload = m.group(2).strip()
+    if not target:
+        m = re.match(r"^#?(\d+)\s*(.*)$", text, re.S)
+        if m:
+            n = int(m.group(1)); rest = m.group(2).strip()
+            if n in by_num:
+                if rest: target = by_num[n]; payload = rest
+                else: _sk_set_focus(by_num[n], None); return
+            else: _sk_chat("No session #%d.\n%s" % (n, _sk_fmt_list())); return
+    if not target:
+        f = _sk_load().get("focus") or {}
+        if f.get("session") in routed and f.get("until", 0) > time.time(): target = f["session"]
+    if not target and len(routed) == 1: target = routed[0]
+    if not target:
+        _sk_chat("Which session? Reply IN a session's thread, or '#N your text', or /focus N.\n" + _sk_fmt_list()); return
+    if sh([TMUX, "has-session", "-t", target])[0] != 0: _sk_chat("[%s] that session has closed." % _session_label(target)); return
+    _mesh_deliver(target, payload); _sk_chat("-> %s%s: delivered." % (("#%d " % idx[target]) if len(routed) > 1 else "", _session_label(target)))
+def _sk_outbound_loop():
+    time.sleep(22)
+    while True:
+        try:
+            if _sk_ready():
+                idx, _ = _sk_index(); mu = _sk_load().get("mute") or {}
+                for s in list(idx.keys()):
+                    if sh([TMUX, "has-session", "-t", s])[0] != 0: continue
+                    busy = _pane_busy(s)
+                    if _SK_BUSY.get(s) is True and not busy and mu.get(s, 0) <= time.time():
+                        _sk_post_session(s, "ready for you (finished or waiting). Reply in this thread to respond.\n---\n" + _sk_pane_tail(s))
+                    _SK_BUSY[s] = busy
+        except Exception: pass
+        time.sleep(8)
+def _sk_pane_tail(name, n=14): return _tg_pane_tail(name, n)
+def _sk_inbound_loop():
+    time.sleep(30)
+    while True:
+        try:
+            if not _sk_ready(): time.sleep(20); continue
+            ch = _sk_channel(); bot = _sk_botid()
+            d = _sk_load(); threads = dict(d.get("threads") or {}); seen = dict(d.get("seen") or {})
+            # 1) replies IN each session's thread -> that exact session
+            for s in list(_sk_routed()):
+                tts = threads.get(s)
+                if not tts: continue
+                r = slack._api("conversations.replies", {"channel": ch, "ts": tts, "oldest": seen.get(tts, tts), "limit": 20})
+                if not r or not r.get("ok"): continue
+                for m in r.get("messages", []):
+                    mts = m.get("ts", "")
+                    if not mts or mts == tts: continue
+                    try:
+                        if float(mts) <= float(seen.get(tts, tts)): continue
+                    except Exception: pass
+                    seen[tts] = mts
+                    if m.get("bot_id") or m.get("user") == bot: continue   # skip our own posts
+                    txt = (m.get("text") or "").strip()
+                    if txt and sh([TMUX, "has-session", "-t", s])[0] == 0:
+                        _mesh_deliver(s, txt); _sk_post("delivered.", thread_ts=tts)
+            # 2) channel-level messages -> commands / number / name
+            last = seen.get("_channel")
+            hr = slack._api("conversations.history", {"channel": ch, "oldest": last or "0", "limit": 20})
+            if hr and hr.get("ok"):
+                for m in sorted(hr.get("messages", []), key=lambda x: float(x.get("ts", "0") or 0)):
+                    mts = m.get("ts", "")
+                    if not mts: continue
+                    try:
+                        if last and float(mts) <= float(last): continue
+                    except Exception: pass
+                    seen["_channel"] = mts
+                    if m.get("thread_ts") and m.get("thread_ts") != mts: continue   # a threaded reply (handled above)
+                    if m.get("bot_id") or m.get("user") == bot: continue
+                    txt = (m.get("text") or "").strip()
+                    if txt: _sk_handle_channel_msg(txt)
+            _sk_mark(seen=seen)
+            time.sleep(6)
+        except Exception: time.sleep(8)
+
 def _ext_mcp_template(eid):
     p = os.path.join(EXT_DIR, eid, "mcp.json")
     if os.path.isfile(p):
@@ -10392,6 +10598,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/extension-setup":     return self._s(200, json.dumps(extension_setup(body.get("id", ""))))
         if u.path == "/api/notify":              return self._s(200, json.dumps(notify_send(body.get("text", ""))))
         if u.path == "/api/telegram-session":    return self._s(200, json.dumps(telegram_session(body.get("name", ""), body.get("on"))))
+        if u.path == "/api/slack-session":       return self._s(200, json.dumps(slack_session(body.get("name", ""), body.get("on"))))
         if u.path == "/api/vault-lease":
             ok = _mesh_token_ok(self.headers.get("X-Mesh-Token", "")) or self._operator_only()
             return self._s(200, json.dumps(vault_lease(body.get("id", ""), body.get("node", ""), authed=ok)))
@@ -10533,7 +10740,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
   .fontgrp button{flex:1;min-width:44px;min-height:38px;margin-left:0;justify-content:center;text-align:center}
   #moremenu .danger{margin-top:4px;border-top:2px solid #3a2230;color:#f85149;background:#241317}
 }</style></head><body>
-<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Show the text as selectable plain text so you can copy it (needed on mobile - the terminal itself is a canvas and can't be selected by touch)">&#10697; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><button id="mtog" onclick="toggleMouse()">scroll</button><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
+<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Show the text as selectable plain text so you can copy it (needed on mobile - the terminal itself is a canvas and can't be selected by touch)">&#10697; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><button id="mtog" onclick="toggleMouse()">scroll</button><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
 <button id="live" onclick="toLive()">&#8595; jump to live</button>
 <div id="copyov"><div id="copybar"><b>Selectable text</b><span id="copyst" style="color:#8a8a99">long-press to select, or</span><button onclick="copyAll()">&#10697; copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" style="border-color:#e8c547">&#10005; close</button></div><pre id="copybody"></pre></div>
 <div id="wrap">
@@ -10594,7 +10801,10 @@ function compactPoll(){fetch('/api/compact-state?name='+encodeURIComponent(name)
 function tgPaint(s){var b=document.getElementById('tgbtn');if(!b)return;if(!s||!s.installed){b.style.display='none';return;}b.style.display='';var n=(s.on&&s.num)?(' #'+s.num):'';b.innerHTML='&#128241; Telegram'+n+': '+(s.on?'on':'off');b.style.color=s.on?'#26a5e4':'#8a8a99';b.title=s.configured?('Telegram '+(s.on?('ON'+(s.num?(' as #'+s.num):'')+' -- pinged on your phone when this finishes/blocks; reply to interact. '+(s.count>1?(s.count+' sessions on -- reply with the number'):'')):'off')+' for this session'):'Telegram bot not set up -- install + Set up telegram-notify in the Marketplace';}
 function tgState(){fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(tgPaint).catch(()=>{});}
 function toggleTg(){fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(function(cur){if(!cur.configured){st.textContent='Telegram not set up -- install + Set up telegram-notify (Marketplace), then toggle';return;}fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:!cur.on})}).then(r=>r.json()).then(function(s){tgPaint(s);st.textContent=name+' - Telegram '+(s.on?'ON (phone alerts + reply-to-interact)':'off');});});}
-ws.onopen=()=>{st.textContent=name+' - connected';fitNow();term.focus();applyMouse();tgState();};
+function skPaint(s){var b=document.getElementById('skbtn');if(!b)return;if(!s||!s.installed){b.style.display='none';return;}b.style.display='';var n=(s.on&&s.num)?(' #'+s.num):'';b.innerHTML='&#128172; Slack'+n+': '+(s.on?'on':'off');b.style.color=s.on?'#36c5f0':'#8a8a99';b.title=s.configured?('Slack '+(s.on?('ON'+(s.num?(' as #'+s.num):'')+' -- your team is pinged in a channel thread when this finishes/blocks; reply in-thread to interact'):'off')+' for this session'):'Slack not set up -- install + Set up the Slack extension and set a comms_channel';}
+function skState(){fetch('/api/slack-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(skPaint).catch(()=>{});}
+function toggleSk(){fetch('/api/slack-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(function(cur){if(!cur.configured){st.textContent='Slack not set up -- install the Slack extension + set a comms_channel, then toggle';return;}fetch('/api/slack-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:!cur.on})}).then(r=>r.json()).then(function(s){skPaint(s);st.textContent=name+' - Slack '+(s.on?'ON (team channel + reply-in-thread)':'off');});});}
+ws.onopen=()=>{st.textContent=name+' - connected';fitNow();term.focus();applyMouse();tgState();skState();};
 ws.onmessage=(e)=>term.write(new Uint8Array(e.data));
 ws.onclose=()=>{st.textContent=name+' - detached (session lives on)';term.write('\r\n\x1b[33m[detached - close this tab; the session keeps running]\x1b[0m\r\n');};
 ws.onerror=()=>{st.textContent='connection error';};
@@ -18421,6 +18631,8 @@ if __name__ == "__main__":
     threading.Thread(target=_autocompact_loop, daemon=True).start()    # graceful auto-compact when a session's context fills past the threshold
     threading.Thread(target=_tg_outbound_loop, daemon=True).start()    # Telegram: ping the phone when a routed session finishes/blocks
     threading.Thread(target=_tg_inbound_loop, daemon=True).start()     # Telegram: relay your replies back into the routed session
+    threading.Thread(target=_sk_outbound_loop, daemon=True).start()    # Slack (team): post to a channel thread when a routed session finishes/blocks
+    threading.Thread(target=_sk_inbound_loop, daemon=True).start()     # Slack (team): poll thread/channel replies + inject back into the routed session
     threading.Thread(target=_autoupdate_loop, daemon=True).start()     # PULL convergence: every tenant self-updates from the dist (boot + timer); source nodes self-skip
     threading.Thread(target=_core_integrity_loop, daemon=True).start() # INTEGRITY: verify framework files vs the signed manifest; appliances self-heal drift from the signed dist
     threading.Thread(target=_license_activate_loop, daemon=True).start() # LICENSE: a sold box auto-activates from its configured activation server on boot if unlicensed

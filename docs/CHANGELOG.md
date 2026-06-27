@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.89.0 -- 2026-06-27
+- SLACK per-session comms -- the TEAM twin of the Telegram tool. Toggle 'Slack' in any session's terminal bar;
+  when it goes busy->idle the bot posts to a per-session THREAD in your `comms_channel`, and a teammate REPLIES
+  in that thread to inject back into the session (a reply in a session's thread is inherently unambiguous). At
+  channel level: '#N your text' routes to session #N, bare '#N' sets focus, plus /list, /focus N [time]|off,
+  /off N, /mute N [time]|/unmute N, /help -- same smart routing + stable numbering as Telegram (single session
+  auto-routes). Built on the existing `slack` extension (bot token via slack._api); inbound is POLLED
+  (conversations.replies per thread + conversations.history for commands) so it needs NO public webhook / Socket
+  Mode -- works behind NAT/tailnet. New: slack_session() + POST /api/slack-session, _sk_outbound_loop /
+  _sk_inbound_loop daemons, the term-bar Slack toggle. No-ops until the slack extension is installed + a bot
+  token + a comms_channel are set. slack extension -> v2.1.0 (provides comms:slack; SLACK_COMMS_CHANNEL).
+
 ## 0.88.0 -- 2026-06-27
 - SUPER-CREATOR RECOVERY (never get locked out) + LICENSE AUTO-ACTIVATION. Recovery: every node now trusts a
   SECOND owner key (`recovery.pub`, ships) ALONGSIDE the primary -- all four authority checks (superadmin grants,
