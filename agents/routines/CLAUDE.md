@@ -40,6 +40,14 @@ Run-state (last_run/last_status/last_exit/tail) lives in `_routines_state.json`;
 `<state>/routine_logs/<name>.log`. Lens **Routines** shows cadence, last-run + status, and a **Run now**
 button. APIs: `GET /api/routines`, `POST /api/routine-run {name}`.
 
+**Host-designated extension routines.** When an EXTENSION declares a `routine`, it registers on install ONLY if
+the node is an extension routine host (`cc.config extension_routine_host`, default **true**). A single-node
+install runs its own extension routines; in a multi-node fleet you set view-only tenant nodes
+(`extension_routine_host:false`, settable via superadmin `set_config`) so a tenant gets the extension's LENS/data
+but the SYNC runs on a central host (Mission Control). This is durable — it survives a reinstall (the routine
+won't re-register on a non-host), unlike manually deleting the routine entry. (Used for Skimlinks: AFP views,
+MC syncs.)
+
 Still open: enable/disable + delete from the lens UI; richer alert channels (email/Slack) beyond Telegram;
 hash-dedupe of identical definitions at registration time.
 

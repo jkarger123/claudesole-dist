@@ -377,7 +377,8 @@ SA_MASTER = os.environ.get("MESH_SUPERADMIN_MASTER") or CC.get("superadmin_maste
 SA_NODE_KEY = os.environ.get("MESH_SUPERADMIN_NODE_KEY") or CC.get("superadmin_node_key") or ""  # this node's derived key
 SA_SKEW = 300                  # max clock skew (s) tolerated on the issued timestamp
 SA_ALLOWED_KEYS = ("mesh_auth_enforce", "mesh_reply_sla", "subscription_monthly", "pipeline_stale_sec",
-                   "deliverables_root", "storage_mode", "account_wallet", "fleet_share", "fleet_view", "side_label")
+                   "deliverables_root", "storage_mode", "account_wallet", "fleet_share", "fleet_view", "side_label",
+                   "extension_routine_host")
 _SA_SEEN = {}                  # nonce -> exp_ts (single-use replay cache)
 _SA_LOCK = threading.Lock()
 # PUBLIC-KEY superadmin (the "every install is auto-under my superadmin" model): MC holds an Ed25519 PRIVATE
@@ -3954,6 +3955,13 @@ def _ext_register_routine(eid, m):
     not values). Tagged with ext:<eid> so uninstall can find + remove it. De-duped by name."""
     spec = (m or {}).get("routine")
     if not isinstance(spec, dict) or not spec.get("name"): return None
+    # HOST-DESIGNATED: an extension's scheduled routine registers ONLY on a node that is a routine host. A
+    # single-node install is a host by default (its own routine runs locally); in a multi-node fleet you set
+    # view-only tenant nodes (e.g. AFP) to extension_routine_host:false so the SYNC runs on a central host
+    # (Mission Control) while the tenant still gets the lens/data. This makes "the sync never runs here" durable
+    # -- it survives a reinstall, unlike just deleting the routine entry.
+    if CC.get("extension_routine_host", True) is False:
+        return {"skipped": "this node is not an extension routine host (extension_routine_host=false)"}
     reg = load(ROUTINES, {"routines": []}); rs = reg.get("routines", [])
     cwd = os.path.join(AGENTS_DIR, eid) if _ext_category(eid) == "agent-tool" else os.path.join(EXT_DIR, eid, "payload")
     r = {"name": spec["name"], "desc": spec.get("desc", ""), "cmd": spec.get("cmd"),

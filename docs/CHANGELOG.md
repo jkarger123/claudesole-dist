@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.75.0 -- 2026-06-27
+- Host-designated extension routines: an extension's scheduled routine now registers on install ONLY where
+  `cc.config extension_routine_host` is true (default true -> single-node installs run their own routines). In a
+  multi-node fleet, set view-only tenant nodes to false so they get the extension LENS/data but the SYNC runs on a
+  central host. Durable across reinstall (a non-host never re-registers the routine), unlike deleting the entry.
+  Added `extension_routine_host` to the superadmin set_config allowlist so MC can set it remotely. Applied: AFP =
+  view-only (false), Mission Control = sync host -- Skimlinks syncs on MC, AFP just views.
+
 ## 0.74.0 -- 2026-06-27
 - Affiliate Intel lens REBUILT to match the original dashboard's layout (the first cut was a lazy vertical stack
   of full-width cards -- wrong). Now: a compact KPI strip (merchants / active / removed / changes), a search +
