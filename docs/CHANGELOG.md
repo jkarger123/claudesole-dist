@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.91.0 -- 2026-06-27
+- FIX: cf-key-restore.sh --verify listed bundle contents with `ls -1`, which hides dotfiles -> the PRIVATE keys
+  (.superadmin_ed25519/.recovery_ed25519/.vault_key) didn't appear, only the .pub files + MANIFEST, making a
+  perfectly good backup look incomplete. Now `ls -1a` so the private keys show. The keys were always in the
+  bundle (it tars `.`); this was display-only. (No change to backup/restore behavior.)
+
 ## 0.90.0 -- 2026-06-27
 - FIX: account fuel-gauge went stale ("100% used, resets in 0m" on a window that had actually reset). Root
   cause: there was NO periodic refresh -- account windows were only re-read on manual trigger / account-switch,

@@ -24,7 +24,7 @@ STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 say "decrypt bundle"
 openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in "$ENC" -out "$STAGE/bundle.tar.gz" || die "decryption failed (wrong passphrase?)"
 tar -xzf "$STAGE/bundle.tar.gz" -C "$STAGE" || die "extract failed"
-echo "  contents:"; ls -1 "$STAGE" | grep -v bundle.tar.gz | sed 's/^/    /'
+echo "  contents:"; ls -1a "$STAGE" | grep -vE '^\.\.?$|bundle\.tar\.gz' | sed 's/^/    /'   # -a so the PRIVATE keys (dotfiles) show, not just the .pub files
 [ -f "$STAGE/MANIFEST.txt" ] && { echo "  manifest:"; sed 's/^/    /' "$STAGE/MANIFEST.txt"; }
 
 if [ "$VERIFY" = "1" ]; then
