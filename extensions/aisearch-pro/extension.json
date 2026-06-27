@@ -160,5 +160,31 @@
         "timeout": 120
       }
     }
+  },
+  "functions": {
+    "analyze": {
+      "entry": "server/aisearch_fn.py",
+      "runtime": "python3",
+      "secrets": [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_AI_API_KEY",
+        "PERPLEXITY_API_KEY"
+      ],
+      "timeout_sec": 90,
+      "tier": "official"
+    },
+    "compare": {
+      "entry": "server/aisearch_fn.py",
+      "runtime": "python3",
+      "secrets": [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_AI_API_KEY",
+        "PERPLEXITY_API_KEY"
+      ],
+      "timeout_sec": 90,
+      "tier": "official"
+    }
   }
 }

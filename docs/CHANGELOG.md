@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.80.0 -- 2026-06-27
+- AISearch now runs 100% INSIDE ClaudeFather -- the worker->server-function port is done. analyze + compare are a
+  stdlib-only Python server FUNCTION (extensions/aisearch-pro/payload/server/aisearch_fn.py) on the new server-
+  function runtime: reads BYOK keys from the injected env, fans out concurrently to OpenAI(gpt-4o)/Anthropic
+  (claude-sonnet-4-5)/Gemini(gemini-2.5-flash), and writes the node-local SQLite store. extension.json declares
+  the `functions`, so the unified /api/ext-action runs them LOCALLY (the lens is unchanged -- same call, same
+  result shape). Cloudflare worker + Supabase are now OUT of the request loop (the deployed worker is dormant
+  fallback; can be decommissioned). Verified in-console end-to-end: Cabeau 100% across all 3 providers, logged to
+  the local store. Faithful port of the worker's prompts/parsing; the simple analyze/compare paths (compare here
+  is the mention/position/winner core, not the web-grounded-report variant -- that + Perplexity + real cost are
+  follow-ons). The AISearch deliverable now: serverless-free, DB-free, BYOK, self-contained in the platform.
+
 ## 0.79.0 -- 2026-06-27
 - Extension Data Store (node-local SQLite) -- the unified store primitive so an extension's data lives ON the node
   (self-contained, no external DB). Generic: data_sources `backend:"sqlite"` + a shipped `schema` (.sql, applied
