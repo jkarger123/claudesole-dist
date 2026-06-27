@@ -1449,7 +1449,7 @@ def _web_manifest():
 # Peer/machine-to-machine ingress: NOT gated by the operator token (that's a human surface). These are
 # peer surface, protected on their own MESH_TOKEN track, so enabling operator auth on a node never severs
 # the mesh (a peer POSTs here with X-Mesh-Token or nothing, never the operator cookie/bearer).
-AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store", "/api/account-windows-store")
+AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store", "/api/account-windows-store", "/api/vault-lease")
 
 # Security frame stamped onto EVERY inbound peer message (appended AFTER the literal "[message from X]" so
 # the Stop-hook sender regex still matches). Makes the trust boundary explicit in the message itself -- a
@@ -3795,8 +3795,143 @@ DEPLOY_ROOT = CC_HOME                            # framework / deployment root (
 DEPLOY_ENV = os.path.join(DEPLOY_ROOT, ".env.claudefather")    # gitignored per-deployment secrets (KEY=VALUE)
 MCP_JSON = os.path.join(DEPLOY_ROOT, ".mcp.json")             # gitignored MCP server config for sessions
 
+# ==== ENTERPRISE CREDENTIAL VAULT -- MC-hosted, encrypted-at-rest, checkout/lease on demand ===================
+# Stops the "copy every API key into every node's .env by hand" problem. Mission Control holds ONE encrypted
+# vault; each secret is SCOPED (which nodes may use it) and can carry a SHARED value PLUS per-node overrides
+# (billing isolation -- a shared key, or each node its own). A node NEVER persists a leased secret: it LEASES on
+# demand over the family-authenticated channel, caches it in MEMORY for a short TTL, and re-leases -- so revoking
+# at MC takes effect within one TTL and a stolen disk image holds no plaintext. Encryption-at-rest is Fernet
+# (the cryptography lib, already the superadmin dep); the Fernet key is MC-only (0600, gitignored, never shipped).
+#   MC management (operator-only): vault_set / vault_revoke / vault_delete / vault_list (NEVER returns values).
+#   Lease (family-token authed):   vault_lease(secret_id, node) -> decrypted value if node in scope & not revoked.
+#   Any node:                      vault_get(secret_id) leases from CC.config 'vault_url' + caches in RAM;
+#                                  _deploy_env falls back to it, so existing secret reads resolve transparently.
+VAULT_FILE = os.path.join(STATE_DIR, "_vault.json")          # {sid:{label,scope[],shared:cipher|null,per_node:{node:cipher},revoked,created,updated}}
+VAULT_KEY_FILE = os.environ.get("CC_VAULT_KEY") or CC.get("vault_key_file") or os.path.join(CC_HOME, ".vault_key")   # MC ONLY -- 0600, gitignored, NEVER shipped
+VAULT_AUDIT = os.path.join(STATE_DIR, "_vault_audit.log")
+VAULT_URL = (CC.get("vault_url") or os.environ.get("CC_VAULT_URL") or "").rstrip("/")    # node side: upstream MC base url to lease from ("" = no upstream)
+VAULT_LEASE_TTL = int(CC.get("vault_lease_ttl") or 600)      # seconds a leased secret stays valid in a node's RAM cache
+_VAULT_LOCK = threading.Lock()
+_vault_cache = {}                                            # node-side in-memory lease cache: sid -> (value, expires_epoch)
+
+def _vault_fernet():
+    """Load (create on first use) the MC vault encryption key. Returns a Fernet, or None if crypto unavailable."""
+    if not _HAS_CRYPTO: return None
+    try: from cryptography.fernet import Fernet
+    except Exception: return None
+    try:
+        if not os.path.isfile(VAULT_KEY_FILE):
+            fd = os.open(VAULT_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f: f.write(Fernet.generate_key())
+        os.chmod(VAULT_KEY_FILE, 0o600)
+        with open(VAULT_KEY_FILE, "rb") as f: return Fernet(f.read().strip())
+    except Exception: return None
+def vault_available(): return _vault_fernet() is not None
+def _vault_enc(plain):
+    fn = _vault_fernet()
+    if fn is None or plain is None: return None
+    try: return fn.encrypt(plain.encode()).decode()
+    except Exception: return None
+def _vault_dec(cipher):
+    fn = _vault_fernet()
+    if fn is None or not cipher: return None
+    try: return fn.decrypt(cipher.encode()).decode()
+    except Exception: return None
+def _vault_load():
+    try: return json.load(open(VAULT_FILE))
+    except Exception: return {}
+def _vault_save(d):
+    with _VAULT_LOCK:
+        try:
+            fd = os.open(VAULT_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, json.dumps(d, indent=2).encode()); os.close(fd)
+        except Exception: pass
+def _vault_audit(action, sid, node, result):
+    try:
+        with open(VAULT_AUDIT, "a") as f:
+            f.write(json.dumps({"ts": int(time.time()), "action": action, "secret": sid, "node": node or "", "result": result, "host": INSTANCE_ID}) + "\n")
+    except Exception: pass
+def _vault_meta(sid, rec):
+    return {"id": sid, "label": rec.get("label") or sid, "scope": rec.get("scope") or ["*"],
+            "has_shared": bool(rec.get("shared")), "node_overrides": sorted((rec.get("per_node") or {}).keys()),
+            "revoked": bool(rec.get("revoked")), "created": rec.get("created"), "updated": rec.get("updated")}
+def _vault_in_scope(rec, node):
+    sc = rec.get("scope") or ["*"]
+    return ("*" in sc) or (node in sc)
+def vault_set(sid, value, label=None, scope=None, node=None):
+    """MC/operator: store/update a secret. value -> the SHARED slot (node=None) or a per-node override
+    (node='afp' -> billing isolation). scope = ['*'] (any family node) or a list of node ids allowed to lease."""
+    sid = re.sub(r"[^A-Za-z0-9_.\-]", "", sid or "")[:64]
+    if not sid: return {"ok": False, "error": "missing/invalid secret id"}
+    if not vault_available(): return {"ok": False, "error": "vault needs the 'cryptography' package (Fernet) -- pip install --user cryptography"}
+    enc = _vault_enc(value) if value not in (None, "") else None
+    if value not in (None, "") and enc is None: return {"ok": False, "error": "encryption failed"}
+    d = _vault_load(); rec = d.get(sid) or {"created": int(time.time()), "scope": ["*"], "per_node": {}}
+    if label is not None: rec["label"] = label
+    if scope is not None: rec["scope"] = [s.strip() for s in (scope if isinstance(scope, list) else str(scope).split(",")) if s.strip()] or ["*"]
+    rec.setdefault("scope", ["*"]); rec.setdefault("per_node", {})
+    if enc is not None:
+        if node: rec["per_node"][node] = enc
+        else: rec["shared"] = enc
+    rec["revoked"] = False; rec["updated"] = int(time.time())
+    d[sid] = rec; _vault_save(d); _vault_audit("set", sid, node, "ok")
+    return {"ok": True, **_vault_meta(sid, rec)}
+def vault_list():
+    d = _vault_load()
+    return {"ok": True, "available": vault_available(), "node": INSTANCE_ID, "secrets": [_vault_meta(s, r) for s, r in sorted(d.items())]}
+def vault_revoke(sid, revoked=True):
+    d = _vault_load(); rec = d.get(sid)
+    if not rec: return {"ok": False, "error": "no such secret"}
+    rec["revoked"] = bool(revoked); rec["updated"] = int(time.time()); d[sid] = rec; _vault_save(d)
+    _vault_audit("revoke" if revoked else "unrevoke", sid, None, "ok")
+    return {"ok": True, **_vault_meta(sid, rec)}
+def vault_delete(sid, node=None):
+    """Delete a per-node override (node given) or the whole secret (node None)."""
+    d = _vault_load(); rec = d.get(sid)
+    if not rec: return {"ok": False, "error": "no such secret"}
+    if node:
+        (rec.get("per_node") or {}).pop(node, None); rec["updated"] = int(time.time()); d[sid] = rec; _vault_save(d)
+        _vault_audit("delete_override", sid, node, "ok"); return {"ok": True, **_vault_meta(sid, rec)}
+    d.pop(sid, None); _vault_save(d); _vault_audit("delete", sid, None, "ok")
+    return {"ok": True, "deleted": sid}
+def vault_audit_tail(n=40):
+    try:
+        lines = open(VAULT_AUDIT).read().splitlines()[-n:]
+        return [json.loads(x) for x in lines if x.strip()][::-1]
+    except Exception: return []
+def vault_lease(sid, node, authed=False):
+    """Server-side: return the decrypted secret for `node` if allowed. `authed` MUST be a verified family/operator
+    caller (the handler checks the mesh token). A per-node override wins over the shared value. Every call audited."""
+    node = re.sub(r"[^A-Za-z0-9_.\-]", "", node or "")[:48]
+    if not authed: _vault_audit("lease", sid, node, "denied:auth"); return {"ok": False, "error": "vault lease requires a valid family mesh token"}
+    d = _vault_load(); rec = d.get(sid)
+    if not rec: _vault_audit("lease", sid, node, "denied:missing"); return {"ok": False, "error": "no such secret"}
+    if rec.get("revoked"): _vault_audit("lease", sid, node, "denied:revoked"); return {"ok": False, "error": "secret revoked"}
+    if not _vault_in_scope(rec, node): _vault_audit("lease", sid, node, "denied:scope"); return {"ok": False, "error": "node not in scope"}
+    over = (rec.get("per_node") or {}).get(node); cipher = over or rec.get("shared")
+    if not cipher: _vault_audit("lease", sid, node, "denied:empty"); return {"ok": False, "error": "no value for this node"}
+    val = _vault_dec(cipher)
+    if val is None: _vault_audit("lease", sid, node, "denied:decrypt"); return {"ok": False, "error": "decrypt failed"}
+    _vault_audit("lease", sid, node, "ok")
+    return {"ok": True, "id": sid, "value": val, "ttl": VAULT_LEASE_TTL, "source": "per_node" if over else "shared"}
+def vault_get(sid, default=None):
+    """Any node: lease a secret value from the upstream MC vault (CC.config 'vault_url'), cached in RAM for the
+    lease TTL (never written to disk). Returns default if no upstream configured or not allowed."""
+    if not VAULT_URL: return default
+    now = time.time(); hit = _vault_cache.get(sid)
+    if hit and hit[1] > now: return hit[0]
+    try:
+        body = json.dumps({"id": sid, "node": INSTANCE_ID}).encode()
+        req = urllib.request.Request(VAULT_URL + "/api/vault-lease", data=body, headers={"Content-Type": "application/json"})
+        if MESH_TOKEN: req.add_header("X-Mesh-Token", MESH_TOKEN)
+        with urllib.request.urlopen(req, timeout=8) as r: res = json.loads(r.read().decode())
+        if res.get("ok") and res.get("value") is not None:
+            _vault_cache[sid] = (res["value"], now + min(int(res.get("ttl") or VAULT_LEASE_TTL), 3600)); return res["value"]
+    except Exception: pass
+    return default
+
 def _deploy_env(key, default=None):
-    """Read a per-deployment secret: os.environ first, then the gitignored .env.claudefather."""
+    """Read a per-deployment secret: os.environ first, then the gitignored .env.claudefather, then (if a
+    'vault_url' upstream is configured) lease it from the Mission Control credential vault (RAM-cached)."""
     v = os.environ.get(key)
     if v: return v
     try:
@@ -3807,6 +3942,9 @@ def _deploy_env(key, default=None):
                 if k.strip() == key: return val.strip().strip('"').strip("'")
     except Exception:
         pass
+    if VAULT_URL:
+        vv = vault_get(key)
+        if vv is not None: return vv
     return default
 
 def notify_send(text):
@@ -9302,6 +9440,17 @@ class H(BaseHTTPRequestHandler):
         c = self._cookies().get(AUTH_COOKIE, "")
         if c and hmac.compare_digest(c, AUTH_TOKEN): return True
         return False
+    def _operator_only(self):
+        """Operator credential ONLY (cookie/bearer/X-CC-Token) -- a family MESH token does NOT satisfy this.
+        Used to keep vault MANAGEMENT (set/revoke/delete/list) operator-gated even though _authed() accepts the
+        family token for the mesh track. Auth-off nodes are open (doctor warns), consistent with the rest."""
+        if not AUTH_TOKEN: return True
+        h = self.headers.get("Authorization", "") or ""
+        if h.startswith("Bearer ") and hmac.compare_digest(h[7:].strip(), AUTH_TOKEN): return True
+        if hmac.compare_digest(self.headers.get("X-CC-Token", "") or "", AUTH_TOKEN): return True
+        c = self._cookies().get(AUTH_COOKIE, "")
+        if c and hmac.compare_digest(c, AUTH_TOKEN): return True
+        return False
     def _auth_gate(self, path):
         """True if the request may proceed; else writes a 401 (API) or 302->/login (browser) and returns False."""
         if self._authed() or path in AUTH_EXEMPT or path in AUTH_MESH_INGRESS or path.startswith("/static/"): return True
@@ -9489,6 +9638,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/security":      return self._s(200, json.dumps(security_status()))
         if u.path == "/api/agents":        return self._s(200, json.dumps(agents_list()))
         if u.path == "/api/extensions":    return self._s(200, json.dumps(extensions_list()))
+        if u.path == "/api/vault":
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps({**vault_list(), "audit": vault_audit_tail(40)}))
         if u.path == "/api/entitlements":  return self._s(200, json.dumps(entitlements_status()))
         if u.path == "/api/routines":      return self._s(200, json.dumps(routines_list()))
         if u.path == "/api/ext-data":      return self._s(200, json.dumps(ext_data((q.get("ext") or [""])[0], (q.get("resource") or [""])[0], q)))
@@ -9940,6 +10092,18 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/extension-setup":     return self._s(200, json.dumps(extension_setup(body.get("id", ""))))
         if u.path == "/api/notify":              return self._s(200, json.dumps(notify_send(body.get("text", ""))))
         if u.path == "/api/telegram-session":    return self._s(200, json.dumps(telegram_session(body.get("name", ""), body.get("on"))))
+        if u.path == "/api/vault-lease":
+            ok = _mesh_token_ok(self.headers.get("X-Mesh-Token", "")) or self._operator_only()
+            return self._s(200, json.dumps(vault_lease(body.get("id", ""), body.get("node", ""), authed=ok)))
+        if u.path == "/api/vault-set":
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(vault_set(body.get("id", ""), body.get("value"), label=body.get("label"), scope=body.get("scope"), node=body.get("node") or None)))
+        if u.path == "/api/vault-revoke":
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(vault_revoke(body.get("id", ""), body.get("revoked", True))))
+        if u.path == "/api/vault-delete":
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(vault_delete(body.get("id", ""), node=body.get("node") or None)))
         if u.path == "/api/team-create":   return self._s(200, json.dumps(team_create(body.get("name", ""), body.get("description", ""))))
         if u.path == "/api/team-run":      return self._s(200, json.dumps(team_run(body.get("slug", "") or body.get("name", ""))))
         if u.path == "/api/team-session":  return self._s(200, json.dumps(team_session(body.get("members", []), body.get("assignment", ""))))
@@ -11649,6 +11813,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="calendar"><i class="ph-light ph-calendar-dots"></i>Calendar</button>
 <button data-l="drive"><i class="ph-light ph-cloud"></i>Drive</button>
 <button data-l="marketplace"><i class="ph-light ph-storefront"></i>Marketplace</button>
+<button data-l="vault"><i class="ph-light ph-key"></i>Credential Vault</button>
 <button data-l="agency"><i class="ph-light ph-buildings"></i>Agency</button>
 <button data-l="calls"><i class="ph-light ph-phone-call"></i>Calls</button>
 <button data-l="capture"><i class="ph-light ph-scissors"></i>Capture</button>
@@ -11755,6 +11920,7 @@ function render(){
   else if(LENS=="security"){loadSecurity();return;}
   else if(LENS=="agents"){loadAgents();return;}
   else if(LENS=="marketplace"){loadMarketplace();return;}
+  else if(LENS=="vault"){loadVault();return;}
   else if(LENS=="affiliate"){loadAffiliate();return;}
   else if(LENS=="aisearch"){loadAisearch();return;}
   else if(LENS=="agency"){loadAgency();return;}
@@ -15411,6 +15577,57 @@ async function loadComms(){
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
   clearInterval(window.COMMSTIMER);window.COMMSTIMER=setInterval(function(){if(LENS!="comms"){clearInterval(window.COMMSTIMER);return;}commsRefresh();},5000);
 }
+// ===== Credential Vault lens (MC-hosted, encrypted, checkout/lease) =====
+var VAULT={data:null};
+async function loadVault(){
+  var g=document.getElementById('grid');g.innerHTML=empty('Loading credential vault…');
+  var d={};try{d=await(await fetch('/api/vault')).json();}catch(e){g.innerHTML=empty("Couldn't load the vault.");return;}
+  if(d&&d.error){g.innerHTML='<div class="card" style="cursor:default"><h3><span>🔐 Credential Vault</span></h3><div class="meta" style="margin-top:8px">'+esc(d.error)+'</div></div>';return;}
+  VAULT.data=d;var secs=(d.secrets||[]);
+  if(!d.available){g.innerHTML=affCss()+'<div class="aff-wrap"><div class="aff-head"><b style="font-size:16px">🔐 Credential Vault</b></div><div class="card" style="cursor:default"><div class="meta">The vault needs the <code>cryptography</code> package (Fernet) for encryption-at-rest. Install it on this node: <code>pip install --user cryptography</code>, then restart.</div></div></div>';return;}
+  var shared=secs.filter(function(s){return s.has_shared;}).length;
+  var overrides=secs.reduce(function(a,s){return a+(s.node_overrides||[]).length;},0);
+  var revoked=secs.filter(function(s){return s.revoked;}).length;
+  var rows=secs.map(vaultRow).join('')||'<tr><td colspan="5" style="padding:16px;text-align:center;color:var(--dim)">No secrets yet — add one on the right.</td></tr>';
+  var audit=(d.audit||[]).slice(0,30).map(function(a){
+    var col=a.result==='ok'?'var(--ok,#3fb950)':(/denied/.test(a.result||'')?'#f85149':'var(--dim)');
+    return '<div class="aff-mv"><span>'+esc(a.action)+' <b>'+esc(a.secret||'')+'</b>'+(a.node?(' · '+esc(a.node)):'')+'</span><span style="color:'+col+'">'+esc(a.result)+'</span></div>';
+  }).join('')||'<div class="meta" style="padding:13px">no vault activity yet</div>';
+  var h=affCss()+'<style>.vlt-form label{display:block;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;margin:9px 0 3px}.vlt-form input{width:100%;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:8px 10px;font:inherit;box-sizing:border-box}.vlt-tag{display:inline-block;background:var(--card2);border:1px solid var(--line);border-radius:6px;padding:1px 7px;font-size:11px;margin:1px}</style>'
+    +'<div class="aff-wrap">'
+    +'<div class="aff-head"><b style="font-size:16px">🔐 Credential Vault</b><span class="sub">'+esc(d.node||'')+' · encrypted at rest · checkout/lease on demand</span></div>'
+    +'<div class="aff-kpis">'+affKpi(secs.length,'secrets')+affKpi(shared,'shared')+affKpi(overrides,'node overrides')+affKpi(revoked,'revoked')+'</div>'
+    +'<div class="aff-panels">'
+      +'<div class="aff-pane"><h3><span>Secrets</span><span class="sub">scope = which nodes may lease</span></h3><div class="aff-scroll"><table class="aff-tbl">'
+        +'<thead><tr><th>ID / label</th><th>Scope</th><th>Values</th><th>Status</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div></div>'
+      +'<div class="aff-pane"><h3><span>＋ Add / update secret</span></h3><div class="vlt-form" style="padding:11px 13px">'
+        +'<label>Secret ID (e.g. OPENAI_API_KEY)</label><input id="vsid" placeholder="OPENAI_API_KEY">'
+        +'<label>Label (optional)</label><input id="vslabel" placeholder="OpenAI API key">'
+        +'<label>Value (encrypted on save; never shown again)</label><input id="vsval" type="password" placeholder="sk-…" autocomplete="new-password">'
+        +'<label>Scope — node ids, comma-separated, or * for all</label><input id="vsscope" placeholder="*  or  afp,shopos">'
+        +'<label>Per-node override (optional node id — billing isolation)</label><input id="vsnode" placeholder="afp">'
+        +'<button class="mini go" style="margin-top:11px;width:100%" onclick="vaultSave()">Encrypt &amp; store</button>'
+        +'<div class="meta" style="margin-top:8px;font-size:11px">A node leases at runtime over the signed family channel and caches it in RAM only. Revoke here and it stops working within one lease TTL.</div>'
+        +'</div><h3 style="border-top:1px solid var(--line)"><span>Recent activity</span></h3><div class="aff-scroll" style="max-height:34vh">'+audit+'</div></div>'
+    +'</div></div>';
+  g.innerHTML=h;
+}
+function vaultRow(s){
+  var scope=(s.scope||['*']).map(function(x){return '<span class="vlt-tag">'+esc(x)+'</span>';}).join('');
+  var vals=(s.has_shared?'<span class="vlt-tag">shared</span>':'')+(s.node_overrides||[]).map(function(n){return '<span class="vlt-tag" style="border-color:var(--accent)">'+esc(n)+'</span>';}).join('');
+  var st=s.revoked?'<span style="color:#f85149">revoked</span>':'<span style="color:var(--ok,#3fb950)">active</span>';
+  var act='<button class="mini" onclick="vaultRevoke(\''+esc(s.id)+'\','+(s.revoked?'false':'true')+')">'+(s.revoked?'Restore':'Revoke')+'</button>'
+    +' <button class="mini" style="color:#f85149" onclick="vaultDel(\''+esc(s.id)+'\')">Delete</button>';
+  return '<tr><td><b>'+esc(s.id)+'</b>'+(s.label&&s.label!==s.id?('<div class="sub" style="font-size:11px">'+esc(s.label)+'</div>'):'')+'</td><td>'+(scope||'—')+'</td><td>'+(vals||'<span style="color:var(--dim)">empty</span>')+'</td><td>'+st+'</td><td style="text-align:right">'+act+'</td></tr>';
+}
+async function vaultSave(){
+  var id=(document.getElementById('vsid').value||'').trim();if(!id){alert('Secret ID required');return;}
+  var body={id:id,label:(document.getElementById('vslabel').value||'').trim()||null,value:document.getElementById('vsval').value,scope:(document.getElementById('vsscope').value||'').trim()||null,node:(document.getElementById('vsnode').value||'').trim()||null};
+  var r=await(await fetch('/api/vault-set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  if(!r.ok){alert('Save failed: '+(r.error||'?'));return;}loadVault();
+}
+async function vaultRevoke(id,rev){await fetch('/api/vault-revoke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,revoked:rev})});loadVault();}
+async function vaultDel(id){if(!confirm('Delete secret '+id+'? Nodes leasing it will lose access.'))return;await fetch('/api/vault-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});loadVault();}
 async function loadMarketplace(){document.getElementById("grid").innerHTML=empty("Loading marketplace…");
   let d={};try{d=await(await fetch('/api/extensions')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load the marketplace.");return;}
   const ex=d.extensions||[];const q=(document.getElementById("search").value||"").toLowerCase();
@@ -16428,7 +16645,7 @@ async function treeResume(id,cwd,fork){const _c=CONVOMAP[id]||{};toast((fork?"Fo
   const r=await(await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({machine:"studio",id:id,cwd:cwd,fork:!!fork,label:_c.label||""})})).json();
   if(!r||!r.ok){toast("Failed: "+((r||{}).error||"?"),5000);return;}
   closeInfo();_openTerm(r);}
-const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',agency:'Agency',calls:'Calls',capture:'Capture',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Accounts / Usage',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Accounts / Usage'};
+const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',vault:'Credential Vault',agency:'Agency',calls:'Calls',capture:'Capture',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Accounts / Usage',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Accounts / Usage'};
 // ---- Chief of Staff: your office (top-level command + a direct line to me) ----
 function gotoLens(l){const b=document.querySelector('#lens button[data-l="'+l+'"]');if(b)b.click();}
 async function talkChief(){toast("Opening your Chief of Staff…");

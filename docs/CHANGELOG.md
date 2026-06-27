@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.83.0 -- 2026-06-27
+- Enterprise CREDENTIAL VAULT -- MC-hosted, encrypted-at-rest, checkout/lease on demand. Mission Control
+  holds ONE encrypted vault; nodes LEASE a secret at runtime over the family-authenticated channel and cache
+  it in RAM only (never on disk), re-leasing on TTL -- so revoking at MC stops a node within one lease window
+  and a stolen disk image holds no plaintext. Each secret is SCOPED (which nodes may lease: `*` or a node-id
+  list) and carries a SHARED value plus optional per-node OVERRIDES (billing isolation -- a shared key, or
+  each node its own). Encryption-at-rest is Fernet (the cryptography lib, already the superadmin dep); the
+  key (`.vault_key`, 0600, gitignored, MC-only) is the sole authority -- `_vault.json` alone can't be
+  decrypted. New: `vault_set/revoke/delete/list` (operator-only via `_operator_only()` -- a family mesh token
+  can lease but NEVER manage), `vault_lease` (family-token authed, on the mesh ingress track), node-side
+  `vault_get` + a transparent `_deploy_env` fallback (set `cc.config.vault_url` and every missing secret read
+  resolves from the vault), and a full audit log. New **Credential Vault** lens on the overseer (KPI strip +
+  secrets table + add-form + live audit). Zero impact on nodes without `vault_url` (the env path is unchanged).
+  Docs: docs/VAULT.md.
+
 ## 0.82.0 -- 2026-06-27
 - Telegram per-session comms got SMART for many sessions on one node (one bot per node). Each enabled
   session now has a STABLE number; pings are tagged `#N node/Title`. Reply routing, in order: reply-TO a
