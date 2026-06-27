@@ -29,8 +29,8 @@
     "resources": {
       "merchants": {
         "table": "skimlinks_merchants",
-        "select": "id,advertiser_id,name,domain,commission_rate,status,first_seen_at,last_seen_at,removed_at,previous_commission_rate,last_commission_change_at,times_commission_changed,days_tracked",
-        "order": "days_tracked.desc",
+        "select": "id,advertiser_id,name,domain,commission_rate,ecpc,average_order_value,average_daily_sales,conversion_rate,status,first_seen_at,last_seen_at,removed_at,previous_commission_rate,last_commission_change_at,times_commission_changed,days_tracked",
+        "order": "average_daily_sales.desc.nullslast",
         "max": 2000,
         "search": ["name", "domain"],
         "filter_cols": ["status"]

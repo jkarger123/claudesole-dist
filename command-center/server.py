@@ -15050,67 +15050,89 @@ async function extInstall(id){const r=await(await fetch('/api/extension-install'
   else if(r&&r.locked){toast('🔒 '+id+' is a paid extension'+(r.pricing&&(r.pricing.monthly_usd||r.pricing.monthly)?(' ($'+(r.pricing.monthly_usd||r.pricing.monthly)+'/mo)'):'')+' — needs a Mission-Control-signed entitlement.',7000);}
   else toast('Install failed: '+((r||{}).error||'?'),5000);}
 function extRequest(id,price){alert('🔒 “'+id+'” is a paid extension'+(price?(' ('+price+')'):'')+'.\n\nIt unlocks only with a Mission-Control-signed entitlement — it cannot be self-granted.\n\nInternal fleet nodes are licensed automatically. External customers: purchase/request access and Mission Control issues a signed entitlement to this node.');}
-// ===== Affiliate Intelligence lens (Skimlinks extension) -- reads the read-only /api/ext-data proxy =====
-var AFFEXT='skimlinks-merchant-sync', AFF={q:'',status:'',rows:[]};
+// ===== Affiliate Intelligence lens (Skimlinks extension) -- laid out like the original dashboard:
+// KPI strip + a 2-column body (merchant TABLE | top-movers side panel). NOT stacked cards. =====
+var AFFEXT='skimlinks-merchant-sync', AFF={q:'',status:'',sort:'daily',rows:[]};
 async function affData(resource,extra){try{return await(await fetch('/api/ext-data?ext='+encodeURIComponent(AFFEXT)+'&resource='+resource+(extra||''))).json();}catch(e){return {ok:false,error:String(e)};}}
 function affPct(v){if(v==null||v==='')return '—';v=parseFloat(v);if(isNaN(v))return '—';if(Math.abs(v)<=1.0001)v=v*100;return v.toFixed(2)+'%';}
+function affMoney(v){if(v==null||v===''||isNaN(parseFloat(v)))return '—';return '$'+parseFloat(v).toFixed(2);}
+function affNum(v){if(v==null||v===''||isNaN(parseFloat(v)))return '—';return Math.round(parseFloat(v)).toLocaleString();}
+function affKpi(val,label){return '<div class="aff-kpi"><div class="v">'+val+'</div><div class="l">'+label+'</div></div>';}
+function affCss(){return '<style id="aff-style">'
+  +'.aff-wrap{grid-column:1/-1;width:100%;max-width:1600px;margin:0 auto}'
+  +'.aff-head{display:flex;align-items:center;gap:10px;margin:2px 0 10px}'
+  +'.aff-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:12px}'
+  +'.aff-kpi{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:11px 13px;border-left:3px solid var(--accent)}'
+  +'.aff-kpi .v{font-size:23px;font-weight:800;color:var(--ink);line-height:1.1}'
+  +'.aff-kpi .l{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-top:3px}'
+  +'.aff-tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}'
+  +'.aff-tools input,.aff-tools select{background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:8px 10px;font:inherit}'
+  +'.aff-panels{display:grid;grid-template-columns:minmax(0,2.3fr) minmax(260px,1fr);gap:14px;align-items:start}'
+  +'@media(max-width:1080px){.aff-panels{grid-template-columns:1fr}}'
+  +'.aff-pane{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}'
+  +'.aff-pane>h3{margin:0;padding:10px 13px;border-bottom:1px solid var(--line);font-size:13px;display:flex;justify-content:space-between;align-items:center}'
+  +'.aff-scroll{max-height:64vh;overflow:auto}'
+  +'.aff-tbl{width:100%;border-collapse:collapse;font-size:13px}'
+  +'.aff-tbl thead th{position:sticky;top:0;background:var(--card2);text-align:left;color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;padding:8px 11px;border-bottom:1px solid var(--line);white-space:nowrap}'
+  +'.aff-tbl thead th.num,.aff-tbl tbody td.num{text-align:right}'
+  +'.aff-tbl tbody td{padding:7px 11px;border-bottom:1px solid var(--line);white-space:nowrap}'
+  +'.aff-tbl tbody tr{cursor:pointer}.aff-tbl tbody tr:hover{background:var(--card2)}'
+  +'.aff-mv{display:flex;justify-content:space-between;gap:8px;padding:8px 13px;border-bottom:1px solid var(--line);font-size:12.5px}'
+  +'</style>';}
+function affSortRows(){var k=AFF.sort;var key={daily:'average_daily_sales',commission:'commission_rate',ecpc:'ecpc',conv:'conversion_rate',tenure:'days_tracked',changes:'times_commission_changed'}[k];
+  if(k==='name'){AFF.rows.sort(function(a,b){return String(a.name||'').localeCompare(String(b.name||''));});}
+  else{AFF.rows.sort(function(a,b){var x=parseFloat(a[key]),y=parseFloat(b[key]);x=isNaN(x)?-1:x;y=isNaN(y)?-1:y;return y-x;});}}
 async function loadAffiliate(){
   var g=document.getElementById('grid');g.innerHTML=empty('Loading affiliate intelligence…');
   var mc=await affData('merchants','&count=1');
   if(!mc.ok){
     var msg=(mc.error||'').toLowerCase();
     var hint=/not configured/.test(msg)?'Set the Skimlinks publisher ID + Supabase URL/key in this node\'s deploy env (run the extension Set up), then run the first sync.':(/not licensed/.test(msg)?'This node isn\'t licensed for Skimlinks — Mission Control must grant a signed entitlement.':(/not installed/.test(msg)?'The Skimlinks extension isn\'t installed on this node.':'Could not reach the data: '+esc(mc.error||'?')));
-    g.innerHTML='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>🔗 Affiliate Intelligence</span></h3><div class="meta" style="margin-top:8px">'+hint+'</div></div>';return;
+    g.innerHTML='<div class="card" style="cursor:default"><h3><span>🔗 Affiliate Intelligence</span></h3><div class="meta" style="margin-top:8px">'+hint+'</div></div>';return;
   }
   var rc=await affData('merchants','&status=removed&count=1');
   var ch=await affData('changes','&count=1');
-  var total=mc.count||'?',removed=(rc&&rc.count)||0,active=(total!=='?'?(total-(parseInt(removed)||0)):'?');
-  var ms=await affData('merchants','&search='+encodeURIComponent(AFF.q)+(AFF.status?('&status='+AFF.status):'')+'&limit=300');
-  AFF.rows=(ms&&ms.rows)||[];
-  var mvr=await affData('changes','&limit=60');
-  var mv={rows:(((mvr&&mvr.rows)||[]).filter(function(c){return String(c.change_type||'').indexOf('commission')>=0;}).slice(0,20))};
-  // header stats
-  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🔗 Affiliate Intelligence</b> <span class="sub">Skimlinks merchant catalog + change tracking</span>'
-    +'<span style="margin-left:auto"><button class="mini go" title="Run the full sync now (~30-50 min; writes to Supabase)" onclick="affRunSync()">▶ Run sync now</button></span></div>'
-    +'<div class="ucards" style="margin-top:10px">'+ustat((total||0).toLocaleString?Number(total).toLocaleString():total,'merchants tracked','full catalog')
-    +ustat((Number(active)||active).toLocaleString?Number(active).toLocaleString():active,'active','currently live')
-    +ustat((Number(removed)||0).toLocaleString(),'removed','soft-deleted (history kept)')
-    +ustat(((ch&&ch.count)||0).toLocaleString?Number((ch&&ch.count)||0).toLocaleString():'0','changes logged','new/removed/commission')+'</div></div>';
-  // controls
-  h+='<div class="card" style="cursor:default;grid-column:1/-1"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">'
-    +'<input id="affq" value="'+esc(AFF.q)+'" placeholder="search merchant name or domain…" style="flex:1;min-width:220px;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 11px" onkeydown="if(event.key===\'Enter\')affSearch()">'
-    +'<button class="mini'+(AFF.status===''?' go':'')+'" onclick="AFF.status=\'\';loadAffiliate()">All</button>'
-    +'<button class="mini'+(AFF.status==='active'?' go':'')+'" onclick="AFF.status=\'active\';loadAffiliate()">Active</button>'
-    +'<button class="mini'+(AFF.status==='removed'?' go':'')+'" onclick="AFF.status=\'removed\';loadAffiliate()">Removed</button>'
-    +'<button class="mini go" onclick="affSearch()">Search</button></div>'
-    +'<div class="meta" style="margin-top:6px">Showing '+AFF.rows.length+' of the catalog. Drag a merchant onto a session tile (or tap ➤) to brief an agent about it; click a row for its commission history.</div></div>';
-  // merchant grid
-  var rows=AFF.rows.map(affRow).join('')||('<tr><td colspan="6" style="padding:14px;text-align:center;color:var(--dim)">no merchants match</td></tr>');
-  h+='<div class="card" style="cursor:default;grid-column:1/-1;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">'
-    +'<thead><tr style="text-align:left;color:var(--dim);border-bottom:1px solid var(--line)">'
-    +'<th style="padding:6px 8px">Merchant</th><th style="padding:6px 8px">Domain</th><th style="padding:6px 8px">Commission</th><th style="padding:6px 8px">Status</th><th style="padding:6px 8px">Tenure</th><th style="padding:6px 8px"></th></tr></thead>'
-    +'<tbody>'+rows+'</tbody></table></div>';
-  // top movers
-  h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>📈 Recent commission changes</span> <span class="sub">top movers</span></h3>'
-    +((mv&&mv.rows&&mv.rows.length)?('<div class="convscroll">'+mv.rows.map(affMover).join('')+'</div>'):'<div class="meta">no recent commission changes logged</div>')+'</div>';
+  var total=Number(mc.count||0),removed=Number((rc&&rc.count)||0),active=total-removed;
+  var ms=await affData('merchants','&search='+encodeURIComponent(AFF.q)+(AFF.status?('&status='+AFF.status):'')+'&limit=400');
+  AFF.rows=(ms&&ms.rows)||[]; affSortRows();
+  var mvr=await affData('changes','&limit=80');
+  var movers=(((mvr&&mvr.rows)||[]).filter(function(c){return String(c.change_type||'').indexOf('commission')>=0;}).slice(0,25));
+  var sortOpts=[['daily','Daily sales'],['commission','Commission'],['ecpc','eCPC'],['conv','Conversion'],['tenure','Tenure'],['changes','# changes'],['name','Name A-Z']]
+    .map(function(o){return '<option value="'+o[0]+'"'+(AFF.sort===o[0]?' selected':'')+'>Sort: '+o[1]+'</option>';}).join('');
+  var pill=function(v,l){return '<button class="mini'+(AFF.status===v?' go':'')+'" onclick="AFF.status=\''+v+'\';loadAffiliate()">'+l+'</button>';};
+  var h=affCss()+'<div class="aff-wrap">'
+    +'<div class="aff-head"><b style="font-size:16px">🔗 Affiliate Intelligence</b><span class="sub">Skimlinks merchant catalog</span>'
+      +'<span style="margin-left:auto"><button class="mini go" title="Run the full sync now (~30-50 min; writes to Supabase)" onclick="affRunSync()">▶ Run sync now</button></span></div>'
+    +'<div class="aff-kpis">'+affKpi(total.toLocaleString(),'merchants tracked')+affKpi(active.toLocaleString(),'active')
+      +affKpi(removed.toLocaleString(),'removed')+affKpi(Number((ch&&ch.count)||0).toLocaleString(),'changes logged')+'</div>'
+    +'<div class="aff-tools">'
+      +'<input id="affq" value="'+esc(AFF.q)+'" placeholder="Search brands, domains…" style="flex:1;min-width:220px" onkeydown="if(event.key===\'Enter\')affSearch()">'
+      +'<select onchange="AFF.sort=this.value;loadAffiliate()">'+sortOpts+'</select>'
+      +pill('','All')+pill('active','Active')+pill('removed','Removed')
+      +'<button class="mini go" onclick="affSearch()">Search</button></div>'
+    +'<div class="aff-panels">'
+      +'<div class="aff-pane"><h3><span>Merchants</span><span class="sub">'+AFF.rows.length+' shown</span></h3><div class="aff-scroll"><table class="aff-tbl">'
+        +'<thead><tr><th>Merchant</th><th class="num">Commission</th><th class="num">eCPC</th><th class="num">Daily sales</th><th class="num">Conv.</th><th>Status</th><th class="num">Tenure</th><th></th></tr></thead>'
+        +'<tbody>'+(AFF.rows.map(affRow).join('')||'<tr><td colspan="8" style="padding:16px;text-align:center;color:var(--dim)">no merchants match</td></tr>')+'</tbody></table></div></div>'
+      +'<div class="aff-pane"><h3><span>📈 Top movers</span><span class="sub">recent commission changes</span></h3>'
+        +'<div class="aff-scroll">'+(movers.length?movers.map(affMover).join(''):'<div class="meta" style="padding:13px">no recent commission changes logged</div>')+'</div></div>'
+    +'</div></div>';
   g.innerHTML=h;
 }
 function affRow(m){
-  var ss=ssAttr({kind:'entity',name:m.name,title:m.name,kind_label:'merchant',
-    fields:{Domain:m.domain||'',Commission:affPct(m.commission_rate),Status:m.status||'',"Advertiser ID":m.advertiser_id,"Days tracked":m.days_tracked,"Commission changes":m.times_commission_changed}});
+  var fields={Domain:m.domain||'',Commission:affPct(m.commission_rate),eCPC:affMoney(m.ecpc),"Daily sales":affNum(m.average_daily_sales),Conversion:affPct(m.conversion_rate),Status:m.status||'',"Advertiser ID":m.advertiser_id,Tenure:(m.days_tracked||0)+'d'};
   var col=(m.status==='removed')?'#f85149':'#3fb950';
-  return '<tr '+ss+' style="border-bottom:1px solid var(--line);cursor:pointer" onclick="affTimeline('+JSON.stringify(String(m.advertiser_id))+','+JSON.stringify(m.name||'')+')">'
-    +'<td style="padding:6px 8px;font-weight:600">'+esc(m.name||'(unnamed)')+'</td>'
-    +'<td style="padding:6px 8px;color:var(--dim)">'+esc(m.domain||'—')+'</td>'
-    +'<td style="padding:6px 8px">'+affPct(m.commission_rate)+(m.times_commission_changed>0?(' <span class="sub" title="commission changes tracked">±'+m.times_commission_changed+'</span>'):'')+'</td>'
-    +'<td style="padding:6px 8px;color:'+col+'">'+esc(m.status||'—')+'</td>'
-    +'<td style="padding:6px 8px;color:var(--dim)">'+(m.days_tracked!=null?(m.days_tracked+'d'):'—')+'</td>'
-    +'<td style="padding:6px 8px">'+ssBtn({kind:'entity',name:m.name,title:m.name,kind_label:'merchant',fields:{Domain:m.domain||'',Commission:affPct(m.commission_rate),Status:m.status||'',"Advertiser ID":m.advertiser_id}})+'</td></tr>';
+  return '<tr '+ssAttr({kind:'entity',name:m.name,title:m.name,kind_label:'merchant',fields:fields})+' onclick="affTimeline('+JSON.stringify(String(m.advertiser_id))+','+JSON.stringify(m.name||'')+')">'
+    +'<td style="font-weight:600">'+esc(m.name||'(unnamed)')+(m.domain?('<div class="sub" style="font-weight:400">'+esc(m.domain)+'</div>'):'')+'</td>'
+    +'<td class="num">'+affPct(m.commission_rate)+(m.times_commission_changed>0?(' <span class="sub" title="'+m.times_commission_changed+' commission changes">±'+m.times_commission_changed+'</span>'):'')+'</td>'
+    +'<td class="num">'+affMoney(m.ecpc)+'</td><td class="num">'+affNum(m.average_daily_sales)+'</td><td class="num">'+affPct(m.conversion_rate)+'</td>'
+    +'<td style="color:'+col+'">'+esc(m.status||'—')+'</td><td class="num" style="color:var(--dim)">'+(m.days_tracked!=null?(m.days_tracked+'d'):'—')+'</td>'
+    +'<td>'+ssBtn({kind:'entity',name:m.name,title:m.name,kind_label:'merchant',fields:fields})+'</td></tr>';
 }
 function affMover(c){
   var dir=(parseFloat(c.new_commission)>=parseFloat(c.old_commission))?'#3fb950':'#f85149';
-  return '<div class="sess"><span class="lbl">'+esc(c.merchant_name||c.advertiser_id||'?')+' <span class="sub">'+esc(c.merchant_domain||'')+'</span></span>'
-    +'<span><span style="color:var(--dim)">'+affPct(c.old_commission)+'</span> → <b style="color:'+dir+'">'+affPct(c.new_commission)+'</b> <span class="sub">'+tago(c.detected_at)+'</span></span></div>';
+  return '<div class="aff-mv"><span style="overflow:hidden;text-overflow:ellipsis">'+esc((c.merchant_name||c.advertiser_id||'?')).slice(0,40)+'<div class="sub">'+tago(c.detected_at)+'</div></span>'
+    +'<span style="white-space:nowrap;text-align:right"><span style="color:var(--dim)">'+affPct(c.old_commission)+'</span> → <b style="color:'+dir+'">'+affPct(c.new_commission)+'</b></span></div>';
 }
 function affSearch(){var e=document.getElementById('affq');AFF.q=e?e.value.trim():'';loadAffiliate();}
 async function affTimeline(advid,name){

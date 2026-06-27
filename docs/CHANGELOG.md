@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.74.0 -- 2026-06-27
+- Affiliate Intel lens REBUILT to match the original dashboard's layout (the first cut was a lazy vertical stack
+  of full-width cards -- wrong). Now: a compact KPI strip (merchants / active / removed / changes), a search +
+  sort (daily sales, commission, eCPC, conversion, tenure, # changes) + status toolbar, and a real 2-column body
+  -- a dense merchant TABLE (Commission / eCPC / Daily sales / Conversion / Status / Tenure, default-sorted by
+  daily sales so the heavy hitters lead) beside a Top-movers side panel (recent commission changes). Rows are
+  draggable into a session; click a row for its commission timeline. Fix: the lens container now spans the full
+  dashboard grid (grid-column:1/-1) instead of collapsing into one cell. Data proxy select expanded with
+  ecpc/aov/daily_sales/conversion. (UI rule going forward: never lay a lens out as stacked full-width cards --
+  study the reference + design dense/laid-out screens.)
+
 ## 0.73.0 -- 2026-06-27
 - Skimlinks Affiliate Intelligence -- the first paid extension ($5/mo, run-gated via the v0.70 signed-entitlement
   system; free on internal fleet nodes). Brings the old external skimlinks.html dashboard IN-HOUSE: a built-in
