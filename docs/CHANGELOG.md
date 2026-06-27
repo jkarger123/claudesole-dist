@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.92.0 -- 2026-06-27
+- Security audit: new Secrets check (A5-keybackup) flags a plaintext key backup (cf-key-backup's
+  PAPER-BACKUP.txt -- Ed25519 PRIVATE keys in cleartext) lingering on disk, so "print it to a safe + remove
+  the plaintext" surfaces in the next audit you run instead of being forgotten. Self-clears once the plaintext
+  file is gone (the keys are also in the encrypted .cfkeys.enc bundle, so nothing is lost). agents/security/
+  tools/scan.py.
+
 ## 0.91.0 -- 2026-06-27
 - FIX: cf-key-restore.sh --verify listed bundle contents with `ls -1`, which hides dotfiles -> the PRIVATE keys
   (.superadmin_ed25519/.recovery_ed25519/.vault_key) didn't appear, only the .pub files + MANIFEST, making a

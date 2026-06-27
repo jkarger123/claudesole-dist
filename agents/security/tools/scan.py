@@ -90,6 +90,24 @@ def scan_secrets(repo):
         elif rows: add("Secrets", "A2b-rotate", "ok", "all known leaks rotated", "Rotation ledger shows every known leak revoked.", "")
     else:
         add("Secrets", "A2b-rotate", "info", "no rotation ledger", "Known deferred item: rotate Anthropic key + bridge secret + Cloudflare token, log them in rotation_ledger.json.", "")
+    # plaintext key backup lingering on disk -- cf-key-backup.sh writes PAPER-BACKUP.txt = the super-creator
+    # Ed25519 PRIVATE keys in CLEARTEXT (the print-to-a-safe layer). Sitting un-printed on disk is a finding;
+    # it self-clears once printed + the plaintext is removed (the keys are also in the encrypted .cfkeys.enc).
+    cand = [os.path.join(HOME, "cf-key-backup"), os.path.join(CC_HOME, "cf-key-backup")]
+    try:
+        for n in os.listdir(HOME):
+            if "cf-key-backup" in n:
+                p = os.path.join(HOME, n)
+                if os.path.isdir(p) and p not in cand: cand.append(p)
+    except Exception: pass
+    paper_hits = [os.path.join(d, "PAPER-BACKUP.txt") for d in cand if os.path.isfile(os.path.join(d, "PAPER-BACKUP.txt"))]
+    if paper_hits:
+        add("Secrets", "A5-keybackup", "warn", "plaintext key backup on disk -- print + remove",
+            "A super-creator PAPER-BACKUP.txt (Ed25519 PRIVATE keys in CLEARTEXT) is on disk. Print it to a "
+            "safe, then delete the plaintext -- the same keys are in the encrypted .cfkeys.enc bundle, so "
+            "nothing is lost. Self-clears once the plaintext file is gone.", ", ".join(paper_hits))
+    else:
+        add("Secrets", "A5-keybackup", "ok", "no plaintext key backup lingering", "No cleartext PAPER-BACKUP.txt key file found on disk.", "")
 
 # ---------------- Access & privilege ----------------
 def scan_access():
