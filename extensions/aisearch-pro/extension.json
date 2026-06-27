@@ -1,34 +1,88 @@
 {
   "id": "aisearch-pro",
-  "name": "AISearch Pro — Brand Visibility",
+  "name": "AISearch Pro \u2014 Brand Visibility",
   "category": "integration",
   "version": "1.0.0",
-  "icon": "🔎",
+  "icon": "\ud83d\udd0e",
   "summary": "See how your brand shows up across the AI engines (ChatGPT/Claude/Gemini/Perplexity) + sources & competitors. BYOK.",
   "description": "Runs a brand-visibility analysis across multiple AI models + Google + journalist/source scraping: 'is my brand visible, who's cited, how do I compare to competitors?'. Hosted serverless on Cloudflare (no daemon, no Mac, no tunnel). Bring-your-own AI keys -- each account uses its own OpenAI/Anthropic/Gemini/Perplexity keys, so you only pay your own AI bill. A built-in lens shows usage, cost, and past reports.",
-  "provides": ["lens:aisearch", "service:aisearch"],
+  "provides": [
+    "lens:aisearch",
+    "service:aisearch"
+  ],
   "requires": [
-    {"key": "AISEARCH_WORKER_URL", "label": "The deployed AISearch worker URL (set by Mission Control at deploy)"},
-    {"key": "AISEARCH_SUPABASE_URL", "label": "Supabase project URL (for the analytics lens; same project as the worker)"},
-    {"key": "AISEARCH_SUPABASE_KEY", "label": "Supabase service-role key (server-side only -- analytics lens read proxy)"}
+    {
+      "key": "AISEARCH_WORKER_URL",
+      "label": "The deployed AISearch worker URL (set by Mission Control at deploy)"
+    },
+    {
+      "key": "AISEARCH_SUPABASE_URL",
+      "label": "Supabase project URL (for the analytics lens; same project as the worker)"
+    },
+    {
+      "key": "AISEARCH_SUPABASE_KEY",
+      "label": "Supabase service-role key (server-side only -- analytics lens read proxy)"
+    }
   ],
   "setup_doc": "SETUP.md",
   "setup_agent": true,
   "agent_doc": "AGENT.md",
   "tier": "paid",
-  "pricing": {"monthly_usd": 5},
+  "pricing": {
+    "monthly_usd": 5
+  },
   "publisher": "ClaudeFather",
-  "lens": {"id": "aisearch", "label": "AI Visibility", "icon": "🔎"},
+  "lens": {
+    "id": "aisearch",
+    "label": "AI Visibility",
+    "icon": "\ud83d\udd0e"
+  },
   "byok": {
     "note": "Each ACCOUNT brings its own AI keys (stored per-account in aisearch_accounts.api_keys; the worker uses them at request time). MC bears no AI cost. Internal accounts (role=internal) fall back to MC's deploy secrets.",
     "store": "per_account",
     "keys": [
-      {"id": "OPENAI_API_KEY", "label": "OpenAI API key", "provider": "OpenAI", "where": "platform.openai.com/api-keys", "required": true},
-      {"id": "ANTHROPIC_API_KEY", "label": "Anthropic API key", "provider": "Anthropic", "where": "console.anthropic.com", "required": true},
-      {"id": "GOOGLE_AI_API_KEY", "label": "Google AI (Gemini) API key", "provider": "Google", "where": "aistudio.google.com/apikey", "required": false},
-      {"id": "GOOGLE_API_KEY", "label": "Google Custom Search API key", "provider": "Google", "where": "console.cloud.google.com", "required": false},
-      {"id": "GOOGLE_SEARCH_ENGINE_ID", "label": "Google Programmable Search engine ID", "provider": "Google", "where": "programmablesearchengine.google.com", "required": false},
-      {"id": "PERPLEXITY_API_KEY", "label": "Perplexity API key", "provider": "Perplexity", "where": "perplexity.ai/settings/api", "required": false}
+      {
+        "id": "OPENAI_API_KEY",
+        "label": "OpenAI API key",
+        "provider": "OpenAI",
+        "where": "platform.openai.com/api-keys",
+        "required": true
+      },
+      {
+        "id": "ANTHROPIC_API_KEY",
+        "label": "Anthropic API key",
+        "provider": "Anthropic",
+        "where": "console.anthropic.com",
+        "required": true
+      },
+      {
+        "id": "GOOGLE_AI_API_KEY",
+        "label": "Google AI (Gemini) API key",
+        "provider": "Google",
+        "where": "aistudio.google.com/apikey",
+        "required": false
+      },
+      {
+        "id": "GOOGLE_API_KEY",
+        "label": "Google Custom Search API key",
+        "provider": "Google",
+        "where": "console.cloud.google.com",
+        "required": false
+      },
+      {
+        "id": "GOOGLE_SEARCH_ENGINE_ID",
+        "label": "Google Programmable Search engine ID",
+        "provider": "Google",
+        "where": "programmablesearchengine.google.com",
+        "required": false
+      },
+      {
+        "id": "PERPLEXITY_API_KEY",
+        "label": "Perplexity API key",
+        "provider": "Perplexity",
+        "where": "perplexity.ai/settings/api",
+        "required": false
+      }
     ]
   },
   "data_sources": {
@@ -41,15 +95,24 @@
         "select": "id,created_at,endpoint,brand,competitor,providers_used,cost_total,latency_ms,sources_found,success,account_id",
         "order": "created_at.desc",
         "max": 500,
-        "filter_cols": ["endpoint", "success", "account_id"]
+        "filter_cols": [
+          "endpoint",
+          "success",
+          "account_id"
+        ]
       },
       "reports": {
         "table": "brand_intelligence_reports",
         "select": "id,created_at,brand,query,section,brands_found,sources_count,latency_ms,account_id",
         "order": "created_at.desc",
         "max": 300,
-        "search": ["brand", "query"],
-        "filter_cols": ["account_id"]
+        "search": [
+          "brand",
+          "query"
+        ],
+        "filter_cols": [
+          "account_id"
+        ]
       },
       "accounts": {
         "table": "aisearch_accounts",
@@ -60,9 +123,15 @@
     }
   },
   "endpoints": [
-    "GET /api/health", "GET /api/account", "GET /api/account/history",
-    "POST /api/analyze", "POST /api/trace", "POST /api/compare",
-    "POST /api/visibility-report", "POST /api/brand-intelligence", "POST /api/affiliate-intel",
+    "GET /api/health",
+    "GET /api/account",
+    "GET /api/account/history",
+    "POST /api/analyze",
+    "POST /api/trace",
+    "POST /api/compare",
+    "POST /api/visibility-report",
+    "POST /api/brand-intelligence",
+    "POST /api/affiliate-intel",
     "GET /api/report-history"
   ],
   "worker": {
@@ -71,10 +140,26 @@
     "auth_header": "X-Access-Code",
     "auth_env": "AISEARCH_ACCESS_CODE",
     "actions": {
-      "analyze": {"method": "POST", "path": "/api/analyze", "timeout": 90},
-      "compare": {"method": "POST", "path": "/api/compare", "timeout": 90},
-      "trace": {"method": "POST", "path": "/api/trace", "timeout": 90},
-      "report": {"method": "POST", "path": "/api/visibility-report", "timeout": 120}
+      "analyze": {
+        "method": "POST",
+        "path": "/api/analyze",
+        "timeout": 90
+      },
+      "compare": {
+        "method": "POST",
+        "path": "/api/compare",
+        "timeout": 90
+      },
+      "trace": {
+        "method": "POST",
+        "path": "/api/trace",
+        "timeout": 90
+      },
+      "report": {
+        "method": "POST",
+        "path": "/api/visibility-report",
+        "timeout": 120
+      }
     }
   }
 }

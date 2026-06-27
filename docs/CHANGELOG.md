@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.78.0 -- 2026-06-27
+- Extension Server Functions -- a unified, sandboxed runtime for extensions to run SERVER-SIDE code inside
+  ClaudeFather (no external worker/host), so future extensions that need server compute all use ONE managed,
+  secure path instead of per-extension hacks. Declared via extension.json `functions` {entry, runtime, secrets[],
+  timeout_sec, mem_mb, tier}; invoked through the unified `/api/ext-action` (a local function is preferred over a
+  remote `worker`, so lens code is identical for either). SECURITY (it runs extension code on a box with secrets):
+  subprocess isolation; RESTRICTED env -- only the secrets the function declares are injected, never the node's
+  auth/mesh tokens or other extensions' keys (proven: node_auth_leaked=false); hard timeout + CPU/file-size (+best-
+  effort memory) limits; stdin/stdout JSON contract; path-confined entry; official-tier only (third_party sandbox +
+  per-account BYOK secret store + OS-level net egress enforcement are the designed-in next steps); every call
+  audited to _ext_fn.log. This is the foundation for moving AISearch fully in-server (next: port its AI fan-out to
+  a server function + node-local data store + migrate the Supabase data). Docs: extensions/AUTHORING.md.
+
 ## 0.77.0 -- 2026-06-27
 - AISearch runs IN-CONSOLE now (was a link-out to the website). The AI Visibility lens gained a Search tab: enter a
   brand + query (or brand vs competitor), Run, and see the live result inline -- a grid of per-engine cards

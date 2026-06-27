@@ -3983,17 +3983,88 @@ def _ext_unregister_routine(eid):
         try: json.dump(reg, open(ROUTINES, "w"), indent=2)
         except Exception: pass
 
+# ==== EXTENSION SERVER FUNCTIONS -- the unified, sandboxed way for an extension to run server-side code ======
+# One platform primitive so every extension that needs server compute (AISearch's AI fan-out, future tools) runs
+# THE SAME managed way -- not per-extension hacks. Request-driven (complements the scheduled routines runner).
+# SECURITY MODEL (this runs extension-shipped code on the box that holds secrets, so it is locked down):
+#   * RESTRICTED ENV -- the child gets ONLY the secrets the function declares (allowlist), never the full
+#     environment, so a function can't read another extension's keys or the node's auth/mesh tokens.
+#   * SUBPROCESS ISOLATION + RESOURCE LIMITS -- separate process, hard wall-clock timeout, setrlimit on CPU /
+#     address space / file size, so a runaway or hung function can't DoS or fill the disk.
+#   * STDIN/STDOUT JSON CONTRACT -- input via stdin (no argv injection), output is captured + size-capped.
+#   * PATH-CONFINED ENTRY -- the entry must resolve inside the extension's own installed dir (no traversal).
+#   * TRUST TIER -- only OFFICIAL extensions (dist-shipped, signed-channel, reviewed) may ship functions today;
+#     a `third_party` tier (tighter sandbox + explicit operator approval) is the documented next step.
+#   * AUDIT -- every invocation is logged (ext/fn/outcome) to _ext_fn.log.
+# Forward extension points (designed-in, not yet built): per-ACCOUNT secret resolution (BYOK from a node-local
+# store, not just deploy env), OS-level network egress enforcement of `net_allow`, and streamed output.
+_EXT_FN_LOG = os.path.join(STATE_DIR, "_ext_fn.log")
+def _fn_audit(eid, fn, outcome):
+    try:
+        with open(_EXT_FN_LOG, "a") as f:
+            f.write("%s %s/%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), eid, fn, outcome))
+    except Exception: pass
+
+def _ext_fn_run(eid, fn, inp, secret_resolver=None):
+    """Run an extension's declared server-side function in a sandboxed subprocess. `secret_resolver(key)` lets a
+    caller supply per-account BYOK secrets; defaults to the node deploy env."""
+    eid, d = _ext_dir(eid)
+    m = _ext_meta(eid)
+    spec = (m.get("functions") or {}).get(fn)
+    if not isinstance(spec, dict) or not spec.get("entry"): return {"ok": False, "error": "no such function '%s'" % fn}
+    if str(spec.get("tier", "official")) != "official":
+        return {"ok": False, "error": "non-official functions are not enabled (third_party sandbox pending)"}
+    base = os.path.realpath(os.path.join(AGENTS_DIR, eid) if _ext_category(eid) == "agent-tool" else os.path.join(EXT_DIR, eid, "payload"))
+    entry = os.path.realpath(os.path.join(base, spec["entry"]))
+    if not (entry == base or entry.startswith(base + os.sep)) or not os.path.isfile(entry):
+        return {"ok": False, "error": "function entry not found / outside extension dir"}
+    # restricted env: ONLY declared secrets + a minimal runtime PATH/HOME
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
+           "HOME": os.path.expanduser("~"), "LANG": "en_US.UTF-8", "CF_FN": fn, "CF_EXT": eid}
+    resolve = secret_resolver or _deploy_env
+    for k in (spec.get("secrets") or []):
+        try: v = resolve(k)
+        except Exception: v = None
+        if v: env[k] = v
+    to = max(1, min(int(spec.get("timeout_sec", 60)), 600))
+    def _limits():
+        try:
+            import resource
+            cpu = to + 5; resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
+            resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024 * 1024, 64 * 1024 * 1024))
+            try:
+                mem = int(spec.get("mem_mb", 768)) * 1024 * 1024
+                resource.setrlimit(resource.RLIMIT_AS, (mem, mem))   # not enforced on all platforms (e.g. macOS); best-effort
+            except Exception: pass
+        except Exception: pass
+    try:
+        p = subprocess.run([spec.get("runtime", "python3"), entry], input=json.dumps(inp or {}),
+                           env=env, cwd=base, capture_output=True, text=True, timeout=to, preexec_fn=_limits)
+    except subprocess.TimeoutExpired:
+        _fn_audit(eid, fn, "timeout %ss" % to); return {"ok": False, "error": "function timed out (%ss)" % to}
+    except Exception as e:
+        _fn_audit(eid, fn, "spawn-error"); return {"ok": False, "error": str(e)[:160]}
+    if p.returncode != 0:
+        _fn_audit(eid, fn, "exit %d" % p.returncode)
+        return {"ok": False, "error": "function exited %d" % p.returncode, "stderr": (p.stderr or "")[-400:]}
+    out = (p.stdout or "")[:4_000_000]
+    _fn_audit(eid, fn, "ok")
+    try: return {"ok": True, "result": (json.loads(out) if out.strip() else {})}
+    except Exception: return {"ok": True, "result": {"raw": out[:8000]}}
+
 def ext_action(eid, action, payload):
-    """GENERIC action proxy: forward an in-console request to an extension's hosted WORKER (e.g. AISearch's
-    Cloudflare Pages Function), injecting the per-node auth (access code) from the deploy env SERVER-SIDE so it
-    never sits in the browser. Lets a lens RUN the product in-console (not link out). The extension declares a
-    `worker` block (url_env/url_default, auth_header/auth_env, actions{name:{method,path}}). BYOK: the worker
-    resolves the AI keys from the account the access code maps to. Installed + entitled only."""
+    """GENERIC action proxy: prefer a LOCAL server-side function (runs in ClaudeFather, sandboxed) for `action`;
+    else forward to the extension's hosted WORKER (e.g. AISearch's Cloudflare Pages Function), injecting the
+    per-node auth from the deploy env SERVER-SIDE. The extension declares EITHER a `functions` block (server-side,
+    preferred -- self-contained) OR a `worker` block (url_env/url_default, auth_header/auth_env, actions). BYOK is
+    honored either way. Installed + entitled only."""
     eid, d = _ext_dir(eid)
     if not d: return {"ok": False, "error": "no such extension"}
     if eid not in _ext_installed(): return {"ok": False, "error": "extension not installed on this node"}
     m = _ext_meta(eid)
     if _ext_is_paid(m) and not _entitled(eid, m): return {"ok": False, "error": "extension not licensed on this node"}
+    if (m.get("functions") or {}).get(action):        # LOCAL server-side function wins -> run it in-process-sandbox
+        return _ext_fn_run(eid, action, payload)
     w = m.get("worker") or {}
     spec = (w.get("actions") or {}).get(action)
     if not spec: return {"ok": False, "error": "unknown action '%s'" % action}

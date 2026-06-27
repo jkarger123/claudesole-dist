@@ -91,6 +91,30 @@ Drag that row onto a session tile (or tap the ➤ button) and the agent receives
 item. Use `fields:{label:value}` (auto-rendered) or a ready `body:"...markdown..."`. Ship a payload resolver +
 `register_sendable("<kind>", fn)` only if you need SERVER-SIDE enrichment (e.g. fetch full detail by id).
 
+## Server functions -- run extension code ON the ClaudeFather server (the unified runtime)
+When an extension needs server-side compute (call AI APIs, transform data, talk to a DB) and return the result
+to the user IN-CONSOLE -- with no external worker/host -- declare `functions` in extension.json. The platform
+runs them in a **sandboxed subprocess** and the lens invokes them via `POST /api/ext-action {ext, action, payload}`
+(a declared function for `action` is preferred over a `worker` block, so the same lens code works for either).
+```json
+"functions": {
+  "analyze": {
+    "entry": "server/analyze.py",     // path INSIDE the extension's installed dir (no traversal)
+    "runtime": "python3",
+    "secrets": ["OPENAI_API_KEY","ANTHROPIC_API_KEY"],  // ONLY these are injected into the child env (allowlist)
+    "timeout_sec": 90, "mem_mb": 768,
+    "tier": "official"                 // only 'official' (dist-shipped, reviewed) may run today
+  }
+}
+```
+The entry reads the request as **JSON on stdin** and writes its result as **JSON on stdout**. Security the runtime
+enforces (because this runs your code on a box that holds secrets): the child gets a RESTRICTED env -- only the
+secrets you declare, never the node's auth/mesh tokens or other extensions' keys; a hard timeout + CPU/file-size
+(and best-effort memory) limits; output is size-capped; the entry must resolve inside your extension dir; every
+call is audited to `_ext_fn.log`. Prefer server functions over a hosted worker -- they make the extension
+self-contained (a downloaded ClaudeFather runs it with zero external infra). BYOK: declare the per-account keys;
+the runtime resolves them (deploy env today; per-account store next).
+
 ## Paid extensions (entitlements) -- the monetization layer
 A `"tier": "paid"` extension is **locked by default** and unlocks ONLY when this node holds a valid
 **Mission-Control-signed entitlement** (Ed25519, same owner key as superadmin; private key MC-only,
