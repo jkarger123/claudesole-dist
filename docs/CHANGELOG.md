@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.71.0 -- 2026-06-27
+- Routines runner — the platform's scheduled-job heartbeat (was a stub: registry, no runner). A stdlib
+  server-side tick loop (`_routines_loop`/`_routine_run`) executes due routines IN THIS NODE'S OWN server
+  process — which has Full Disk Access — and NEVER reaches across user-home boundaries. That cross-user/SSD
+  reach is exactly what silently broke the legacy launchd job when it was loaded under a different user (a TCC
+  denial with no log) — so each node runs its own routines on node-local paths. Hard-won rules baked in from
+  the legacy Skimlinks/CarSearch setup: de-dupe by NAME (a routine can't double-fire — the old setup had a
+  LaunchAgent AND a duplicate crontab line racing the same DB rows), failure alerts from day one (non-zero
+  exit/timeout -> notify_send; the old job had ZERO alerting and a failed run sat unnoticed for two weeks),
+  and catch-up (a missed calendar window runs once on the next tick). Routine schema in _routines.json gains
+  cmd/cwd/when/env/timeout_sec/alert/enabled; run-state + per-run logs persisted; Routines lens shows cadence
+  + last-run/status + a "Run now" button. APIs: GET /api/routines, POST /api/routine-run. VERIFIED: a test
+  routine auto-fired on cadence (the exact failure mode that was broken) and via manual run. Docs:
+  agents/routines/CLAUDE.md. (This is the prerequisite for shipping the Skimlinks sync as a scheduled extension.)
+
 ## 0.70.0 -- 2026-06-27
 - Paid extensions / entitlements — the monetization layer for the Marketplace, built so it can't be self-granted.
   A `"tier":"paid"` extension is LOCKED by default and unlocks ONLY with a Mission-Control-SIGNED entitlement

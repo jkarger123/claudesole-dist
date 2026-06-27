@@ -20,7 +20,7 @@ Two senses of "agent" -- don't confuse them (see `docs/MEMORY_SKILLS_AGENTS.md` 
 | `google/` | Turn Gmail/Calendar/Drive into action via live Google MCP. READ/DRAFT-first; **never sends email**, confirms before any mutation. | charter + `config.json` (drives MCP tools, not a `run.py`) |
 | `ideas/` | Frictionless idea inbox; refine + PROMOTE to a module note / new agent / Ralph loop. | charter only (logic in `server.py` `idea_*`) |
 | `incidents/` | Read-only open-incident posture from configured incident/nightly/error logs. | `tools/run.py` + config |
-| `routines/` | Owns scheduled recurring jobs (heartbeat). **STUB** -- registry only, no runner yet (first job: build itself). | charter only (registry `_routines.json`) |
+| `routines/` | Owns scheduled recurring jobs (heartbeat). **BUILT (v0.70.0)** -- server-side runner executes due routines in-node (FDA), de-duped by name, with failure alerts. | charter only (runner in `server.py`, registry `_routines.json`) |
 | `security/` | Audit security posture (project + AI-agent safety); read-only scans autonomously, propose+queue fixes for human approval. | `tools/scan.py` + `reports/` + `rotation_ledger.json` (own schema) |
 | `usage/` | Token + cost analytics + token-waste detection from Claude Code transcripts. | charter only (logic in `server.py` `_scan_tok`/`token_*`, Usage lens) |
 

@@ -8482,6 +8482,166 @@ def _fleet_converge_loop():
         except Exception: pass
         time.sleep(max(1800, int(CC.get("fleet_converge_min", 180)) * 60))   # default 3h
 
+# ==== ROUTINES RUNNER: the control center's heartbeat ============================================
+# Executes due scheduled routines IN THIS NODE'S OWN SERVER CONTEXT (the tmux process has Full Disk Access),
+# NEVER reaching across user-home boundaries -- that cross-user/SSD reach is exactly what silently broke the
+# old launchd job when it was loaded under a different user (TCC denial, no log). Each node runs its OWN
+# routines. De-dupes by routine NAME (a job can't double-fire -- the old setup had a LaunchAgent AND a
+# duplicate crontab line racing the same rows). Records last-run/status/output + alerts on failure (the old
+# job had ZERO alerting -- a failure sat unnoticed for two weeks). Registry: _routines.json (per-node,
+# PRESERVE). A routine auto-runs only if it declares a `cmd` + a schedule; otherwise it's display/manual.
+_ROUTINES_STATE = os.path.join(STATE_DIR, "_routines_state.json")
+_ROUTINE_LOG_DIR = os.path.join(STATE_DIR, "routine_logs")
+_ROUTINES_RUNNING = set()
+_ROUTINES_RUN_LOCK = threading.Lock()
+
+def _routines_reg():
+    try: return load(ROUTINES, {"routines": []}).get("routines", [])
+    except Exception: return []
+
+def _routines_state_load():
+    try: return json.load(open(_ROUTINES_STATE))
+    except Exception: return {}
+
+def _routines_state_set(name, **kw):
+    with _ROUTINES_RUN_LOCK:
+        d = _routines_state_load(); d[name] = {**d.get(name, {}), **kw}
+        try:
+            fd = os.open(_ROUTINES_STATE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f: json.dump(d, f, indent=2)
+        except Exception: pass
+
+def _routine_when(r):
+    """Structured schedule: prefer r['when'] {weekday?,hour,minute} or {every_minutes}; else parse the
+    free-text r['schedule'] keyword. None => manual/on-demand (never auto-runs). weekday uses launchd's
+    convention (0=Sunday)."""
+    w = r.get("when")
+    if isinstance(w, dict) and w: return w
+    s = str(r.get("schedule", "")).strip().lower()
+    if s in ("", "on-demand", "on demand", "manual", "none", "unscheduled"): return None
+    m = re.search(r"every\s+(\d+)\s*(m|min|mins|minute|minutes|h|hr|hour|hours)", s)
+    if m: n = int(m.group(1)); return {"every_minutes": n * 60 if m.group(2).startswith("h") else n}
+    if "hour" in s: return {"every_minutes": 60}
+    if "week" in s: return {"weekday": 0, "hour": 3, "minute": 0}   # Sunday 03:00 (matches the legacy Skimlinks cadence)
+    if "dai" in s or "day" in s: return {"hour": 3, "minute": 0}
+    return None
+
+def _routine_last_fire(when, now):
+    """Most recent scheduled fire-time (epoch) <= now for a calendar schedule, else None for interval."""
+    if "every_minutes" in when: return None
+    import datetime as _d
+    hh = int(when.get("hour", 3)); mm = int(when.get("minute", 0))
+    base = _d.datetime.fromtimestamp(now)
+    if "weekday" in when:
+        target_py = (int(when["weekday"]) + 6) % 7        # launchd Sun=0 -> python Mon=0..Sun=6
+        for back in range(0, 8):
+            cand = (base - _d.timedelta(days=back)).replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if cand.weekday() == target_py and cand.timestamp() <= now:
+                return cand.timestamp()
+        return None
+    cand = base.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if cand.timestamp() > now: cand -= _d.timedelta(days=1)
+    return cand.timestamp()
+
+def _routine_due(r, st, now):
+    if r.get("enabled") is False: return False
+    if str(r.get("status", "")).lower() in ("paused", "disabled", "halted"): return False
+    if not r.get("cmd"): return False                      # display/manual only -- nothing to auto-run
+    when = _routine_when(r)
+    if not when: return False
+    last = float((st.get(r.get("name", "")) or {}).get("last_run", 0) or 0)
+    if "every_minutes" in when:
+        return (now - last) >= max(1, int(when["every_minutes"])) * 60
+    fire = _routine_last_fire(when, now)
+    return bool(fire and last < fire)
+
+def _routine_alert(r, subject):
+    al = r.get("alert") or {}
+    if al.get("channel") == "none": return
+    try: notify_send("[%s] %s" % (INSTANCE_ID, subject))   # Telegram (in-process); per-routine channels can extend this
+    except Exception: pass
+
+def _routine_run(r, manual=False):
+    """Execute one routine in THIS node's context. cmd may be a string (run via bash -lc) or an argv list.
+    Output is captured to routine_logs/<name>.log; failure (non-zero exit / exception) fires an alert."""
+    name = r.get("name") or "routine"
+    cmd = r.get("cmd")
+    if not cmd: return {"ok": False, "error": "routine has no cmd to run"}
+    with _ROUTINES_RUN_LOCK:
+        if name in _ROUTINES_RUNNING: return {"ok": False, "error": "already running"}   # de-dupe by NAME
+        _ROUTINES_RUNNING.add(name)
+    started = time.time()
+    _routines_state_set(name, running=True, last_run=started, last_status="running")
+    try:
+        os.makedirs(_ROUTINE_LOG_DIR, exist_ok=True)
+        logp = os.path.join(_ROUTINE_LOG_DIR, re.sub(r"[^A-Za-z0-9_-]", "_", name)[:60] + ".log")
+        cwd = r.get("cwd") or PROJECT
+        env = dict(os.environ); env.update({k: str(v) for k, v in (r.get("env") or {}).items()})
+        argv = cmd if isinstance(cmd, list) else ["bash", "-lc", cmd]
+        to = int(r.get("timeout_sec") or 7200)             # routines can be long (the Skimlinks pass is ~30-50 min)
+        with open(logp, "a") as lf:
+            lf.write("\n===== %s  run %s%s =====\n" % (name, time.strftime("%Y-%m-%d %H:%M:%S"), " (manual)" if manual else ""))
+            lf.flush()
+            try:
+                p = subprocess.run(argv, cwd=cwd, env=env, stdout=lf, stderr=subprocess.STDOUT, timeout=to)
+                code = p.returncode
+            except subprocess.TimeoutExpired:
+                lf.write("\n[routine timed out after %ss]\n" % to); code = 124
+        tail = ""
+        try:
+            with open(logp) as f: tail = f.read()[-600:]
+        except Exception: pass
+        ok = (code == 0)
+        _routines_state_set(name, running=False, last_status=("ok" if ok else "failed"),
+                            last_exit=code, last_ms=int((time.time() - started) * 1000), tail=tail)
+        if not ok:
+            _routine_alert(r, "Routine '%s' FAILED (exit %s). Tail:\n%s" % (name, code, tail[-300:]))
+        return {"ok": ok, "exit": code, "log": logp}
+    except Exception as e:
+        _routines_state_set(name, running=False, last_status="error", tail=str(e)[:300])
+        _routine_alert(r, "Routine '%s' errored: %s" % (name, str(e)[:200]))
+        return {"ok": False, "error": str(e)[:160]}
+    finally:
+        with _ROUTINES_RUN_LOCK: _ROUTINES_RUNNING.discard(name)
+
+def routines_list():
+    """Registry merged with live run-state (for the Routines lens + /api/routines)."""
+    st = _routines_state_load(); out = []
+    for r in _routines_reg():
+        nm = r.get("name", "")
+        s = st.get(nm, {})
+        rr = dict(r)
+        rr["last_run"] = s.get("last_run"); rr["last_status"] = s.get("last_status")
+        rr["last_exit"] = s.get("last_exit"); rr["last_ms"] = s.get("last_ms")
+        rr["running"] = bool(s.get("running"))
+        rr["auto"] = bool(r.get("cmd") and _routine_when(r))     # will it actually fire on a schedule?
+        if rr["running"]: rr["status"] = "running"
+        elif s.get("last_status") == "failed": rr["status"] = "blocked"
+        elif s.get("last_status") == "ok": rr["status"] = rr.get("status") or "idle"
+        out.append(rr)
+    return {"routines": out}
+
+def routine_run_now(name):
+    name = (name or "").strip()
+    r = next((x for x in _routines_reg() if x.get("name") == name), None)
+    if not r: return {"ok": False, "error": "no such routine"}
+    if not r.get("cmd"): return {"ok": False, "error": "routine has no cmd to run"}
+    threading.Thread(target=_routine_run, args=(r,), kwargs={"manual": True}, daemon=True).start()
+    return {"ok": True, "started": name}
+
+def _routines_loop():
+    time.sleep(90)
+    while True:
+        try:
+            now = time.time(); st = _routines_state_load()
+            for r in _routines_reg():
+                try:
+                    if _routine_due(r, st, now):
+                        threading.Thread(target=_routine_run, args=(r,), daemon=True).start()
+                except Exception: continue
+        except Exception: pass
+        time.sleep(60)
+
 # ---- Settings: configure this node's Tier + Type from the UI instead of hand-editing cc.config.json ----
 # Taxonomy (presentation over existing primitives, no data-model change):
 #   Tier: ClaudeFather = a project node (role=project) | ClaudeGrandfather = the overseer (role=org).
@@ -8788,7 +8948,7 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({
                 "machines": load(MACHINES, {"machines": []}).get("machines", []),
                 "components": load(COMPS, {"components": []}).get("components", []),
-                "routines": load(ROUTINES, {"routines": []}).get("routines", []),
+                "routines": routines_list().get("routines", []),
                 "ralph": load(RALPH, {"loops": []}).get("loops", []),
                 "jobs": load(JOBS, {"jobs": []}).get("jobs", [])}))
         if u.path == "/api/status": return self._s(200, json.dumps(all_status()))
@@ -8810,6 +8970,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/agents":        return self._s(200, json.dumps(agents_list()))
         if u.path == "/api/extensions":    return self._s(200, json.dumps(extensions_list()))
         if u.path == "/api/entitlements":  return self._s(200, json.dumps(entitlements_status()))
+        if u.path == "/api/routines":      return self._s(200, json.dumps(routines_list()))
         if u.path == "/api/version-check": return self._s(200, json.dumps(version_check()))
         if u.path == "/api/agent-report":  return self._s(200, json.dumps(agent_report(q.get("slug", [""])[0])))
         if u.path == "/api/skills":        return self._s(200, json.dumps(skills_list()))
@@ -9249,6 +9410,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/skill-delete":  return self._s(200, json.dumps(skill_delete(body.get("scope", ""), body.get("name", ""))))
         if u.path == "/api/agent-create":  return self._s(200, json.dumps(agent_create(body.get("name", ""), body.get("summary", ""))))
         if u.path == "/api/agent-delete":  return self._s(200, json.dumps(agent_delete(body.get("slug", ""))))
+        if u.path == "/api/routine-run":         return self._s(200, json.dumps(routine_run_now(body.get("name", ""))))
         if u.path == "/api/extension-install":   return self._s(200, json.dumps(extension_install(body.get("id", ""))))
         if u.path == "/api/entitlement-grant":   return self._s(200, json.dumps(entitlement_grant(body.get("node", INSTANCE_ID), body.get("ext", ""), int(body.get("days", 0) or 0))))
         if u.path == "/api/entitlement-revoke":  return self._s(200, json.dumps(entitlement_revoke(body.get("node", INSTANCE_ID), body.get("ext", ""))))
@@ -11094,7 +11256,17 @@ function render(){
 function empty(t){return "<p style='color:var(--mut)'>"+t+"</p>";}
 function compCard(c){const k=c.kind=="spine"?'<span class="badge" style="background:#d2992222;color:#d29922">spine</span>':'';
   return '<div class="card" onclick="openComp(\''+c.id+'\')"><h3><span>'+c.name+'</span><span style="display:flex;gap:5px">'+k+badge(c.status)+'</span></h3><div class="brief">'+(c.summary||"")+'</div>'+((c.areas&&c.areas.length)?'<div class="meta">'+c.areas.length+' areas · <code>'+(c.path||"")+'</code></div>':'')+(c.active?'<div class="meta" style="color:var(--accent)">▶ '+e2(c.active).slice(0,80)+'</div>':'')+'</div>';}
-function rouCard(r){return '<div class="card" style="cursor:default"><h3><span>'+r.name+'</span>'+badge(r.status)+'</h3><div class="meta">⏰ '+(r.schedule||"unscheduled")+'</div><div class="brief">'+(r.desc||"")+'</div></div>';}
+function rouCard(r){
+  var last=r.last_run?('ran '+tago(r.last_run)+(r.last_status?(' · '+(r.last_status=='ok'?'✅ ok':(r.last_status=='running'?'⏳ running':'❌ '+esc(r.last_status)+(r.last_exit!=null?(' (exit '+r.last_exit+')'):''))) ):'')):'never run';
+  var sched='⏰ '+esc(r.schedule||r.when&&JSON.stringify(r.when)||'unscheduled')+(r.auto?' · <span style="color:#3fb950">auto</span>':' · <span style="color:#8b949e">manual</span>');
+  var btn=r.cmd?('<button class="mini" onclick="routineRun(\''+esc(r.name)+'\')">▶ Run now</button>'):'';
+  return '<div class="card" style="cursor:default"><h3><span>'+esc(r.name)+'</span>'+badge(r.status)+'</h3>'
+    +'<div class="meta">'+sched+'</div><div class="meta" style="opacity:.8">'+last+'</div>'
+    +'<div class="brief">'+esc(r.desc||"")+'</div>'+(btn?('<div class="modnav" style="margin-top:7px">'+btn+'</div>'):'')+'</div>';}
+async function routineRun(name){toast('Running '+name+'…',3000);
+  try{const r=await(await fetch('/api/routine-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})})).json();
+    if(r&&r.ok)toast('Started '+name+' — watch its status update.',4000);else toast('Could not run: '+((r||{}).error||'?'),5000);}catch(e){toast('Run failed');}
+  setTimeout(()=>{if(LENS=='routines')load();},1500);}
 const RCOL={running:"#3fb950",paused:"#d29922",blocked:"#f85149",done:"#3fb950",stopped:"#a0a0b0",halted:"#a0a0b0",idle:"#a0a0b0"};
 let RALPHVIEW='active';
 function ralphToggle(){return '<div style="display:flex;gap:6px;margin-bottom:10px">'
@@ -16968,6 +17140,7 @@ if __name__ == "__main__":
     threading.Thread(target=_autocompact_loop, daemon=True).start()    # graceful auto-compact when a session's context fills past the threshold
     threading.Thread(target=_autoupdate_loop, daemon=True).start()     # PULL convergence: every tenant self-updates from the dist (boot + timer); source nodes self-skip
     threading.Thread(target=_fleet_converge_loop, daemon=True).start() # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
+    threading.Thread(target=_routines_loop, daemon=True).start()       # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts
     threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
     threading.Thread(target=_gmail_sync_loop, daemon=True).start()      # keep recently-viewed Gmail lists warm (cache + outage fallback)
     threading.Thread(target=_gc_sync_loop, daemon=True).start()         # same for Calendar/Drive (resilient cache)
