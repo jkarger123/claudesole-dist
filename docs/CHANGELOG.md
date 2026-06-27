@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.86.0 -- 2026-06-27
+- TURNKEY HARDENING phase 2 -- the OS-level enforcement that makes "can't modify core" REAL, plus the codebase
+  IP-protection strategy. New `cf-appliance-install.sh` (run with sudo on a fresh Mac): creates a dedicated
+  NON-ADMIN runtime user (cfrun), installs the framework CORE root-owned + READ-ONLY to cfrun (so the agent
+  running --dangerously-skip-permissions literally cannot write server.py -- the OS is the boundary, not Claude
+  Code), redirects ALL writable state (state/deliverables/custom/secrets) OUT of core via cc.config
+  (state_dir/deploy_root/deliverables_root/custom_dir), marks the box edition=appliance, and installs two
+  launchd services: the runtime (as cfrun) + a privileged HEALER (as root). New `cf-update-healer.sh` (root,
+  every 30 min): pulls the signed dist, VERIFIES the core manifest signature with superadmin.pub, restores any
+  drifted/updated core file (copying only dist files that match the signed hash), resets read-only perms, and
+  restarts the runtime if anything changed -- update + self-heal with the privilege the read-only runtime lacks.
+  `DEPLOY_ROOT` now honors cc.config `deploy_root` so secrets/.mcp live outside a read-only core. Runbook:
+  docs/APPLIANCE_BRINGUP.md (Mac mini bring-up + verification). Codebase IP protection (anti-clone/jailbreak)
+  strategy + honest limits: docs/IP_PROTECTION.md (license activation bound to hardware + signed + expiring;
+  obfuscate the shipped artifact only; heartbeat/duplicate-fingerprint revocation; watermark + legal).
+
 ## 0.85.0 -- 2026-06-27
 - TURNKEY HARDENING phase 1 -- the software backbone for shipping ClaudeFather as a tamper-resistant appliance
   (full design + threat model: docs/HARDENING.md). New EDITION tier: `authoring` (us -- modifies/signs core,

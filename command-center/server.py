@@ -3792,7 +3792,7 @@ def extensions_list():
     return {"extensions": out, "version": _manifest_version(), "n": len(out)}
 
 # ---- extension payloads: per-deployment secrets + notify channel + generic MCP wiring ----------------
-DEPLOY_ROOT = CC_HOME                            # framework / deployment root (self-located)
+DEPLOY_ROOT = os.path.expanduser(CC.get("deploy_root") or CC_HOME)   # where per-deploy secrets/.mcp live; an APPLIANCE points this at a WRITABLE runtime dir so CORE stays read-only
 DEPLOY_ENV = os.path.join(DEPLOY_ROOT, ".env.claudefather")    # gitignored per-deployment secrets (KEY=VALUE)
 MCP_JSON = os.path.join(DEPLOY_ROOT, ".mcp.json")             # gitignored MCP server config for sessions
 
