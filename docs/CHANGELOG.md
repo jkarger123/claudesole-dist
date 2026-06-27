@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.66.1 -- 2026-06-27
+- Sessions strip fuel: the account LIVE on the machine you're viewing now LEADS the row and gets the bright slot
+  outline — previously the ▶ recommendation got first-position + the glow, which on a node you're NOT logged
+  into read as "this box is on that account." The gold ▶ stays as the separate, subtler "use next" marker.
+
 ## 0.66.0 -- 2026-06-26
 - Live-login integrity — the account switch (`_kc_write`) now writes `~/.claude.json` AND VERIFIES it persisted
   (retry + a loud WARN to `~/.cc-credential-changes.log` on failure), so the keychain login and the

@@ -11100,6 +11100,7 @@ function fleetFuel(){
   var accts=(d.accounts||[]).filter(function(a){return a.in_rotation&&a.ok;});
   if(!accts.length) accts=(d.accounts||[]).filter(function(a){return a.ok;});
   if(!accts.length) return '';
+  accts.sort(function(a,b){return (b.active?1:0)-(a.active?1:0);});  // the account LIVE on THIS machine leads (first + brightest)
   function usedOf(a,win){var w=(a.windows||{})[win];return w?Math.max(0,Math.min(100,w.pct)):0;}
   function tipOf(a){var w5=(a.windows||{}).session,ww=(a.windows||{}).week,m=a.model||{},me=m.session||m.week;
     return a.email+'\n5h: '+(w5?(w5.pct+'% used · '+w5.free+'% free'+(w5.ttr!=null?(' · resets '+awDur(w5.ttr)):'')):'—')
@@ -11109,7 +11110,7 @@ function fleetFuel(){
   function row(lbl,win){return '<div class="us-brow"><span class="us-bl">'+lbl+'</span><div class="us-bat">'
     +accts.map(function(a){var u=usedOf(a,win),g=fuelShade(u);
       var fill=u<=1?'':'<div class="us-fill" style="width:'+u+'%;background:linear-gradient(90deg,'+g[0]+','+g[1]+')"></div>';
-      return '<div class="us-slot'+(a.use_next?' use':'')+'" title="'+e2(tipOf(a))+'" onclick="gotoLens(\'usage\')">'+fill+'</div>';}).join('')
+      return '<div class="us-slot'+(a.active?' use':'')+'" title="'+e2(tipOf(a))+'" onclick="gotoLens(\'usage\')">'+fill+'</div>';}).join('')
     +'</div></div>';}
   var labels=accts.map(function(a){var s=(a.windows||{}).session,wk=(a.windows||{}).week,nm=shortName(a.email);
     var ls=(a.live_on||[]).join(', ');
