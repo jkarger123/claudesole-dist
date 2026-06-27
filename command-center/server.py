@@ -3832,6 +3832,93 @@ def notify_send(text):
         out["skipped"].append("no notify channel installed (install telegram-notify in the Marketplace)")
     return out
 
+# ==== TELEGRAM PER-SESSION COMMS -- route a session's correspondence to your phone, toggle per session ========
+# Built on telegram-notify (the bot + creds). Per session you can flip ON: when it goes busy->idle (task done OR
+# blocked waiting), it pings your phone with the tail; you REPLY (reply-to the message, or prefix 'name: ...') and
+# it's injected back INTO that session. Toggle on/off mid-conversation. State + getUpdates offset are node-local.
+TG_STATE_FILE = os.path.join(STATE_DIR, "_tg_sessions.json")
+_TG_LOCK = threading.Lock(); _TG_BUSY = {}
+def _tg_load():
+    try: return json.load(open(TG_STATE_FILE))
+    except Exception: return {"routed": [], "offset": 0, "msgmap": {}}
+def _tg_save(d):
+    with _TG_LOCK:
+        try:
+            fd = os.open(TG_STATE_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, json.dumps(d).encode()); os.close(fd)
+        except Exception: pass
+def _tg_routed(): return set(_tg_load().get("routed", []))
+def _tg_ready(): return bool(_deploy_env("TELEGRAM_BOT_TOKEN") and _deploy_env("TELEGRAM_CHAT_ID") and "telegram-notify" in _ext_installed())
+def telegram_session(name, on=None):
+    name = re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:48]
+    d = _tg_load(); r = set(d.get("routed", []))
+    if on is True and name: r.add(name)
+    elif on is False: r.discard(name)
+    d["routed"] = sorted(r); _tg_save(d)
+    return {"ok": True, "on": name in r, "routed": d["routed"],
+            "configured": bool(_deploy_env("TELEGRAM_BOT_TOKEN") and _deploy_env("TELEGRAM_CHAT_ID")),
+            "installed": "telegram-notify" in _ext_installed()}
+def _tg_api(method, params, timeout=35):
+    tok = _deploy_env("TELEGRAM_BOT_TOKEN")
+    if not tok: return None
+    try:
+        req = urllib.request.Request("https://api.telegram.org/bot%s/%s" % (tok, method), data=urllib.parse.urlencode(params).encode())
+        with urllib.request.urlopen(req, timeout=timeout) as r: return json.loads(r.read().decode())
+    except Exception: return None
+def _tg_chat(text):
+    c = _deploy_env("TELEGRAM_CHAT_ID")
+    if c: _tg_api("sendMessage", {"chat_id": c, "text": text[:3900], "disable_web_page_preview": "true"})
+def _tg_send_session(session, text):
+    c = _deploy_env("TELEGRAM_CHAT_ID")
+    if not c: return
+    res = _tg_api("sendMessage", {"chat_id": c, "text": ("[%s] %s" % (session, text))[:3900], "disable_web_page_preview": "true"})
+    try:
+        mid = res["result"]["message_id"]; d = _tg_load(); mm = d.get("msgmap", {}); mm[str(mid)] = session
+        if len(mm) > 200: mm = dict(list(mm.items())[-200:])
+        d["msgmap"] = mm; _tg_save(d)
+    except Exception: pass
+def _tg_pane_tail(name, n=14):
+    try:
+        o = sh([TMUX, "capture-pane", "-t", name, "-p"])[1]
+        return "\n".join([l for l in o.splitlines() if l.strip()][-n:])[-1400:]
+    except Exception: return ""
+def _tg_outbound_loop():
+    time.sleep(20)
+    while True:
+        try:
+            if _tg_ready():
+                for s in _tg_routed():
+                    if sh([TMUX, "has-session", "-t", s])[0] != 0: continue
+                    busy = _pane_busy(s)
+                    if _TG_BUSY.get(s) is True and not busy:   # busy -> idle: done or blocked-waiting
+                        _tg_send_session(s, "ready for you (finished or waiting). Reply to this message to respond.\n---\n" + _tg_pane_tail(s))
+                    _TG_BUSY[s] = busy
+        except Exception: pass
+        time.sleep(8)
+def _tg_inbound_loop():
+    time.sleep(25)
+    while True:
+        try:
+            if not _tg_ready(): time.sleep(20); continue
+            off = _tg_load().get("offset", 0)
+            res = _tg_api("getUpdates", {"offset": off + 1, "timeout": 25})
+            if not res or not res.get("ok"): time.sleep(4); continue
+            for upd in res.get("result", []):
+                d = _tg_load(); d["offset"] = max(d.get("offset", 0), upd.get("update_id", 0)); _tg_save(d)
+                msg = upd.get("message") or {}; text = (msg.get("text") or "").strip()
+                if not text: continue
+                target = None
+                rt = msg.get("reply_to_message") or {}
+                if rt.get("message_id"): target = _tg_load().get("msgmap", {}).get(str(rt["message_id"]))
+                if not target:
+                    mm = re.match(r"^/?s(?:ession)?\s+(\S+)\s+(.*)$", text, re.S) or re.match(r"^(\S+):\s+(.*)$", text, re.S)
+                    if mm and mm.group(1) in _tg_routed(): target = mm.group(1); text = mm.group(2).strip()
+                if not target:
+                    _tg_chat("Which session? Reply TO a session's message, or prefix 'name: your text'. On now: " + (", ".join(sorted(_tg_routed())) or "none"))
+                    continue
+                if sh([TMUX, "has-session", "-t", target])[0] != 0: _tg_chat("[%s] that session has closed." % target); continue
+                _mesh_deliver(target, text); _tg_chat("[%s] delivered." % target)
+        except Exception: time.sleep(5)
+
 def _ext_mcp_template(eid):
     p = os.path.join(EXT_DIR, eid, "mcp.json")
     if os.path.isfile(p):
@@ -9738,6 +9825,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/extension-uninstall": return self._s(200, json.dumps(extension_uninstall(body.get("id", ""))))
         if u.path == "/api/extension-setup":     return self._s(200, json.dumps(extension_setup(body.get("id", ""))))
         if u.path == "/api/notify":              return self._s(200, json.dumps(notify_send(body.get("text", ""))))
+        if u.path == "/api/telegram-session":    return self._s(200, json.dumps(telegram_session(body.get("name", ""), body.get("on"))))
         if u.path == "/api/team-create":   return self._s(200, json.dumps(team_create(body.get("name", ""), body.get("description", ""))))
         if u.path == "/api/team-run":      return self._s(200, json.dumps(team_run(body.get("slug", "") or body.get("name", ""))))
         if u.path == "/api/team-session":  return self._s(200, json.dumps(team_session(body.get("members", []), body.get("assignment", ""))))
@@ -9846,7 +9934,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
   .fontgrp button{flex:1;min-width:44px;min-height:38px;margin-left:0;justify-content:center;text-align:center}
   #moremenu .danger{margin-top:4px;border-top:2px solid #3a2230;color:#f85149;background:#241317}
 }</style></head><body>
-<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Show the text as selectable plain text so you can copy it (needed on mobile - the terminal itself is a canvas and can't be selected by touch)">&#10697; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><button id="mtog" onclick="toggleMouse()">scroll</button><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
+<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Show the text as selectable plain text so you can copy it (needed on mobile - the terminal itself is a canvas and can't be selected by touch)">&#10697; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><button id="mtog" onclick="toggleMouse()">scroll</button><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
 <button id="live" onclick="toLive()">&#8595; jump to live</button>
 <div id="copyov"><div id="copybar"><b>Selectable text</b><span id="copyst" style="color:#8a8a99">long-press to select, or</span><button onclick="copyAll()">&#10697; copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" style="border-color:#e8c547">&#10005; close</button></div><pre id="copybody"></pre></div>
 <div id="wrap">
@@ -9904,7 +9992,10 @@ function compactSess(){if(!confirm('Compact this session?\n\nThe agent writes a 
   st.textContent=name+' - compact: starting…';
   fetch('/api/compact-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(r=>{if(!r||!r.ok){st.textContent='compact failed: '+((r||{}).error||'?');return;}compactPoll();}).catch(()=>{st.textContent='compact request failed';});}
 function compactPoll(){fetch('/api/compact-state?name='+encodeURIComponent(name)).then(r=>r.json()).then(s=>{if(!s||!s.step)return;st.textContent=name+' - compact: '+(s.msg||s.step);if(['done','aborted','error'].indexOf(s.step)<0)setTimeout(compactPoll,3000);}).catch(()=>{});}
-ws.onopen=()=>{st.textContent=name+' - connected';fitNow();term.focus();applyMouse();};
+function tgPaint(s){var b=document.getElementById('tgbtn');if(!b)return;if(!s||!s.installed){b.style.display='none';return;}b.style.display='';b.innerHTML='&#128241; Telegram: '+(s.on?'on':'off');b.style.color=s.on?'#26a5e4':'#8a8a99';b.title=s.configured?('Telegram '+(s.on?'ON -- you get pinged when this session finishes/blocks; reply to interact':'off')+' for this session'):'Telegram bot not set up -- install + Set up telegram-notify in the Marketplace';}
+function tgState(){fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(tgPaint).catch(()=>{});}
+function toggleTg(){fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(function(cur){if(!cur.configured){st.textContent='Telegram not set up -- install + Set up telegram-notify (Marketplace), then toggle';return;}fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:!cur.on})}).then(r=>r.json()).then(function(s){tgPaint(s);st.textContent=name+' - Telegram '+(s.on?'ON (phone alerts + reply-to-interact)':'off');});});}
+ws.onopen=()=>{st.textContent=name+' - connected';fitNow();term.focus();applyMouse();tgState();};
 ws.onmessage=(e)=>term.write(new Uint8Array(e.data));
 ws.onclose=()=>{st.textContent=name+' - detached (session lives on)';term.write('\r\n\x1b[33m[detached - close this tab; the session keeps running]\x1b[0m\r\n');};
 ws.onerror=()=>{st.textContent='connection error';};
@@ -17675,6 +17766,8 @@ if __name__ == "__main__":
         threading.Thread(target=_acct_poll_loop, daemon=True).start()  # per-account /usage fuel gauges (token-isolated)
     threading.Thread(target=_autoapprove_loop, daemon=True).start()   # keep agents off the permission-prompt wall
     threading.Thread(target=_autocompact_loop, daemon=True).start()    # graceful auto-compact when a session's context fills past the threshold
+    threading.Thread(target=_tg_outbound_loop, daemon=True).start()    # Telegram: ping the phone when a routed session finishes/blocks
+    threading.Thread(target=_tg_inbound_loop, daemon=True).start()     # Telegram: relay your replies back into the routed session
     threading.Thread(target=_autoupdate_loop, daemon=True).start()     # PULL convergence: every tenant self-updates from the dist (boot + timer); source nodes self-skip
     threading.Thread(target=_fleet_converge_loop, daemon=True).start() # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     threading.Thread(target=_routines_loop, daemon=True).start()       # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts

@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.81.0 -- 2026-06-27
+- Telegram per-session comms -- route ANY tmux session to your phone. Toggle "Telegram" in a session's terminal
+  bar (the moremenu, next to compact): when that session goes busy->idle (task finished OR blocked waiting), the
+  bot pings your phone with the pane tail; you REPLY (reply-TO the ping, or prefix `name: text` / `s name text`)
+  and it's injected straight back INTO that session via the mesh-deliver typer. Toggle on/off mid-conversation.
+  Built on the existing telegram-notify extension (the bot + creds); state + getUpdates offset are node-local
+  (`_tg_sessions.json`). The whole feature no-ops until telegram-notify is INSTALLED and TELEGRAM_BOT_TOKEN +
+  TELEGRAM_CHAT_ID are in the deployment env -- so it ships fleet-wide safely; each node BYO bot via the
+  Marketplace "Set up telegram-notify" flow. New: `telegram_session()` + `POST /api/telegram-session {name,on}`,
+  two daemon loops (`_tg_outbound_loop` busy->idle edge; `_tg_inbound_loop` getUpdates->route->`_mesh_deliver`),
+  and the `#tgbtn` term-bar toggle (hidden unless the extension is installed on this node).
+
 ## 0.80.0 -- 2026-06-27
 - AISearch now runs 100% INSIDE ClaudeFather -- the worker->server-function port is done. analyze + compare are a
   stdlib-only Python server FUNCTION (extensions/aisearch-pro/payload/server/aisearch_fn.py) on the new server-
