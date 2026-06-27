@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.85.0 -- 2026-06-27
+- TURNKEY HARDENING phase 1 -- the software backbone for shipping ClaudeFather as a tamper-resistant appliance
+  (full design + threat model: docs/HARDENING.md). New EDITION tier: `authoring` (us -- modifies/signs core,
+  mints grants) vs `appliance` (a shipped/customer box -- locked + self-healing). Default: a SOURCE node is
+  authoring; any other install is a locked appliance. New SIGNED CORE INTEGRITY: `core_sign()` (authoring-only,
+  POST /api/core-sign) hashes every framework code/config file (.py/.sh/.json/.pub/.css/.html -- docs + vendored
+  JS excluded so per-node CC:NOTES never trip it) and signs the manifest with the Ed25519 private key ->
+  core.sig.json (ships via dist). On boot + every 15 min an appliance runs `core_verify()`: it verifies the
+  manifest signature with superadmin.pub (a tampered manifest is rejected), checks every hash, and SELF-HEALS
+  any drifted file from the signed dist mirror (only if the dist copy matches the signed hash), logging to
+  _core_integrity.log + alerting if it can't. So edits to core on an appliance silently revert. Authoring boxes
+  only DETECT (they're the source of truth). superadmin keygen is now authoring-only. New GET /api/core-integrity
+  + `edition`/`integrity` in /api/health + doctor checks (unsigned/drifted/sig-invalid). Zero behavior change on
+  authoring nodes; appliances with no signed manifest yet just no-op (then warn in doctor). OS-level hardening
+  (dedicated runtime user + read-only core) + the sandbox arena are phase 2/3 (docs/HARDENING.md roadmap).
+
 ## 0.84.0 -- 2026-06-27
 - Granola Calls hardened into a clean, shippable, agent-accessible extension. The engine now gives CLEAR,
   actionable errors instead of opaque states: an empty key says "no Granola API key set", and a 401/403

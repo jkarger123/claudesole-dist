@@ -409,6 +409,7 @@ def superadmin_keygen():
     to the shipped framework file (superadmin.pub) so every install auto-trusts it. Refuses to clobber an
     existing private key (rotation must be deliberate)."""
     if not _HAS_CRYPTO: return {"ok": False, "error": "cryptography not installed (pip install --user cryptography)"}
+    if not _authoring(): return {"ok": False, "error": "superadmin keygen is authoring-only (this is a locked appliance)"}
     if os.path.isfile(SA_PRIVKEY_PATH): return {"ok": False, "error": "private key already exists at %s (refusing to overwrite)" % SA_PRIVKEY_PATH}
     priv = Ed25519PrivateKey.generate()
     pem_priv = priv.private_bytes(_crypto_ser.Encoding.PEM, _crypto_ser.PrivateFormat.PKCS8, _crypto_ser.NoEncryption())
@@ -6328,6 +6329,14 @@ def doctor():
         issues.append({"sev": "warn", "path": "auth", "msg": "Command Center has NO authentication -- dashboard + every /api is open to anyone who can reach the port (perimeter is network-only). Set cc.config auth_token / CC_AUTH_TOKEN to require a login."})
     if os.path.isfile(SA_PUBKEY_PATH) and not _HAS_CRYPTO:
         issues.append({"sev": "warn", "path": "superadmin", "msg": "superadmin.pub is present but the `cryptography` library is NOT installed for this CC's python -- Ed25519 superadmin grants cannot be verified here (the node is NOT under the owner's superadmin until fixed). Install: pip install --user cryptography, then restart the CC."})
+    # Turnkey hardening (docs/HARDENING.md): a locked appliance should carry a signed core manifest + verify clean.
+    if not _authoring():
+        if not os.path.isfile(CORE_SIG_FILE):
+            issues.append({"sev": "warn", "path": "integrity", "msg": "this is a locked appliance but ships NO signed core manifest (core.sig.json) -- core integrity cannot be verified or self-healed. The authoring build must run core_sign and ship it via the dist."})
+        elif _CORE_STATUS.get("status") == "drifted":
+            issues.append({"sev": "err", "path": "integrity", "msg": "core integrity DRIFTED and could not fully self-heal: %s. Run cc_update to restore the signed framework." % ", ".join((_CORE_STATUS.get("drift") or [])[:6])})
+        elif _CORE_STATUS.get("status") == "sig-invalid":
+            issues.append({"sev": "err", "path": "integrity", "msg": "core.sig.json signature did NOT verify against superadmin.pub -- the manifest or the trusted key was tampered with. The appliance is not trusting it."})
     # Storage architecture: a node's home (hence its iCloud container + project) should live on its own
     # dedicated SSD, not the small internal boot drive. Compare the home's volume to the root volume.
     try:
@@ -9028,6 +9037,123 @@ def _is_update_source():
     except Exception: pass
     return False
 
+# ==== EDITION (turnkey hardening) + SIGNED CORE INTEGRITY + SELF-HEAL =========================================
+# EDITION = the authority tier. 'authoring' (us): modifies/signs core, mints grants. 'appliance' (a shipped/
+# customer box): locked -- core-mutating ops refuse, and the core SELF-HEALS to the signed dist if tampered.
+# Default: a SOURCE node (authors framework) is 'authoring'; any other install is a locked 'appliance'.
+# Honest threat model + the OS-level enforcement layer live in docs/HARDENING.md.
+def _edition():
+    e = str(CC.get("edition", "")).lower()
+    if e in ("authoring", "appliance"): return e
+    return "authoring" if _is_update_source() else "appliance"
+def _authoring(): return _edition() == "authoring"
+
+CORE_SIG_FILE = os.path.join(CC_HOME, "core.sig.json")        # SHIPPED: signed manifest of framework-file hashes
+CORE_INTEGRITY_LOG = os.path.join(STATE_DIR, "_core_integrity.log")
+_CORE_STATUS = {"status": "unchecked", "checked": 0, "drift": [], "healed": [], "ts": 0}
+CORE_HASH_EXT = (".py", ".sh", ".json", ".pub", ".css", ".html")   # code/config we protect (skip docs + vendored JS)
+CORE_HASH_SKIP = ("static/novnc", "static/xterm", "node_modules", "/.git/", "instances/", "secrets/", "/.env")
+def _core_files():
+    """Resolve manifest framework_paths -> the concrete code/config files we hash (relative to CC_HOME)."""
+    try: fps = json.load(open(os.path.join(CC_HOME, "claudesole.manifest.json"))).get("framework_paths", [])
+    except Exception: fps = []
+    out = set()
+    for fp in fps:
+        base = os.path.join(CC_HOME, fp)
+        matches = glob.glob(base) or ([base] if os.path.exists(base) else [])
+        for path in matches:
+            if os.path.isdir(path):
+                for root, _, files in os.walk(path):
+                    if any(s in (root + "/") for s in CORE_HASH_SKIP): continue
+                    for fn in files:
+                        if fn.endswith(CORE_HASH_EXT): out.add(os.path.join(root, fn))
+            elif os.path.isfile(path):
+                out.add(path)                                # exact/glob file -> protect regardless of extension
+    rels = []
+    for p in sorted(out):
+        rel = os.path.relpath(p, CC_HOME)
+        if rel == "core.sig.json" or any(s.strip("/") in rel for s in CORE_HASH_SKIP): continue
+        rels.append(rel)
+    return rels
+def _core_hash(rel):
+    try: return hashlib.sha256(open(os.path.join(CC_HOME, rel), "rb").read()).hexdigest()
+    except Exception: return None
+def _core_log(event, extra):
+    try:
+        with open(CORE_INTEGRITY_LOG, "a") as f:
+            f.write(json.dumps({"ts": int(time.time()), "event": event, "edition": _edition(), **extra}) + "\n")
+    except Exception: pass
+def core_sign():
+    """AUTHORING only: hash every framework code/config file + sign the manifest with the Ed25519 private key.
+    Writes core.sig.json (ships via dist). Run at ship time AFTER all edits are final."""
+    if not _authoring(): return {"ok": False, "error": "core_sign is authoring-only"}
+    priv = _sa_load_priv()
+    if priv is None: return {"ok": False, "error": "no Ed25519 private key on this box (authoring only)"}
+    files = {}
+    for rel in _core_files():
+        h = _core_hash(rel)
+        if h: files[rel] = h
+    payload = {"v": 1, "version": _manifest_version(), "files": files, "generated": int(time.time())}
+    sig = base64.b64encode(priv.sign(_sa_canon(payload).encode())).decode()
+    doc = {"payload": payload, "sig": sig, "alg": "ed25519"}
+    tmp = CORE_SIG_FILE + ".tmp"
+    with open(tmp, "w") as f: json.dump(doc, f, indent=2, sort_keys=True)
+    os.replace(tmp, CORE_SIG_FILE)
+    return {"ok": True, "files": len(files), "version": payload["version"], "sig_file": CORE_SIG_FILE}
+def _core_manifest_trusted():
+    """Load core.sig.json and verify ITS signature with superadmin.pub. Returns the payload or None."""
+    try: doc = json.load(open(CORE_SIG_FILE))
+    except Exception: return None
+    pub = _sa_load_pub(); payload = doc.get("payload") or {}; sig = doc.get("sig", "")
+    if pub is None or not payload or not sig: return None
+    try:
+        pub.verify(base64.b64decode(sig), _sa_canon(payload).encode())   # raises on bad signature
+        return payload
+    except Exception:
+        return None
+def _core_heal_file(rel, expected):
+    """Restore one file from the SIGNED dist mirror -- only if the dist copy matches the signed hash."""
+    try:
+        src = os.path.join(_dist_dir(), rel)
+        if not os.path.isfile(src): return False
+        if hashlib.sha256(open(src, "rb").read()).hexdigest() != expected: return False   # dist also dirty -> defer to cc_update
+        dst = os.path.join(CC_HOME, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst); return True
+    except Exception:
+        return False
+def core_verify(heal=True):
+    """Verify framework files against the signed manifest. On an appliance, self-heal drifted files from the
+    signed dist + report. Authoring boxes only DETECT (they are the source of truth). Returns a status dict."""
+    payload = _core_manifest_trusted()
+    if payload is None:
+        if os.path.isfile(CORE_SIG_FILE): _core_log("manifest-untrusted", {})   # present but sig failed -> do NOT trust
+        _CORE_STATUS.update({"status": "unsigned" if not os.path.isfile(CORE_SIG_FILE) else "sig-invalid", "ts": int(time.time())})
+        return dict(_CORE_STATUS)
+    files = payload.get("files") or {}
+    drift = [rel for rel, h in files.items() if _core_hash(rel) != h]
+    healed = []
+    if drift and heal and not _authoring():
+        for rel in drift:
+            if _core_heal_file(rel, files[rel]): healed.append(rel)
+        unhealed = [r for r in drift if r not in healed]
+        _core_log("self-heal", {"drift": drift, "healed": healed, "unhealed": unhealed})
+        if unhealed:
+            try: notify_send("ClaudeFather: core integrity drift could not self-heal (%s). A cc_update is needed." % ", ".join(unhealed[:5]))
+            except Exception: pass
+    elif drift:
+        _core_log("drift-detected", {"drift": drift})
+    status = "clean" if not drift else ("healed" if len(healed) == len(drift) else "drifted")
+    _CORE_STATUS.update({"status": status, "checked": len(files), "drift": drift, "healed": healed,
+                         "version": payload.get("version"), "ts": int(time.time())})
+    return dict(_CORE_STATUS)
+def _core_integrity_loop():
+    time.sleep(12)
+    while True:
+        try: core_verify(heal=True)
+        except Exception: pass
+        time.sleep(900)                                       # re-verify every 15 min (+ on boot)
+
 def _local_quiescent():
     """True only if NO local session is mid-turn -- so an auto-restart can't interrupt active work."""
     try:
@@ -9581,7 +9707,7 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path); q = urllib.parse.parse_qs(u.query)
         if not self._auth_gate(u.path): return
         if u.path == "/login": return self._s(200, LOGIN_PAGE, "text/html; charset=utf-8")
-        if u.path == "/api/health": return self._s(200, json.dumps({"ok": True, "instance": INSTANCE_ID, "version": _manifest_version(), "auth": bool(AUTH_TOKEN)}))
+        if u.path == "/api/health": return self._s(200, json.dumps({"ok": True, "instance": INSTANCE_ID, "version": _manifest_version(), "auth": bool(AUTH_TOKEN), "edition": _edition(), "integrity": _CORE_STATUS.get("status")}))
         if u.path == "/ws": return self.handle_ws(q)
         if u.path == "/wsvnc": return self.handle_wsvnc()
         if u.path == "/api/convo-tree":
@@ -9604,6 +9730,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/ccr-sent": return self._s(200, json.dumps({"sent": ccr_sent_list(), "self": INSTANCE_ID, "mc": _mc_url()}))
         if u.path == "/api/fw-fingerprint": return self._s(200, json.dumps(fw_fingerprint()))
         if u.path == "/api/ccr-drift": return self._s(200, json.dumps(drift_report()))
+        if u.path == "/api/core-integrity":
+            return self._s(200, json.dumps({"edition": _edition(), "authoring": _authoring(),
+                                            "signed": os.path.isfile(CORE_SIG_FILE), **core_verify(heal=False)}))
         if u.path == "/api/update-status": return self._s(200, json.dumps(update_status()))
         if u.path == "/api/settings": return self._s(200, json.dumps(settings_get()))
         if u.path == "/api/chief": return self._s(200, json.dumps(chief_overview()))
@@ -10095,6 +10224,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/vault-lease":
             ok = _mesh_token_ok(self.headers.get("X-Mesh-Token", "")) or self._operator_only()
             return self._s(200, json.dumps(vault_lease(body.get("id", ""), body.get("node", ""), authed=ok)))
+        if u.path == "/api/core-sign":
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(core_sign()))
         if u.path == "/api/vault-set":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(vault_set(body.get("id", ""), body.get("value"), label=body.get("label"), scope=body.get("scope"), node=body.get("node") or None)))
@@ -18101,6 +18233,7 @@ if __name__ == "__main__":
     threading.Thread(target=_tg_outbound_loop, daemon=True).start()    # Telegram: ping the phone when a routed session finishes/blocks
     threading.Thread(target=_tg_inbound_loop, daemon=True).start()     # Telegram: relay your replies back into the routed session
     threading.Thread(target=_autoupdate_loop, daemon=True).start()     # PULL convergence: every tenant self-updates from the dist (boot + timer); source nodes self-skip
+    threading.Thread(target=_core_integrity_loop, daemon=True).start() # INTEGRITY: verify framework files vs the signed manifest; appliances self-heal drift from the signed dist
     threading.Thread(target=_fleet_converge_loop, daemon=True).start() # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     threading.Thread(target=_routines_loop, daemon=True).start()       # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts
     threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
