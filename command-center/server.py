@@ -12771,10 +12771,11 @@ async function loadCalls(){
   let d={};try{d=await(await fetch('/api/granola')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load Calls.");return;}
   const props=d.proposals||[];const clients=d.clients||[];
   const pend=props.filter(function(p){return p.status==='pending';});const done=props.filter(function(p){return p.status!=='pending';});
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>📞 Calls</b> <span class="sub">'+(d.configured?('source: '+esc(d.source)+' · '+pend.length+' to review · dest: '+esc((d.destinations||['cc']).join(', '))):'not configured')+'</span> <button class="mini go" onclick="callsSync()">⟳ Sync Granola calls</button></div>';
-  if(!d.configured)h+='<div class="meta" style="margin-top:8px">Set <code>"granola"</code> in this deployment\'s <code>cc.config.json</code>: a Granola API key (or local cache path), an optional <code>client_map</code>, and <code>destinations</code>. See <code>extensions/granola/SETUP.md</code>.</div>';
+  const status=d.ready?('source: '+esc(d.source)+' · '+pend.length+' to review · dest: '+esc((d.destinations||['cc']).join(', '))):(d.configured?'⚠ needs setup':'not configured');
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>📞 Calls</b> <span class="sub">'+status+'</span> <button class="mini go" onclick="callsSync()">⟳ Sync Granola calls</button></div>';
+  if(!d.ready)h+='<div class="meta" style="margin-top:8px;color:#d29922">'+esc(d.hint||'Set "granola" in this deployment\'s cc.config.json. See extensions/granola/SETUP.md.')+'</div>';
   h+='</div>';
-  if(!pend.length)h+=empty(d.configured?"No calls awaiting review. Hit ⟲ Sync to pull recent Granola calls.":"Configure Granola, then Sync.");
+  if(!pend.length)h+=empty(d.ready?"No calls awaiting review. Hit ⟳ Sync to pull recent Granola calls.":"Finish Granola setup above, then Sync.");
   pend.forEach(function(p){
     const opts='<option value="">— pick client —</option>'+clients.map(function(c){return '<option value="'+esc(c)+'"'+(p.client===c?' selected':'')+'>'+esc(c)+'</option>';}).join('');
     const gsd=p.meeting_id?{kind:'granola',id:p.meeting_id,name:(p.title||'call')}:null;   // drag the CALL TRANSCRIPT onto a session (keyed on meeting_id, what get_transcript wants -- NOT the proposal id)

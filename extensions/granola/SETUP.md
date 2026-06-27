@@ -12,7 +12,10 @@ Nothing is written until you approve it in the **Calls** lens.
 1. INGEST (read-only) -- pulls recent meetings + transcripts from Granola, either:
    - **Official API** (recommended): `GET https://public-api.granola.ai/v1/notes` + `/notes/{id}?include=transcript`,
      auth `Authorization: Bearer grn_...`. Create the key in the Granola desktop app: Settings -> Connectors
-     -> API keys (Business plan).
+     -> API keys (Business plan). **IMPORTANT PREREQUISITE:** the Granola workspace must have **end-to-end
+     encryption turned OFF**. With E2E on, Granola will not expose notes to the public API (you'll see an
+     encryption-related message when creating/using the key, and the API returns 401/403). Turn E2E off in
+     the Granola workspace settings (or use a workspace/plan that permits API access) BEFORE creating the key.
    - **Local cache** (no key): `~/Library/Application Support/Granola/cache-v3.json`. Fully local, no key --
      BUT this only works if THIS deployment's box is the SAME Mac where the calls are recorded (Granola
      desktop installed + signed in here). On most agency setups the always-on ClaudeFather box (e.g. a Mac
@@ -64,6 +67,15 @@ under "Recently handled"; the dated note is now in that client's CLAUDE.md and t
   review-first -- nothing touches a client file until you approve it.
 - Everything runs on THIS deployment's box against THIS deployment's client tree. No client data leaves it
   except (a) to your own LLM for extraction and (b) to any destination you explicitly enable.
+
+## Troubleshooting
+- **"encryption" message / Sync error 401 or 403:** your Granola WORKSPACE has end-to-end encryption enabled,
+  which blocks the public API from reading notes (or the plan doesn't allow API keys). Fix: Granola workspace
+  settings -> turn E2E encryption OFF, confirm a Business plan, recreate the `grn_` key, paste it into
+  `granola.api_key`, then Sync. This is a Granola account condition, not a ClaudeFather bug.
+- **Calls lens says "needs setup":** no usable source yet. The lens shows the exact next step (add the API
+  key, or -- on a call-taking Mac -- install Granola for the local cache).
+- **"no Granola API key set":** `source` is "api" but `api_key` is empty in `cc.config.json`. Add the key.
 
 ## Files
 - Engine: `command-center/granola.py`  | Lens + endpoints: in `command-center/server.py` (Calls lens,

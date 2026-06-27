@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.84.0 -- 2026-06-27
+- Granola Calls hardened into a clean, shippable, agent-accessible extension. The engine now gives CLEAR,
+  actionable errors instead of opaque states: an empty key says "no Granola API key set", and a 401/403
+  explicitly names the real cause -- "your Granola workspace has END-TO-END ENCRYPTION enabled, which blocks
+  the public API; turn E2E off and recreate the key" (this is the "encryption" message users hit, surfaced
+  honestly). `/api/granola` now returns `ready` + `hint` + `has_key`, and the Calls lens shows the exact next
+  step ("needs setup" with the precise fix) instead of a generic "not configured". Granola calls are draggable
+  into sessions (already wired -- now declared in extension.json) and the extension ships an AGENT.md so agents
+  on an installed node know the propose->approve->apply flow. SETUP.md documents the E2E-encryption + Business-
+  plan prerequisite and a Troubleshooting section. extension.json -> v1.1.0 (agent_doc, draggables, publisher,
+  clearer requires). No behavior change to the apply path (review-first intact).
+
 ## 0.83.0 -- 2026-06-27
 - Enterprise CREDENTIAL VAULT -- MC-hosted, encrypted-at-rest, checkout/lease on demand. Mission Control
   holds ONE encrypted vault; nodes LEASE a secret at runtime over the family-authenticated channel and cache

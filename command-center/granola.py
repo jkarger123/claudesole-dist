@@ -16,7 +16,7 @@ Config (cc.config "granola"): {
   "apply_mode": "review"                       # review (default) | hybrid (auto-note, review tasks) | auto
 }
 """
-import json, os, re, subprocess, time, glob, urllib.request
+import json, os, re, subprocess, time, glob, urllib.request, urllib.error
 
 _CTX = {}  # injected by server.py: CC, PROJECT, STATE_DIR, sh, agency_dirs, pretty_name, mesh_log(optional)
 
@@ -52,11 +52,23 @@ def _source():
 
 def _api_get(path):
     c = _cfg()
+    key = c.get("api_key") or ""
+    if not key:
+        raise RuntimeError("no Granola API key set (cc.config granola.api_key). Create one in Granola -> "
+                           "Settings -> Connectors -> API keys (needs a Business plan; the workspace must have "
+                           "end-to-end encryption OFF for the public API to read notes), then add it.")
     req = urllib.request.Request("https://public-api.granola.ai/v1" + path,
-                                 headers={"Authorization": "Bearer " + (c.get("api_key") or ""),
-                                          "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read().decode())
+                                 headers={"Authorization": "Bearer " + key, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise RuntimeError("Granola rejected the API key (HTTP %d). Either the key is wrong, OR your Granola "
+                               "workspace has END-TO-END ENCRYPTION enabled -- which blocks the public API from "
+                               "reading notes. Fix: in Granola workspace settings turn E2E encryption OFF (and "
+                               "confirm your plan allows API keys), then recreate the key." % e.code)
+        raise RuntimeError("Granola API HTTP %d on %s" % (e.code, path))
 
 
 def _cache_file():
@@ -226,10 +238,27 @@ def gr_sync(limit=15):
     return {"ok": True, "added": added, "pending": len([p for p in st["proposals"] if p["status"] == "pending"])}
 
 
+def _gr_ready():
+    """(ready, hint) -- is Granola actually able to ingest? Distinguishes 'enabled' from 'has a usable source'."""
+    c = _cfg()
+    if not c: return (False, "Granola isn't enabled on this node (cc.config 'granola').")
+    src = _source()
+    if src == "api" and not c.get("api_key"):
+        return (False, "Add your Granola API key (granola.api_key). Create it in Granola -> Settings -> "
+                       "Connectors -> API keys (Business plan; workspace end-to-end encryption must be OFF "
+                       "for the public API to read notes).")
+    if src == "cache" and not os.path.isfile(_cache_file()):
+        return (False, "No Granola desktop cache on this machine (%s). Install/run Granola here, or set "
+                       "source='api' with an API key." % _cache_file())
+    return (True, "")
+
+
 def gr_proposals():
     st = _load_state()
+    ready, hint = _gr_ready()
     return {"ok": True, "proposals": st.get("proposals", [])[:80], "last_sync": st.get("last_sync", 0),
-            "configured": bool(_cfg()), "source": _source(),
+            "configured": bool(_cfg()), "ready": ready, "hint": hint, "source": _source(),
+            "has_key": bool((_cfg() or {}).get("api_key")),
             "clients": [nm for nm, _ in _client_dirs()], "destinations": _cfg().get("destinations") or ["cc"]}
 
 
