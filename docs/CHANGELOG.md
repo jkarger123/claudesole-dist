@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.79.0 -- 2026-06-27
+- Extension Data Store (node-local SQLite) -- the unified store primitive so an extension's data lives ON the node
+  (self-contained, no external DB). Generic: data_sources `backend:"sqlite"` + a shipped `schema` (.sql, applied
+  idempotently); the lens reads it through the SAME data_sources contract as supabase (whitelisted table/select/
+  order from the manifest; user search/filters are BOUND params -- no injection); server functions get their OWN
+  scoped DB via CF_STORE_DB (per-extension file -- no cross-extension reach). AISearch moved to it: shipped
+  store_schema.sql (accounts/requests/reports incl. per-account byok/api_keys) and MIGRATED the existing Supabase
+  data into the local store (verified: 25 requests / 11 reports / 2 accounts read back through the lens). The
+  in-console search still renders live; the analytics tab now reads local. (Final step: port the worker's AI fan-out
+  to a server FUNCTION that writes the local store -- then Cloudflare/Supabase are fully out of the loop.) Docs:
+  extensions/AUTHORING.md.
+
 ## 0.78.0 -- 2026-06-27
 - Extension Server Functions -- a unified, sandboxed runtime for extensions to run SERVER-SIDE code inside
   ClaudeFather (no external worker/host), so future extensions that need server compute all use ONE managed,

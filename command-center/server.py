@@ -4021,6 +4021,8 @@ def _ext_fn_run(eid, fn, inp, secret_resolver=None):
     # restricted env: ONLY declared secrets + a minimal runtime PATH/HOME
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
            "HOME": os.path.expanduser("~"), "LANG": "en_US.UTF-8", "CF_FN": fn, "CF_EXT": eid}
+    if ((m.get("data_sources") or {}).get("backend") == "sqlite"):   # give the function its OWN scoped store
+        _ext_store_init(eid, m); env["CF_STORE_DB"] = _ext_store_db(eid)
     resolve = secret_resolver or _deploy_env
     for k in (spec.get("secrets") or []):
         try: v = resolve(k)
@@ -4090,20 +4092,84 @@ def ext_action(eid, action, payload):
     except Exception as e:
         return {"ok": False, "error": str(e)[:160]}
 
+# ==== EXTENSION DATA STORE (node-local SQLite) -- the unified store primitive ================================
+# So an extension's data lives ON the node (self-contained, no external DB), and server functions read/write it
+# while the lens reads it through the SAME data_sources contract as the supabase backend (just backend:"sqlite").
+# Per-extension DB file (scoped); the runtime hands a function its own CF_STORE_DB path -- no cross-extension reach.
+def _ext_store_db(eid):
+    dd = os.path.join(STATE_DIR, "ext_stores")
+    try: os.makedirs(dd, exist_ok=True)
+    except Exception: pass
+    return os.path.join(dd, re.sub(r"[^a-z0-9_-]", "", eid) + ".sqlite")
+
+def _ext_store_init(eid, m):
+    """Apply the extension's declared store schema (shipped .sql, CREATE ... IF NOT EXISTS) to its node-local
+    SQLite, idempotently. Only for backend:'sqlite'."""
+    import sqlite3
+    ds = (m or {}).get("data_sources") or {}
+    if ds.get("backend") != "sqlite": return
+    eid2, d = _ext_dir(eid)
+    sp = os.path.join(d, ds["schema"]) if (ds.get("schema") and d) else None
+    try:
+        con = sqlite3.connect(_ext_store_db(eid), timeout=10)
+        if sp and os.path.isfile(sp): con.executescript(open(sp, encoding="utf-8").read())
+        con.commit(); con.close()
+    except Exception: pass
+
+def _ext_store_query(eid, res, params):
+    """Read-only SELECT against the node-local SQLite. Table/select/order are whitelisted from the manifest;
+    user-supplied search/filters are BOUND parameters (no injection)."""
+    import sqlite3
+    db = _ext_store_db(eid)
+    if not os.path.isfile(db): return {"ok": True, "rows": [], "count": "0", "n": 0}
+    def _p(n, dv=""):
+        v = params.get(n); return (v[0] if isinstance(v, list) else v) if v else dv
+    ident = lambda s: re.sub(r"[^A-Za-z0-9_]", "", s or "")
+    table = ident(res.get("table"))
+    sel = res.get("select", "*")
+    sel = "*" if sel == "*" else ",".join(ident(c) for c in sel.split(",") if c.strip())
+    where = []; args = []
+    search = (_p("search") or "").strip()
+    if search and res.get("search"):
+        ors = []
+        for c in res["search"]: ors.append(ident(c) + " LIKE ?"); args.append("%" + search[:60] + "%")
+        where.append("(" + " OR ".join(ors) + ")")
+    for c in res.get("filter_cols", []):
+        v = (_p(c) or "").strip()
+        if v: where.append(ident(c) + " = ?"); args.append(v[:80])
+    wsql = (" WHERE " + " AND ".join(where)) if where else ""
+    try:
+        con = sqlite3.connect(db, timeout=10); con.row_factory = sqlite3.Row; cur = con.cursor()
+        if _p("count"):
+            cur.execute("SELECT COUNT(*) AS c FROM " + table + wsql, args); c = cur.fetchone()["c"]; con.close()
+            return {"ok": True, "rows": [], "count": str(c), "n": 0}
+        try: lim = min(int(_p("limit", res.get("max", 200))), int(res.get("max", 2000)))
+        except Exception: lim = res.get("max", 200)
+        od = res.get("order"); osql = ""
+        if od:
+            pp = od.split("."); osql = " ORDER BY " + ident(pp[0]) + (" DESC" if (len(pp) > 1 and pp[1].lower() == "desc") else " ASC")
+        cur.execute("SELECT " + sel + " FROM " + table + wsql + osql + " LIMIT %d" % max(1, lim), args)
+        rows = [dict(r) for r in cur.fetchall()]; con.close()
+        return {"ok": True, "rows": rows, "count": None, "n": len(rows)}
+    except Exception as e:
+        return {"ok": False, "error": "sqlite query failed: " + str(e)[:140]}
+
 def ext_data(eid, resource, params):
-    """GENERIC read-only data proxy for an INSTALLED + ENTITLED extension's declared data_sources (today:
-    Supabase REST via stdlib urllib, GET-only). The DB key stays SERVER-SIDE -- never returned to the browser.
-    Table/select/order come from the extension manifest (not the caller); only the manifest's declared
-    search/filter columns are honored from `params`. Reusable by any data-backed extension."""
+    """GENERIC read-only data proxy for an INSTALLED + ENTITLED extension's declared data_sources. Backend
+    'sqlite' = the node-local store (self-contained); 'supabase' = Supabase REST. Table/select/order come from
+    the manifest (not the caller); only declared search/filter columns are honored (bound params)."""
     eid, d = _ext_dir(eid)
     if not d: return {"ok": False, "error": "no such extension"}
     if eid not in _ext_installed(): return {"ok": False, "error": "extension not installed on this node"}
     m = _ext_meta(eid)
     if _ext_is_paid(m) and not _entitled(eid, m): return {"ok": False, "error": "extension not licensed on this node"}
     ds = m.get("data_sources") or {}
-    if ds.get("backend") != "supabase": return {"ok": False, "error": "no supabase data source declared"}
     res = (ds.get("resources") or {}).get(resource)
     if not res: return {"ok": False, "error": "unknown resource '%s'" % resource}
+    if ds.get("backend") == "sqlite":
+        _ext_store_init(eid, m)
+        out = _ext_store_query(eid, res, params); out["resource"] = resource; return out
+    if ds.get("backend") != "supabase": return {"ok": False, "error": "no data source declared"}
     url = _deploy_env(ds.get("url_env", "")); key = _deploy_env(ds.get("key_env", ""))
     if not url or not key:
         return {"ok": False, "error": "data source not configured (set %s + %s in the deploy env via setup)" % (ds.get("url_env"), ds.get("key_env"))}

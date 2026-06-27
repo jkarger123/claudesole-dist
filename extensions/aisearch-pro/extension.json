@@ -86,9 +86,8 @@
     ]
   },
   "data_sources": {
-    "backend": "supabase",
-    "url_env": "AISEARCH_SUPABASE_URL",
-    "key_env": "AISEARCH_SUPABASE_KEY",
+    "backend": "sqlite",
+    "schema": "store_schema.sql",
     "resources": {
       "requests": {
         "table": "aisearch_requests",
