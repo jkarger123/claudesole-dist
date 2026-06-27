@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.90.0 -- 2026-06-27
+- FIX: account fuel-gauge went stale ("100% used, resets in 0m" on a window that had actually reset). Root
+  cause: there was NO periodic refresh -- account windows were only re-read on manual trigger / account-switch,
+  so after an overnight weekly reset the gauge kept the pre-reset reading whose reset-timestamp was now in the
+  past (-> floored to "0m"). Two fixes: (1) `_win_view` now detects an expired window (reset_ts in the past),
+  treats it as RESET (0% used, full), rolls the reset clock forward to the next boundary, and flags `expired`
+  -- so a rolled-over window self-corrects instead of lying. (2) New `_acct_windows_loop` refreshes the LIVE
+  login's 5h/weekly windows on a ~30m cadence (only the live keychain login exposes them), deduped across
+  co-located instances via a shared CC_HOME lock so the overseer+nodes don't each spend a /usage read; plus an
+  on-view debounced kick so opening the Accounts lens with stale data refreshes immediately. Net: the gauge
+  stays accurate and the "use this account next" recommendation sees real free capacity again.
+
 ## 0.89.0 -- 2026-06-27
 - SLACK per-session comms -- the TEAM twin of the Telegram tool. Toggle 'Slack' in any session's terminal bar;
   when it goes busy->idle the bot posts to a per-session THREAD in your `comms_channel`, and a teammate REPLIES

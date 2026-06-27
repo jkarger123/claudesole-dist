@@ -3184,12 +3184,22 @@ def _acct_dur(s):
     if s < 3600: return "%dm" % (s // 60)
     if s < 86400: return "%.1fh" % (s / 3600.0)
     return "%.1fd" % (s / 86400.0)
-def _win_view(x, now):
-    """A parsed window -> UI shape with free% + seconds-to-reset."""
+def _win_view(x, now, kind=None):
+    """A parsed window -> UI shape with free% + seconds-to-reset. If the stored reset time is already in the
+    PAST, the window has rolled over since this reading -> the old pct is stale: treat it as RESET (pct 0,
+    full) and roll the reset clock forward one window length to the next boundary, flagged `expired` so the UI
+    can show 'reset, refreshing' instead of a lying '100% used, resets in 0m' until a live re-read lands."""
     if not x: return None
     pct = max(0, min(100, x.get("pct") or 0)); rts = x.get("resets_ts")
+    expired = bool(rts and rts < now)
+    if expired:
+        ln = _WIN_LEN.get(kind) or (5 * 3600 if kind == "session" else 7 * 86400)
+        try:
+            while rts is not None and rts < now: rts += ln
+        except Exception: rts = None
+        pct = 0
     return {"pct": pct, "free": 100 - pct, "resets": x.get("resets"),
-            "resets_ts": rts, "ttr": (rts - now) if rts else None}
+            "resets_ts": rts, "ttr": (rts - now) if rts else None, "expired": expired}
 
 def _acct_recommend(accounts, now):
     """Decide which in-rotation account to USE NEXT, optimizing to MINIMIZE WASTED CAPACITY: prefer the
@@ -3272,6 +3282,28 @@ def _acct_fleet_reports(ttl=45):
             _ACCT_FLEET_CACHE.update({"at": now, "data": peer_reps})
     return [self_rep] + peer_reps
 
+# Periodic refresh so the fuel gauge never goes stale (the bug: with NO loop, a weekly that reset overnight kept
+# showing the pre-reset 100% with a past reset-ts -> "resets in 0m"). Only the LIVE keychain login exposes the
+# 5h/weekly windows, so we refresh that one. A SHARED lock (CC_HOME) means the co-located instances (overseer +
+# nodes share one login) don't each spend a /usage read every cycle -- one wins the lock per interval.
+_ACCT_REFRESH_LOCK = os.path.join(CC_HOME, ".acct_refresh.lock")
+def _acct_refresh_due(interval=1800):
+    try:
+        if os.path.isfile(_ACCT_REFRESH_LOCK) and (time.time() - os.path.getmtime(_ACCT_REFRESH_LOCK)) < interval:
+            return False
+    except Exception: pass
+    try: open(_ACCT_REFRESH_LOCK, "w").write(str(int(time.time())))
+    except Exception: pass
+    return True
+def _acct_windows_loop():
+    time.sleep(40)                                       # let boot settle (first cycle refreshes if the lock is stale)
+    while True:
+        try:
+            if _current_email() and _acct_refresh_due(1800):    # live login present + not refreshed in the last ~30m
+                account_windows_refresh()
+        except Exception: pass
+        time.sleep(300)                                  # re-check every 5m; the shared lock gates the actual ~30m read
+
 def account_windows_all():
     """The Accounts/Usage fuel UI payload. Merges THIS node's readings with every peer's (the overseer rolls up
     all macOS users), taking the FRESHEST reading per account, and flags which user each account is live on now.
@@ -3311,10 +3343,17 @@ def account_windows_all():
             "active": em == cur,                                 # live on THIS node (drives the switch button)
             "in_wallet": em in walletset,                        # can THIS machine switch to it (saved here)?
             "live_on": live_on.get(em, []), "in_rotation": em in rotset, "ok": bool(a.get("ok")),
-            "windows": {"session": _win_view(w.get("session"), now), "week": _win_view(w.get("week"), now),
-                        "week_sonnet": _win_view(w.get("week_sonnet"), now)},
+            "windows": {"session": _win_view(w.get("session"), now, "session"), "week": _win_view(w.get("week"), now, "week"),
+                        "week_sonnet": _win_view(w.get("week_sonnet"), now, "week_sonnet")},
             "ts": a.get("ts"), "side": a.get("side"), "last_error": a.get("last_error"), "model": a.get("model"),
             "switchable_on": switchable.get(em, [])})
+    # If the LIVE account's windows look expired/stale when someone opens the lens, kick a background refresh now
+    # (debounced by the shared lock) so the gauge self-corrects instead of waiting for the next loop tick.
+    try:
+        ca = next((a for a in accounts if a.get("active")), None)
+        if ca and any((ca["windows"].get(k) or {}).get("expired") for k in ("session", "week", "week_sonnet")):
+            threading.Thread(target=lambda: (_acct_refresh_due(600) and account_windows_refresh()), daemon=True).start()
+    except Exception: pass
     info, pick = _acct_recommend(accounts, now)
     for a in accounts:
         a.update(info.get(a["email"], {"status": "no_data", "why": "", "score": -9, "use_next": False}))
@@ -18635,6 +18674,7 @@ if __name__ == "__main__":
     threading.Thread(target=_sk_inbound_loop, daemon=True).start()     # Slack (team): poll thread/channel replies + inject back into the routed session
     threading.Thread(target=_autoupdate_loop, daemon=True).start()     # PULL convergence: every tenant self-updates from the dist (boot + timer); source nodes self-skip
     threading.Thread(target=_core_integrity_loop, daemon=True).start() # INTEGRITY: verify framework files vs the signed manifest; appliances self-heal drift from the signed dist
+    threading.Thread(target=_acct_windows_loop, daemon=True).start()   # USAGE: keep the account fuel-gauge fresh (refresh the live login's 5h/weekly windows ~30m; shared-lock deduped across co-located instances)
     threading.Thread(target=_license_activate_loop, daemon=True).start() # LICENSE: a sold box auto-activates from its configured activation server on boot if unlicensed
     threading.Thread(target=_fleet_converge_loop, daemon=True).start() # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     threading.Thread(target=_routines_loop, daemon=True).start()       # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts
