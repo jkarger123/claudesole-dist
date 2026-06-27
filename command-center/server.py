@@ -6337,6 +6337,10 @@ def doctor():
             issues.append({"sev": "err", "path": "integrity", "msg": "core integrity DRIFTED and could not fully self-heal: %s. Run cc_update to restore the signed framework." % ", ".join((_CORE_STATUS.get("drift") or [])[:6])})
         elif _CORE_STATUS.get("status") == "sig-invalid":
             issues.append({"sev": "err", "path": "integrity", "msg": "core.sig.json signature did NOT verify against superadmin.pub -- the manifest or the trusted key was tampered with. The appliance is not trusting it."})
+        _lic = license_status()
+        if not _lic.get("licensed"):
+            sev = "err" if _lic.get("enforce") else "warn"
+            issues.append({"sev": sev, "path": "license", "msg": "appliance is NOT licensed (%s)%s. Fingerprint: %s -- issue a license for it (POST /api/license-issue on MC) and install it (POST /api/license-install)." % (_lic.get("reason", "?"), " [ENFORCED -- service refused]" if _lic.get("enforce") else " [soft -- not yet enforced]", _lic.get("fingerprint", "?"))})
     # Storage architecture: a node's home (hence its iCloud container + project) should live on its own
     # dedicated SSD, not the small internal boot drive. Compare the home's volume to the root volume.
     try:
@@ -9154,6 +9158,72 @@ def _core_integrity_loop():
         except Exception: pass
         time.sleep(900)                                       # re-verify every 15 min (+ on boot)
 
+# ==== LICENSE ACTIVATION (anti-clone) -- hardware-bound, Ed25519-signed, expiring =============================
+# Defeats "copy the tree to another box + run it": a license is signed by US (superadmin private key), BOUND to
+# the machine's hardware fingerprint, and EXPIRES. A clone on a different Mac -> fingerprint mismatch -> invalid.
+# Stripping the check loses updates/self-heal + is revocable + traceable (customer watermark). Soft by default
+# (detect + doctor warn + health field); set cc.config license_enforce=true on a SOLD box to hard-refuse service.
+# Honest limits + the obfuscation layer that protects the check itself: docs/IP_PROTECTION.md.
+LICENSE_FILE = os.path.join(DEPLOY_ROOT, "license.json")     # signed by us; lives in the writable runtime dir
+LICENSE_ENFORCE = bool(CC.get("license_enforce"))            # hard-refuse when invalid (default: soft/warn)
+_LICENSE_EXEMPT = ("/api/health", "/api/license", "/api/license-install", "/login", "/api/login", "/favicon.ico", "/manifest.webmanifest")
+def _hw_fingerprint():
+    """Stable per-machine id. macOS: IOPlatformUUID; else hostname+arch. Hashed (we store/sign the hash)."""
+    try:
+        out = sh(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], timeout=8)[1]
+        m = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', out or "")
+        if m: return hashlib.sha256(("cf-hw:" + m.group(1)).encode()).hexdigest()[:32]
+    except Exception: pass
+    try: return hashlib.sha256(("cf-hw:" + socket.gethostname() + os.uname().machine).encode()).hexdigest()[:32]
+    except Exception: return ""
+def license_issue(fingerprint, customer="", days=365):
+    """AUTHORING/MC only: mint a signed license bound to a machine fingerprint + expiry + customer watermark."""
+    if not _authoring(): return {"ok": False, "error": "license_issue is authoring-only"}
+    priv = _sa_load_priv()
+    if priv is None: return {"ok": False, "error": "no Ed25519 private key (authoring only)"}
+    fp = re.sub(r"[^a-f0-9]", "", (fingerprint or "").lower())[:64]
+    if not fp: return {"ok": False, "error": "missing hardware fingerprint"}
+    now = int(time.time())
+    payload = {"v": 1, "fingerprint": fp, "customer": customer or "unspecified",
+               "issued": now, "exp": now + int(days) * 86400, "edition": "appliance"}
+    sig = base64.b64encode(priv.sign(_sa_canon(payload).encode())).decode()
+    return {"ok": True, "license": {"payload": payload, "sig": sig, "alg": "ed25519"}}
+def license_install(doc):
+    """Store a signed license on THIS node (writable runtime dir). Verifies it before persisting."""
+    try:
+        if isinstance(doc, str): doc = json.loads(doc)
+    except Exception: return {"ok": False, "error": "license is not valid JSON"}
+    st = _license_check(doc)
+    if not st.get("licensed") and st.get("reason") not in ("expired",):   # allow installing a not-yet-active/expired only if signature+fp ok
+        if st.get("reason") in ("bad signature", "hardware mismatch (license bound to a different machine)", "no crypto/pubkey"):
+            return {"ok": False, "error": "refusing to install: " + st["reason"]}
+    try:
+        tmp = LICENSE_FILE + ".tmp"
+        with open(tmp, "w") as f: json.dump(doc, f, indent=2)
+        os.replace(tmp, LICENSE_FILE)
+    except Exception as e: return {"ok": False, "error": "could not write license: " + str(e)[:100]}
+    return {"ok": True, **license_status()}
+def _license_check(doc):
+    pub = _sa_load_pub(); payload = (doc or {}).get("payload") or {}; sig = (doc or {}).get("sig", "")
+    if pub is None: return {"licensed": False, "reason": "no crypto/pubkey"}
+    if not payload or not sig: return {"licensed": False, "reason": "malformed license"}
+    try: pub.verify(base64.b64decode(sig), _sa_canon(payload).encode())
+    except Exception: return {"licensed": False, "reason": "bad signature"}
+    if payload.get("fingerprint") != _hw_fingerprint():
+        return {"licensed": False, "reason": "hardware mismatch (license bound to a different machine)"}
+    exp = payload.get("exp", 0)
+    if exp and time.time() > exp: return {"licensed": False, "reason": "expired", "exp": exp, "customer": payload.get("customer")}
+    return {"licensed": True, "reason": "ok", "exp": exp, "customer": payload.get("customer")}
+def license_status():
+    if _authoring(): return {"licensed": True, "reason": "authoring", "enforce": False, "edition": _edition()}
+    st = _license_check(_license_load()) if os.path.isfile(LICENSE_FILE) else {"licensed": False, "reason": "no license"}
+    st["enforce"] = LICENSE_ENFORCE; st["edition"] = _edition(); st["fingerprint"] = _hw_fingerprint()
+    return st
+def _license_load():
+    try: return json.load(open(LICENSE_FILE))
+    except Exception: return None
+def _licensed(): return license_status().get("licensed", False)
+
 def _local_quiescent():
     """True only if NO local session is mid-turn -- so an auto-restart can't interrupt active work."""
     try:
@@ -9579,6 +9649,20 @@ class H(BaseHTTPRequestHandler):
         return False
     def _auth_gate(self, path):
         """True if the request may proceed; else writes a 401 (API) or 302->/login (browser) and returns False."""
+        # HARD license enforcement (anti-clone): only when license_enforce is set on a (non-authoring) appliance.
+        # Dormant on our fleet (enforce off -> short-circuits, zero overhead). Exempts health/login/license/static.
+        if LICENSE_ENFORCE and not _authoring() and path not in _LICENSE_EXEMPT and not path.startswith("/static/") and not _licensed():
+            if self.command == "GET" and "text/html" in (self.headers.get("Accept", "") or ""):
+                st = license_status()
+                self._s(200, ("<!doctype html><meta charset=utf-8><title>License required</title>"
+                              "<body style='font:15px -apple-system,sans-serif;background:#0d1117;color:#e6edf3;max-width:560px;margin:12vh auto;padding:0 24px'>"
+                              "<h2>&#128274; License required</h2><p>This ClaudeFather appliance has no valid license (%s).</p>"
+                              "<p style='color:#8b949e'>Machine fingerprint:<br><code>%s</code></p>"
+                              "<p>Send this fingerprint to your vendor to be issued a license, then install it.</p></body>"
+                              % (st.get("reason", "?"), st.get("fingerprint", "?"))), "text/html; charset=utf-8")
+            else:
+                self._s(402, json.dumps({"ok": False, "error": "license required", "status": license_status()}))
+            return False
         if self._authed() or path in AUTH_EXEMPT or path in AUTH_MESH_INGRESS or path.startswith("/static/"): return True
         if self.command == "GET" and "text/html" in (self.headers.get("Accept", "") or ""):
             # serve the login form INLINE at the requested URL (instead of 302 -> /login) so the address bar
@@ -9707,7 +9791,7 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path); q = urllib.parse.parse_qs(u.query)
         if not self._auth_gate(u.path): return
         if u.path == "/login": return self._s(200, LOGIN_PAGE, "text/html; charset=utf-8")
-        if u.path == "/api/health": return self._s(200, json.dumps({"ok": True, "instance": INSTANCE_ID, "version": _manifest_version(), "auth": bool(AUTH_TOKEN), "edition": _edition(), "integrity": _CORE_STATUS.get("status")}))
+        if u.path == "/api/health": return self._s(200, json.dumps({"ok": True, "instance": INSTANCE_ID, "version": _manifest_version(), "auth": bool(AUTH_TOKEN), "edition": _edition(), "integrity": _CORE_STATUS.get("status"), "licensed": _licensed()}))
         if u.path == "/ws": return self.handle_ws(q)
         if u.path == "/wsvnc": return self.handle_wsvnc()
         if u.path == "/api/convo-tree":
@@ -9733,6 +9817,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/core-integrity":
             return self._s(200, json.dumps({"edition": _edition(), "authoring": _authoring(),
                                             "signed": os.path.isfile(CORE_SIG_FILE), **core_verify(heal=False)}))
+        if u.path == "/api/license": return self._s(200, json.dumps(license_status()))
         if u.path == "/api/update-status": return self._s(200, json.dumps(update_status()))
         if u.path == "/api/settings": return self._s(200, json.dumps(settings_get()))
         if u.path == "/api/chief": return self._s(200, json.dumps(chief_overview()))
@@ -10227,6 +10312,12 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/core-sign":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(core_sign()))
+        if u.path == "/api/license-issue":            # AUTHORING/MC: mint a signed license for a customer box's fingerprint
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(license_issue(body.get("fingerprint", ""), body.get("customer", ""), body.get("days", 365))))
+        if u.path == "/api/license-install":          # THIS node: store a signed license we were issued
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(license_install(body.get("license") or body)))
         if u.path == "/api/vault-set":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(vault_set(body.get("id", ""), body.get("value"), label=body.get("label"), scope=body.get("scope"), node=body.get("node") or None)))

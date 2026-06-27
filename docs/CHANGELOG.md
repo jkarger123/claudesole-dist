@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.87.0 -- 2026-06-27
+- CODEBASE / IP PROTECTION (anti-clone) -- phase 3a: LICENSE ACTIVATION shipped (soft-enforce). A license is
+  Ed25519-signed by us, BOUND to the machine's hardware fingerprint (macOS IOPlatformUUID), and EXPIRES -- so
+  copying the tree to another Mac fails (fingerprint mismatch -> invalid), and a license is revocable + carries a
+  customer watermark. `_hw_fingerprint`, `license_issue` (authoring/MC only), `license_status`/`_licensed`,
+  `license_install`. APIs: GET /api/license, POST /api/license-issue (MC mints for a box's fingerprint), POST
+  /api/license-install (node stores it). SOFT by default (health `licensed` + doctor warn; never bricks our
+  fleet); set cc.config `license_enforce=true` on a SOLD box and the auth gate hard-refuses service with a
+  "license required" page showing the fingerprint to send the vendor. Tested: validates on the issuing machine;
+  rejects wrong-machine/tampered/expired. Phase 3b SCAFFOLD: `cf-build-appliance.sh` obfuscates the SHIPPED
+  appliance Python (PyArmor preferred, Cython fallback) -- authoring stays plaintext; needs a PyArmor purchase to
+  run (never ships plaintext silently). Full strategy + honest limits + how-to-license-a-box: docs/IP_PROTECTION.md.
+
 ## 0.86.0 -- 2026-06-27
 - TURNKEY HARDENING phase 2 -- the OS-level enforcement that makes "can't modify core" REAL, plus the codebase
   IP-protection strategy. New `cf-appliance-install.sh` (run with sudo on a fresh Mac): creates a dedicated

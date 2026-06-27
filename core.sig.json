@@ -34,8 +34,9 @@
       "cc-recover.sh": "110a7a50ef880f2b1696f27d176ce501de1a4b4d148ec99d4c6d93216993708b",
       "cc-update.sh": "c85dae6d74ca22452f1676cff55f09a23634bcbfa224297aaedc72f471d9693d",
       "cf-appliance-install.sh": "6974494064107096079a40ed0f3ec865e38e0e0905ec94d5671a9d2793e9424e",
+      "cf-build-appliance.sh": "fb8961bf3296a51e58701fa5bd869effa3d406397266df3c2083d282eb4e1d69",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "0a2d49e8c29e7de40cbec8db36fde8b5a21c7479b7c880ef63ce1771709946dc",
+      "claudesole.manifest.json": "cc823751ba1a372a79212628fb13b761c5e89da81a3e09c692aae3c3c87982c2",
       "command-center/CLAUDE.md": "ab9b718de3722af62d05ff7ba004bb522283e39405e92166437cd6124fa2d074",
       "command-center/cc-instance-supervise.sh": "e0521eae7f276255afc604e872f9edf5aedc657b86dc55edca4340382d61c342",
       "command-center/cc-session-watchdog.py": "270e2d689edfc8d8e8e992d95c08745c37fbddcbbffd7b2389fd30b36094e6dd",
@@ -50,7 +51,7 @@
       "command-center/preship.py": "f628484ffc6457c12e074cdb63da2ec1a32fd95eea4db6d45844f8bd694011f2",
       "command-center/ralph_runner.py": "7d26a8d8bca83ba6f52c8ab45aae1c5643233e5cf94c6293b8f6f14b6c169f3b",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "2b9532adfaf61efed6c8afe4f2d9a46c38724a077385e8db4fe3ad3351cf3912",
+      "command-center/server.py": "2880b20b186cdbbe9eded3d979a569ea13ee85ba85088ddd528825d62e4d0b4f",
       "command-center/slack.py": "55b3282a2b6a104e6f9cf98b2e5569a2a358741c47a5f5c4b32377f4448222bc",
       "command-center/zoom.py": "a6ac02eae3b7a7e633ff969bdc34ab9b466b5ce3014577c55015d08688b7d379",
       "desktop/package-lock.json": "09bdae0768c3f9dabbaa556e594b30cf5f947d3009e21a49cc9a530d91140a5d",
@@ -63,13 +64,13 @@
       "docs/APPLIANCE_BRINGUP.md": "519525aafcce807331adce0d382f86da785395a68e65e2fe61dc5965f28ff3c1",
       "docs/ARCHITECTURE.md": "e61a69a2703c9ac9ba5e153855ddfd495ed5dbd0b5f49b190c4954b8f3c85989",
       "docs/CAPTURE.md": "c0833ca6871ba51a3991cfed1d24b8252280e5d004abdddbce99806a9dd1d071",
-      "docs/CHANGELOG.md": "08bb2388ba349806fdad2c0782c423cd418fc18857173030dedbbd188ce439a0",
+      "docs/CHANGELOG.md": "e5eb1d1fb9ad0ed7b262aa563464a8c32772ce678d3786cdb16574abb9d4a977",
       "docs/CLAUDE_CODE_REFERENCE.md": "d9acc94772b0a5b6b8dcf81962cea5f36cd050dd7797c6180c69c9b661450b2a",
       "docs/CONTROL_CENTER_BLUEPRINT.md": "3bf2fb328661e1cac513e8a9aacf6fb2bba7c5d9c361f069991c3915caa393e9",
       "docs/FEATURES.md": "022f1687b2f9b98364c1028d3ca85e88cbefd6d0c32372aecf08a83fd301f57b",
       "docs/HARDENING.md": "0db952709046fd13b4f4e39048ddaeebac3761767a4ceabe2b22b58492342001",
       "docs/ICLOUD_STORAGE.md": "f34a102d528be2f33e14ff8b0f38d28625d4d6134625e66ef389623e31db1cb1",
-      "docs/IP_PROTECTION.md": "41e0bc742073cd4ca17ad5dd265bb5d63667f06e9e3a1d59b3b2c28bfa226868",
+      "docs/IP_PROTECTION.md": "5dbc53a392a913ac1c0a2ac3840dc0b4b6ced6dceb3b990dfcbadedabc3b9d59",
       "docs/MEMORY_SKILLS_AGENTS.md": "3121bd1afe19e6d4c02cc660f2e8252f00a2b6244415c53ea6450eb13238037b",
       "docs/MODULE_MAP.md": "7d5172dd176f67db1350fe71c751db64ca1a964cd85caac732d1d92c6b49ee24",
       "docs/PACKAGING.md": "e0c08a0e85a98b10b0c6a06d7e468329eb8fcd5211a6f0e8566cbdb106edfaaf",
@@ -138,9 +139,9 @@
       "presets/project.json": "3ba6bc6bd1e8096d78ec2e7bd7321902488a3dfdfe231f23bd1d94d37068d526",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1782594378,
+    "generated": 1782594858,
     "v": 1,
-    "version": "0.86.0"
+    "version": "0.87.0"
   },
-  "sig": "1A29ig20IHOeYnKR18lg5WxZqVER6lVV6Dyy9ZMmYu+Boct0itap/LJWaoLFFZLUCg3cCwpsy9P7Dh/suIqtAw=="
+  "sig": "XSs1fF+ifOvupvU82GL+lXxaQCQq5Yw7tx8EeyOHgmezqZSTyE3Dc+voVjn2aBAsp09iGqYWIsEDT84vCTOCDw=="
 }

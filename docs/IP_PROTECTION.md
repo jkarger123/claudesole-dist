@@ -67,6 +67,24 @@ SaaS the real moat is **a cracked copy gets no updates, no managed features, no 
 - **License hard-enforce timing:** ship the license layer soft (detect/warn) immediately; flip hard-refuse on
   for the first sold Mac mini once we've confirmed it won't disrupt our fleet.
 
+## Status (what's built)
+- **License activation — SHIPPED (v0.87.0), soft-enforce.** Hardware fingerprint (`_hw_fingerprint`, macOS
+  IOPlatformUUID), Ed25519-signed licenses bound to fingerprint+expiry+customer (`license_issue`, authoring/MC
+  only), node-side verify+gate (`license_status`/`_licensed`). APIs: `GET /api/license`, `POST /api/license-issue`
+  (MC mints for a box's fingerprint), `POST /api/license-install` (node stores it). Soft by default (health
+  `licensed` field + doctor warn); set `cc.config license_enforce=true` on a SOLD box to hard-refuse service
+  (the `_auth_gate` shows a "license required" page with the machine fingerprint to send the vendor). Tested:
+  installs+validates on the issuing machine; rejects wrong-machine / tampered / expired.
+  - **To license a sold box:** on the box `GET /api/license` -> copy its `fingerprint`; on MC
+    `POST /api/license-issue {fingerprint, customer, days}`; paste the returned license to the box
+    `POST /api/license-install`; set `license_enforce=true` in its cc.config.
+- **Obfuscation — SCAFFOLD (v0.87.0), needs the tool.** `cf-build-appliance.sh` stages the authoring tree and
+  obfuscates the Python via **PyArmor** (preferred) or **Cython** (`--cython` fallback), keeping authoring
+  plaintext. It will NOT ship plaintext silently (stops if the tool is absent). **Blocked on a purchase:** buy a
+  PyArmor license (~$70-150/yr), `pip install --user pyarmor`, `pyarmor reg <license>`, then the pipeline
+  produces a real obfuscated artifact (which then gets `core_sign`ed over the obfuscated files + published as the
+  appliance dist). Until then appliances ship plaintext-but-licensed (license is the active protection).
+
 ## What NOT to do (false comfort)
 - Don't rely on a removable `if not licensed: exit` in plaintext — that's exactly the "strip the block" attack.
   The check must gate something unreconstructable (a signed token tied to hardware, or content decrypted with our
