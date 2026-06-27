@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.69.0 -- 2026-06-27
+- Auto-update HARDENED for packaged/white-label installs (was tuned to our one fleet). Update identity is now
+  ONE white-label point — three named constants in server.py (OFFICIAL_DIST_GIT / OFFICIAL_DIST_DIR /
+  CORE_AUTHORING_REPO); everything else is config, no scattered literals. Version probe is host-agnostic:
+  local-dir upstream → read its manifest; GitHub/GitLab → raw probe; ANY other git host → shallow-clone-and-read
+  fallback (private GitLab/Gitea/Bitbucket fleets work). `update_source` accepts a git URL on any host OR a
+  local/shared-mount directory. Source-node detection is portable + git-independent: cc.config
+  `update_role:"source"` → `.cc-source` marker file → is-the-dist-dir → git-remote heuristic (dropped the
+  one-off `hptuners-autonomous` reference). Our 3 source nodes are now marked explicitly (update_role + marker)
+  so protection never depends on git. Provisioning (cc-init.sh) seeds `auto_update:true` on new tenants. Net: a
+  downloaded ClaudeFather with ZERO config is a tenant that auto-updates from the canonical dist and self-restarts
+  when idle; a private fleet repoints to its own dist with config only. Docs: command-center/update/UPGRADE_SYSTEM.md
+  §5 + §6b (white-label checklist).
+
 ## 0.68.0 -- 2026-06-27
 - Enterprise auto-update — the fleet now converges itself; updates are no longer "whoever remembers to push to
   each node." Root cause this kills: shopos sat 39 versions behind (0.28 vs 0.67) because the push ritual only

@@ -41,6 +41,9 @@ d["project_name"]=name; d["project_root"]=root; d["brand"]=brand
 if storage: d["storage_mode"]=storage
 d.setdefault("storage_mode","github")
 d.setdefault("framework","command-center")
+# Enterprise auto-update: a provisioned node is a TENANT -> it self-converges from the dist (boot + timer).
+# Leave update_role UNSET (only authoring/source nodes set it). Override update_source for a private fleet.
+d.setdefault("auto_update",True)
 d.setdefault("agents",["security","backup","usage","ideas","routines"])
 d.setdefault("chief_brief","You are my Chief of Staff, operating from the top level. Read CLAUDE.md, give me a one-line status of the operation, and stand by.")
 json.dump(d,open(cfg,"w"),indent=2)

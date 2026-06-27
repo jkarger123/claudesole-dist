@@ -66,7 +66,9 @@ documents it; it doesn't contain the engine (engine stays in the single stdlib s
 ## Invariants — do not break these (each caused or would cause a real outage)
 
 1. **Source nodes NEVER self-update or get pushed to.** The authoring checkout is the source of truth; pulling
-   the published copy over it destroys uncommitted work. Guarded two ways (git-remote detect + same-CC_HOME skip).
+   the published copy over it destroys uncommitted work. Detection is portable + host-agnostic (cc.config
+   `update_role:"source"` → `.cc-source` marker → is-the-dist-dir → git-remote heuristic), and `fleet_converge`
+   also skips any node sharing MC's `CC_HOME`. A fresh/downloaded tenant matches none → it self-updates.
 2. **Restart for OTHER-user nodes is the SEPARATE `restart` superadmin action**, never `cc_update` with
    `restart:true`. AFP runs as user `sarahaios`; MC must not tmux-kill it. `fleet_converge` always does the
    two-call form.

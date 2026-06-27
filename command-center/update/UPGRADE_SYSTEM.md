@@ -89,14 +89,16 @@ Triggers:
 
 ## 5. Source-node protection (why a push/pull can't eat the checkout)
 
-`_is_update_source()` returns true when ANY of:
-- `cc.config update_role == "source"` (explicit), or
-- `CC_HOME` is the dist mirror dir, or
-- `git -C CC_HOME remote -v` mentions `claudesole-core` (the private authoring repo) or `hptuners-autonomous`.
+`_is_update_source()` is **portable and host-agnostic**, checked most-explicit first:
+1. `cc.config update_role == "source"` — the documented way; set it on ANY authoring node, any host.
+2. a `.cc-source` marker file in `CC_HOME` — git-independent (survives non-repo / downloaded checkouts).
+3. `CC_HOME` IS the dist mirror dir.
+4. `git -C CC_HOME remote -v` mentions the private authoring repo (`CORE_AUTHORING_REPO`) — dev-fleet convenience.
 
-The three local nodes share `/Users/hptuner/hptuners-control` (remote = claudesole-core) → all auto-detected
-as source → they never self-update, and `fleet_converge` skips them via the `home == CC_HOME` test. Tenants
-(AFP, shopos) are not that repo → they self-update normally.
+Our three local nodes are marked **both** ways (`update_role:"source"` in each cc.config **and** a `.cc-source`
+marker) so protection never depends on the git heuristic. `fleet_converge` additionally skips any node whose
+`home == CC_HOME`. **A fresh/downloaded tenant matches NONE of these → it correctly self-updates.** Tenants
+(AFP, shopos) carry no `update_role` and no marker → they self-update normally.
 
 ## 6. Bootstrap note (one-time, by design)
 
@@ -105,6 +107,24 @@ has no self-updater yet, so it can't self-converge to the release that first con
 done once via PUSH (`Update all behind` / `fleet_converge`). After a node is on a self-updater-bearing
 version, path A keeps it current forever. **This is the only time a human-initiated push is required**, and
 it's a single fleet-wide action, not per-node.
+
+## 6b. White-label / private-fleet portability (packaged-product checklist)
+
+The update identity lives in **one place** — three constants at the top of `server.py`:
+`OFFICIAL_DIST_GIT`, `OFFICIAL_DIST_DIR`, `CORE_AUTHORING_REPO`. Everything else is config. To run a fleet
+that updates from **your own** dist instead of the canonical one, set per node (no code edits):
+
+- `update_source` — a git URL on **any host** (GitHub/GitLab raw-probe auto-derived; any other host falls
+  back to a shallow-clone version check) **or a local/shared-mount directory path** (manifest read directly).
+- `update_manifest_url` — optional explicit raw-manifest URL for hosts we don't auto-derive.
+- `dist_dir` — the MC-side local mirror used by the PUSH path.
+- `auto_update: false` — for a fleet that wants operator-gated (not auto) updates; converge then via the
+  Fleet-drift button / `POST /api/fleet-update`.
+- Mark your authoring node with `update_role: "source"` (or a `.cc-source` file). Never set it on a tenant.
+
+A downloaded ClaudeFather with **zero config** behaves correctly: tenant, auto-updates from the canonical
+dist, self-restarts when idle. No path, repo name, port, or account in the update engine is hardcoded
+outside those three named constants.
 
 ## 7. Adding a node (the zero-wiring promise)
 

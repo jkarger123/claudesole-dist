@@ -87,6 +87,14 @@ SCOPE_SESSIONS = CC.get("scope_sessions", ROLE != "org")
 FLEET_SHARE = bool(CC.get("fleet_share", True))
 FLEET_VIEW = (CC.get("fleet_view") or "full").lower()
 
+# ---- Update identity (ONE white-label point) -------------------------------------------------------
+# A packaged install pulls framework updates from the canonical ClaudeFather dist by default; a private/
+# enterprise fleet points these at their OWN dist via cc.config (update_source / dist_dir) -- zero code
+# edits. Keep ALL deployment-specific update identity here so there are no scattered literals.
+OFFICIAL_DIST_GIT = "https://github.com/jkarger123/claudesole-dist.git"   # canonical public framework repo (override: cc.config update_source)
+OFFICIAL_DIST_DIR = "/Users/Shared/claudefather-dist/claudefather"        # MC's local mirror clone (override: cc.config dist_dir)
+CORE_AUTHORING_REPO = "claudesole-core"                                   # the PRIVATE authoring repo -- a node whose git remote is this is a SOURCE node (never self-updates)
+
 def _agency_early():
     """Lightweight agency detection usable at import time (before is_agency/_agency_dirs are defined):
     integration=='agency', else the tree has both a Clients/ and a Tools/ dir."""
@@ -8097,7 +8105,7 @@ def fw_fingerprint():
     """Node-side: this deployment's framework version + core-file hashes (read from its own CC_HOME)."""
     return {"id": INSTANCE_ID, "version": _manifest_version(), "home": CC_HOME, "files": _fw_fingerprint(CC_HOME)}
 def _dist_dir():
-    return os.path.expanduser(CC.get("dist_dir") or "/Users/Shared/claudefather-dist/claudefather")
+    return os.path.expanduser(CC.get("dist_dir") or OFFICIAL_DIST_DIR)
 
 def drift_report():
     """Mission Control: compare every node's framework fingerprint against the canonical dist."""
@@ -8162,37 +8170,68 @@ def _aupd_log(msg):
     except Exception: pass
 
 def _update_source():
-    """The canonical upstream a tenant pulls from: the PUBLIC dist git repo (so freshness never depends on
-    anyone having git-pulled a local mirror). Override per node via cc.config 'update_source'."""
-    return CC.get("update_source") or "https://github.com/jkarger123/claudesole-dist.git"
+    """The canonical upstream a tenant pulls from. Default: the public dist git repo (so freshness never
+    depends on anyone having git-pulled a local mirror). A private/enterprise fleet overrides this per node
+    via cc.config 'update_source' -- a git URL (any host) OR a local/shared-mount directory path."""
+    return CC.get("update_source") or OFFICIAL_DIST_GIT
 
 def _update_manifest_url():
-    """Raw URL of the upstream manifest -- the cheap 'what is the latest version' probe (no clone)."""
+    """Raw URL of the upstream manifest -- the cheap 'what is the latest version' probe (no clone). Derives
+    the raw URL for github/gitlab-style hosts; an enterprise on any other host sets 'update_manifest_url'
+    explicitly. Empty -> caller falls back to a clone-based check."""
     u = CC.get("update_manifest_url")
     if u: return u
-    m = re.match(r"^https?://github\.com/([^/]+)/([^/.]+?)(?:\.git)?/?$", _update_source())
+    src = _update_source()
+    m = re.match(r"^https?://github\.com/([^/]+)/([^/.]+?)(?:\.git)?/?$", src)
     if m: return "https://raw.githubusercontent.com/%s/%s/main/claudesole.manifest.json" % (m.group(1), m.group(2))
+    m = re.match(r"^https?://gitlab\.com/([^/]+)/([^/.]+?)(?:\.git)?/?$", src)
+    if m: return "https://gitlab.com/%s/%s/-/raw/main/claudesole.manifest.json" % (m.group(1), m.group(2))
     return ""
 
 def _remote_latest_version():
+    """Latest published framework version, portably: local-dir upstream -> read its manifest; raw-URL host
+    -> HTTP probe; otherwise -> shallow-clone the git URL and read the manifest (works on ANY git host)."""
+    src = _update_source()
+    if os.path.isdir(src):
+        try: return (json.load(open(os.path.join(src, "claudesole.manifest.json"))).get("version") or "").strip()
+        except Exception: return ""
     url = _update_manifest_url()
-    if not url: return ""
+    if url:
+        try:
+            with urllib.request.urlopen(url, timeout=15) as r:
+                return (json.loads(r.read().decode()).get("version") or "").strip()
+        except Exception: pass   # fall through to clone-based check
+    # last resort, host-agnostic: shallow clone just to read the version
     try:
-        with urllib.request.urlopen(url, timeout=15) as r:
-            return (json.loads(r.read().decode()).get("version") or "").strip()
-    except Exception: return ""
+        import tempfile
+        td = tempfile.mkdtemp(prefix="cc-ver-")
+        try:
+            code, _, _ = sh(["git", "clone", "--depth", "1", "-q", src, td], timeout=90)
+            if code == 0:
+                return (json.load(open(os.path.join(td, "claudesole.manifest.json"))).get("version") or "").strip()
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+    except Exception: pass
+    return ""
 
 def _is_update_source():
-    """A SOURCE node authors framework code -- it must NEVER self-update (that would overwrite in-progress
-    edits with the published copy). Identified by explicit config, by being the dist mirror, or by the
-    authoring checkout's git remote pointing at the private core repo (covers all co-located dev nodes)."""
+    """A SOURCE node authors framework code -- it must NEVER self-update or be pushed to (that would overwrite
+    in-progress edits with the published copy). Portable detection, most-explicit first:
+      1. cc.config update_role == "source"  (the documented, host-agnostic way -- set this on any authoring node)
+      2. a '.cc-source' marker file in CC_HOME  (git-independent, survives non-repo checkouts)
+      3. CC_HOME IS the dist mirror dir
+      4. git remote points at the private authoring core repo  (dev-fleet convenience only)
+    A fresh/downloaded tenant install matches NONE of these -> correctly self-updates."""
     if str(CC.get("update_role", "")).lower() == "source": return True
+    try:
+        if os.path.isfile(os.path.join(CC_HOME, ".cc-source")): return True
+    except Exception: pass
     try:
         if os.path.realpath(CC_HOME) == os.path.realpath(_dist_dir()): return True
     except Exception: pass
     try:
         code, out, _ = sh(["git", "-C", CC_HOME, "remote", "-v"], timeout=8)
-        if code == 0 and ("claudesole-core" in out or "hptuners-autonomous" in out): return True
+        if code == 0 and CORE_AUTHORING_REPO in out: return True
     except Exception: pass
     return False
 
