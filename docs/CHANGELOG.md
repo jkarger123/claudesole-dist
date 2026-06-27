@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.72.0 -- 2026-06-27
+- Two extension framework primitives (running themes across core + extensions), built generic so any extension
+  uses them — Skimlinks will be the first consumer:
+  - Extension-scoped AGENT CONTEXT: an extension can ship an `AGENT.md` (agent-facing usage doc) that is
+    auto-injected into the launch brief (`_system_brief`) ONLY on nodes where that extension is installed/enabled.
+    Per-node-clean by construction: a node without the extension never tells its agents the tool exists (a
+    CarSearch node without Skimlinks gets zero Skimlinks context). Capped ~1.6KB each. Safe no-op until an
+    installed extension ships an AGENT.md.
+  - Extension-declared DRAGGABLES: the generic `entity` sendable lets any lens/extension make any item draggable
+    into a Claude session (taskbar dock) with ZERO server code — the descriptor carries its own content
+    (`ssAttr({kind:'entity', name, title, fields|body, kind_label})`); extensions declare their draggable types
+    in extension.json `draggables`. Built on the existing register_sendable/session-send spine (drag a merchant,
+    a row, anything → the agent gets a clean markdown card). Verified end-to-end. Ship a payload resolver only
+    for server-side enrichment. Docs: extensions/AUTHORING.md (AGENT.md + Draggables sections; extension.json
+    gains optional agent_doc + draggables).
+
 ## 0.71.0 -- 2026-06-27
 - Routines runner — the platform's scheduled-job heartbeat (was a stub: registry, no runner). A stdlib
   server-side tick loop (`_routines_loop`/`_routine_run`) executes due routines IN THIS NODE'S OWN server

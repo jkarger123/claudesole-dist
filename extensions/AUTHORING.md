@@ -23,6 +23,13 @@ it works, and the safe way to run it. No extension ships without this.
   "tier": "free",                   // OPTIONAL: "free" (default) | "paid" -- paid = locked until entitled
   "pricing": {"monthly_usd": 49},  // OPTIONAL (paid only): shown on the card; billing automation is separate
   "publisher": "ClaudeFather",     // OPTIONAL: who authors/houses it (official vs third-party)
+  "agent_doc": "AGENT.md",         // OPTIONAL: agent-facing usage doc, AUTO-INJECTED into agent context ONLY
+                                   //   on nodes where this extension is INSTALLED (default file: AGENT.md)
+  "draggables": [                  // OPTIONAL: entity types this extension lets a user drag INTO a session
+    { "kind": "entity",            //   use "entity" (generic, self-contained) unless you ship a payload resolver
+      "label": "merchant",         //   human label
+      "note": "drag a merchant into a Claude session" }
+  ],
   "launch_group": "Tools",         // OPTIONAL: which group this extension's launch points show under
                                    //   in the New-session picker (defaults to "Extensions")
   "launch_points": [               // OPTIONAL: the logical places a user would launch an AGENT for this
@@ -60,6 +67,29 @@ It MUST contain these sections, in this order:
 - `agent-tool`: payload is an `agents/<id>/` dir (charter + tools/run.py) -> appears in the Agents lens.
 - `skill`: payload is a `SKILL.md` -> copied into `<scope>/.claude/skills/` -> appears in the Skills lens.
 - `theme`: provides a `data-theme` palette + brand assets.
+
+## Agent context injection (`AGENT.md`) -- per-node-clean tool awareness
+Ship an optional **`AGENT.md`** (agent-facing): a concise "here is the tool you have + how to use it" doc.
+The platform AUTO-INJECTS it into the launch brief of agents on this node (`_system_brief`) **only when the
+extension is INSTALLED/enabled here**. A node that doesn't have the extension never hears about it -- e.g. a
+CarSearch node without Skimlinks gets zero Skimlinks context, so agents there can't be told to use a tool that
+isn't present. Keep it short (it's capped ~1.6KB), action-oriented (the APIs/commands/lens the agent should use),
+and ASCII. This is how an extension makes itself usable by AGENTS, the same way `SETUP.md` makes it usable by a person.
+
+## Draggables -- let users drag your items into a Claude session
+A running platform theme: relevant things can be dragged straight into a session (the taskbar dock). An
+extension/lens makes any item draggable by attaching `ssAttr({...})` to its row and declaring the types in
+`draggables`. The generic, zero-server-code path is the **`entity`** sendable -- the descriptor carries its own
+content:
+```js
+// in your lens row HTML:
+'<div '+ssAttr({kind:'entity', name:m.name, title:m.name,
+    fields:{Domain:m.domain, Commission:m.commission_rate+'%', Status:m.status},
+    kind_label:'merchant'})+'>'+ ... +'</div>'
+```
+Drag that row onto a session tile (or tap the ➤ button) and the agent receives a clean markdown card about the
+item. Use `fields:{label:value}` (auto-rendered) or a ready `body:"...markdown..."`. Ship a payload resolver +
+`register_sendable("<kind>", fn)` only if you need SERVER-SIDE enrichment (e.g. fetch full detail by id).
 
 ## Paid extensions (entitlements) -- the monetization layer
 A `"tier": "paid"` extension is **locked by default** and unlocks ONLY when this node holds a valid

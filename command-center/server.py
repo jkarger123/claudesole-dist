@@ -4082,6 +4082,30 @@ def entitlement_revoke(node_id, ext):
     g = superadmin_send(node_id, "del_entitlement", {"ext": ext})
     return {"ok": bool(g.get("ok")), "node": node_id, "result": g.get("result") or g}
 
+def _ext_agent_context():
+    """Extension-scoped agent context: concatenate the agent-facing usage doc (AGENT.md) of every extension
+    INSTALLED on THIS node, so a launched agent knows how to use exactly the tools this node has -- and NEVER
+    hears about an extension it doesn't (a CarSearch node without Skimlinks gets zero Skimlinks context). This
+    is injected into the launch brief (_system_brief). Per-node-clean by construction: it reads this node's
+    install state, which is per-deployment. Capped so it can't bloat the window."""
+    inst = _ext_installed()
+    if not inst: return ""
+    blocks = []
+    for eid in sorted(inst):
+        eid2, d = _ext_dir(eid)
+        if not d: continue
+        m = _ext_meta(eid2)
+        doc = os.path.join(d, m.get("agent_doc", "AGENT.md"))
+        if not os.path.isfile(doc): continue
+        try:
+            t = open(doc, encoding="utf-8", errors="replace").read().strip()
+        except Exception:
+            t = ""
+        if t: blocks.append("#### %s\n%s" % (m.get("name", eid2), t[:1600]))
+    if not blocks: return ""
+    return ("TOOLS INSTALLED ON THIS NODE (extensions you can use -- and the only ones that exist here):\n\n"
+            + "\n\n".join(blocks[:20]))
+
 def security_status():
     """Read the latest security posture report written by agents/security/tools/scan.py."""
     p = os.path.join(AGENTS_DIR, "security", "reports", "latest.json")
@@ -6145,13 +6169,18 @@ def _system_brief():
                   "something, POST /api/browser/show {subject} -- it opens + highlights the page you already know about "
                   "that subject from the context graph -- or /api/browser/queue {action:open|scroll_to|highlight|screenshot, ...} "
                   "to drive the browser directly)") if rt == "desktop" else " (WEB: no embedded browser/capture -- those are desktop-only)"
-        return ("SYSTEM MAP: you operate inside ClaudeFather, a self-hosted context OS. Core = a CONTEXT LAYER "
+        base = ("SYSTEM MAP: you operate inside ClaudeFather, a self-hosted context OS. Core = a CONTEXT LAYER "
                 "(event store + entity graph + a router that assembles the perfect CITED slice for a subject -- "
                 "GET /api/context/assemble, /api/context/brief 'catch me up') feeding everything; a CAPTURE loop "
                 "(saved pages/clips -> review-first triage -> CC:CLIPS digests + tasks); a FOCUS engine (context "
                 "follows the user). Live surfaces on THIS node: " + on + ". The user is on the '" + rt +
                 "' runtime" + rtnote + ". Prefer the context router/brief to get caught up on a subject rather "
                 "than guessing; honor review-first (propose, never auto-apply); everything is provenance-stamped.")
+        try:
+            extc = _ext_agent_context()      # only the extensions INSTALLED on this node -> per-node-clean tool awareness
+            if extc: base += "\n\n" + extc
+        except Exception: pass
+        return base
     except Exception:
         return "SYSTEM MAP: ClaudeFather context OS (context layer + capture + focus + mesh)."
 
@@ -7086,11 +7115,29 @@ def _send_granola(d):
     return {"ok": True, "filename": "granola-" + re.sub(r"[^A-Za-z0-9_-]", "", mid)[:40] + ".md",
             "mime": "text/markdown", "data": "# Call transcript\n\n" + tx, "note": "(call transcript)"}
 
+def _send_entity(d):
+    """GENERIC, self-contained draggable -- the framework primitive behind 'drag a <whatever> into a Claude
+    session'. The descriptor carries its OWN content, so ANY lens/extension can make ANY item draggable with
+    ZERO server-side code: attach ssAttr({kind:'entity', name, title, body|fields, kind_label}) to a row. An
+    extension declares its draggable types in extension.json 'draggables' (for awareness); this resolves them.
+    body = ready markdown/text; or fields = {label:value} rendered to a list."""
+    title = (d.get("title") or d.get("name") or "item").strip()
+    body = d.get("body")
+    if not body and isinstance(d.get("fields"), dict):
+        body = "\n".join("- **%s:** %s" % (k, v) for k, v in d["fields"].items() if v not in (None, ""))
+    body = (body or "").strip()
+    if not body: return {"error": "draggable item has no body/fields"}
+    label = (d.get("kind_label") or d.get("source") or "item").strip()
+    md = "# %s\n\n%s\n" % (title, body)
+    fn = (re.sub(r"[^A-Za-z0-9_-]+", "-", title).strip("-")[:50] or "entity") + ".md"
+    return {"ok": True, "filename": fn, "mime": "text/markdown", "data": md, "note": "(%s: %s)" % (label, title[:60])}
+
 register_sendable("deliverable", _send_deliverable)
 register_sendable("drive", _send_drive)
 register_sendable("gmail", _send_gmail)
 register_sendable("calendar", _send_calendar)
 register_sendable("granola", _send_granola)
+register_sendable("entity", _send_entity)   # generic extension/lens draggable -- self-contained, no per-type server code
 
 def session_send(session, kind, desc, note="", enter=False):
     """Resolve a {kind,id,...} descriptor to content and hand it to a session (the drag-ANYTHING endpoint).
