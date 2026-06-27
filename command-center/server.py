@@ -174,7 +174,7 @@ def render_page():
     except Exception: _lenses = None
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
-        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(),
+        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(),
         "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md", "MASTER_HANDOFF.md",
             "FILE_SYSTEM_GOVERNANCE.md", "TEXT2TUNE_ARCHITECTURE.md", "ENTERPRISE_MIGRATION.md",
             "BRIDGE_MIGRATION.md"]})
@@ -3934,6 +3934,8 @@ def extension_install(eid):
     out = {"ok": True, "installed": eid, "mcp_servers": wired,
            "note": "enabled -- run Set up to finish (accounts/keys)" + (" ; wired MCP: " + ", ".join(wired) if wired else "")}
     out.update(_ext_apply_payload(eid, d))
+    r = _ext_register_routine(eid, m)        # an extension can declare a scheduled routine -> auto-register on install
+    if r: out["routine"] = r
     return out
 
 def extension_uninstall(eid):
@@ -3943,7 +3945,85 @@ def extension_uninstall(eid):
     removed = _ext_wire_mcp(eid, remove=True)
     out = {"ok": True, "uninstalled": eid, "mcp_removed": removed}
     if d: out.update(_ext_apply_payload(eid, d, remove=True))
+    _ext_unregister_routine(eid)             # pull its scheduled routine back out
     return out
+
+def _ext_register_routine(eid, m):
+    """If an extension declares a `routine` in extension.json, register it into THIS node's _routines.json on
+    install -- cwd resolved to the installed agent-tool payload dir, secrets reached via CF_DEPLOY_ENV (path,
+    not values). Tagged with ext:<eid> so uninstall can find + remove it. De-duped by name."""
+    spec = (m or {}).get("routine")
+    if not isinstance(spec, dict) or not spec.get("name"): return None
+    reg = load(ROUTINES, {"routines": []}); rs = reg.get("routines", [])
+    cwd = os.path.join(AGENTS_DIR, eid) if _ext_category(eid) == "agent-tool" else os.path.join(EXT_DIR, eid, "payload")
+    r = {"name": spec["name"], "desc": spec.get("desc", ""), "cmd": spec.get("cmd"),
+         "cwd": spec.get("cwd") or cwd, "when": spec.get("when"), "schedule": spec.get("schedule"),
+         "timeout_sec": spec.get("timeout_sec"), "alert": spec.get("alert"),
+         "env": {**(spec.get("env") or {}), "CF_DEPLOY_ENV": DEPLOY_ENV},
+         "status": "active", "enabled": True, "ext": eid}
+    rs = [x for x in rs if x.get("name") != r["name"]]    # de-dupe by name
+    rs.append(r); reg["routines"] = rs
+    try: json.dump(reg, open(ROUTINES, "w"), indent=2)
+    except Exception as e: return {"error": str(e)[:120]}
+    return {"registered": r["name"], "cwd": r["cwd"]}
+
+def _ext_unregister_routine(eid):
+    reg = load(ROUTINES, {"routines": []}); rs = reg.get("routines", [])
+    keep = [x for x in rs if x.get("ext") != eid]
+    if len(keep) != len(rs):
+        reg["routines"] = keep
+        try: json.dump(reg, open(ROUTINES, "w"), indent=2)
+        except Exception: pass
+
+def ext_data(eid, resource, params):
+    """GENERIC read-only data proxy for an INSTALLED + ENTITLED extension's declared data_sources (today:
+    Supabase REST via stdlib urllib, GET-only). The DB key stays SERVER-SIDE -- never returned to the browser.
+    Table/select/order come from the extension manifest (not the caller); only the manifest's declared
+    search/filter columns are honored from `params`. Reusable by any data-backed extension."""
+    eid, d = _ext_dir(eid)
+    if not d: return {"ok": False, "error": "no such extension"}
+    if eid not in _ext_installed(): return {"ok": False, "error": "extension not installed on this node"}
+    m = _ext_meta(eid)
+    if _ext_is_paid(m) and not _entitled(eid, m): return {"ok": False, "error": "extension not licensed on this node"}
+    ds = m.get("data_sources") or {}
+    if ds.get("backend") != "supabase": return {"ok": False, "error": "no supabase data source declared"}
+    res = (ds.get("resources") or {}).get(resource)
+    if not res: return {"ok": False, "error": "unknown resource '%s'" % resource}
+    url = _deploy_env(ds.get("url_env", "")); key = _deploy_env(ds.get("key_env", ""))
+    if not url or not key:
+        return {"ok": False, "error": "data source not configured (set %s + %s in the deploy env via setup)" % (ds.get("url_env"), ds.get("key_env"))}
+    def _p(name, default=""):
+        v = params.get(name)
+        return (v[0] if isinstance(v, list) else v) if v else default
+    q = "select=" + urllib.parse.quote(res.get("select", "*"), safe="*,")
+    want_count = _p("count")
+    if want_count:
+        q += "&limit=1"
+        hdr_extra = {"Prefer": "count=exact"}
+    else:
+        try: lim = min(int(_p("limit", res.get("max", 200))), int(res.get("max", 2000)))
+        except Exception: lim = res.get("max", 200)
+        hdr_extra = {}
+    search = (_p("search") or "").strip()
+    if search and res.get("search"):
+        pat = "*" + re.sub(r"[,()*&%]", "", search)[:60] + "*"
+        ors = ",".join("%s.ilike.%s" % (c, pat) for c in res["search"])
+        q += "&or=(" + urllib.parse.quote(ors, safe=".*,()") + ")"
+    for c in res.get("filter_cols", []):
+        v = (_p(c) or "").strip()
+        if v: q += "&%s=eq.%s" % (c, urllib.parse.quote(re.sub(r"[,()&%]", "", v)[:80]))
+    if res.get("order"): q += "&order=" + urllib.parse.quote(res["order"], safe=".,")
+    if not want_count: q += "&limit=%d" % max(1, lim)
+    full = url.rstrip("/") + "/rest/v1/" + res["table"] + "?" + q
+    hdr = {"apikey": key, "Authorization": "Bearer " + key, "Accept": "application/json"}; hdr.update(hdr_extra)
+    try:
+        with urllib.request.urlopen(urllib.request.Request(full, headers=hdr), timeout=25) as r:   # GET -> read-only
+            rows = json.loads(r.read().decode() or "[]")
+            cnt = None; cr = r.headers.get("content-range")
+            if cr and "/" in cr: cnt = cr.split("/")[-1]
+        return {"ok": True, "resource": resource, "rows": rows, "count": cnt, "n": len(rows)}
+    except Exception as e:
+        return {"ok": False, "error": "query failed: " + str(e)[:160]}
 
 def extension_setup(eid):
     """Open a guided setup agent in the extension dir, briefed with its SETUP.md (the walk-through)."""
@@ -4081,6 +4161,17 @@ def entitlement_revoke(node_id, ext):
     if node_id == INSTANCE_ID: return {"ok": True, "node": node_id, "result": entitlement_remove(ext)}
     g = superadmin_send(node_id, "del_entitlement", {"ext": ext})
     return {"ok": bool(g.get("ok")), "node": node_id, "result": g.get("result") or g}
+
+def _ext_lenses():
+    """Lenses contributed by extensions INSTALLED (+ entitled) on this node -> the dashboard adds a nav button
+    for each. Per-node-clean: a node without the extension never sees the lens. extension.json: 'lens':{id,label,icon}."""
+    out = []
+    for eid in _ext_installed():
+        m = _ext_meta(eid); L = m.get("lens")
+        if not isinstance(L, dict) or not L.get("id"): continue
+        if _ext_is_paid(m) and not _entitled(eid, m): continue
+        out.append({"id": L["id"], "label": L.get("label", eid), "icon": L.get("icon", "🧩"), "ext": eid})
+    return out
 
 def _ext_agent_context():
     """Extension-scoped agent context: concatenate the agent-facing usage doc (AGENT.md) of every extension
@@ -9018,6 +9109,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/extensions":    return self._s(200, json.dumps(extensions_list()))
         if u.path == "/api/entitlements":  return self._s(200, json.dumps(entitlements_status()))
         if u.path == "/api/routines":      return self._s(200, json.dumps(routines_list()))
+        if u.path == "/api/ext-data":      return self._s(200, json.dumps(ext_data((q.get("ext") or [""])[0], (q.get("resource") or [""])[0], q)))
         if u.path == "/api/version-check": return self._s(200, json.dumps(version_check()))
         if u.path == "/api/agent-report":  return self._s(200, json.dumps(agent_report(q.get("slug", [""])[0])))
         if u.path == "/api/skills":        return self._s(200, json.dumps(skills_list()))
@@ -11276,6 +11368,7 @@ function render(){
   else if(LENS=="security"){loadSecurity();return;}
   else if(LENS=="agents"){loadAgents();return;}
   else if(LENS=="marketplace"){loadMarketplace();return;}
+  else if(LENS=="affiliate"){loadAffiliate();return;}
   else if(LENS=="agency"){loadAgency();return;}
   else if(LENS=="calls"){loadCalls();return;}
   else if(LENS=="capture"){loadCapture();return;}
@@ -14957,6 +15050,83 @@ async function extInstall(id){const r=await(await fetch('/api/extension-install'
   else if(r&&r.locked){toast('🔒 '+id+' is a paid extension'+(r.pricing&&(r.pricing.monthly_usd||r.pricing.monthly)?(' ($'+(r.pricing.monthly_usd||r.pricing.monthly)+'/mo)'):'')+' — needs a Mission-Control-signed entitlement.',7000);}
   else toast('Install failed: '+((r||{}).error||'?'),5000);}
 function extRequest(id,price){alert('🔒 “'+id+'” is a paid extension'+(price?(' ('+price+')'):'')+'.\n\nIt unlocks only with a Mission-Control-signed entitlement — it cannot be self-granted.\n\nInternal fleet nodes are licensed automatically. External customers: purchase/request access and Mission Control issues a signed entitlement to this node.');}
+// ===== Affiliate Intelligence lens (Skimlinks extension) -- reads the read-only /api/ext-data proxy =====
+var AFFEXT='skimlinks-merchant-sync', AFF={q:'',status:'',rows:[]};
+async function affData(resource,extra){try{return await(await fetch('/api/ext-data?ext='+encodeURIComponent(AFFEXT)+'&resource='+resource+(extra||''))).json();}catch(e){return {ok:false,error:String(e)};}}
+function affPct(v){if(v==null||v==='')return '—';v=parseFloat(v);if(isNaN(v))return '—';if(Math.abs(v)<=1.0001)v=v*100;return v.toFixed(2)+'%';}
+async function loadAffiliate(){
+  var g=document.getElementById('grid');g.innerHTML=empty('Loading affiliate intelligence…');
+  var mc=await affData('merchants','&count=1');
+  if(!mc.ok){
+    var msg=(mc.error||'').toLowerCase();
+    var hint=/not configured/.test(msg)?'Set the Skimlinks publisher ID + Supabase URL/key in this node\'s deploy env (run the extension Set up), then run the first sync.':(/not licensed/.test(msg)?'This node isn\'t licensed for Skimlinks — Mission Control must grant a signed entitlement.':(/not installed/.test(msg)?'The Skimlinks extension isn\'t installed on this node.':'Could not reach the data: '+esc(mc.error||'?')));
+    g.innerHTML='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>🔗 Affiliate Intelligence</span></h3><div class="meta" style="margin-top:8px">'+hint+'</div></div>';return;
+  }
+  var rc=await affData('merchants','&status=removed&count=1');
+  var ch=await affData('changes','&count=1');
+  var total=mc.count||'?',removed=(rc&&rc.count)||0,active=(total!=='?'?(total-(parseInt(removed)||0)):'?');
+  var ms=await affData('merchants','&search='+encodeURIComponent(AFF.q)+(AFF.status?('&status='+AFF.status):'')+'&limit=300');
+  AFF.rows=(ms&&ms.rows)||[];
+  var mvr=await affData('changes','&limit=60');
+  var mv={rows:(((mvr&&mvr.rows)||[]).filter(function(c){return String(c.change_type||'').indexOf('commission')>=0;}).slice(0,20))};
+  // header stats
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🔗 Affiliate Intelligence</b> <span class="sub">Skimlinks merchant catalog + change tracking</span>'
+    +'<span style="margin-left:auto"><button class="mini go" title="Run the full sync now (~30-50 min; writes to Supabase)" onclick="affRunSync()">▶ Run sync now</button></span></div>'
+    +'<div class="ucards" style="margin-top:10px">'+ustat((total||0).toLocaleString?Number(total).toLocaleString():total,'merchants tracked','full catalog')
+    +ustat((Number(active)||active).toLocaleString?Number(active).toLocaleString():active,'active','currently live')
+    +ustat((Number(removed)||0).toLocaleString(),'removed','soft-deleted (history kept)')
+    +ustat(((ch&&ch.count)||0).toLocaleString?Number((ch&&ch.count)||0).toLocaleString():'0','changes logged','new/removed/commission')+'</div></div>';
+  // controls
+  h+='<div class="card" style="cursor:default;grid-column:1/-1"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">'
+    +'<input id="affq" value="'+esc(AFF.q)+'" placeholder="search merchant name or domain…" style="flex:1;min-width:220px;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 11px" onkeydown="if(event.key===\'Enter\')affSearch()">'
+    +'<button class="mini'+(AFF.status===''?' go':'')+'" onclick="AFF.status=\'\';loadAffiliate()">All</button>'
+    +'<button class="mini'+(AFF.status==='active'?' go':'')+'" onclick="AFF.status=\'active\';loadAffiliate()">Active</button>'
+    +'<button class="mini'+(AFF.status==='removed'?' go':'')+'" onclick="AFF.status=\'removed\';loadAffiliate()">Removed</button>'
+    +'<button class="mini go" onclick="affSearch()">Search</button></div>'
+    +'<div class="meta" style="margin-top:6px">Showing '+AFF.rows.length+' of the catalog. Drag a merchant onto a session tile (or tap ➤) to brief an agent about it; click a row for its commission history.</div></div>';
+  // merchant grid
+  var rows=AFF.rows.map(affRow).join('')||('<tr><td colspan="6" style="padding:14px;text-align:center;color:var(--dim)">no merchants match</td></tr>');
+  h+='<div class="card" style="cursor:default;grid-column:1/-1;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">'
+    +'<thead><tr style="text-align:left;color:var(--dim);border-bottom:1px solid var(--line)">'
+    +'<th style="padding:6px 8px">Merchant</th><th style="padding:6px 8px">Domain</th><th style="padding:6px 8px">Commission</th><th style="padding:6px 8px">Status</th><th style="padding:6px 8px">Tenure</th><th style="padding:6px 8px"></th></tr></thead>'
+    +'<tbody>'+rows+'</tbody></table></div>';
+  // top movers
+  h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>📈 Recent commission changes</span> <span class="sub">top movers</span></h3>'
+    +((mv&&mv.rows&&mv.rows.length)?('<div class="convscroll">'+mv.rows.map(affMover).join('')+'</div>'):'<div class="meta">no recent commission changes logged</div>')+'</div>';
+  g.innerHTML=h;
+}
+function affRow(m){
+  var ss=ssAttr({kind:'entity',name:m.name,title:m.name,kind_label:'merchant',
+    fields:{Domain:m.domain||'',Commission:affPct(m.commission_rate),Status:m.status||'',"Advertiser ID":m.advertiser_id,"Days tracked":m.days_tracked,"Commission changes":m.times_commission_changed}});
+  var col=(m.status==='removed')?'#f85149':'#3fb950';
+  return '<tr '+ss+' style="border-bottom:1px solid var(--line);cursor:pointer" onclick="affTimeline('+JSON.stringify(String(m.advertiser_id))+','+JSON.stringify(m.name||'')+')">'
+    +'<td style="padding:6px 8px;font-weight:600">'+esc(m.name||'(unnamed)')+'</td>'
+    +'<td style="padding:6px 8px;color:var(--dim)">'+esc(m.domain||'—')+'</td>'
+    +'<td style="padding:6px 8px">'+affPct(m.commission_rate)+(m.times_commission_changed>0?(' <span class="sub" title="commission changes tracked">±'+m.times_commission_changed+'</span>'):'')+'</td>'
+    +'<td style="padding:6px 8px;color:'+col+'">'+esc(m.status||'—')+'</td>'
+    +'<td style="padding:6px 8px;color:var(--dim)">'+(m.days_tracked!=null?(m.days_tracked+'d'):'—')+'</td>'
+    +'<td style="padding:6px 8px">'+ssBtn({kind:'entity',name:m.name,title:m.name,kind_label:'merchant',fields:{Domain:m.domain||'',Commission:affPct(m.commission_rate),Status:m.status||'',"Advertiser ID":m.advertiser_id}})+'</td></tr>';
+}
+function affMover(c){
+  var dir=(parseFloat(c.new_commission)>=parseFloat(c.old_commission))?'#3fb950':'#f85149';
+  return '<div class="sess"><span class="lbl">'+esc(c.merchant_name||c.advertiser_id||'?')+' <span class="sub">'+esc(c.merchant_domain||'')+'</span></span>'
+    +'<span><span style="color:var(--dim)">'+affPct(c.old_commission)+'</span> → <b style="color:'+dir+'">'+affPct(c.new_commission)+'</b> <span class="sub">'+tago(c.detected_at)+'</span></span></div>';
+}
+function affSearch(){var e=document.getElementById('affq');AFF.q=e?e.value.trim():'';loadAffiliate();}
+async function affTimeline(advid,name){
+  showM('<h2>'+esc(name||'Merchant')+' — change history</h2><div id="afftl" class="meta">loading…</div>');
+  var r=await affData('changes','&advertiser_id='+encodeURIComponent(advid)+'&limit=100');
+  var el=document.getElementById('afftl');if(!el)return;
+  if(!r.ok||!r.rows||!r.rows.length){el.innerHTML='no logged changes for this merchant.';return;}
+  el.innerHTML='<div class="convscroll" style="max-height:50vh">'+r.rows.map(function(c){
+    return '<div class="sess"><span class="lbl"><b>'+esc(c.change_type||'change')+'</b>'+(c.change_type==='commission_change'?(' '+affPct(c.old_commission)+' → '+affPct(c.new_commission)):'')+(c.severity?(' <span class="sub">['+esc(c.severity)+']</span>'):'')+'</span><span class="sub">'+tago(c.detected_at)+'</span></div>';
+  }).join('')+'</div>';
+}
+async function affRunSync(){
+  if(!confirm('Run the full Skimlinks sync now? It takes ~30-50 minutes and writes to your Supabase. (It also runs automatically every Sunday 03:00.)'))return;
+  try{var r=await(await fetch('/api/routine-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Skimlinks weekly sync'})})).json();
+    toast(r&&r.ok?'Sync started — watch the Routines lens for status.':('Could not start sync: '+((r||{}).error||'?')),5000);}catch(e){toast('Failed to start sync',4000);}
+}
 async function extUninstall(id){if(!confirm('Remove extension "'+id+'"? (your accounts/keys are NOT deleted)'))return;
   const r=await(await fetch('/api/extension-uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})).json();
   if(r&&r.ok){toast('Removed '+id);loadMarketplace();}else toast('Failed: '+((r||{}).error||'?'),5000);}
@@ -16155,8 +16325,20 @@ function cfReveal(sel,inputId){
 // Escape inside the global search closes + clears it.
 (function(){var s=document.getElementById("search"); if(s)s.addEventListener("keydown",function(e){
   if(e.key==="Escape"){document.body.classList.remove("cf-search-open");s.value="";if(typeof render==="function")render();s.blur();}});})();
-function applyPreset(){var L=(window.CC&&window.CC.lenses);if(!L||!L.length)return;
-  document.querySelectorAll('#lens button[data-l]').forEach(function(b){if(L.indexOf(b.dataset.l)<0)b.style.display='none';});
+function applyPreset(){
+  // Extension-contributed lenses: create a nav button for each extension installed (+ entitled) on THIS node.
+  // The bootstrap only lists installed ones, so a node without the extension never gets the button.
+  try{(window.CC&&window.CC.extLenses||[]).forEach(function(x){
+    if(!x||!x.id||document.querySelector('#lens button[data-l="'+x.id+'"]'))return;
+    NAV[x.id]=x.label||x.id;
+    var b=document.createElement('button'); b.setAttribute('data-l',x.id);
+    b.innerHTML='<i class="ph-light ph-link"></i>'+(x.label||x.id);
+    var nav=document.getElementById('lens'), anchor=document.querySelector('#lens button[data-l="marketplace"]');
+    if(anchor&&anchor.parentNode===nav){nav.insertBefore(b,anchor);}else if(nav){nav.appendChild(b);}
+  });}catch(e){}
+  var EXTIDS=(window.CC&&window.CC.extLenses||[]).map(function(x){return x.id;});
+  var L=(window.CC&&window.CC.lenses);if(!L||!L.length)return;
+  document.querySelectorAll('#lens button[data-l]').forEach(function(b){if(L.indexOf(b.dataset.l)<0&&EXTIDS.indexOf(b.dataset.l)<0)b.style.display='none';});
   if(!(window.CC&&window.CC.agency)){['agency','calls'].forEach(function(l){var _ab=document.querySelector('#lens button[data-l="'+l+'"]');if(_ab)_ab.style.display='none';});}
   if(!(window.CC&&window.CC.pipeline)){var _pl=document.querySelector('#lens button[data-l="pipeline"]');if(_pl)_pl.style.display='none';}  // Pipeline lens self-hides until the node declares a pipeline manifest
   // Google lenses self-hide unless the google-workspace extension has a token on this node; when present they

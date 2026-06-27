@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.73.0 -- 2026-06-27
+- Skimlinks Affiliate Intelligence -- the first paid extension ($5/mo, run-gated via the v0.70 signed-entitlement
+  system; free on internal fleet nodes). Brings the old external skimlinks.html dashboard IN-HOUSE: a built-in
+  "Affiliate Intel" lens (stats + searchable merchant grid with draggable rows + top movers + per-merchant
+  commission timeline), gated to appear only on nodes where the extension is installed. Ships a parameterized,
+  multi-tenant sync payload (publisher ID / Supabase URL+key / min-merchant guard all from the deploy env, nothing
+  hardcoded), the exact schema.sql, AGENT.md (agent usage, auto-injected only where installed), and SETUP.md.
+  Install registers the weekly routine (Sun 03:00) via the new runner; uninstall removes it. Reads data through a
+  NEW generic, reusable extension data proxy (GET /api/ext-data) -- read-only Supabase REST, the DB key stays
+  server-side (never in the browser). Also new + generic: extension.json `lens` (extensions contribute a nav lens,
+  per-node-clean) + the install->routine auto-registration. VERIFIED end-to-end in an isolated worktree test
+  instance against live data: entitlement gate, install+payload+routine, the read-only proxy (35,221 merchants),
+  and the lens render (headless). Docs: extensions/skimlinks-merchant-sync/.
+
 ## 0.72.0 -- 2026-06-27
 - Two extension framework primitives (running themes across core + extensions), built generic so any extension
   uses them — Skimlinks will be the first consumer:
