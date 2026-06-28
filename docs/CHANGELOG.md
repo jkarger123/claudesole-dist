@@ -3,6 +3,34 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.2 -- 2026-06-28
+- FIX duplicate AUTO-compact (James: "on auto-compact it asks twice to write the handoff, then ~4x to read
+  it -- never happens on a manual /compact"). Root causes, both proven from the `_autocompact.log`s:
+  (1) co-located instances share the tmux server and the overseer (ROLE=org) is UNSCOPED -> it saw every
+  session and raced the owning node's watcher (hpcc + overseer both logged the SAME session's auto-compact
+  within 1s); the dedup state was per-process so neither saw the other's in-flight compact. (2) the cooldown
+  lived in memory, so a server restart (every ship) wiped it and re-fired on a session that was mid-compact
+  (chief-mission-control fired 69s apart, bracketing a restart -> the two duplicate handoff files).
+  - Fix: a cross-instance + restart-DURABLE file lock (`/tmp/cf-compact-locks/<session>.lock`). `O_EXCL`
+    create = only the first co-located instance wins the race; on-disk = survives a restart. Auto-compact
+    now gates on `_compact_lock_acquire` (replaces the in-memory 900s cooldown); both manual + auto stamp
+    the lock 'running' for the whole compact and 'done' on completion (cooldown then blocks an immediate
+    auto re-fire). Manual /compact is unchanged (it never raced -- one click, one worker).
+  - Verified: 6-scenario lock harness passes (race=1 winner, restart-while-running=skip, within-cooldown=skip,
+    after-cooldown=fire, steal-crashed-lock, manual-running-blocks-auto).
+
+## 0.99.1 -- 2026-06-28
+- ACCOUNT BURN-ROTATION follow-ups (on the v0.98.0 system):
+  - FLEET-AWARE recommendation: `_acct_recommend` now EXCLUDES any account already LIVE on another node
+    (status 'elsewhere') -- two nodes on one subscription would share its limits + risk concurrent-use flags,
+    wasting a separate subscription. So each node gets a DISTINCT account (e.g. AFP keeps sarah; hptuners is
+    recommended the soonest-reset of the *remaining* accounts). Important for multi-node + multi-subscription.
+  - VERIFY ROBUSTNESS: the switch verification now retries the /usage read and, crucially, distinguishes a
+    GENUINE auth failure (login/expired -> roll back) from a slow/flaky telemetry scrape. Newer Claude Code
+    renders /usage as a TABBED view whose rate-limit windows load via a separate API call; if the login
+    AUTHENTICATES but the windows don't render in time, the switch is now ACCEPTED (login valid; windows
+    refresh in the background) instead of false-rolling-back a perfectly good account.
+
 ## 0.99.0 -- 2026-06-28
 - SESSIONS WORKSPACE: replaced focus/grid/list with a modular split-pane workspace. DRAG a session up from the
   bottom taskbar into the main area to open it; drag a SECOND up and the screen SPLITS into resizable columns --

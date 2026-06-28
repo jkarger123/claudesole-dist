@@ -2905,6 +2905,20 @@ def _kc_write(blob, account):
     """Write a stored login back -> the keychain + ~/.claude.json. Backs up the current one first. LIVE switch."""
     cur = _kc_read()
     if cur:
+        # CAPTURE-ON-SWITCH-AWAY: before overwriting the keychain, persist the OUTGOING account's CURRENT
+        # (possibly just-rotated) blob back into ITS wallet file. OAuth refresh tokens ROTATE on use, so a wallet
+        # snapshot taken earlier holds a refresh token that the live session has since CONSUMED -- switching back
+        # to that stale blob = a DEAD login. Re-capturing the live blob here keeps each wallet entry current, so
+        # switching between accounts stays reliable. (This is the fix for the stranded-login incident.)
+        try:
+            cur_em = (cur.get("account") or {}).get("emailAddress") or ""
+            wp = _acct_path(cur_em)
+            if cur_em and wp and os.path.isfile(wp) and cur.get("blob"):   # only refresh accounts already in the wallet
+                rec = json.load(open(wp))
+                rec["blob"] = cur["blob"]; rec["account"] = cur["account"]; rec["ts"] = int(time.time())
+                tw = wp + ".tmp"; fdw = os.open(tw, os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o600)
+                os.write(fdw, json.dumps(rec).encode()); os.close(fdw); os.replace(tw, wp)
+        except Exception: pass
         try:
             fd = os.open(os.path.join(STATE_DIR, "_kc_backup.json"), os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o600)
             os.write(fd, json.dumps({"ts": int(time.time()), **cur}).encode()); os.close(fd)
@@ -3310,24 +3324,42 @@ def account_switch_verified(target, by="manual"):
         return {"ok": False, "error": "keychain write failed (login not changed)"}
     time.sleep(1.0)
     live_now = _current_email(); verified = False; werr = None; windows = None
-    if live_now == tgt_email:                              # identity flipped -> now prove it can actually read
-        try:
-            with _ACCT_POLL_LOCK: vr = _read_usage_session(label="verify")
-            verified = bool(vr.get("ok")); werr = vr.get("error"); windows = vr.get("windows")
-        except Exception as e: werr = str(e)[:140]
+    authed = False
+    if live_now == tgt_email:                              # identity flipped -> now confirm the LOGIN works
+        for attempt in range(3):                           # robust against a slow/flaky /usage scrape
+            try:
+                with _ACCT_POLL_LOCK: vr = _read_usage_session(label="verify")
+            except Exception as e:
+                werr = str(e)[:140]
+                if attempt < 2: time.sleep(3)
+                continue
+            if vr.get("ok"):                               # best case: authenticated AND windows scraped
+                verified = True; windows = vr.get("windows"); werr = None; break
+            werr = (vr.get("error") or ""); low = werr.lower()
+            if any(k in low for k in ("login", "setup-token", "expired", "invalid", "auth failed")):
+                if attempt < 2: time.sleep(3); continue    # GENUINE auth problem -> retry, then fail + rollback
+                break
+            if "couldn't read the /usage windows" in low:  # claude RAN + authenticated, just didn't render the
+                authed = True; break                       # rate-limit windows (tabbed /usage UI / slow API): login VALID
+            if attempt < 2: time.sleep(3)                  # "no output" / startup flake -> retry
+        verified = verified or authed
     else:
         werr = "identity did not flip (live shows %s)" % (live_now or "none")
-    if verified:                                           # success: persist the fresh windows + mark proven-good
+    if verified:                                           # success: persist any reading + mark proven-good
         try:
-            store = _acct_windows_load()
-            store[tgt_email] = {"email": tgt_email, "windows": windows or {}, "ts": int(time.time()),
-                                "ok": True, "side": _side_label(), "error": None}
-            _acct_windows_save(store); _acct_validate(tgt_email)
-            _acct_calib_log(tgt_email, _side_label(), windows or {}, int(time.time()))
+            if windows:                                    # only overwrite the stored reading when we got one (never
+                store = _acct_windows_load()               # wipe a prior good reading with an empty flaky scrape)
+                store[tgt_email] = {"email": tgt_email, "windows": windows, "ts": int(time.time()),
+                                    "ok": True, "side": _side_label(), "error": None}
+                _acct_windows_save(store); _acct_calib_log(tgt_email, _side_label(), windows, int(time.time()))
+            _acct_validate(tgt_email)                       # the login itself is confirmed working
         except Exception: pass
-        _switch_health_log(prev_email, tgt_email, True, by, "verified")
+        if not windows:                                    # login good but windows still loading -> refresh in bg
+            try: threading.Thread(target=lambda: account_windows_refresh(), daemon=True).start()
+            except Exception: pass
+        _switch_health_log(prev_email, tgt_email, True, by, "verified" if windows else "authed")
         return {"ok": True, "verified": True, "email": tgt_email, "from": prev_email,
-                "note": "live + verified (read /usage on the new login)"}
+                "note": ("live + verified (read /usage)" if windows else "live + login verified (usage windows still loading — will refresh in the background)")}
     rolled = bool(snap and _kc_write(snap.get("blob"), snap.get("account")))   # verify failed -> ROLL BACK
     _switch_health_log(prev_email, tgt_email, False, by, "verify", werr, rolled_back=rolled)
     return {"ok": False, "verified": False, "rolled_back": rolled, "target": tgt_email,
@@ -3456,6 +3488,14 @@ def _acct_recommend(accounts, now):
         mdl = a.get("model") or {}
         if not a.get("in_rotation"):
             info[em] = {"status": "tracked", "why": "tracked, not in your rotation", "score": -9, "use_next": False}; continue
+        # FLEET-AWARENESS: never recommend an account already LIVE on ANOTHER node -- two nodes on one
+        # subscription share its limits (and may trip concurrent-use), wasting a separate subscription. `active`
+        # = live on THIS node (fine, we may stay); a non-empty live_on without active = held by another store.
+        elsewhere = [s2 for s2 in (a.get("live_on") or []) if True] if (a.get("live_on") and not a.get("active")) else []
+        if elsewhere:
+            info[em] = {"status": "elsewhere", "score": -5, "use_next": False,
+                        "why": "live on %s — reserved for that node (two nodes can't share one subscription)" % ", ".join(elsewhere)}
+            continue
         if not a.get("ok") or not s:
             info[em] = {"status": "no_data", "score": -9, "use_next": False,
                         "why": "no reading yet — log into this account on any node to read it"}; continue
@@ -3615,7 +3655,7 @@ def account_windows_all():
     info, pick = _acct_recommend(accounts, now)
     for a in accounts:
         a.update(info.get(a["email"], {"status": "no_data", "why": "", "score": -9, "use_next": False}))
-    order = {"use_next": 0, "ready": 1, "cooling": 2, "resting": 3, "tracked": 4, "no_data": 5}
+    order = {"use_next": 0, "ready": 1, "cooling": 2, "resting": 3, "elsewhere": 4, "tracked": 5, "no_data": 6}
     accounts.sort(key=lambda a: (order.get(a.get("status"), 9), -(a.get("score") or -9)))
     pa = next((a for a in accounts if a["email"] == pick), None)
     # Should the operator switch RIGHT NOW? Yes when the recommended pick exists, differs from the live login,
@@ -6573,6 +6613,57 @@ def _compact_set(name, step, msg, handoff=""):
     prev = _COMPACT_STATE.get(name, {})
     _COMPACT_STATE[name] = {"step": step, "msg": msg, "at": time.time(), "handoff": handoff or prev.get("handoff", "")}
 
+# Cross-instance + restart-durable lock so exactly ONE auto-compact ever runs per session. Two failures caused
+# the SAME session to be compacted 2-4x (duplicate "COMPACT PREP" handoff asks + duplicate "read the handoff"):
+#   (1) co-located instances share the tmux server -- the overseer (ROLE=org) is UNSCOPED and sees every
+#       session, so it raced the owning node's watcher (proven: hpcc + overseer both logged the SAME session's
+#       auto-compact within 1s). In-memory dedup (_COMPACT_STATE/_AUTOCOMPACT_LAST) is PER-PROCESS, so neither
+#       saw the other's in-flight compact.
+#   (2) the cooldown lived in memory, so a server restart (every ship) wiped it and re-fired on a session that
+#       was mid-compact (proven: chief-mission-control fired 69s apart, bracketing a restart).
+# A file lock in shared /tmp fixes both: O_EXCL create = only the first instance wins the race; on-disk =
+# survives a restart. Manual /compact is unaffected (it never raced -- one click, one POST, one worker).
+_COMPACT_LOCK_DIR = "/tmp/cf-compact-locks"
+_COMPACT_LOCK_STALE = 1800   # 30 min: a compact never legitimately runs this long -> steal a lock left by a crash
+_COMPACT_COOLDOWN  = 900     # 15 min: don't auto-recompact a session this soon after one completed
+def _compact_lock_path(name):
+    return os.path.join(_COMPACT_LOCK_DIR, re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:48] + ".lock")
+def _compact_lock_mark(name, state):
+    """Unconditionally stamp a session's lock (used by BOTH paths so any in-flight compact is visible to other
+    instances; manual compacts hold it too, which also blocks an auto re-fire for the cooldown after)."""
+    try: os.makedirs(_COMPACT_LOCK_DIR, exist_ok=True)
+    except Exception: pass
+    try:
+        fd = os.open(_compact_lock_path(name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(fd, json.dumps({"state": state, "ts": time.time(), "pid": os.getpid(), "instance": INSTANCE_ID}).encode())
+        os.close(fd)
+    except Exception: pass
+def _compact_lock_acquire(name):
+    """Gated, atomic acquire for the AUTO path. Returns True only if WE may start an auto-compact: no other
+    instance is mid-compact and none completed within the cooldown. O_EXCL makes the create atomic so two
+    instances scanning in the same second can't both win."""
+    try: os.makedirs(_COMPACT_LOCK_DIR, exist_ok=True)
+    except Exception: pass
+    p = _compact_lock_path(name); now = time.time()
+    payload = json.dumps({"state": "running", "ts": now, "pid": os.getpid(), "instance": INSTANCE_ID}).encode()
+    try:
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)   # atomic: first co-located instance wins
+        os.write(fd, payload); os.close(fd); return True
+    except FileExistsError:
+        pass
+    except Exception:
+        return False
+    try:
+        st = json.load(open(p)); age = now - float(st.get("ts", 0))
+    except Exception:
+        st = {}; age = _COMPACT_LOCK_STALE + 1   # garbled/unreadable -> treat as stealable
+    if st.get("state") == "running" and age < _COMPACT_LOCK_STALE: return False  # in progress elsewhere
+    if st.get("state") == "done"    and age < _COMPACT_COOLDOWN:    return False  # cooled down recently
+    try:   # stale (crashed mid-compact) or cooldown expired -> steal it (rare; race window negligible)
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, payload); os.close(fd); return True
+    except Exception:
+        return False
+
 def _pane_busy(name):
     """Claude Code shows 'esc to interrupt' while it's working; absence of it = idle/ready for input."""
     _, o, _ = sh([TMUX, "capture-pane", "-t", name, "-p"])
@@ -6624,6 +6715,7 @@ def compact_session(name):
     try: os.makedirs(os.path.dirname(hpath), exist_ok=True)
     except Exception: pass
     _compact_set(nm, "starting", "starting compact", hpath)
+    _compact_lock_mark(nm, "running")   # hold the cross-instance lock for the whole compact (manual + auto)
     threading.Thread(target=_compact_worker, args=(nm, hpath), daemon=True).start()
     return {"ok": True, "handoff": hpath}
 
@@ -6677,6 +6769,8 @@ def _compact_worker(name, hpath):
         _compact_set(name, "done", "compact complete -- agent reloaded its handoff", hpath)
     except Exception as e:
         _compact_set(name, "error", "compact error: %s" % e, hpath)
+    finally:
+        _compact_lock_mark(name, "done")   # release: stamps completion -> the cooldown blocks an immediate auto re-fire
 
 def term_snapshot(name, lines=60):
     """Cheap live snapshot of a session's terminal (tmux capture-pane) -- for the sessions-desktop tiles,
@@ -13645,7 +13739,7 @@ function awBar(w,label){ if(!w) return '<div class="awrow"><div class="awlbl">'+
   return '<div class="awrow"><div class="awlbl">'+label+'</div>'
     +'<div class="awtrack"><div class="awfill" style="width:'+p+'%;background:'+col+'"></div></div>'
     +'<div class="awsub"><b style="color:#e8e8ea">'+p+'%</b> used · '+(100-p)+'% free'+rt+'</div></div>'; }
-function awBadge(st){ var M={use_next:['▶ USE NEXT','#1a1606','#e8c547',1],ready:['ready','#3fb95022','#3fb950',0],cooling:['cooling','#58a6ff22','#58a6ff',0],resting:['resting','#6b6b7822','#9aa0ad',0],tracked:['not in rotation','#6b6b7814','#8b949e',0],need_token:['enable polling','#d2992222','#d29922',0],no_data:['no data','#6b6b7814','#8b949e',0]};
+function awBadge(st){ var M={use_next:['▶ USE NEXT','#1a1606','#e8c547',1],ready:['ready','#3fb95022','#3fb950',0],cooling:['cooling','#58a6ff22','#58a6ff',0],resting:['resting','#6b6b7822','#9aa0ad',0],elsewhere:['🔒 in use by another node','#8957e522','#a371f7',0],tracked:['not in rotation','#6b6b7814','#8b949e',0],need_token:['enable polling','#d2992222','#d29922',0],no_data:['no data','#6b6b7814','#8b949e',0]};
   var m=M[st]||M.no_data; return '<span class="awbadge" style="background:'+m[1]+';color:'+m[2]+(m[3]?';border:1px solid #e8c547':'')+'">'+m[0]+'</span>'; }
 function acctFuelSection(){
   var d=ACCTWIN;
@@ -19401,8 +19495,11 @@ def _autocompact_scan():
             full = 100.0 * used / CTX_WINDOW
             if full < thresh: continue
             st = _COMPACT_STATE.get(name, {})
-            if st.get("step") in ("starting", "handoff", "compacting", "restoring"): continue   # already compacting
-            if now - _AUTOCOMPACT_LAST.get(name, 0) < 900: continue                              # 15-min cooldown
+            if st.get("step") in ("starting", "handoff", "compacting", "restoring"): continue   # this process already on it
+            # Durable, cross-instance gate: only ONE co-located instance may fire (the overseer is unscoped and
+            # sees every session), and it survives a restart (so a mid-ship restart can't re-fire). Replaces the
+            # old in-memory 900s cooldown that both duplicated across instances and reset on every restart.
+            if not _compact_lock_acquire(name): continue
             _AUTOCOMPACT_LAST[name] = now
             try:
                 with open(_AUTOCOMPACT_LOG, "a") as f:
