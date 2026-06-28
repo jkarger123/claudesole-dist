@@ -6933,9 +6933,14 @@ def instance_provision(p, do_launch=False, dry=False):
     # register into THIS running overseer's registry (what its Portfolio reads) -- not the engine's
     # default-config registry, which may be a different state dir (the bug that hid the first shopos).
     cmd = ["bash", eng, "--id", iid, "--dest", dest, "--register-into", INSTANCES]
-    # Type: product (default) vs agency (clients+tools tree, like AFP). Explicit beats auto-detect.
-    integration = "agency" if (p.get("type") or p.get("integration") or "").lower() == "agency" else "product"
+    # TREE SHAPE (integration): product (default, single operation) vs agency (clients+tools tree, like AFP).
+    integration = "agency" if (p.get("integration") or "").lower() == "agency" else "product"
     cmd += ["--integration", integration]
+    # NODE TYPE (the sandbox/authorization axis, asked at install): developer (custom-extension sandbox) vs
+    # agency (official-only, locked -- what a client gets). Only passed when chosen; else the safe agency default.
+    nt = (p.get("node_type") or "").lower()
+    if nt in ("agency", "developer"):
+        cmd += ["--node-type", nt]
     for flag, key in (("--name", "name"), ("--brand", "brand"), ("--preset", "preset"),
                       ("--port", "port"), ("--storage", "storage"), ("--agents", "agents"),
                       ("--project-root", "project_root"), ("--user", "user")):
@@ -19441,12 +19446,14 @@ function cfAddWizard(){
    +cfF('name','Name','e.g. Bakery Ops')
    +cfF('brand','Brand','defaults to name')
    +cfSel('preset','Role',[['project','project — a single operation'],['overseer','overseer — oversees nodes']])
-   +cfSel('type','Type',[['product','Product — a single product/operation'],['agency','Agency — clients + tools tree']])
+   +cfSel('node_type','Install type',[['agency','Agency — official tools only (locked, safe)'],['developer','Developer — can build custom tools (sandbox)']])
+   +cfSel('integration','Tree shape',[['product','Product — a modules tree'],['agency','Agency — a clients + tools tree']])
    +cfF('dest','Bundle folder','blank = /Volumes/Samsung990PRO/claudefather-<id>')
    +cfF('port','Port','blank = auto (≥ 8800)')
    +cfSel('storage','Storage',[['github','github'],['icloud','icloud'],['icloud+github','icloud+github']])
    +cfF('agents','Agents','blank = security,backup,usage,ideas,routines')
    +'</div>'
+   +'<div class="sub" style="margin:8px 0;line-height:1.5"><b>Install type</b> — <b>Agency</b>: runs only official, signed tools — locked &amp; safe, what a client/tenant gets. <b>Developer</b>: also lets you build + run your OWN custom tools in an operator-approved sandbox (your own installs). &nbsp;·&nbsp; <b>Tree shape</b> — <b>Product</b>: a modules tree. <b>Agency</b>: a clients + tools tree (like Sarah/AFP).</div>'
    +'<label class="cfpersist"><input type="checkbox" id="cf_persist" checked><span><b>Make it permanent &amp; join the mesh</b><br>On <b>Create &amp; start</b>, install it to survive reboots and add it to the fleet — no manual steps.</span></label>'
    +'<div class="cfacts"><button class="mini" onclick="cfPlan()" title="Show the plan only — writes nothing">👁 Preview</button>'
    +'<button class="mini go" onclick="cfProvision(false)" title="Build the folder, leave it off">📦 Create</button>'
@@ -19454,7 +19461,7 @@ function cfAddWizard(){
    +'<div class="cflegend">👁 <b>Preview</b> — plan only. &nbsp; 📦 <b>Create</b> — build it, leave it off. &nbsp; 🚀 <b>Create &amp; start</b> — build, start, finish setup, then open it and run its <b>Setup agent</b>.</div>'
    +'<pre id="cfout"></pre></div>');
 }
-function cfVals(){var g={};['id','name','brand','preset','type','dest','port','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
+function cfVals(){var g={};['id','name','brand','preset','node_type','integration','dest','port','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
 async function cfPost(extra){
   var body=cfVals(); if(!body.id){toast('Enter an ID first.');return null;}
   Object.assign(body,extra||{});

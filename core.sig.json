@@ -30,7 +30,7 @@
       "agents/skimlinks-merchant-sync/tools/skimlinks_sync.py": "90c1171829b058224ae8626304118f956523d105b3ba62448ca53a121b798f9f",
       "agents/usage/CLAUDE.md": "cae22f0cac898db9f048e8f3266d1117e57a4ecbc7616de0cc90f03a1669c3a6",
       "cc-init.sh": "22d00060b63d33c187debb4a097fffae789924e19323b3bdfff0e6653cd2e1e4",
-      "cc-newinstance.sh": "2148b740ef6fb280ccad16d5c82c59b6384dcf2a5efd997602617a055af7156d",
+      "cc-newinstance.sh": "c797c8ae3c7a4abb939252c10d8f122863e7168ec75780a8dbfe0622e09927bb",
       "cc-recover.sh": "110a7a50ef880f2b1696f27d176ce501de1a4b4d148ec99d4c6d93216993708b",
       "cc-update.sh": "c85dae6d74ca22452f1676cff55f09a23634bcbfa224297aaedc72f471d9693d",
       "cf-appliance-install.sh": "6974494064107096079a40ed0f3ec865e38e0e0905ec94d5671a9d2793e9424e",
@@ -38,7 +38,7 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "1d0d1aa6c9a5ea4834c71f0b8d4963bb9aac1d5e71fa5456832411902a7e79f7",
+      "claudesole.manifest.json": "6978309abe487cb219ae2b478cbb444a167c4d038b916036b4d31b5560223ade",
       "command-center/CLAUDE.md": "a4bb111f53b165f258d0f74fa50a466f35315a55c6fc7b13afd9d38f5ba82028",
       "command-center/cc-handoff": "9194f8a409f322c9835615cdb014dc9e626a469611ea127b1e9e7a6bf4db2532",
       "command-center/cc-hold": "a756f97be0fef2e0b764324f6830c1c63859347e009f04e8e4a6b8e5ccf9a3fc",
@@ -57,7 +57,7 @@
       "command-center/preship.py": "f628484ffc6457c12e074cdb63da2ec1a32fd95eea4db6d45844f8bd694011f2",
       "command-center/ralph_runner.py": "7d26a8d8bca83ba6f52c8ab45aae1c5643233e5cf94c6293b8f6f14b6c169f3b",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "1e9cb26ff4537b736255c628dcf994efa40ece2939994dd324d993b8bfcfbf2e",
+      "command-center/server.py": "aeab18e75517739fefa3218d4c39d631be01ada1e92991a4fc76fe3aac4fb3dd",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/vault/CLAUDE.md": "76e4f6160e6c67968e49e7e89b8618e3d2130c0093f2b582080b7bccb33871c6",
@@ -72,7 +72,7 @@
       "docs/APPLIANCE_BRINGUP.md": "519525aafcce807331adce0d382f86da785395a68e65e2fe61dc5965f28ff3c1",
       "docs/ARCHITECTURE.md": "e61a69a2703c9ac9ba5e153855ddfd495ed5dbd0b5f49b190c4954b8f3c85989",
       "docs/CAPTURE.md": "c0833ca6871ba51a3991cfed1d24b8252280e5d004abdddbce99806a9dd1d071",
-      "docs/CHANGELOG.md": "8e1c1d3895699e65ea527a0a115247d2c70b8c9b0728408726008467e3a13256",
+      "docs/CHANGELOG.md": "8d57872251f89c75399d4a18230f27f45aca58c6931a36c442b8736b398f9056",
       "docs/CLAUDE_CODE_REFERENCE.md": "d9acc94772b0a5b6b8dcf81962cea5f36cd050dd7797c6180c69c9b661450b2a",
       "docs/CONTEXT_ENGINEERING.md": "accc989214de542191bf7a678f0336087039e815eac7d0429deb671cf8277ddc",
       "docs/CONTROL_CENTER_BLUEPRINT.md": "3bf2fb328661e1cac513e8a9aacf6fb2bba7c5d9c361f069991c3915caa393e9",
@@ -153,9 +153,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1782688402,
+    "generated": 1782689072,
     "v": 1,
-    "version": "0.99.23"
+    "version": "0.99.24"
   },
-  "sig": "nUxYs70HMiYRCrAaxSkxfReRboFrrtrM0a2zw+n7XbxyKUFZ+ituLjQIK7VspS0dHknCnkEzstl2ngEEscvfBQ=="
+  "sig": "KJptEeZefG+hbPAgNhsPG91kUpG8kmZLYQX6nEm7wF+biWjZTn9nLUyUcGQud9/Lk6V3m0/Yal5A4G8nkPj9Dw=="
 }

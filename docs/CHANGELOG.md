@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.24 -- 2026-06-28
+- INSTALL TYPE asked at provisioning + a naming-collision fix. The "+ Add a ClaudeFather" wizard now ASKS the
+  node **Install type** -- **agency** (official signed tools only; locked + safe; what a client/tenant gets) vs
+  **developer** (also builds + runs operator-approved custom tools in the sandbox; your own installs) -- with an
+  inline explanation of the difference. Threaded through: wizard `node_type` -> `instance_provision` -> new
+  `cc-newinstance.sh --node-type` -> the bundle's cc.config `type`.
+  - Collision fixed: the wizard's old "Type" selector was actually the TREE SHAPE (product vs agency clients/tools
+    tree -> `integration`), not the sandbox node-type. Renamed to "Tree shape"; `instance_provision` no longer
+    reads `type` as integration. The safe default stays agency when nothing is chosen.
+  - (Local config, not shipped) all of James's nodes set `type=developer` (hptuners/MC/carsearch/shopos); AFP
+    stays `agency` (Sarah's locked tenant). Net node model: every node identical; the overseer is the workbench/
+    signer; AFP differs only by running as `sarahaios` + being agency.
+
 ## 0.99.23 -- 2026-06-28
 - VAULT COMPLETION -- the central vault is now the verified single source of truth, and the node-uniformity
   answer (every node leases its SCOPED secrets from the overseer; adding a node never touches secrets). The
