@@ -4292,7 +4292,7 @@ def agent_open(slug):
           "current module folder's deliverables/ subdir -- that is THE way to deliver it: it appears in that "
           "module's Files panel AND the top-level Files lens for them to open/download (and on iCloud "
           "deployments it auto-syncs to their devices). ALWAYS use deliverables/; never leave them a raw path "
-          "to hunt for. %s'" % (slug, roster_text()))
+          "to hunt for. %s %s'" % (slug, _extend_brief(), roster_text()))
     sh([TMUX, "new-session", "-d", "-s", sess, "-c", d, cl])
     def _trust():
         for _ in range(10):
@@ -8183,6 +8183,38 @@ def system_info():
                          "slack": _mod_on(slack, "configured"), "zoom": _mod_on(zoom, "is_configured"),
                          "focus": _focus_capture(), "mesh": bool([p for p in peers() if p.get("id") != INSTANCE_ID])}}
 
+def _extend_brief():
+    """Node-aware awareness of the LOCKED core + how to ADD capability the RIGHT way (custom sandbox on a
+    developer node, or a Change Request to Mission Control) -- so an agent asked to 'add to ClaudeFather' guides
+    the user correctly instead of hand-editing signed core (which is detected + self-healed/quarantined). Shared
+    by the chief brief (_system_brief) + scoped agent-tools (agent_open)."""
+    try:
+        ed = _edition(); nt = _node_type()
+        t = ("EXTENDING CLAUDEFATHER: the CORE (command-center/, server.py) + the OFFICIAL `extensions/` are SIGNED "
+             "+ LOCKED -- only official (signed-dist) or operator-APPROVED CUSTOM extensions run; anything else is "
+             "refused/quarantined. ")
+        if ed == "authoring":
+            t += ("This is an AUTHORING node: new OFFICIAL extensions are built under extensions/<id>/ to "
+                  "extensions/AUTHORING.md, then signed (POST /api/core-sign) + shipped via the dist. ")
+        else:
+            t += ("Do NOT hand-edit framework files here (appliance: changes are detected + self-healed/quarantined) "
+                  "-- a framework change goes to Mission Control as a Change Request (Propose Change lens). ")
+        if nt == "developer":
+            t += ("To add a NEW tool for the user HERE, build a CUSTOM programmatic extension in "
+                  "custom/extensions/<id>/ (extension.json with inputs[]/outputs[] + a functions entry; "
+                  "server/run.py reads {\"inputs\":...} on stdin, prints {\"outputs\":...}); use the Build lens "
+                  "(scaffold -> edit -> operator APPROVES -> Run) or /api/custom-scaffold|custom-approve|ext-run. It "
+                  "runs in the restricted sandbox (no core secrets). That is the ONLY place non-core tools may live. "
+                  "See docs/EXTENSIONS.md.")
+        else:
+            t += ("This node is type=agency, so the custom sandbox is OFF: propose new tools to Mission Control "
+                  "(Change Request), or have the operator set cc.config type=developer to unlock the local sandbox. "
+                  "See docs/EXTENSIONS.md.")
+        return t
+    except Exception:
+        return ("EXTENDING: core + official extensions are signed/locked; add capability only via an approved custom "
+                "extension (developer-type sandbox) or a Change Request to Mission Control. See docs/EXTENSIONS.md.")
+
 def _system_brief():
     """A concise, LIVE description of the platform + what's available on THIS node + the user's runtime, so a
     launched agent UNDERSTANDS the whole system instead of guessing. Injected into the chief launch brief."""
@@ -8209,6 +8241,8 @@ def _system_brief():
                  "write it to a 0600 temp file and run `cc-secure reveal \"<label>\" <file>` (a box shows them; "
                  "nothing hits the chat). Credentials live ONLY in the per-install vault -- read them with the "
                  "normal secret resolver, never hardcode or echo them.")
+        try: base += "\n\n" + _extend_brief()   # node-aware: locked core + how to add capability (sandbox / CCR)
+        except Exception: pass
         try:
             extc = _ext_agent_context()      # only the extensions INSTALLED on this node -> per-node-clean tool awareness
             if extc: base += "\n\n" + extc

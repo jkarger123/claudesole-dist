@@ -88,7 +88,17 @@ Install → `_ext_wire_mcp` (integration) / `_ext_apply_payload` (agent-tool, sk
 (if declared) → `_ext_declare_secrets` (reserve vault slots). Uninstall is reversible (MCP entries removed;
 payloads archived to `_archive/`; accounts/keys never touched). Setup = a guided `claude` agent briefed by SETUP.md.
 
-## 9. Audit posture (how to verify conformance + cleanliness)
+## 9. Agent awareness (agents KNOW the lockdown + how to extend)
+Agents are briefed at launch so they guide the user correctly instead of trying to hand-edit signed core. The
+node-aware `_extend_brief()` is injected into the **Chief of Staff** brief (`_system_brief`) and every scoped
+**agent-tool** (`agent_open`): it states that core + official `extensions/` are signed/locked (only official or
+approved-custom run; rogue dirs are quarantined), and gives the RIGHT path — on an `authoring` node, build an
+official ext to AUTHORING.md + sign it; on an appliance, raise a Change Request to Mission Control; on a
+`developer`-type node, build a custom programmatic ext in the sandbox (Build lens / `ext-run`). Plain project
+sessions are protected by the integrity backstop regardless (a hand-edit to a signed file is detected +
+self-healed/quarantined). So when a user asks "add this to ClaudeFather," the agent already knows where it goes.
+
+## 10. Audit posture (how to verify conformance + cleanliness)
 - Catalog conformance: every `extension.json` has the required fields + `SETUP.md` + `AGENT.md` (theme/skill
   exempt) + a real `lens` object wherever it provides a lens + `default_category`.
 - A node is clean iff: its `extensions/` matches the signed dist (core integrity `clean`), its installed list is

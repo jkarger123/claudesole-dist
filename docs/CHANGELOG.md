@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.11 -- 2026-06-28
+- AGENT AWARENESS of the lockdown + sandbox: launched agents now KNOW that core + official `extensions/` are
+  signed/locked and how to ADD capability the right way, so they guide the user instead of hand-editing signed
+  core. New node-aware `_extend_brief()` injected into the Chief brief (`_system_brief`) AND every scoped
+  agent-tool (`agent_open`): authoring node -> build official ext to AUTHORING.md + sign; appliance -> raise a
+  Change Request to Mission Control; developer-type -> build a custom programmatic ext in the sandbox (Build lens
+  / ext-run). Plain project sessions stay protected by the integrity backstop regardless. docs/EXTENSIONS.md (new
+  "Agent awareness" section).
+
 ## 0.99.10 -- 2026-06-28
 - CUSTOM SANDBOX + PROGRAMMATIC RUN ENGINE (Ship B of the extension-system standardization) -- the place users
   BUILD, and the engine that runs non-agentic programmatic extensions end to end.
