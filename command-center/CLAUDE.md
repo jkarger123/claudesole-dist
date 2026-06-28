@@ -39,6 +39,17 @@ of the fleet (mesh), and integrates Google Workspace + Tasks + deliverables.
 - **iCloud materialization** (175–227): force-download evictable iCloud files before reading.
 - **Mesh comms** (227–300, 1223–1400): inter-chief messaging — persistent inbox (`_mesh_inbox.json`),
   durable outbound queue with retry/backoff, the mesh worker, send/recv/reply. Pairs with `mesh_stop_hook.py`.
+- **Operator notes** (`op_note_*`, near `peers()`): a HUMAN↔human chat between node operators (e.g. James@MC ↔
+  Sarah@AFP), SEPARATE from the chief mesh. Per-node `_opnotes.json` (`{threads:{peer:[{dir,text,ts,read}]},outq}`),
+  own durable retry worker (`_opnote_worker`), rides the same X-Mesh-Token transport but delivers to
+  **`/api/opnote-recv`** (in `AUTH_MESH_INGRESS`) → the peer's HUMAN, never the agent. APIs: `/api/opnotes[,-unread]`,
+  `/api/opnote-send|-read|-recv`. Frontend = the **Notes** lens + the can't-miss `#opAlert` corner alert.
+- **Drag-anything → session + Basket** (`SESSION_SEND_RESOLVERS`, `register_sendable`, `session_send[_batch]`):
+  any portal item (Drive/email/calendar/deliverable/Granola/extension `entity`/`upload`) carries a `{kind,...}`
+  descriptor (`ssAttr`) and drops onto a session → resolved to a real file + injected. The **Basket** is a
+  client-side collection of those descriptors (sidebar, replaced the old machines widget) dropped into a session
+  as a unit via `session_send_batch` (`/api/session-send-batch`); saved named "packs" persist server-side
+  (`_baskets.json`, `/api/baskets*`); OS files added via `/api/basket-upload` (the `upload` sendable kind).
 - **Tiered mesh trust + superadmin** (300–540): `MESH_TOKEN` (family badge), `MESH_ENFORCE` gate,
   `SUPERADMIN_TOKENS`, and Ed25519/HMAC **superadmin grants** (cryptographically-signed platform-owner
   directives any node will execute via `/api/superadmin-exec`). Keys: `.superadmin_ed25519` (MC-only, 0600),
@@ -67,6 +78,10 @@ of the fleet (mesh), and integrates Google Workspace + Tasks + deliverables.
   (the orchestrator only sees descriptions at selection time; weak ones make a capability invisible).
 - **Overseer/portfolio** (3637–3722): roll up child ClaudeFathers (scrape their `/api/chief` + `/api/security`).
 - **Compaction** (3723–3864): write-handoff → `/compact` → re-read (preserve agent memory across compaction).
+  Auto + manual compact are deduped by a **cross-instance + restart-durable file lock**
+  (`/tmp/cf-compact-locks/<session>.lock`; `_compact_lock_acquire`/`_compact_lock_mark`): co-located instances
+  share the tmux server and the overseer is unscoped (sees every session), so without it the SAME session got
+  compacted 2–4× (dup "COMPACT PREP"/"read handoff"). `O_EXCL`=one instance wins; on-disk=survives a restart.
 - **History/resume** (3865–3942): past conversations across the fleet (`scan_projects.py`) + resume/fork.
 - **Ralph loops** (3943–4105): file-driven parallel agent loops; state in `data/ralph/<name>/` (run by
   `ralph_runner.py` inside `ralph-<name>` tmux). See `RALPH_LOOPS.md`.
@@ -88,14 +103,24 @@ of the fleet (mesh), and integrates Google Workspace + Tasks + deliverables.
 ## Frontend (the `PAGE` string, ~7149+)
 Single-page vanilla JS. `LENS` selects the active view; `render()` (~8205) dispatches to per-lens loaders.
 Lenses include: pillars, modules, files, gmail/calendar/drive, ralph, pipeline, jobs, machines, desktop,
-usage, backup, security, agents, marketplace, agency, calls, comms, skills, teams, audit, portfolio,
+usage, backup, security, agents, marketplace, agency, calls, comms, **notes**, skills, teams, audit, portfolio,
 sessions, history, tree, tasks, ideas, ccr, propose, accounts, settings, chief, docs, doctor. Which lenses
 appear is driven by the **preset** (`../presets/<PRESET>.json` → `project.json` / `overseer.json`).
 Brand assets in `static/brand/`; terminal via `static/xterm.js`; remote desktop via `static/novnc/`.
+- **Nav categories** (`navDefaultTree`/`NAV_CAT`/`NAV_PINNED`, `paintNavNotif`): the sidebar ships GROUPED into
+  default COLLAPSED categories (Google/Workspace/Agency/Team/Integrations/System) with daily-drivers pinned on
+  top; a collapsed category whose hidden members have unread badges GLOWS + shows the summed count. Built on the
+  pre-existing grouping engine (tree in `localStorage ccnav:<project>`; drag/rename/+category/flatten/reset).
+  Built-in lens→category in `NAV_CAT`; extension lenses carry `extension.json default_category` (via
+  `_ext_lenses().category`). `navFlatten()` opts out to the most-used list; `navAuto()` re-seeds the defaults.
+- **Sessions workspace + Basket** live in `PAGE` too: the split-pane workspace (drag a session up to split) and
+  the sidebar **Basket** (`#basketwrap`, `renderBasket`/`basketSendTo`) that drops a whole collection into a session.
 
 ## Helper files (this dir)
 - `granola.py` — Granola call transcripts → reviewed proposals (client CLAUDE.md note + tasks/reminders).
-  `server.py` calls `granola.init(ctx)` once; `gr_*` behind `/api/granola*`. Nothing applies until approved.
+  `server.py` calls `granola.init(ctx)` once (passing the `secret` resolver); `gr_*` behind `/api/granola*`.
+  Nothing applies until approved. The API key resolves VAULT-FIRST (`_api_key()` → `_deploy_env("GRANOLA_API_KEY")`,
+  falling back to `cc.config granola.api_key`) — so a key added via the Vault/secure-field just works.
 - `ralph_runner.py` — the Ralph loop driver (one loop/invocation, runs in `ralph-<name>` tmux).
 - `scan_projects.py` — fast scan of `~/.claude/projects` → past-conversation JSON (runs on macOS + Windows).
 - `cc-session-watchdog.py` — nudges opted-in tmux sessions stalled on API outages (launchd ~45s; opt-in only).
@@ -138,6 +163,9 @@ Brand assets in `static/brand/`; terminal via `static/xterm.js`; remote desktop 
 ## How to extend it
 - **New API + lens:** add a backend fn → register a `do_GET`/`do_POST` route in `class H` → add a `loadX()`
   in `PAGE` and a `LENS=="x"` branch in `render()` → list the lens in the relevant `presets/*.json`. Restart.
+  Give the new lens a `NAV_CAT` entry (else it defaults to "Workspace"); a built-in always-on lens outside the
+  preset list must be force-shown in `applyPreset()` (see the `tasks`/`notes` lines). For a per-lens unread
+  badge, add a `<span id="xBadge">` inside its nav button — `paintNavNotif` aggregates it into the category glow.
 - **New agent-tool:** `agent_create()` / drop `agents/<slug>/` (config + CLAUDE.md + reports). Give it a
   strong description (the orchestrator selects on the description — run the description-audit).
 - **New skill:** `.claude/skills/<name>/SKILL.md` (frontmatter `name`+`description`); surfaced via Skills lens.

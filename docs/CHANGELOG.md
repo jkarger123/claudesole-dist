@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.8 -- 2026-06-28
+- DOCS: documented this stretch's work in the module CLAUDE.md files + the standards (no code change).
+  `command-center/CLAUDE.md` (compact cross-instance lock; operator-notes section; drag-anything + Basket;
+  nav-categories frontend + how-to-extend note; granola vault-first helper). `extensions/CLAUDE.md` +
+  `AUTHORING.md` (the `default_category` key + the rule that a `lens:{id,label,icon}` OBJECT — not
+  `provides:["lens:x"]` — is what surfaces a nav tab). `extensions/granola/CLAUDE.md` (the lens-object fix +
+  vault-first key). `command-center/vault/CLAUDE.md` + `docs/CREDENTIALS.md` (engine modules resolve secrets
+  vault-first via the `secret`=`_deploy_env` resolver; Granola the reference). `docs/FEATURES.md` (Sessions
+  workspace, drag-anything + Basket, Notes, nav categories).
+
 ## 0.99.7 -- 2026-06-28
 - NOTES: an operator-to-operator chat between the PEOPLE running the nodes (e.g. James @ Mission Control <->
   Sarah @ AFP), separate from the chief(agent) mesh. Leave a note; it lands in the other operator's dashboard

@@ -38,7 +38,11 @@ Never read a secret any other way. Never hardcode. Never echo.
 file-based extension secrets (slack `bot_token`, google `google_oauth.json` -> `google_oauth_client`, per-account
 google token JSONs -> one `google_tokens` dict) INTO the vault, verifies each reads back, and (scrub) archives
 the plaintext (`*.migrated-<ts>`, reversible). Google loads its OAuth token VAULT-FIRST (`_google_token_load`),
-slack `_token()` prefers the vault. After migration the vault is the ONLY store.
+slack `_token()` prefers the vault, **Granola** reads its key vault-first (`granola._api_key()` →
+`_deploy_env("GRANOLA_API_KEY")`, v0.99.5). After migration the vault is the ONLY store.
+- **Pattern for any engine module that needs a secret:** take the `secret` resolver in its `init(ctx)` (server.py
+  passes `_deploy_env`) and read `secret("KEY")` — NEVER `cc.config`. Granola is the reference (it used to read
+  cc.config only, so a key added the standard way — vault/secure-field — was silently ignored until fixed).
 
 ## 5. Secure fields — secrets to/from a session WITHOUT the chat (v0.96)
 The out-of-band channel. Agents use the `cc-secure` helper (`../cc-secure`); humans answer via a dashboard modal.

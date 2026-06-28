@@ -10,8 +10,13 @@ Authoring standard: **`AUTHORING.md`** (READ FIRST before adding/editing any ext
 A dir `extensions/<id>/` containing:
 - **`extension.json`** — REQUIRED. The catalog card + the model-facing trigger. Keys: `id` (==dir name,
   `[a-z0-9-]`), `name`, `category`, `version`, `icon`, `summary`, `description`, `provides[]`,
-  `requires[]`, `setup_doc`, `setup_agent`. `summary`/`description` are advertising the orchestrator
-  reads at selection time — weak text = invisible capability.
+  `requires[]`, `setup_doc`, `setup_agent`, **`default_category`** (which nav category this extension's lens
+  lands in — Google/Workspace/Agency/Team/Integrations/System; surfaced via `_ext_lenses().category`; every
+  extension declares one). `summary`/`description` are advertising the orchestrator reads at selection
+  time — weak text = invisible capability.
+  - **A lens needs a `lens:{id,label,icon}` object** to get a nav tab — that's what `_ext_lenses()` reads.
+    `provides:["lens:x"]` is informational ONLY (it does NOT surface a tab). (This bit Granola: it declared
+    `provides:["lens:calls"]` but no `lens` object, so the Calls tab never showed on any node until v0.99.4.)
 - **`SETUP.md`** — REQUIRED. The script the guided setup agent runs. Fixed section order (What/Why/How/
   Prerequisites/Setup steps/Verify/Usage/Best practices) — see AUTHORING.md.
 - Category-specific payload (below).

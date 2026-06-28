@@ -27,6 +27,18 @@ Link a folder (agency client *or* project module) to emails/domains. Per-folder 
 ## Sessions taskbar (desktop)
 A Windows-style dock of every live session pinned at the bottom of every lens. Tiles **blink gold while working**, **pulse gold when finished** (and the browser tab title shows "🟡 N done"). Hover a tile → a full interactive terminal blow-up with **Usage / New-tab / Graceful-exit / Kill**. Viewing a session in the Sessions tab clears its gold flash.
 
+## Sessions workspace (split-pane)
+The Sessions tab is a modular split-pane workspace (replaced focus/grid/list): drag a session up from the taskbar into the main area, **split-screen** with an adjustable divider, pull in more, push any back down. The taskbar marks which sessions are currently "up."
+
+## Drag anything into a session + the Basket
+Any portal item — a Drive file, an email/thread, a calendar event, a deliverable, a Granola call, or **any extension item** — can be **dragged straight onto a session** (or a workspace pane); the agent instantly receives it as a real file. The **Basket** (sidebar) is a collection you fill from anywhere — drag items in, or files from your computer — then **drag the whole basket into a session** to hand the agent everything for a task at once. Save a basket as a reusable named **"context pack."**
+
+## Notes — message between node operators
+A human-to-human chat between the people running the nodes (e.g. Mission Control ↔ a tenant). Leave someone a note; it lands in their dashboard as a **can't-miss bottom-right corner alert** (plus a Notes-tab thread, a nav badge, and a Telegram ping if set) — they reply and it comes back to you. Threads are saved per peer. Separate from the agent-to-agent mesh.
+
+## Nav categories
+The sidebar groups tabs into **collapsed categories** by default (Google, Workspace, Agency, Team, Integrations, System) with your daily drivers pinned on top — and a category **glows + shows a count** when something inside it has a notification (new email, a pending change request, an unread note). Drag to reorder, rename, add categories, or flatten to a single most-used list.
+
 ## Pipeline Live-View
 Live run-map of a node's scheduled pipeline. A loud full-width banner goes **red** on FAIL/STALL, **amber** on MISS — a silent failure can never go unnoticed. Drops in automatically when a node emits a manifest + heartbeat (`docs/PIPELINE_LIVEVIEW.md`).
 

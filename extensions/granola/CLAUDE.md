@@ -17,11 +17,11 @@ Agency deployments only (the lens shows when `Clients/` + `Tools/` are present, 
 5. **APPLY** (`gr_apply`, on approve) — (a) appends a dated entry to the client's `CLAUDE.md` inside a managed `CC:CALLS` region; (b) creates tasks + reminders in the configured destination(s).
 
 ## Key files / where things live
-- `command-center/granola.py` — the **engine** (stdlib only). All logic lives here; `server.py` injects context and exposes endpoints.
-- `extensions/granola/extension.json` — manifest: `provides: lens:calls`, requires a Granola API key OR the desktop app, `setup_agent: true`.
+- `command-center/granola.py` — the **engine** (stdlib only). All logic lives here; `server.py` injects context and exposes endpoints. The API key resolves **VAULT-FIRST** via `_api_key()` → `_deploy_env("GRANOLA_API_KEY")`, falling back to `cc.config granola.api_key` (used by `_source`/`_api_get`/`_gr_ready`/`has_key`). So a key added the standard way — Vault lens / `cc-secure` — just works; no cc.config hand-edit. (Before v0.99.5 granola read ONLY cc.config, so a vault key was silently ignored.)
+- `extensions/granola/extension.json` — manifest. The Calls tab comes from the **`lens:{id:"calls",...}` OBJECT** (what `_ext_lenses()` reads) + `default_category:"Agency"`; `provides:["lens:calls"]` is informational only. (Before v0.99.4 it had only `provides`, so the Calls tab never showed on ANY node.) Requires a Granola API key OR the desktop app; `setup_agent: true`. The install also reserves a `GRANOLA_API_KEY` vault slot.
 - `extensions/granola/SETUP.md` — setup-agent walkthrough (config, sources, destinations, privacy).
 - `command-center/server.py`:
-  - `granola.init({...})` (~L4619) — injects `CC, PROJECT, STATE_DIR, agency_dirs, agency_subfolders`.
+  - `granola.init({...})` (~L4619) — injects `CC, PROJECT, STATE_DIR, agency_dirs, agency_subfolders, secret` (the `secret`=`_deploy_env` resolver enables the vault-first key lookup).
   - Endpoints: `/api/granola` (proposals), `/api/granola-sync` (POST, runs `gr_sync` in a **background thread** — extraction is slow), `/api/granola-apply`, `/api/granola-skip`.
   - **Calls lens** UI (`LENS=="calls"`, `callsSync/callsApply/callsSkip`).
 - **State (per-deployment):** `<STATE_DIR>/_granola.json` — `{proposals, seen, last_sync}`. `seen` is capped at last 500 meeting ids; proposals carry `status: pending|applied|skipped`.

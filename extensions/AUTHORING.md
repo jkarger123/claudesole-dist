@@ -15,10 +15,13 @@ Build EVERY extension to the same spec so they're consistent + agent-usable. An 
    only via `_deploy_env(key)`; NEVER a bespoke secret file, cc.config secret, or hardcoded value.
 5. **Draggables** (if it has items a user would hand to a session) -- declare `draggables[]` + attach `ssAttr`
    to rows so they drag into a Claude session (the generic `entity` sendable needs zero server code).
-6. **A `lens`** (if it has a UI) -- declare `lens:{id,label,icon}`; it self-shows when installed (extLenses),
-   built dense (KPI strip + tables/2-col panels -- NEVER a stack of full-width cards).
-7. **Server functions** (if it needs server-side compute) -- declare `functions{}`; runs sandboxed; no worker.
-8. **`tier`/`pricing`/`publisher`** (paid extensions ride the signed-entitlement gate).
+6. **A `lens`** (if it has a UI) -- declare the **`lens:{id,label,icon}`** OBJECT (this is what gives it a nav tab
+   via `_ext_lenses()`; `provides:["lens:x"]` is informational ONLY and surfaces NOTHING). It self-shows when
+   installed (extLenses), built dense (KPI strip + tables/2-col panels -- NEVER a stack of full-width cards).
+7. **A `default_category`** -- which nav folder the lens lands in (Google/Workspace/Agency/Team/Integrations/
+   System); the sidebar groups lenses into collapsed categories by default. EVERY extension declares one.
+8. **Server functions** (if it needs server-side compute) -- declare `functions{}`; runs sandboxed; no worker.
+9. **`tier`/`pricing`/`publisher`** (paid extensions ride the signed-entitlement gate).
 Reversible install (uninstall archives, never deletes user data/keys). ASCII only. The sections below detail each.
 
 ## Credentials & secrets (the ONE way -- non-negotiable)
@@ -48,6 +51,10 @@ reference: `command-center/vault/CLAUDE.md`; spec: `docs/CREDENTIALS.md`.)
   "requires": [ {"key":"X","label":"plain-language thing the user must have/get"} ],
   "setup_doc": "SETUP.md",
   "setup_agent": true,              // true => the Marketplace 'Set up' button opens a guided agent
+  "default_category": "Integrations", // REQUIRED: nav folder for this ext's lens (Google|Workspace|Agency|
+                                   //   Team|Integrations|System) -- sidebar groups lenses into collapsed categories
+  "lens": {"id":"calls","label":"Calls","icon":"PH"}, // ONLY if it has a UI -- THIS object surfaces the nav tab
+                                   //   (NOT provides:["lens:x"], which is informational only)
   "tier": "free",                   // OPTIONAL: "free" (default) | "paid" -- paid = locked until entitled
   "pricing": {"monthly_usd": 49},  // OPTIONAL (paid only): shown on the card; billing automation is separate
   "publisher": "ClaudeFather",     // OPTIONAL: who authors/houses it (official vs third-party)
