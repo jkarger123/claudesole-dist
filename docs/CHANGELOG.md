@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.93.0 -- 2026-06-27
+- NEW EXTENSION: Substack (read + draft -- Substack has no publish API, so this is the honest shape). TRACK:
+  poll configured publications' PUBLIC RSS feeds into a node-local cache + a Substack lens (your pub +
+  competitors/sources); post content is untrusted data. DRAFT: a headless Claude (Max sub, no metered key)
+  turns a topic + optional source into a publication-ready markdown draft, saved to deliverables/substack/ for
+  review -- you paste into Substack + publish (nothing auto-publishes; no unofficial/cookie endpoints used).
+  New stdlib engine command-center/substack.py (RSS via urllib+ElementTree; draft via claude -p), server wiring
+  (GET /api/substack, POST /api/substack-sync, POST /api/substack-draft, a ~45m RSS poll loop), and a Substack
+  lens (KPI strip + tracked-posts table + draft composer + drafts list; reuses the .aff-* dense layout). Ships
+  as the `substack` extension (lens:substack + context:substack; self-shows when installed); cc.config
+  substack.publications = [handles | domains | /feed URLs]. Tested: real RSS parse (20 posts), idempotent sync,
+  draft flow, lens render.
+
 ## 0.92.0 -- 2026-06-27
 - Security audit: new Secrets check (A5-keybackup) flags a plaintext key backup (cf-key-backup's
   PAPER-BACKUP.txt -- Ed25519 PRIVATE keys in cleartext) lingering on disk, so "print it to a safe + remove

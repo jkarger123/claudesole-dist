@@ -27,6 +27,7 @@ focus   = _opt_import("focus")     # FOCUS/INTENT engine: activity signal -> sub
 slack   = _opt_import("slack")     # Slack -> context layer (read-only ingest, trust=contact)
 zoom    = _opt_import("zoom")      # Zoom transcript intake -> the granola proposal pipeline
 clips   = _opt_import("clips")     # CAPTURE SPINE: Capture -> Triage -> Apply (review-first)
+substack = _opt_import("substack") # Substack -> READ (RSS track) + DRAFT (headless-claude co-writer); no publish API
 try:   # Ed25519 for asymmetric superadmin (public-key). Optional: nodes without it fall back to HMAC + a doctor warning.
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
     from cryptography.hazmat.primitives import serialization as _crypto_ser
@@ -6956,6 +6957,47 @@ try: slack.init({"CC": CC, "STATE_DIR": STATE_DIR, "CC_HOME": CC_HOME, "EXT_DIR"
 except Exception as _e: print("[slack] init failed:", _e)
 try: zoom.init({"CC": CC, "PROJECT": PROJECT, "STATE_DIR": STATE_DIR, "secret": _deploy_env})
 except Exception as _e: print("[zoom] init failed:", _e)
+try: substack.init({"CC": CC, "STATE_DIR": STATE_DIR})
+except Exception as _e: print("[substack] init failed:", _e)
+def _substack_dir():
+    d = os.path.join(PROJECT, "deliverables", "substack")
+    try: os.makedirs(d, exist_ok=True)
+    except Exception: pass
+    return d
+def _substack_drafts():
+    """Recent generated drafts (newest first) so the lens + Files show them; nothing auto-publishes."""
+    d = _substack_dir(); out = []
+    try:
+        for fn in os.listdir(d):
+            if fn.endswith(".md"):
+                p = os.path.join(d, fn)
+                try: st = os.stat(p)
+                except Exception: continue
+                out.append({"name": fn, "rel": os.path.relpath(p, PROJECT), "mtime": st.st_mtime, "size": st.st_size})
+    except Exception: pass
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out[:30]
+def _substack_draft_run(topic, source, audience, tone, length):
+    """Generate a draft (headless claude) + save it as a reviewable deliverable. Runs in a background thread."""
+    r = substack.draft(topic, source=source, audience=audience, tone=tone, length=length)
+    if not r.get("ok"):
+        try: notify_send("Substack draft failed: " + str(r.get("error"))[:120])
+        except Exception: pass
+        return
+    title = r.get("title") or "draft"
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:48] or "draft"
+    fn = "%s-%d.md" % (slug, int(time.time()))
+    try:
+        with open(os.path.join(_substack_dir(), fn), "w") as f:
+            f.write("<!-- Substack draft (review + paste into Substack; nothing is auto-published) -->\n\n" + r["markdown"])
+    except Exception: pass
+def _substack_loop():
+    time.sleep(50)
+    while True:
+        try:
+            if substack.configured(): substack.sync()
+        except Exception: pass
+        time.sleep(2700)   # poll tracked publications' RSS ~every 45 min
 # THE CONTEXT LAYER -- store the DB on the SSD (next to deliverables) when configured, else CC_HOME/data.
 try:
     context.init({"PROJECT": PROJECT, "CC_HOME": CC_HOME,
@@ -10205,6 +10247,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/agency":        return self._s(200, json.dumps(agency_model()))
         if u.path == "/api/mesh":          return self._s(200, json.dumps(mesh_inbox()))
         if u.path == "/api/granola":       return self._s(200, json.dumps(granola.gr_proposals()))
+        if u.path == "/api/substack":      return self._s(200, json.dumps({**substack.status(), "drafts": _substack_drafts()}))
         if u.path == "/api/clips":         # CAPTURE SPINE: the clip tray + pending proposals (review queue)
             return self._s(200, json.dumps(clips.clips_list((q.get("subject", [None])[0]), (q.get("status", [None])[0]))))
         if u.path == "/api/context/stats": return self._s(200, json.dumps(context.stats(), default=str))
@@ -10580,6 +10623,14 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"ok": True, "started": True}))
         if u.path == "/api/granola-apply": return self._s(200, json.dumps(granola.gr_apply(body.get("id", ""), body.get("edited"))))
         if u.path == "/api/granola-skip":  return self._s(200, json.dumps(granola.gr_skip(body.get("id", ""))))
+        if u.path == "/api/substack-sync":  # RSS fetch across publications -> background (network)
+            threading.Thread(target=lambda: substack.sync(), daemon=True).start()
+            return self._s(200, json.dumps({"ok": True, "started": True}))
+        if u.path == "/api/substack-draft":  # headless-claude draft is slow -> background; appears under drafts when done
+            topic = (body.get("topic") or "").strip()
+            if not topic: return self._s(200, json.dumps({"ok": False, "error": "a topic is required"}))
+            threading.Thread(target=lambda: _substack_draft_run(topic, body.get("source", ""), body.get("audience", ""), body.get("tone", ""), body.get("length", "")), daemon=True).start()
+            return self._s(200, json.dumps({"ok": True, "started": True}))
         if u.path == "/api/slack/save-thread":  # capture a specific Slack thread to a subject
             return self._s(200, json.dumps(slack.save_thread(context, body.get("channel", ""), body.get("ts", ""), body.get("subject"))))
         if u.path == "/api/zoom-sync":  # Zoom cloud recordings -> proposals (slow -> background); appear in the Calls lens
@@ -12493,6 +12544,7 @@ function render(){
   else if(LENS=="vault"){loadVault();return;}
   else if(LENS=="affiliate"){loadAffiliate();return;}
   else if(LENS=="aisearch"){loadAisearch();return;}
+  else if(LENS=="substack"){loadSubstack();return;}
   else if(LENS=="agency"){loadAgency();return;}
   else if(LENS=="calls"){loadCalls();return;}
   else if(LENS=="capture"){loadCapture();return;}
@@ -16330,6 +16382,46 @@ var AISEXT='aisearch-pro', AIS={tab:'search',ep:'',brand:'',query:'',competitor:
 async function aisData(resource,extra){try{return await(await fetch('/api/ext-data?ext='+encodeURIComponent(AISEXT)+'&resource='+resource+(extra||''))).json();}catch(e){return {ok:false,error:String(e)};}}
 function aisCost(v,dp){v=parseFloat(v);return isNaN(v)?'—':'$'+v.toFixed(dp==null?4:dp);}
 function aisProv(p){try{var a=(typeof p==='string')?JSON.parse(p):p;return Array.isArray(a)?a.join(', '):(a?Object.keys(a).join(', '):'');}catch(e){return '';}}
+// ===== Substack lens: track publications (RSS read) + draft posts (headless-claude co-writer) =====
+var SUB={};
+async function loadSubstack(){
+  var g=document.getElementById('grid');g.innerHTML=empty('Loading Substack…');
+  var d={};try{d=await(await fetch('/api/substack')).json();}catch(e){g.innerHTML=empty("Couldn't load Substack.");return;}
+  SUB.data=d;var posts=d.recent||[],pubs=d.publications||[],drafts=d.drafts||[];
+  var rows=posts.map(function(p){return '<tr><td><a href="'+esc(p.link||'#')+'" target="_blank" rel="noopener" style="color:var(--ink)"><b>'+esc(p.title||'(untitled)')+'</b></a>'+(p.summary?('<div class="sub" style="font-size:11px;white-space:normal;max-width:520px">'+esc((p.summary||'').slice(0,160))+'</div>'):'')+'</td><td>'+esc(p.source||'')+'</td><td class="sub" style="font-size:11px">'+esc((p.date||'').slice(0,16))+'</td></tr>';}).join('')||'<tr><td colspan="3" style="padding:16px;text-align:center;color:var(--dim)">No posts yet — add publications + Sync.</td></tr>';
+  var dr=drafts.map(function(f){return '<div class="aff-mv"><span>📝 '+esc(f.name)+'</span><a class="mini" href="/api/file-get?b64='+b64u(f.rel)+'" target="_blank" rel="noopener">open</a></div>';}).join('')||'<div class="meta" style="padding:13px">No drafts yet — write one on the right. Each appears here + in the Files lens to review and paste into Substack.</div>';
+  var notcfg=!d.configured;
+  var h=affCss()+'<style>.sub-form label{display:block;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;margin:9px 0 3px}.sub-form input,.sub-form textarea{width:100%;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:8px 10px;font:inherit;box-sizing:border-box}.sub-form textarea{min-height:90px;resize:vertical}</style>'
+    +'<div class="aff-wrap">'
+    +'<div class="aff-head"><b style="font-size:16px">📰 Substack</b><span class="sub">track publications (RSS) · draft posts (you paste &amp; publish — no auto-publish)</span>'
+      +'<span style="margin-left:auto"><button class="mini go" onclick="subSync()">⟳ Sync feeds</button></span></div>'
+    +(notcfg?'<div class="meta" style="margin:0 0 10px;color:#d29922">No publications configured. Add them in this node\'s cc.config.json: <code>"substack":{"publications":["pragmaticengineer.com","stratechery","https://yourpub.substack.com"]}</code> (handle, domain, or full /feed URL), then Sync.</div>':'')
+    +'<div class="aff-kpis">'+affKpi(pubs.length,'publications')+affKpi(Number(d.count||0).toLocaleString(),'posts tracked')+affKpi(drafts.length,'drafts')+affKpi(d.last_sync?(ago(Date.now()/1000-d.last_sync)+' ago'):'—','last sync')+'</div>'
+    +'<div class="aff-panels">'
+      +'<div class="aff-pane"><h3><span>Tracked posts</span><span class="sub">'+posts.length+' shown'+(pubs.length?(' · '+esc(pubs.join(', '))):'')+'</span></h3><div class="aff-scroll"><table class="aff-tbl">'
+        +'<thead><tr><th>Post</th><th>Publication</th><th>Date</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>'
+      +'<div class="aff-pane"><h3><span>✍️ Draft a post</span></h3><div class="sub-form" style="padding:11px 13px">'
+        +'<label>Topic / working title</label><input id="subtopic" placeholder="e.g. Why agencies should run their own AI control plane">'
+        +'<label>Audience (optional)</label><input id="subaud" placeholder="agency owners, indie devs…">'
+        +'<label>Tone (optional)</label><input id="subtone" placeholder="punchy, analytical, friendly…">'
+        +'<label>Length (optional)</label><input id="sublen" placeholder="~800 words">'
+        +'<label>Source material (optional — notes, an outline, a transcript)</label><textarea id="subsrc" placeholder="Paste any source the draft should be grounded in…"></textarea>'
+        +'<button class="mini go" style="margin-top:11px;width:100%" onclick="subDraft()">✍️ Generate draft</button>'
+        +'<div class="meta" style="margin-top:8px;font-size:11px">Runs a headless Claude (your Max subscription). The draft appears below + in Files in ~30–60s — review it, then paste into Substack and publish yourself.</div>'
+        +'</div><h3 style="border-top:1px solid var(--line)"><span>Drafts</span></h3><div class="aff-scroll" style="max-height:34vh">'+dr+'</div></div>'
+    +'</div></div>';
+  g.innerHTML=h;
+}
+async function subSync(){st_toast('Syncing Substack feeds…');await fetch('/api/substack-sync',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});setTimeout(loadSubstack,2500);}
+async function subDraft(){
+  var topic=(document.getElementById('subtopic').value||'').trim();if(!topic){alert('Enter a topic');return;}
+  var body={topic:topic,audience:(document.getElementById('subaud').value||''),tone:(document.getElementById('subtone').value||''),length:(document.getElementById('sublen').value||''),source:(document.getElementById('subsrc').value||'')};
+  var r=await(await fetch('/api/substack-draft',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  if(!r.ok){alert('Draft failed: '+(r.error||'?'));return;}
+  st_toast('Drafting… it will appear under Drafts + in Files in ~30–60s');
+  setTimeout(loadSubstack,30000);
+}
+function st_toast(m){try{if(typeof toast==='function')toast(m);else{var st=document.getElementById('st');if(st)st.textContent=m;}}catch(e){}}
 function loadAisearch(){
   var g=document.getElementById('grid');
   g.innerHTML=affCss()+'<div class="aff-wrap"><div class="aff-head"><b style="font-size:16px">🔎 AI Visibility</b><span class="sub">AISearch Pro — brand visibility across AI engines (BYOK)</span>'
@@ -18675,6 +18767,7 @@ if __name__ == "__main__":
     threading.Thread(target=_autoupdate_loop, daemon=True).start()     # PULL convergence: every tenant self-updates from the dist (boot + timer); source nodes self-skip
     threading.Thread(target=_core_integrity_loop, daemon=True).start() # INTEGRITY: verify framework files vs the signed manifest; appliances self-heal drift from the signed dist
     threading.Thread(target=_acct_windows_loop, daemon=True).start()   # USAGE: keep the account fuel-gauge fresh (refresh the live login's 5h/weekly windows ~30m; shared-lock deduped across co-located instances)
+    threading.Thread(target=_substack_loop, daemon=True).start()       # SUBSTACK: poll tracked publications' RSS into the read cache (no-op until publications are configured)
     threading.Thread(target=_license_activate_loop, daemon=True).start() # LICENSE: a sold box auto-activates from its configured activation server on boot if unlicensed
     threading.Thread(target=_fleet_converge_loop, daemon=True).start() # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     threading.Thread(target=_routines_loop, daemon=True).start()       # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts

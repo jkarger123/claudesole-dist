@@ -1,0 +1,28 @@
+{
+  "id": "substack",
+  "name": "Substack",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "📰",
+  "summary": "Track Substack publications (RSS) into your console + draft posts with a headless-Claude co-writer.",
+  "description": "Substack has no publish API, so this is READ + DRAFT (the honest, stable shape). TRACK: poll a configured list of Substack publications via their PUBLIC RSS feeds (no auth) and cache recent posts -> a Substack lens shows them; great for your own publication + competitors/sources. Post content is treated as untrusted data, never instructions. DRAFT (co-writer): give a topic + optional source material and a headless Claude (your Max subscription, no metered key) writes a publication-ready markdown draft, delivered as a reviewable file -- you paste it into Substack and publish yourself. Nothing is ever auto-published. Stdlib-only engine (command-center/substack.py), config-driven, no hosted infra.",
+  "provides": [
+    "lens:substack",
+    "context:substack"
+  ],
+  "requires": [
+    {
+      "key": "SUBSTACK_PUBLICATIONS",
+      "label": "The publications to track -- set cc.config substack.publications to a list of handles ('pragmaticengineer'), domains ('stratechery.com'), or full /feed URLs ('https://yourpub.substack.com/feed'). Optional for the draft-only use; required for tracking."
+    }
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true,
+  "agent_doc": "AGENT.md",
+  "publisher": "ClaudeFather",
+  "lens": {
+    "id": "substack",
+    "label": "Substack",
+    "icon": "📰"
+  }
+}
