@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.18 -- 2026-06-28
+- THE SCOUT -- proactive context surfacing (the answer to "an agent can't know what it doesn't know"). Beyond the
+  cited brief (the obvious subject matches), a cheap index pass over the WHOLE substrate now flags the items --
+  an email, a file, a call -- that are FRESH and relevant to what you're working on but that nobody pulled into
+  view, as POINTERS (never a dump): the email sitting in the inbox that would make the agent a superstar. New
+  `context.scout()` primitive (freshness-biased half-life, relevance gated on lexical-match membership not the
+  brittle bm25 magnitude, deduped, excludes what was already handed). Surfaced in: the launch brief
+  (`_scout_brief` injected via --append-system-prompt, deduped against the brief's own citations), the persistent
+  Chief brief (focus-routed to the current subject), a `/api/scout` API, and a "Scout -- what you might be
+  missing" panel in the Context lens. Toggle `scout` in the Context tab (on by default; obeyed everywhere).
+- DOCTOR budget now counts AUTHORED lines only -- framework-managed regions (CC:TREEMAP / CC:CHILDREN /
+  CC:BEGIN..CC:END) no longer count against the <200-line CLAUDE.md index budget (a lean root index that carries
+  the whole-tree map was being falsely flagged). `_authored_lines()`.
+- (Local, not shipped) the HP Tuners project-root CLAUDE.md was re-indexed 906->208 lines (~34K->5K tok/trip for
+  its agents) -- deep prose moved to docs/, doors kept. Demonstrates the index-not-dump rule the Doctor fix enforces.
+
 ## 0.99.17 -- 2026-06-28
 - PAYLOAD CHIP IN THE SESSION: right next to each session's context-% gauge there's now a 📦 badge showing the
   ~token weight of the "payload" (everything sent to that agent EVERY trip beyond your message). Hover = a

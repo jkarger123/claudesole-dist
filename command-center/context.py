@@ -329,6 +329,62 @@ def search(q, limit=30):
     return [{"id": r["id"], "kind": r["kind"], "source": r["source"], "ts": r["ts"], "trust": r["trust"],
              "title": r["title"], "snippet": (r["body"] or "")[:200]} for r in items]
 
+# ---- THE SCOUT: proactive "you didn't know to look" surfacing -------------------------------------
+def _ago(now, ts):
+    s = max(0, int((now or time.time()) - (ts or 0)))
+    return (str(s)+"s") if s < 60 else (str(s//60)+"m") if s < 3600 else (str(s//3600)+"h") if s < 86400 else (str(s//86400)+"d")
+
+def scout(subject=None, query=None, limit=6, max_age_hours=336.0, min_rel=0.18, exclude_ids=None, now=None):
+    """The SCOUT -- proactive relevance surfacing (the answer to 'the email you didn't know was in the inbox').
+    Return the freshest, genuinely-relevant POINTERS about a subject/query that the agent was NOT already handed
+    (exclude_ids), so a cheap index pass can flag 'these N recent items may bear on what you're doing -- open if
+    useful' WITHOUT dumping the whole inbox. Distinct from assemble(): assemble returns the cited BRIEF TEXT
+    (the obvious subject matches); scout returns actionable, deduped, FRESHNESS-FIRST pointers. Scores
+    relevance x recency (short half-life) x trust, gates on a freshness window + a relevance floor (a fresh item
+    with no subject/query match survives only if it's very fresh AND carries a link -- a genuine 'new thing').
+    stdlib-only, no LLM (a model re-rank can wrap this later). Returns {ok, subject, query, count, items:[
+    {id,kind,source,title,ts,ago,refs,trust,actor,score,why}]}."""
+    now = now or time.time()
+    exclude = set(int(x) for x in (exclude_ids or []) if str(x).isdigit())
+    nsubj = _norm(str(subject)) if subject else ""
+    cand, matched = {}, set()   # `matched` = items that LEXICALLY matched the query/subject (membership is the
+    if query:                   # relevance signal -- the bm25 magnitude is brittle: a SOLE match normalizes to ~0).
+        for i, rel in _search_ids(query, 60): cand[i] = max(cand.get(i, 0.0), max(rel, 0.4)); matched.add(i)
+    if subject:
+        for i, rel in _search_ids(str(subject), 60): cand[i] = max(cand.get(i, 0.0), max(rel * 0.9, 0.36)); matched.add(i)
+        for i in _recent_ids(60, None, str(subject)): cand[i] = max(cand.get(i, 0.0), 0.5); matched.add(i)  # subject-keyed = strong
+    for i in _recent_ids(40, None, None): cand.setdefault(i, 0.0)   # the unknown-unknown net: fresh items at large
+    rows = _fetch(list(cand.keys()))
+    half = 96.0   # freshness-biased half-life (~4 days): the scout favors the NEW more than assemble does
+    scored, seen_h = [], set()
+    for i, rel in cand.items():
+        if i in exclude: continue
+        r = rows.get(i)
+        if not r: continue
+        age_h = max(0.0, (now - r["ts"]) / 3600.0)
+        if age_h > max_age_hours: continue                              # freshness window
+        recency = math.exp(-age_h / half)
+        refs = json.loads(r["refs"] or "{}")
+        has_link = bool(refs.get("url") or refs.get("link") or refs.get("rel") or refs.get("thread"))
+        subj_match = bool(nsubj and _norm(r["subject"] or "") == nsubj)
+        relevant = (i in matched) or subj_match                        # it matched the query/subject lexically or by key
+        if not relevant:
+            if not (recency > 0.5 and has_link): continue              # not relevant -> only a fresh, actionable "new thing"
+        score = 0.5 * max(rel, min_rel if relevant else 0.0) + 0.4 * recency + 0.1 * (r["trust"] / 3.0)
+        h = hashlib.sha1((str(r["source"]) + "|" + _norm(r["title"])).encode()).hexdigest()
+        if h in seen_h: continue
+        seen_h.add(h)
+        actor = re.sub(r"<[^>]*>", "", (r["actor"] or "")).strip().strip('"').strip()[:40]
+        why = "%s%s, %s ago%s" % (r["kind"], (" from " + actor) if actor else "", _ago(now, r["ts"]),
+                                  (" -- matches '%s'" % subject) if (subject and relevant) else "")
+        scored.append((score, r, refs, why))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    items = [{"id": r["id"], "kind": r["kind"], "source": r["source"], "title": r["title"], "ts": r["ts"],
+              "ago": _ago(now, r["ts"]), "refs": refs, "trust": r["trust"], "actor": r["actor"],
+              "score": round(score, 4), "why": why}
+             for score, r, refs, why in scored[:max(1, int(limit))]]
+    return {"ok": True, "subject": subject, "query": query, "count": len(items), "items": items}
+
 # ---- self test --------------------------------------------------------------------------------------
 def selftest():
     import tempfile
@@ -347,6 +403,13 @@ def selftest():
     assert any("Cummins" in (t or "") for t in titles), titles
     assert all("newsletter" not in (i["title"] or "").lower() for i in b["items"][:2]), "noise ranked too high"
     s = stats(); assert s["events"] == 4, s   # the dup did not create a 5th
+    # SCOUT: surfaces fresh+relevant pointers about the subject, excluding what was already handed, and never the noise.
+    sc = scout(subject="acme-diesel", limit=5)
+    assert sc["count"] >= 2, sc
+    assert all("newsletter" not in (i["title"] or "").lower() for i in sc["items"]), "scout surfaced noise"
+    scx = scout(subject="acme-diesel", limit=5, exclude_ids=[i["id"] for i in sc["items"]])
+    assert scx["count"] == 0, ("scout did not honor exclude_ids", scx)
+    print("SCOUT OK -> surfaced=%d why0=%s" % (sc["count"], sc["items"][0]["why"]))
     print("SELFTEST OK -> events=%d count=%d used=%d fts=%s" % (s["events"], b["count"], b["used"], _FTS))
     print("--- assembled bundle (edge-placed, cited) ---"); print(b["text"][:700])
     return True
@@ -357,4 +420,5 @@ if __name__ == "__main__":
     if cmd == "selftest": selftest()
     elif cmd == "stats": init(); print(json.dumps(stats(), indent=1, default=str))
     elif cmd == "assemble": init(); print(assemble(query=" ".join(sys.argv[2:]) or None)["text"])
-    else: print("usage: context.py [selftest|stats|assemble <query>]")
+    elif cmd == "scout": init(); print(json.dumps(scout(subject=" ".join(sys.argv[2:]) or None), indent=1, default=str))
+    else: print("usage: context.py [selftest|stats|assemble <query>|scout <subject>]")

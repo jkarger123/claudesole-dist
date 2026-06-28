@@ -7670,6 +7670,17 @@ def seed_framework_blocks():
         if changed: save(MREG, m)
     except Exception: pass
 
+def _authored_lines(txt):
+    """Line count EXCLUDING framework-managed regions (CC:TREEMAP / CC:CHILDREN / CC:BEGIN..CC:END). Those are
+    generated (the module map, governance primers) -- not author-fixable -- so they must NOT count against the
+    index budget, else any root doc that carries the whole-tree map trips the limit no matter how lean the prose."""
+    out, skip = 0, False
+    for ln in txt.split("\n"):
+        if "/CC:TREEMAP" in ln or "/CC:CHILDREN" in ln or "CC:END" in ln: skip = False; continue
+        if ("CC:TREEMAP" in ln) or ("CC:CHILDREN" in ln) or ("CC:BEGIN" in ln): skip = True; continue
+        if not skip: out += 1
+    return out
+
 def doctor():
     """Self-maintenance check: flags over-budget docs, sub-tool duplication, managed-block drift, and
        registered components missing a CLAUDE.md -- so the multi-level doc system stays clean as it grows."""
@@ -7680,11 +7691,12 @@ def doctor():
         if not os.path.isfile(cm):
             continue
         txt = open(cm, errors="ignore").read()
-        n = txt.count("\n") + 1
+        n = _authored_lines(txt)        # count AUTHORED lines only (managed map/primers don't count)
+        ntot = txt.count("\n") + 1
         depth = 0 if rel == "" else rel.count("/") + 1
         label = (rel or "<root>") + "/CLAUDE.md"
         if n > BUDGET:
-            issues.append({"sev": "warn", "path": label, "msg": "%d lines (>%d budget) - slim to an index + pointers" % (n, BUDGET)})
+            issues.append({"sev": "warn", "path": label, "msg": "%d authored lines (>%d budget; %d total incl. managed map) - slim to an index + pointers" % (n, BUDGET, ntot)})
         if depth >= 2 and "CC:BEGIN" in txt:
             issues.append({"sev": "warn", "path": label, "msg": "sub-tool doc carries a managed CC block (an ancestor already delivers it) - should be hand content only"})
     for b in managed_overview()["blocks"]:
@@ -8232,28 +8244,59 @@ def _files_brief():
             "file any durable learning into that module's CC:NOTES. Keep each CLAUDE.md an INDEX (point to "
             "detail), never a dump -- the goal is a tree any newcomer instantly understands.")
 
-def _launch_context_brief(subject, budget=900):
+def _launch_context_brief(subject, budget=900, with_ids=False):
     """Pre-load a small, CITED, time-decayed slice about the launch subject (client/module/person) from the
     context layer, so the agent rides in already KNOWING recent calls/emails/decisions/people -- just-in-time +
-    budgeted (no context rot). '' if the context layer is unavailable or has nothing relevant. (Track A.)"""
-    if not subject: return ""
+    budgeted (no context rot). '' if the context layer is unavailable or has nothing relevant. (Track A.)
+    with_ids=True returns (text, [citation ids]) so the Scout can dedup against what was already handed."""
+    empty = ("", []) if with_ids else ""
+    if not subject: return empty
     try:
         b = context.assemble(subject=str(subject), budget_tokens=int(budget))
     except Exception:
+        return empty
+    if not isinstance(b, dict) or not b.get("items"): return empty
+    txt = ("CONTEXT BRIEF -- what we already know about '%s' (%d cited items, freshest first; pre-loaded so you "
+           "start informed. Call /api/context/brief for the full picture; honor provenance/trust):\n\n%s"
+           % (subject, b.get("count", len(b.get("items", []))), (b.get("text") or "").strip()))[:6000]
+    if with_ids:
+        return txt, [c.get("id") for c in (b.get("citations") or []) if c.get("id") is not None]
+    return txt
+
+def _scout_brief(subject, exclude_ids=None, limit=5):
+    """THE SCOUT as a system-prompt block: a tiny POINTER list of FRESH, relevant items the agent was NOT
+    explicitly handed -- the 'you didn't know to look' surface (the email/file/call sitting just out of view that
+    would make the agent a superstar). Self-skips when empty; obeys the `scout` toggle (Context tab). It carries
+    pointers (+ a one-line why + a link/ref), never the full content -- the agent pulls what matters."""
+    if not subject or CC.get("scout", True) is False: return ""
+    try:
+        s = context.scout(subject=str(subject), exclude_ids=exclude_ids, limit=int(limit))
+    except Exception:
         return ""
-    if not isinstance(b, dict) or not b.get("items"): return ""
-    return ("CONTEXT BRIEF -- what we already know about '%s' (%d cited items, freshest first; pre-loaded so you "
-            "start informed. Call /api/context/brief for the full picture; honor provenance/trust):\n\n%s"
-            % (subject, b.get("count", len(b.get("items", []))), (b.get("text") or "").strip()))[:6000]
+    its = (s or {}).get("items") or []
+    if not its: return ""
+    lines = []
+    for it in its:
+        ref = it.get("refs") or {}
+        loc = ref.get("url") or ref.get("link") or ref.get("rel") or (("thread:" + ref["thread"]) if ref.get("thread") else "")
+        lines.append("- [%s] %s (%s)%s" % (it.get("kind"), (it.get("title") or "").strip()[:90],
+                                            it.get("why", ""), ("  -> " + str(loc)) if loc else ""))
+    return ("POSSIBLY RELEVANT -- you were NOT handed these, but the context layer flags them as fresh + relevant "
+            "to '%s'. Skim; pull any that matter (GET /api/context/assemble?subject=... or open the ref). Ignore if "
+            "not useful:\n%s" % (subject, "\n".join(lines)))[:1800]
 
 def _launch_sys_context(subject=None):
     """The SYSTEM-level context block injected into a launched session via --append-system-prompt (no forced
     turn): how to place files + the locked-core/extend awareness + a focus-routed context brief about the
-    subject. Maximizes what the agent knows without bloating -- each part self-skips when empty. The context
-    brief obeys the `context_brief` toggle (Context tab); the awareness parts always go (they're tiny + safety)."""
+    subject + the SCOUT's fresh-relevant pointers. Maximizes what the agent knows without bloating -- each part
+    self-skips when empty. The brief obeys `context_brief`, the Scout obeys `scout` (Context tab); the awareness
+    parts always go (tiny + safety)."""
     parts = [_files_brief(), _extend_brief()]
     if CC.get("context_brief", True) is not False:
-        parts.append(_launch_context_brief(subject))
+        cb, ids = _launch_context_brief(subject, with_ids=True)
+        if cb: parts.append(cb)
+        sc = _scout_brief(subject, exclude_ids=ids)   # the Scout: fresh items NOT already in the brief
+        if sc: parts.append(sc)
     return "\n\n".join(p for p in parts if p)
 
 def _extend_brief():
@@ -8340,6 +8383,14 @@ def _system_brief():
                 base += ("\n\nRECENT ACROSS THE OPERATION (freshest first, cited -- you're already caught up on our "
                          "calls/emails/tasks/actions/notes; call /api/context/brief for any subject in depth):\n\n"
                          + (rb.get("text") or "").strip()[:4500])
+        except Exception: pass
+        # THE SCOUT (proactive): fresh + relevant pointers about the CURRENT focus the chief wasn't handed --
+        # the 'you didn't know to look' surface, focus-routed so it tracks what the operator is on right now.
+        try:
+            if CC.get("scout", True) is not False:
+                fs = (focus_now() or {}).get("subject")
+                sc = _scout_brief(fs) if fs else ""
+                if sc: base += "\n\n" + sc
         except Exception: pass
         return base
     except Exception:
@@ -8621,6 +8672,24 @@ def context_package(session=None, subject=None):
             "total_tokens": sum(c["tokens"] for c in comps),
             "note": "The 'payload' beyond your message = what ClaudeFather assembles + what Claude Code auto-loads each trip. Claude Code also adds its OWN base system prompt + the running conversation history (inside the agent, not shown here)."}
 
+def scout_panel(subject=None):
+    """THE SCOUT surface: 'you might want to look at these' -- fresh, relevant pointers for a subject (or, with no
+    subject, the CURRENT focus). The proactive answer to 'the agent doesn't know what it doesn't know': a cheap
+    index pass over the whole substrate flags what's fresh + relevant now, as POINTERS (never a dump)."""
+    subj = (subject or "").strip(); auto = False
+    if not subj:
+        try: subj = (focus_now() or {}).get("subject") or ""
+        except Exception: subj = ""
+        auto = bool(subj)
+    on = CC.get("scout", True) is not False
+    if not subj:
+        return {"ok": True, "subject": None, "on": on, "items": [],
+                "note": "no subject -- pass ?subject=<client/module> or turn on Focus so the Scout tracks what you're on."}
+    try: s = context.scout(subject=subj, limit=10)
+    except Exception as e: return {"ok": False, "error": str(e)[:120]}
+    s["auto_subject"] = auto; s["on"] = on
+    return s
+
 def _cc_config_set(updates):
     """Persist toggle(s) into cc.config.json (0600) + update the live CC. Used by the Context tab controls."""
     try:
@@ -8640,6 +8709,8 @@ def context_settings():
             "doc": "Every launched session is handed a budgeted, CITED brief about its subject (recent calls/emails/decisions/people) as a system prompt -- so the agent rides in already informed instead of starting blank."},
         "context_ingest": {"on": CC.get("context_ingest", True) is not False, "label": "Context ingest (the substrate)",
             "doc": "Pull our calls/email/calendar/clips/notes/tasks/actions + each extension's relevant intel into ONE provenance-stamped store the briefs draw from (idempotent, every 15 min). Off = the store stops updating."},
+        "scout": {"on": CC.get("scout", True) is not False, "label": "The Scout (proactive surfacing)",
+            "doc": "Beyond the cited brief, a cheap index pass flags FRESH items relevant to what you're doing that you were NOT handed -- the email/file/call just out of view -- as pointers in the launch brief + the Scout panel. Solves 'the agent doesn't know what it doesn't know' without dumping the inbox. Off = only the explicit brief is injected."},
         "housekeeping": {"on": CC.get("housekeeping", True) is not False, "label": "Automatic housekeeping",
             "doc": "Hourly: regenerate the module map (CC:CHILDREN + CC:TREEMAP), run Doctor, and surface over-budget docs / drift -- the doc tree stays clean with zero manual upkeep."},
         "autocompact": {"on": _autocompact_on(), "pct": _autocompact_pct(), "label": "Graceful auto-compaction",
@@ -11761,6 +11832,8 @@ class H(BaseHTTPRequestHandler):
                 kinds=([k for k in (q.get("kinds", [""])[0] or "").split(",") if k] or None)), default=str))
         if u.path == "/api/context/search":
             return self._s(200, json.dumps(context.search((q.get("q", [""])[0]) or "", int((q.get("limit", ["30"])[0]) or 30)), default=str))
+        if u.path == "/api/scout":   # THE SCOUT: fresh, relevant pointers you weren't handed (subject= or current focus)
+            return self._s(200, json.dumps(scout_panel((q.get("subject", [""])[0]) or None), default=str))
         if u.path == "/api/system":  # self-describing capability map (runtime + surfaces) -- for UI gating + agents
             return self._s(200, json.dumps(system_info(), default=str))
         if u.path == "/api/browser/commands":  # the desktop browser polls for agent-queued commands (Browser v2)
@@ -15194,9 +15267,40 @@ async function loadContext(){
     +'<button class="mini go" onclick="ctxAssemble()">Assemble</button>'
     +'<button class="mini" onclick="ctxBrief()" title="Assemble this context and hand it to a session -- the agent rides in already knowing">&#128203; Brief a session</button></div>'
     +'<div id="ctxOut" style="margin-top:10px"></div></div>';
-  h += ctxCtlCard((cs&&cs.settings)||{}) + ctxPkgCard();
+  h += ctxScoutCard() + ctxCtlCard((cs&&cs.settings)||{}) + ctxPkgCard();
   document.getElementById("grid").innerHTML='<div class="modstack"><div id="ctxFocus"></div><div id="ctxHoming"></div>'+h+'</div>';
-  loadFocus();
+  loadFocus(); ctxScoutGo();
+}
+// ---- THE SCOUT panel: proactive "you might want to look at these" -- fresh, relevant pointers you weren't handed ----
+function ctxScoutCard(){
+  return '<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128064; The Scout &mdash; what you might be missing</b> <span class="sub">fresh + relevant, surfaced before you ask</span></div>'
+    +'<div class="meta" style="margin:6px 0">The answer to &ldquo;the agent can\'t know what it doesn\'t know.&rdquo; A cheap pass over everything ClaudeFather knows flags the items &mdash; an email, a file, a call &mdash; that are <b>fresh and relevant to what you\'re on right now</b> but that nobody pulled into view. Pointers only, never a dump.</div>'
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
+    +'<input id="scoutSubj" placeholder="subject (blank = your current focus)" style="'+COMMS_INP+';flex:1;min-width:200px" onkeydown="if(event.key===\'Enter\')ctxScoutGo()">'
+    +'<button class="mini go" onclick="ctxScoutGo()">&#128064; Scan</button></div>'
+    +'<div id="scoutOut" class="meta" style="margin-top:10px">Scanning&hellip;</div></div>';
+}
+async function ctxScoutGo(){
+  var el=document.getElementById('scoutOut'); if(!el)return;
+  var subj=(document.getElementById('scoutSubj')||{}).value||'';
+  el.innerHTML='Scanning&hellip;';
+  try{
+    var d=await(await fetch('/api/scout'+(subj?('?subject='+encodeURIComponent(subj)):''))).json();
+    if(!d.on){el.innerHTML='<span style="color:#d29922">The Scout is OFF.</span> Turn it on in Context engineering below.';return;}
+    if(!d.subject){el.innerHTML=e2(d.note||'No subject &mdash; type one above, or turn on Focus so the Scout tracks what you\'re working on.');return;}
+    var subjlbl='&ldquo;'+e2(d.subject)+'&rdquo;'+(d.auto_subject?' <span class="sub">(your current focus)</span>':'');
+    var its=d.items||[];
+    if(!its.length){el.innerHTML='Nothing fresh + relevant to '+subjlbl+' right now &mdash; the Scout is quiet (that\'s good).';return;}
+    var rows=its.map(function(it){
+      var ref=it.refs||{};var loc=ref.url||ref.link||(ref.rel?('file: '+ref.rel):'')||(ref.thread?('thread '+ref.thread):'');
+      var open=ref.url?('<a href="'+esc(ref.url)+'" target="_blank" rel="noopener">open &#8599;</a>'):(loc?('<span class="sub">'+e2(loc)+'</span>'):'');
+      return '<div style="display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--line)">'
+        +'<span class="badge" style="background:#1f6feb22;color:#58a6ff;flex:0 0 auto">'+esc(it.kind)+'</span>'
+        +'<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:12.5px">'+e2(it.title||'(untitled)')+'</div>'
+        +'<div class="sub" style="margin-top:1px">'+e2(it.why||'')+(open?(' &middot; '+open):'')+'</div></div></div>';
+    }).join('');
+    el.innerHTML='<div style="font-size:12px;color:var(--mut);margin-bottom:2px">'+its.length+' for '+subjlbl+' &mdash; skim; pull what matters:</div>'+rows;
+  }catch(e){el.innerHTML='<span style="color:#f85149">Scout scan failed.</span>';}
 }
 // ---- Context-engineering CONTROLS + docs (toggles for the features that make sense to toggle) ----
 function ctxCtlCard(st){
