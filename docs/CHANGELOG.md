@@ -3,6 +3,26 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.22 -- 2026-06-28
+- SMART FIXES -- closed the quality gaps in routing/harvest/drift, using the node's Claude SUBSCRIPTION (headless
+  `claude -p`, NO metered cost) deterministic-first (the model fires ONLY on ambiguous cases). `_claude_text()`.
+  - SEMANTIC ROUTING (fix 1): when keyword routing is unsure (<0.6), the model picks the real home -- "firmware
+    brick pre-flash gate" now routes to `patches` (keyword logic missed it). Confident routes skip the model
+    entirely (verified 0.009s, llm=False). `_llm_route()`.
+  - SMART HARVEST (fix 2): an abandoned conversation's transcript tail is distilled into REAL durable notes for the
+    folder records (not just a pointer); pointer remains the always-safe fallback. `_distill_harvest()`,
+    `_session_transcript_path()`, `_transcript_tail()`.
+  - TOPIC REFRESH (fix 4, free): housekeeping refreshes each live conversation's topic from its recent transcript
+    (`_refresh_topics`), so relevance-matching tracks what it's ACTUALLY on now, not just its launch subject.
+  - DRIFT FLAG (fix 3, free): the hygiene panel flags a conversation working OFF its scope (recent keywords vs
+    folder) with an off-scope badge -- a nudge to warm-transfer it.
+  - CONFLICT FLAG (fix 5, free): a harvested note that flips a known opposite of an existing note is tagged
+    [CONFLICT?] for the operator instead of two contradictory notes silently coexisting. `_conflict_tag()`.
+  - ARCHIVE DIAL (fix 6): the idle-before-archive window is now a live, adjustable dial (Workspace hygiene panel
+    + cc.config `idle_archive_sec`), read dynamically -- no restart to change.
+  - Toggle `smart` (on by default; off = pure keyword/heuristic, no model calls). (The single-Mac/stdlib scale
+    boundary is by design -- multi-node is the mesh/federation story, not a bug to fix.)
+
 ## 0.99.21 -- 2026-06-28
 - RECONCILIATION -- many conversations per folder converge on the FOLDER's memory (the office-records model). The
   fix for "Sarah opens 5 sessions in a folder and it's chaos": conversations are ephemeral meetings; a folder's
