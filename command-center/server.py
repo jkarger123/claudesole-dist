@@ -1856,22 +1856,42 @@ def _session_loc(cwd):
         return "…/" + "/".join(rel.split("/")[-2:])
     return os.path.basename(c)   # outside the project tree (an extension dir, CC_HOME, etc.)
 
+def _session_kind(name):
+    """Classify a session for the taskbar: work (real launched work) | chief (a Chief-of-Staff comms endpoint) |
+    service (the live product bridge/crons or a config-declared protected) | loop (a Ralph loop)."""
+    if name.startswith("ralph-"): return "loop"
+    if name in ("t2tbridge", "t2tcrons") or name in (CC.get("protected_sessions") or []): return "service"
+    if name == globals().get("CHIEF") or name.startswith("chief"): return "chief"
+    return "work"
+def _is_server_session(name):
+    """The dashboard's OWN server processes (hpcc / cc-<instance>) -- never work; hidden from every session view."""
+    return name == "hpcc" or bool(re.match(r"^cc-[A-Za-z0-9_-]+$", name))
+
 def tmux_sessions():
     code, o, _ = sh([TMUX, "list-sessions", "-F",
                      "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}"])
-    HIDE = {"hpcc"}   # hide the CC web-server's own tmux entirely
     cwds = _session_cwds()   # always -- also used to show WHERE each session is launched
     res = []
     if code == 0:
         for ln in o.splitlines():
             p = ln.split("|")
-            if len(p) >= 4 and p[0] not in HIDE:
-                if SCOPE_SESSIONS and p[0] != globals().get("CHIEF") and not _session_in_project(cwds.get(p[0], "")):
-                    continue  # belongs to a different project (the Chief is always kept -- it's THIS console's comms endpoint)
-                res.append({"name": p[0], "label": _session_label(p[0]), "loc": _session_loc(cwds.get(p[0], "")), "cwd": cwds.get(p[0], ""),
-                            "created": float(p[1] or 0), "activity": float(p[2] or 0),
-                            "attached": p[3] != "0", "protected": _protected(p[0]),
-                            "chief": p[0] == globals().get("CHIEF")})
+            if len(p) < 4: continue
+            nm = p[0]
+            if _is_server_session(nm): continue            # the CC web-server processes -- never a session you touch
+            cwd = cwds.get(nm, "")
+            is_chief = (nm == globals().get("CHIEF"))
+            mine = is_chief or _session_in_project(cwd)     # belongs to THIS console (its chief + its project work)
+            if SCOPE_SESSIONS and not mine: continue        # a scoped node never shows another project's sessions
+            kind = _session_kind(nm)
+            lbl = _session_label(nm); node = ""
+            if nm.startswith("chief-"):                      # another instance's Chief -> clear label + node tag
+                node = nm[len("chief-"):]; lbl = "Chief of Staff"
+            res.append({"name": nm, "label": lbl, "kind": kind, "node": node, "mine": mine,
+                        "loc": _session_loc(cwd), "cwd": cwd,
+                        "created": float(p[1] or 0), "activity": float(p[2] or 0),
+                        "attached": p[3] != "0",
+                        "protected": _protected(nm) or kind in ("chief", "service", "loop"),
+                        "chief": is_chief})
     res.sort(key=lambda x: -x["activity"]); return res
 
 # ---- token usage + per-session remaining-context -----------------------------
@@ -7187,7 +7207,7 @@ def session_bar():
     """Lightweight feed for the global desktop sessions taskbar: every project session + its live busy state
     (busy = Claude is mid-turn). The frontend watches for busy->idle transitions to flash a tile gold ('done').
     Busy is computed in parallel so a dozen sessions don't serialize a dozen capture-pane calls."""
-    sess = tmux_sessions()
+    sess = [s for s in tmux_sessions() if s.get("kind") not in ("service", "loop")]   # taskbar = WORK + CHIEFS only (services/loops live in their own lenses; servers already hidden)
     busy = {}
     def chk(n):
         try: busy[n] = _pane_busy(n)
@@ -7195,10 +7215,12 @@ def session_bar():
     ts = [threading.Thread(target=chk, args=(s["name"],)) for s in sess]
     for t in ts: t.start()
     for t in ts: t.join()
-    return {"sessions": [{"name": s["name"], "label": s["label"], "loc": s.get("loc", ""), "cwd": s.get("cwd", ""),
-                          "busy": busy.get(s["name"], False),
+    return {"sessions": [{"name": s["name"], "label": s["label"], "kind": s.get("kind", "work"),
+                          "node": s.get("node", ""), "mine": s.get("mine", True),
+                          "loc": s.get("loc", ""), "cwd": s.get("cwd", ""), "busy": busy.get(s["name"], False),
                           "chief": s.get("chief", False), "attached": s.get("attached", False),
-                          "protected": bool(s.get("protected", False))} for s in sess]}
+                          "protected": bool(s.get("protected", False))} for s in sess],
+            "unscoped": (not SCOPE_SESSIONS), "instance": INSTANCE_ID}
 
 def _wait_idle(name, timeout, settle=3):
     start = time.time(); calm = 0
@@ -20740,7 +20762,11 @@ async function sbPoll(){
   // (was: cleared + bailed on non-desktop -> that left the mobile dock an empty black bar). Populate at ALL
   // widths now; the hover-blowup preview stays desktop-only (event-driven; #sessprev is display:none on mobile).
   var r; try{ r=await(await fetch('/api/session-bar')).json(); }catch(e){ return; }
-  var list=r.sessions||[], names={};
+  window.SB_UNSCOPED=!!r.unscoped;   // an overseer that sees every node's sessions -> offer the Mine/All toggle
+  if(window.SB_SCOPE===undefined){ try{window.SB_SCOPE=localStorage.getItem('cc_sb_scope')||(r.unscoped?'mine':'all');}catch(e){window.SB_SCOPE=r.unscoped?'mine':'all';} }
+  var full=r.sessions||[];
+  var list=(window.SB_UNSCOPED && window.SB_SCOPE==='mine') ? full.filter(function(s){return s.mine;}) : full;
+  var names={};
   SB.list=list;
   list.forEach(function(s){ names[s.name]=1;
     // busy -> idle = just finished -> flag for the gold pulse, UNLESS you're already viewing it big in the
@@ -20752,6 +20778,7 @@ async function sbPoll(){
   Object.keys(SB.prev).forEach(function(n){ if(!names[n]) delete SB.prev[n]; });
   sbRender(list);
 }
+function sbScopeToggle(){ window.SB_SCOPE=(window.SB_SCOPE==='mine')?'all':'mine'; try{localStorage.setItem('cc_sb_scope',window.SB_SCOPE);}catch(e){} SB._sig=''; sbPoll(); }
 function sbViewing(n){ return LENS==='sessions' && SESSBIG===n; }   // is this session the one open big in the Sessions tab?
 function sbRender(list){
   var bar=document.getElementById('sessbar'); if(!bar)return;
@@ -20766,13 +20793,15 @@ function sbRender(list){
   var doneCount=list.filter(function(s){return SB.done[s.name];}).length;
   // Rebuild the DOM ONLY when the SET of tiles changes -- not every poll -- so the tile under your cursor is
   // not destroyed mid-hover (that's what made them "move around"/hard to use). State is applied in place below.
-  var sig=list.map(function(s){return s.name+':'+(s.label||'');}).join('|');   // label in sig so a self-named session refreshes its tile
+  function sbLbl(s){ return (s.label||s.name)+((s.node&&!s.chief)?(' · '+s.node):''); }   // a NODE's chief -> "Chief of Staff · carsearch"; your own -> just "Chief of Staff"
+  var sig=(window.SB_SCOPE||'')+'#'+list.map(function(s){return s.name+':'+(s.label||'')+':'+(s.node||'');}).join('|');
   if(sig!==SB._sig){
-    var h='<span class="sb-title">Sessions</span>';
+    var tog=window.SB_UNSCOPED?('<button class="sb-tog" onclick="sbScopeToggle()" title="Switch between this overseer\'s own sessions and every node\'s sessions" style="margin:0 8px 0 4px;background:var(--card2,#1a1a22);border:1px solid var(--line,#2a2a33);color:var(--mut,#aab);border-radius:7px;padding:2px 9px;font-size:11px;cursor:pointer">'+(window.SB_SCOPE==='mine'?'◉ Mine':'◈ All nodes')+'</button>'):'';
+    var h='<span class="sb-title">Sessions</span>'+tog;
     h+= list.length ? list.map(function(s){
-      return '<div class="sb-tile" data-n="'+e2(s.name)+'" draggable="true" ondragstart="sbDragStart(event,\''+esc(s.name)+'\')" ondragend="sbDragEnd()" onmouseenter="sbHover(\''+esc(s.name)+'\',this)" onmouseleave="sbLeave()" onclick="sbClick(\''+esc(s.name)+'\')" title="'+e2(s.label||s.name)+' — drag up to split, or click to toggle in the workspace">'
-        +'<span class="sb-dot"></span><span class="sb-lbl">'+e2(s.label||s.name)+'</span></div>';
-    }).join('') : '<span class="sb-empty">no sessions</span>';
+      return '<div class="sb-tile" data-n="'+e2(s.name)+'" draggable="true" ondragstart="sbDragStart(event,\''+esc(s.name)+'\')" ondragend="sbDragEnd()" onmouseenter="sbHover(\''+esc(s.name)+'\',this)" onmouseleave="sbLeave()" onclick="sbClick(\''+esc(s.name)+'\')" title="'+e2(sbLbl(s))+' — drag up to split, or click to toggle in the workspace">'
+        +'<span class="sb-dot"></span><span class="sb-lbl">'+e2(sbLbl(s))+'</span></div>';
+    }).join('') : '<span class="sb-empty">'+(window.SB_UNSCOPED&&window.SB_SCOPE==='mine'?'no sessions here — click All nodes to see node sessions':'no sessions')+'</span>';
     bar.innerHTML=h; SB._sig=sig;
   }
   list.forEach(function(s){   // apply busy/done/chief in place -- no DOM churn

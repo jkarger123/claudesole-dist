@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.25 -- 2026-06-28
+- SESSIONS TASKBAR CLARITY (the bottom bar). It was showing raw infrastructure on the unscoped overseer --
+  the CC SERVER processes (cc-overseer/cc-carsearch/cc-shopos/hpcc) and the product SERVICES (t2tbridge =
+  "Live bridge" blank, t2tcrons = "Bridge crons" stuck at an ssh password prompt) mixed in with real work.
+  - Session classification: `_session_kind()` (work | chief | service | loop) + `_is_server_session()`. The
+    taskbar now shows WORK + CHIEFS only -- server processes are hidden everywhere; services/loops live in their
+    own lenses. Each session carries `kind` + `node` + `mine`.
+  - Clear labels: a node's Chief shows "Chief of Staff - <node>" (your own just "Chief of Staff"), not a raw
+    `chief-carsearch`. Other nodes' chiefs are protected (not casually killable).
+  - OVERSEER toggle (your ask): a Mine / All nodes switch on the taskbar (shown only on an unscoped overseer) --
+    "Mine" = just this console's sessions; "All nodes" = every node's, labeled by node. Persists per device.
+
 ## 0.99.24 -- 2026-06-28
 - INSTALL TYPE asked at provisioning + a naming-collision fix. The "+ Add a ClaudeFather" wizard now ASKS the
   node **Install type** -- **agency** (official signed tools only; locked + safe; what a client/tenant gets) vs
