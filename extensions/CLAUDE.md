@@ -1,5 +1,13 @@
 # Extensions — the ClaudeFather Marketplace catalog
 
+<!-- CC:CHILDREN auto-managed by the Command Center; do not hand-edit -->
+**Sub-tools in this folder** (you can launch into any of these; file a learning to the one it belongs to):
+- `google-workspace/` -- A ClaudeFather integration extension (extension.json id google-workspace). It does two things:
+- `granola/` -- Turn Granola call transcripts into REVIEWED updates to the agency tree: a dated note in the matched
+- `incident-commander/payload/` -- I am the Incident Commander for this ClaudeFather. Scoped agent-tool: my own dir, this charter, tools/,
+- `skimlinks-merchant-sync/payload/` -- I am the Skimlinks sync tool. I keep a tenant's full Skimlinks affiliate-merchant catalog mirrored into their
+<!-- /CC:CHILDREN -->
+
 The installable add-on system. Each subdir here is **one extension**: an external integration, an
 agent-tool, a skill, a theme, or a lens. The catalog ships with the framework (propagates to every
 deployment via `cc-update`); **install state + secrets are per-deployment** and gitignored.

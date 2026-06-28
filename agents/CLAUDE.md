@@ -1,5 +1,21 @@
 # Agents -- scoped agent-tools (the roster)
 
+<!-- CC:CHILDREN auto-managed by the Command Center; do not hand-edit -->
+**Sub-tools in this folder** (you can launch into any of these; file a learning to the one it belongs to):
+- `backup/` -- I am the Backup agent for this control center -- a scoped agent-tool (my own dir + charter + tools +
+- `cost/` -- I am the Cost agent for this ClaudeFather. Scoped agent-tool: my own dir, charter, tools/,
+- `deploy/` -- I am the Deploy agent for this ClaudeFather. I am a scoped agent-tool: my own directory, my own
+- `google/` -- I am the Google agent for this ClaudeFather. Scoped agent-tool: my own dir, charter, config.json,
+- `ideas/` -- I am the Ideas agent -- a scoped agent-tool for capturing, refining, and promoting ideas into real
+- `incidents/` -- I am the Incidents agent for this ClaudeFather. Scoped agent-tool: my own dir, charter, tools/,
+- `provision/` -- I am the Provision agent for this ClaudeFather platform. I am the brain behind the "+ Add a
+- `routines/` -- I am the Routines agent -- a scoped agent-tool for scheduled, recurring operations (the control
+- `security/` -- I am the Security agent for this control center. I am a scoped agent-tool: my own directory, my
+- `setup/` -- I am the Setup agent. I run inside a freshly-created ClaudeFather instance and walk the operator
+- `skimlinks-merchant-sync/` -- I am the Skimlinks sync tool. I keep a tenant's full Skimlinks affiliate-merchant catalog mirrored into their
+- `usage/` -- I am the Usage agent -- a scoped agent-tool that owns token + cost analytics for the control center.
+<!-- /CC:CHILDREN -->
+
 This dir is the ClaudeFather's **agent-tool roster**. Each subdir is one *scoped agent-tool*: a
 focused capability with its OWN dir + `CLAUDE.md` charter + (optional) `tools/` + `config.json` +
 `reports/` + hard boundaries. The Command Center auto-discovers every dir here and renders it in the

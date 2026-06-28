@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.16 -- 2026-06-28
+- THE CONTEXT TAB -- one home for all context-engineering features, fully documented, with toggles + a payload
+  inspector:
+  - CONTROLS + DOCS: the Context lens now has a "Context engineering" panel that toggles the features that make
+    sense to toggle -- `context_brief` (auto brief at launch), `context_ingest` (the substrate), `housekeeping`
+    (auto map/Doctor upkeep), `autocompact` -- each with a one-line explainer (persists to cc.config, live), plus
+    a note on the native no-toggle levers (cascading map, path-scoped rules, skills, hooks). The features now obey
+    their toggles (`_launch_sys_context`/chief brief, backfill loop, housekeeping loop).
+  - CONTEXT PACKAGE INSPECTOR (demystify the "payload"): pick a session or subject -> see EVERYTHING beyond your
+    message that reaches the agent each trip -- the injected system briefing, the CLAUDE.md chain Claude Code
+    auto-loads, the cited context brief, and the enabled tools -- each with a token weight bar + plain note +
+    expandable content + a total. New `context_package()` + `/api/context-package`; `/api/context-settings`.
+  - NAV CATEGORIES FIX: older browsers whose nav stayed flat (or carried only the legacy "Google" group) now
+    MIGRATE once to the default categories (`_catseed`); genuine custom multi-group setups are preserved. Fixes
+    "only Mission Control got auto-categories." Verified: a simulated legacy state migrated to full categories.
+
 ## 0.99.15 -- 2026-06-28
 - AUTOMATIC HOUSEKEEPING (Track B core of the context strategy): the doc/context tree now stays clean with zero
   manual upkeep. New `_housekeeping_loop` (hourly, idempotent, daemon): regenerates the module map (every

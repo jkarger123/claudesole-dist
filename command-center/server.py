@@ -8236,8 +8236,11 @@ def _launch_context_brief(subject, budget=900):
 def _launch_sys_context(subject=None):
     """The SYSTEM-level context block injected into a launched session via --append-system-prompt (no forced
     turn): how to place files + the locked-core/extend awareness + a focus-routed context brief about the
-    subject. Maximizes what the agent knows without bloating -- each part self-skips when empty."""
-    parts = [_files_brief(), _extend_brief(), _launch_context_brief(subject)]
+    subject. Maximizes what the agent knows without bloating -- each part self-skips when empty. The context
+    brief obeys the `context_brief` toggle (Context tab); the awareness parts always go (they're tiny + safety)."""
+    parts = [_files_brief(), _extend_brief()]
+    if CC.get("context_brief", True) is not False:
+        parts.append(_launch_context_brief(subject))
     return "\n\n".join(p for p in parts if p)
 
 def _extend_brief():
@@ -8319,7 +8322,7 @@ def _system_brief():
         # RECENT ACROSS THE OPERATION (A.5): a budgeted, cited recency slice from the context layer so the chief is
         # current on our movements -- calls/emails/tasks/actions/notes -- without having to go ask for it.
         try:
-            rb = context.assemble(budget_tokens=1000)
+            rb = context.assemble(budget_tokens=1000) if (CC.get("context_brief", True) is not False) else None
             if isinstance(rb, dict) and rb.get("items"):
                 base += ("\n\nRECENT ACROSS THE OPERATION (freshest first, cited -- you're already caught up on our "
                          "calls/emails/tasks/actions/notes; call /api/context/brief for any subject in depth):\n\n"
@@ -8547,9 +8550,88 @@ def _epoch(s):
 
 def _context_backfill_loop():
     while True:
-        try: _context_backfill()
+        try:
+            if CC.get("context_ingest", True) is not False: _context_backfill()
         except Exception: pass
         time.sleep(900)   # re-ingest every 15 min (idempotent)
+
+def _toklen(s):
+    """Rough token estimate (~4 chars/token) -- good enough for the context-package size bars."""
+    return max(0, len(s or "")) // 4
+
+def context_package(session=None, subject=None):
+    """DEMYSTIFY THE PAYLOAD: everything (beyond your message) that goes to an agent on a trip -- the system
+    briefing ClaudeFather injects, the CLAUDE.md chain Claude Code auto-loads, the cited context brief, and the
+    enabled tools -- each with a rough token estimate + a plain note. Reconstructed from what WE inject + what the
+    framework loads (Claude Code's own base system prompt + the running conversation aren't visible here)."""
+    sess = re.sub(r"[^A-Za-z0-9_-]", "", session or "")[:64]
+    cwd = (_pane_cwd(sess) if sess else None) or None
+    subj = (subject or (os.path.basename(cwd.rstrip("/")) if cwd else "") or "").strip()
+    comps = []
+    try:
+        sysctx = _launch_sys_context(subj)
+        if sysctx: comps.append({"id": "system", "label": "ClaudeFather system briefing (injected at launch)",
+            "tokens": _toklen(sysctx), "content": sysctx[:8000],
+            "note": "A system prompt we add at launch (no turn): file-placement rules, locked-core/extend guidance, and a focus-routed context brief."})
+    except Exception: pass
+    try:
+        chain = [PROJECT]
+        if cwd and os.path.realpath(cwd) != os.path.realpath(PROJECT):
+            rel = os.path.relpath(cwd, PROJECT)
+            if not rel.startswith(".."):
+                acc = PROJECT
+                for part in rel.split(os.sep):
+                    acc = os.path.join(acc, part); chain.append(acc)
+        seen = set()
+        for d in chain:
+            cm = os.path.join(d, "CLAUDE.md")
+            if os.path.isfile(cm) and cm not in seen:
+                seen.add(cm); t = _read(cm)
+                lbl = "CLAUDE.md (project root)" if os.path.realpath(d) == os.path.realpath(PROJECT) else ("CLAUDE.md (" + os.path.relpath(d, PROJECT) + ")")
+                comps.append({"id": "claudemd:" + lbl, "label": lbl, "tokens": _toklen(t), "content": t[:8000],
+                    "note": "Auto-loaded by Claude Code (the cascading CLAUDE.md; the root carries the whole-tree module map)."})
+    except Exception: pass
+    try:
+        if subj:
+            b = context.assemble(subject=subj, budget_tokens=900)
+            if isinstance(b, dict) and b.get("items"):
+                comps.append({"id": "brief", "label": "Context brief -- cited slice about '" + subj + "'",
+                    "tokens": b.get("used") or _toklen(b.get("text")), "content": (b.get("text") or "")[:6000],
+                    "note": str(b.get("count", 0)) + " items from the context layer (relevance x recency x trust, budgeted, cited). Already part of the system briefing above -- shown standalone so you can see exactly what was selected."})
+    except Exception: pass
+    try:
+        extc = _ext_agent_context()
+        if extc: comps.append({"id": "tools", "label": "Enabled tools (extension AGENT.md)", "tokens": _toklen(extc),
+            "content": extc[:6000], "note": "Usage docs for the extensions ENABLED on THIS node only (per-node-clean -- a node never hears about tools it doesn't have)."})
+    except Exception: pass
+    return {"ok": True, "session": sess or None, "subject": subj, "components": comps,
+            "total_tokens": sum(c["tokens"] for c in comps),
+            "note": "The 'payload' beyond your message = what ClaudeFather assembles + what Claude Code auto-loads each trip. Claude Code also adds its OWN base system prompt + the running conversation history (inside the agent, not shown here)."}
+
+def _cc_config_set(updates):
+    """Persist toggle(s) into cc.config.json (0600) + update the live CC. Used by the Context tab controls."""
+    try:
+        CC.update(updates)
+        cfg = json.load(open(_CC_CONFIG)) if os.path.isfile(_CC_CONFIG) else {}
+        cfg.update(updates)
+        tmp = _CC_CONFIG + ".tmp"; json.dump(cfg, open(tmp, "w"), indent=2)
+        try: os.chmod(tmp, 0o600)
+        except Exception: pass
+        os.replace(tmp, _CC_CONFIG); return True
+    except Exception: return False
+
+def context_settings():
+    """Current state + doc for each context-engineering toggle -- drives the Context tab controls panel."""
+    return {"ok": True, "settings": {
+        "context_brief": {"on": CC.get("context_brief", True) is not False, "label": "Auto context brief at launch",
+            "doc": "Every launched session is handed a budgeted, CITED brief about its subject (recent calls/emails/decisions/people) as a system prompt -- so the agent rides in already informed instead of starting blank."},
+        "context_ingest": {"on": CC.get("context_ingest", True) is not False, "label": "Context ingest (the substrate)",
+            "doc": "Pull our calls/email/calendar/clips/notes/tasks/actions + each extension's relevant intel into ONE provenance-stamped store the briefs draw from (idempotent, every 15 min). Off = the store stops updating."},
+        "housekeeping": {"on": CC.get("housekeeping", True) is not False, "label": "Automatic housekeeping",
+            "doc": "Hourly: regenerate the module map (CC:CHILDREN + CC:TREEMAP), run Doctor, and surface over-budget docs / drift -- the doc tree stays clean with zero manual upkeep."},
+        "autocompact": {"on": _autocompact_on(), "pct": _autocompact_pct(), "label": "Graceful auto-compaction",
+            "doc": "When a session's context fills past " + str(int(_autocompact_pct())) + "%, it writes a full handoff, runs /compact, then re-reads it -- so a long session never blows its window."},
+    }}
 
 # ---- AUTOMATIC HOUSEKEEPING (Track B): keep the context/doc tree clean with zero manual upkeep. Regenerates the
 # module map (treemap + per-folder children) so it never drifts on a node nobody is viewing, runs Doctor, and
@@ -8581,7 +8663,8 @@ def _housekeeping_once():
 def _housekeeping_loop():
     time.sleep(150)                  # let boot + the first treemap/integrity passes settle
     while True:
-        try: _housekeeping_once()
+        try:
+            if CC.get("housekeeping", True) is not False: _housekeeping_once()
         except Exception: pass
         time.sleep(3600)             # hourly
 
@@ -11655,6 +11738,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/clips":         # CAPTURE SPINE: the clip tray + pending proposals (review queue)
             return self._s(200, json.dumps(clips.clips_list((q.get("subject", [None])[0]), (q.get("status", [None])[0]))))
         if u.path == "/api/context/stats": return self._s(200, json.dumps(context.stats(), default=str))
+        if u.path == "/api/context-settings": return self._s(200, json.dumps(context_settings()))
+        if u.path == "/api/context-package":     # demystify the payload: what (beyond your message) reaches the agent
+            return self._s(200, json.dumps(context_package((q.get("session") or [""])[0], (q.get("subject") or [""])[0])))
         if u.path == "/api/context/assemble":   # the ROUTER: assemble a cited, budgeted slice for a subject/query
             return self._s(200, json.dumps(context.assemble(
                 query=(q.get("q", [None])[0]), subject=(q.get("subject", [None])[0]),
@@ -11867,6 +11953,17 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(op_note_read(body.get("peer", ""))))
         if u.path == "/api/opnote-recv":       # INGRESS: a peer operator's note arrives here (mesh-token auth)
             return self._s(200, json.dumps(op_note_recv(body.get("from", ""), body.get("text", ""), body.get("from_label"))))
+        if u.path == "/api/context-settings":   # toggle a context-engineering feature (persists to cc.config, live)
+            key = body.get("key", ""); on = bool(body.get("on", True))
+            if key == "autocompact":
+                CC["autocompact"] = on
+                if body.get("pct") is not None: CC["autocompact_pct"] = max(50.0, min(99.0, float(body.get("pct"))))
+                _cc_config_set({"autocompact": CC.get("autocompact", True), "autocompact_pct": _autocompact_pct()})
+            elif key in ("context_brief", "context_ingest", "housekeeping"):
+                _cc_config_set({key: on})
+            else:
+                return self._s(200, json.dumps({"ok": False, "error": "unknown setting"}))
+            return self._s(200, json.dumps(context_settings()))
         if u.path == "/api/custom-scaffold":   # developer: create a starter custom extension in the sandbox
             return self._s(200, json.dumps(custom_scaffold(body.get("id", ""), body.get("name", ""))))
         if u.path == "/api/custom-approve":     # developer: approve/revoke a custom extension so it may run
@@ -15058,6 +15155,7 @@ async function loadCapture(){
 // cited, budgeted, edge-placed slice for a subject/question -- the thing every agent will pull from.
 async function loadContext(){
   let s={};try{s=await(await fetch('/api/context/stats')).json();}catch(e){}
+  let cs={};try{cs=await(await fetch('/api/context-settings')).json();}catch(e){}
   const kinds=Object.entries(s.by_kind||{}).map(function(kv){return '<span class="badge" style="background:#1f6feb22;color:#58a6ff">'+esc(kv[0])+' '+kv[1]+'</span>';}).join(' ');
   const srcs=Object.entries(s.by_source||{}).map(function(kv){return '<span class="badge" style="background:#3fb95022;color:#3fb950">'+esc(kv[0])+' '+kv[1]+'</span>';}).join(' ');
   let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#129504; Context</b> <span class="sub">'+(s.events||0)+' events &middot; '+(s.entities||0)+' entities &middot; '+(s.fts?'FTS5':'LIKE')+'</span><div style="margin-left:auto;display:flex;gap:6px"><button class="mini go" onclick="ctxBackfill()">&#8635; Re-ingest</button></div></div>'
@@ -15073,8 +15171,61 @@ async function loadContext(){
     +'<button class="mini go" onclick="ctxAssemble()">Assemble</button>'
     +'<button class="mini" onclick="ctxBrief()" title="Assemble this context and hand it to a session -- the agent rides in already knowing">&#128203; Brief a session</button></div>'
     +'<div id="ctxOut" style="margin-top:10px"></div></div>';
+  h += ctxCtlCard((cs&&cs.settings)||{}) + ctxPkgCard();
   document.getElementById("grid").innerHTML='<div class="modstack"><div id="ctxFocus"></div><div id="ctxHoming"></div>'+h+'</div>';
   loadFocus();
+}
+// ---- Context-engineering CONTROLS + docs (toggles for the features that make sense to toggle) ----
+function ctxCtlCard(st){
+  var rows=Object.keys(st).map(function(k){var x=st[k]||{};var on=!!x.on;
+    return '<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-top:1px solid var(--line)">'
+      +'<button class="mini '+(on?'go':'')+'" style="flex:0 0 64px" onclick="ctxToggle(\''+esc(k)+'\','+(on?'false':'true')+')">'+(on?'ON':'OFF')+'</button>'
+      +'<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:12.5px;color:var(--mut)">'+e2(x.label||k)
+      +(k==='autocompact'&&x.pct?(' <span class="sub">@ '+Math.round(x.pct)+'%</span>'):'')+'</div>'
+      +'<div class="meta sub" style="margin-top:2px">'+e2(x.doc||'')+'</div></div></div>';
+  }).join('');
+  return '<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#9881;&#65039; Context engineering &mdash; what we feed agents + controls</b> <span class="sub">toggle a feature; persists to this node</span></div>'
+    +'<div class="meta" style="margin:6px 0">These are the levers that decide WHAT (beyond your message) each agent receives. Built to Anthropic\'s context-engineering guidance: feed the smallest set of high-signal, cited tokens, just-in-time, and keep the housekeeping automatic. Full reference: docs/CONTEXT_STRATEGY.md + docs/CONTEXT_ENGINEERING.md.</div>'
+    +rows
+    +'<div class="meta sub" style="margin-top:10px;border-top:1px dashed var(--line);padding-top:8px"><b>Also available (native, no toggle):</b> cascading CLAUDE.md map (auto), per-node tool awareness, the context substrate above, path-scoped <code>.claude/rules/</code> (load only on matching files), procedures&rarr;skills, and SessionStart/PreCompact hooks. See docs/CONTEXT_STRATEGY.md to adopt.</div></div>';
+}
+async function ctxToggle(key,on){
+  try{var r=await(await fetch('/api/context-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:key,on:on})})).json();
+    toast(key+': '+(on?'on':'off'),2500); loadContext();
+  }catch(e){toast('toggle failed',3000);}
+}
+// ---- The CONTEXT PACKAGE inspector: demystify the "payload" (everything other than your message) ----
+function ctxPkgCard(){
+  var list=(window.SB&&SB.list)||[];
+  var opts='<option value="">— pick a session —</option>'+list.map(function(s){return '<option value="'+esc(s.name)+'">'+e2(s.label||s.name)+'</option>';}).join('');
+  return '<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128230; Context package &mdash; see the payload</b> <span class="sub">everything (beyond your message) that goes to the agent each trip</span></div>'
+    +'<div class="meta" style="margin:6px 0">Every turn, an agent gets far more than what you type. This shows the <b>payload</b> ClaudeFather assembles + the framework auto-loads &mdash; the system briefing, the CLAUDE.md chain, the cited context brief, and the enabled tools &mdash; with a rough token weight for each, so you can SEE how this works (and where the tokens go).</div>'
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><select id="pkgSess" style="'+COMMS_INP+';flex:0 0 220px">'+opts+'</select>'
+    +'<input id="pkgSubj" placeholder="or a subject (client/module)" style="'+COMMS_INP+';flex:1;min-width:180px" onkeydown="if(event.key===\'Enter\')ctxPackage()">'
+    +'<button class="mini go" onclick="ctxPackage()">Inspect payload</button></div>'
+    +'<div id="pkgOut" style="margin-top:10px"></div></div>';
+}
+async function ctxPackage(){
+  var sess=(document.getElementById('pkgSess')||{}).value||'';
+  var subj=(document.getElementById('pkgSubj')||{}).value||'';
+  var out=document.getElementById('pkgOut'); if(out)out.innerHTML='<div class="meta sub">assembling…</div>';
+  var d;try{d=await(await fetch('/api/context-package?session='+encodeURIComponent(sess)+'&subject='+encodeURIComponent(subj))).json();}catch(e){if(out)out.innerHTML='<div class="meta" style="color:#f85149">failed</div>';return;}
+  if(!d||!d.ok){if(out)out.innerHTML='<div class="meta" style="color:#f85149">'+e2((d||{}).error||'failed')+'</div>';return;}
+  var comps=d.components||[]; var tot=d.total_tokens||0;
+  if(!comps.length){if(out)out.innerHTML='<div class="meta sub">No ClaudeFather-assembled payload for '+(d.subject?('&ldquo;'+e2(d.subject)+'&rdquo;'):'this')+' yet (the awareness briefs still apply). Pick a session or a subject with activity.</div>';return;}
+  var max=Math.max.apply(null,comps.map(function(c){return c.tokens||0;}).concat([1]));
+  var col={system:'#c9a227',brief:'#3fb950',tools:'#58a6ff'};
+  var rows=comps.map(function(c,i){var w=Math.round(100*(c.tokens||0)/max);var bc=col[c.id]||(String(c.id).indexOf('claudemd')===0?'#a371f7':'#8b949e');
+    return '<div style="margin-top:9px"><div style="display:flex;align-items:center;gap:8px"><b style="font-size:12.5px;color:var(--mut);flex:1;min-width:0">'+e2(c.label)+'</b>'
+      +'<span class="sub" style="flex:0 0 auto">~'+(c.tokens||0)+' tok</span>'
+      +'<button class="mini" style="flex:0 0 auto" onclick="var e=document.getElementById(\'pkgc'+i+'\');e.style.display=e.style.display===\'block\'?\'none\':\'block\';">view</button></div>'
+      +'<div style="height:7px;border-radius:4px;background:var(--line);margin-top:4px;overflow:hidden"><div style="height:100%;width:'+w+'%;background:'+bc+'"></div></div>'
+      +'<div class="meta sub" style="margin-top:3px">'+e2(c.note||'')+'</div>'
+      +'<pre id="pkgc'+i+'" class="snap" style="display:none;white-space:pre-wrap;margin-top:5px;max-height:280px;overflow:auto">'+e2(c.content||'')+'</pre></div>';
+  }).join('');
+  out.innerHTML='<div style="display:flex;align-items:baseline;gap:8px;border-bottom:1px solid var(--line);padding-bottom:6px"><b>Payload for '+(d.subject?('&ldquo;'+e2(d.subject)+'&rdquo;'):'this session')+'</b><span class="sub">~'+tot+' tokens across '+comps.length+' parts</span></div>'
+    +rows
+    +'<div class="meta sub" style="margin-top:10px;border-top:1px dashed var(--line);padding-top:8px">'+e2(d.note||'')+'</div>';
 }
 // FOCUS row: "what you're on" (on-demand, trust-dialed). Off by default; one tap to enable (app-only, no perm).
 async function loadFocus(){
@@ -19606,9 +19757,16 @@ function renderNav(){
     navBtns().forEach(function(b){b.classList.remove("grouped","ghide");b.removeAttribute("draggable");});
     applyNavOrder();paintNavMode();return;
   }
-  // DEFAULT = categorized + collapsed. Seed it once (unless the user explicitly flattened). Existing users with
-  // a saved tree keep theirs; only a truly-fresh nav (no tree) gets the default categories.
-  if(s.mode!=="flat"&&!s.tree){s.tree=navDefaultTree();s.mode="manual";navSave(s);}
+  // DEFAULT = categorized + collapsed. Seed once; ALSO one-time MIGRATE older browsers that never got the
+  // categories (the bug: a node whose nav was still flat, or carried only the legacy "gGoogle" group, kept its
+  // old layout while only freshly-viewed nodes seeded). `_catseed` makes the default categories apply once on
+  // every node; genuine custom multi-group setups are preserved (just marked).
+  if(s.mode!=="flat"){
+    var _grps=(s.tree||[]).filter(function(n){return n.t==="grp";});
+    var _legacy=(_grps.length===0)||(_grps.length===1&&_grps[0].id==="gGoogle");   // flat or only the old Google group
+    if(!s.tree || (!s._catseed && _legacy)){ s.tree=navDefaultTree(); s.mode="manual"; s._catseed=1; navSave(s); }
+    else if(!s._catseed){ s._catseed=1; navSave(s); }   // already customized into categories -> keep, just mark
+  }
   if(s.mode==="flat"||(s.mode!=="manual"&&!navHasGrp(s))){
     var nav=document.getElementById("lens");if(nav)nav.querySelectorAll(".navgroup").forEach(function(x){x.remove();});
     navBtns().forEach(function(b){b.classList.remove("grouped","ghide");b.setAttribute("draggable","true");});
