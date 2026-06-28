@@ -30,5 +30,6 @@
       "label": "call",
       "note": "drag a Granola call onto a session -> the agent receives the full transcript"
     }
-  ]
+  ],
+  "default_category": "Agency"
 }

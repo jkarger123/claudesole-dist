@@ -22,5 +22,6 @@
   ],
   "setup_doc": "SETUP.md",
   "setup_agent": true,
-  "agent_doc": "AGENT.md"
+  "agent_doc": "AGENT.md",
+  "default_category": "Integrations"
 }

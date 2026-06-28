@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.6 -- 2026-06-28
+- NAV CATEGORIES (declutter the crowded sidebar). The nav now ships GROUPED into default categories that are
+  COLLAPSED by default, with a few daily-driver tabs pinned at the top (Sessions, Chief, Comms, Notes, Tasks,
+  Files). Categories: Google, Workspace, Agency, Team, Integrations, System. Built-in lenses are mapped in JS;
+  every extension declares its `default_category` (backfilled all 24; surfaced via `_ext_lenses().category`) so
+  an installed extension's lens lands in the right folder. Fully built on the existing grouping engine, so users
+  keep drag-to-reorder, rename, +category, and can "flatten" to the old most-used list or "reset" to defaults.
+  - CATEGORY NOTIFICATION GLOW: when a lens INSIDE a collapsed category has an unread badge (new Gmail, pending
+    CCR, etc.), the category header GLOWS and shows the summed count -- so nothing is ever buried in a folder.
+    Reads the existing per-lens badge spans uniformly; updates live with the badge pollers; clears on expand.
+  - The old one-off "Google" auto-seed is superseded by the default tree (kept only its cleanup-when-disabled).
+  - Verified headless: default collapsed categories on node + overseer, pinned drivers top-level, nothing
+    stranded, and System glowed "3" with a CCR badge then cleared on expand.
+
 ## 0.99.5 -- 2026-06-28
 - Granola API key now resolves VAULT-FIRST (`_deploy_env("GRANOLA_API_KEY")`), falling back to the legacy
   `cc.config granola.api_key`. Before, granola.py read ONLY cc.config -- so a key added the standard way (Vault

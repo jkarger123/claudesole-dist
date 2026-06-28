@@ -5539,7 +5539,8 @@ def _ext_lenses():
         m = _ext_meta(eid); L = m.get("lens")
         if not isinstance(L, dict) or not L.get("id"): continue
         if _ext_is_paid(m) and not _entitled(eid, m): continue
-        out.append({"id": L["id"], "label": L.get("label", eid), "icon": L.get("icon", "🧩"), "ext": eid})
+        out.append({"id": L["id"], "label": L.get("label", eid), "icon": L.get("icon", "🧩"), "ext": eid,
+                    "category": m.get("default_category") or L.get("category") or "Integrations"})
     return out
 
 def _ext_agent_context():
@@ -11905,6 +11906,11 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .lens .navgroup.open .ngtog{transform:rotate(90deg)}
 .lens .navgroup .ngname{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .lens .navgroup .ngct{font-size:10px;color:var(--dim);font-weight:700;flex:0 0 auto}
+/* a collapsed category with unread items inside glows + shows the summed count, so nothing is buried */
+.lens .navgroup .ngnotif{font-size:10px;font-weight:800;color:#fff;background:#f85149;border-radius:9px;padding:0 6px;flex:0 0 auto;min-width:16px;text-align:center;box-shadow:0 0 7px rgba(248,81,73,.7)}
+.lens .navgroup.glow{color:var(--near,#f2f3f7);border-color:rgba(248,81,73,.5);background:rgba(248,81,73,.08);animation:ngpulse 2.4s ease-in-out infinite}
+.lens .navgroup.glow .ngtog{color:#f85149}
+@keyframes ngpulse{0%,100%{box-shadow:0 0 0 0 rgba(248,81,73,.0)}50%{box-shadow:0 0 12px 0 rgba(248,81,73,.35)}}
 .lens .navgroup .ngdel{opacity:0;color:var(--dim);flex:0 0 auto;font-size:11px}
 .lens .navgroup:hover .ngdel{opacity:.65}
 .lens .navgroup .ngdel:hover{color:#f85149;opacity:1}
@@ -14479,7 +14485,7 @@ async function commsSend(){
   setTimeout(commsRefresh,700);setTimeout(commsRefresh,3000);
 }
 async function commsRefresh(){const ta=document.getElementById('commsMsg');const v=ta?ta.value:"";const f=ta&&document.activeElement===ta;await loadComms();const t2=document.getElementById('commsMsg');if(t2){t2.value=v;if(f)t2.focus();}}
-function commsSetBadge(n){const b=document.getElementById('commsBadge');if(!b)return;if(n>0){b.textContent=n>99?'99+':n;b.style.display='inline-block';}else{b.textContent='';b.style.display='none';}}
+function commsSetBadge(n){const b=document.getElementById('commsBadge');if(!b)return;if(n>0){b.textContent=n>99?'99+':n;b.style.display='inline-block';}else{b.textContent='';b.style.display='none';}try{paintNavNotif();}catch(e){}}
 async function commsBadgePoll(){try{const d=await(await fetch('/api/mesh')).json();const seen=parseInt(localStorage.getItem('comms_seen')||'0');const unread=(d.messages||[]).filter(function(m){return m.dir==='in'&&(m.ts||0)>seen;}).length;const drops=((d.overdue||[]).length)+((d.unanswered||[]).length);if(LENS!=='comms')commsSetBadge(unread+drops);}catch(e){}}  // badge also shows OVERDUE/UNANSWERED (persists until resolved) so a dropped ball surfaces without watching
 setInterval(commsBadgePoll,15000);setTimeout(commsBadgePoll,1500);
 // ============ GOOGLE WORKSPACE LENSES (live Gmail / Calendar / Drive, server-side OAuth) ============
@@ -18708,6 +18714,51 @@ function reconcileTree(tree){
 }
 function locate(tree,l){for(var i=0;i<tree.length;i++){var n=tree[i];if(n.t==="tab"&&n.l===l)return{top:i};if(n.t==="grp"){var j=n.items.indexOf(l);if(j>=0)return{top:i,grp:n,j:j};}}return null;}
 function treeRemoveLens(tree,l){for(var i=tree.length-1;i>=0;i--){var n=tree[i];if(n.t==="tab"&&n.l===l)tree.splice(i,1);else if(n.t==="grp"){var j=n.items.indexOf(l);if(j>=0)n.items.splice(j,1);}}}
+// ---- DEFAULT CATEGORIES: out of the box the nav is grouped into collapsed categories (declutter), seeded once.
+// Users can still drag/rename/add/delete + "flatten" to the old most-used list. Built-ins map here; extension
+// lenses carry their own category (extension.json default_category -> extLenses[].category). "reset" re-seeds this.
+var NAV_PINNED=["portfolio","sessions","chief","comms","notes","tasks","files"];   // stay top-level (daily drivers)
+var NAV_CAT_ORDER=["Google","Workspace","Agency","Team","Integrations","System"];
+var NAV_CAT={
+  gmail:"Google",calendar:"Google",drive:"Google",
+  modules:"Workspace",projects:"Workspace",context:"Workspace",capture:"Workspace",ideas:"Workspace",
+  pipeline:"Workspace",ralph:"Workspace",jobs:"Workspace",routines:"Workspace",tree:"Workspace",
+  agency:"Agency",calls:"Agency",
+  agents:"Team",skills:"Team",teams:"Team",audit:"Team",
+  marketplace:"Integrations",vault:"Integrations",
+  usage:"System",accounts:"System",security:"System",backup:"System",machines:"System",desktop:"System",
+  history:"System",docs:"System",doctor:"System",ccr:"System",propose:"System",settings:"System"
+};
+function navAvail(){return navBtns().filter(function(b){return b.style.display!=="none";});}   // gated/hidden lenses excluded
+function navDefaultTree(){
+  var extCat={};(window.CC&&window.CC.extLenses||[]).forEach(function(x){if(x&&x.id)extCat[x.id]=x.category||"Integrations";});
+  var used={},tree=[],buckets={};
+  NAV_PINNED.forEach(function(l){var b=document.querySelector('#lens button[data-l="'+l+'"]');if(b&&b.style.display!=="none"&&!used[l]){tree.push({t:"tab",l:l});used[l]=1;}});
+  navAvail().forEach(function(b){var l=b.dataset.l;if(used[l])return;var cat=NAV_CAT[l]||extCat[l]||"Workspace";(buckets[cat]=buckets[cat]||[]).push(l);used[l]=1;});
+  var order=NAV_CAT_ORDER.slice();Object.keys(buckets).forEach(function(c){if(order.indexOf(c)<0)order.push(c);});
+  order.forEach(function(c){if(buckets[c]&&buckets[c].length)tree.push({t:"grp",id:"cat-"+c.toLowerCase().replace(/[^a-z0-9]+/g,"-"),name:c,collapsed:true,items:buckets[c]});});
+  return tree;
+}
+function navFlatten(){var s=navState();s.mode="flat";delete s.tree;navSave(s);renderNav();}   // opt out of categories -> most-used list
+// ---- per-category NOTIFICATION glow + count: a collapsed category whose hidden members have unread badges
+// glows and shows the summed count, so a new email/message/CCR is never buried inside a folder.
+function navNotif(lensId){
+  var btn=document.querySelector('#lens button[data-l="'+lensId+'"]');if(!btn)return 0;
+  var bs=btn.querySelector('span[id$="Badge"]');if(!bs||bs.style.display==="none"||!bs.textContent)return 0;
+  var n=parseInt(bs.textContent,10);return isNaN(n)?1:n;
+}
+function paintNavNotif(){
+  var s=navState(),tree=(s&&s.tree)||[];
+  document.querySelectorAll("#lens .navgroup").forEach(function(hd){
+    var gn=tree.filter(function(n){return n.t==="grp"&&n.id===hd.dataset.g;})[0];if(!gn)return;
+    var total=(gn.items||[]).reduce(function(a,l){return a+navNotif(l);},0);
+    var collapsed=!hd.classList.contains("open");
+    hd.classList.toggle("glow",total>0&&collapsed);
+    var nb=hd.querySelector(".ngnotif");
+    if(total>0&&collapsed){if(!nb){nb=document.createElement("span");nb.className="ngnotif";hd.insertBefore(nb,hd.querySelector(".ngct"));}nb.textContent=total>99?"99+":total;nb.style.display="inline-block";}
+    else if(nb){nb.style.display="none";}
+  });
+}
 // ---- render
 function renderNav(){
   var s=navState();
@@ -18718,10 +18769,13 @@ function renderNav(){
     navBtns().forEach(function(b){b.classList.remove("grouped","ghide");b.removeAttribute("draggable");});
     applyNavOrder();paintNavMode();return;
   }
-  if(s.mode!=="manual"&&!navHasGrp(s)){
+  // DEFAULT = categorized + collapsed. Seed it once (unless the user explicitly flattened). Existing users with
+  // a saved tree keep theirs; only a truly-fresh nav (no tree) gets the default categories.
+  if(s.mode!=="flat"&&!s.tree){s.tree=navDefaultTree();s.mode="manual";navSave(s);}
+  if(s.mode==="flat"||(s.mode!=="manual"&&!navHasGrp(s))){
     var nav=document.getElementById("lens");if(nav)nav.querySelectorAll(".navgroup").forEach(function(x){x.remove();});
     navBtns().forEach(function(b){b.classList.remove("grouped","ghide");b.setAttribute("draggable","true");});
-    applyNavOrder();paintNavMode();return;
+    applyNavOrder();paintNavMode();paintNavNotif();return;
   }
   var nav=document.getElementById("lens");if(!nav)return;
   var tree=reconcileTree(s.tree||seedTree());s.tree=tree;navSave(s);   // membership/manual order persisted as-is
@@ -18749,15 +18803,15 @@ function renderNav(){
     nav.appendChild(hd);
     n.items.forEach(function(l){var b=nav.querySelector('button[data-l="'+l+'"]');if(b){b.classList.add("grouped");if(n.collapsed)b.classList.add("ghide");nav.appendChild(b);}});
   });
-  paintNavMode();
+  paintNavMode();paintNavNotif();
 }
 function paintNavMode(){
   var el=document.getElementById("navmode");if(!el)return;var s=navState();
   if(s.mode==="manual"||navHasGrp(s)){
     var sort=s.autorank?'<a onclick="navToggleRank()" title="ranking each folder + the top level by use; click for manual drag-order">by use &#10003;</a>'
                        :'<a onclick="navToggleRank()" title="rank tabs inside + outside folders by how often you click them">by use</a>';
-    el.innerHTML='&#11021; <b>custom</b> &middot; sort '+sort+' &middot; <a onclick="navNewCat()">+ category</a> &middot; <a onclick="navAuto()">reset</a>';
-  } else el.innerHTML='&#11021; <b>most-used first</b> &middot; <a onclick="navNewCat()">+ category</a>';
+    el.innerHTML='&#11021; <b>categories</b> &middot; sort '+sort+' &middot; <a onclick="navNewCat()">+ category</a> &middot; <a onclick="navFlatten()" title="drop categories, show one most-used list">flatten</a> &middot; <a onclick="navAuto()" title="restore the default categories">reset</a>';
+  } else el.innerHTML='&#11021; <b>most-used first</b> &middot; <a onclick="navAuto()" title="group tabs into default categories">use categories</a> &middot; <a onclick="navNewCat()">+ category</a>';
 }
 function navToggleRank(){var s=navState();s.autorank=!s.autorank;navSave(s);renderNav();}
 function navAuto(){var s=navState();delete s.mode;delete s.order;delete s.tree;delete s.autorank;navSave(s);renderNav();}
@@ -18824,13 +18878,11 @@ function navSeedGoogle(){   // one-time: tuck the live Google lenses into a "Goo
     if(ch){navSave(s0);renderNav();}
     return;
   }
-  var s=navState();if(s._gseed)return;
-  if(!s.tree||!s.tree.length)s.tree=seedTree();
-  ['gmail','calendar','drive'].forEach(function(l){treeRemoveLens(s.tree,l);});
-  s.tree.unshift({t:"grp",id:"gGoogle",name:"Google",collapsed:false,items:["gmail","calendar","drive"]});
-  s._gseed=true;s.mode="manual";navSave(s);renderNav();
+  // Google IS enabled: the default-category tree (navDefaultTree) already files gmail/calendar/drive under a
+  // "Google" category, so there's nothing to seed here anymore. (Kept for the removal branch above.)
 }
 setupNavDnD();renderNav();navSeedGoogle();
+setInterval(function(){try{paintNavNotif();}catch(e){}},3000);   // keep collapsed-category glow/count current with the badge pollers
 // ===== Global sessions taskbar (desktop): live dock of ALL project sessions + gold "done" pulse + hover preview =====
 var SB={prev:{},done:{},hover:null,popHover:false,pvTimer:null,baseTitle:document.title};
 SB.protected={}; SB.holdT=null;

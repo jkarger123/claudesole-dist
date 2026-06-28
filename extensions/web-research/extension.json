@@ -6,8 +6,11 @@
   "icon": "WR",
   "summary": "A guided deep-research workflow: fan out searches, fetch + verify sources, synthesize a cited report.",
   "description": "A SKILL.md that codifies how to research a question well -- multiple searches, fetch primary sources, adversarially verify claims, write a cited synthesis. No accounts, no secrets; uses the model's built-in web search/fetch. Installing copies it into your skills so any agent can invoke /web-research.",
-  "provides": ["skill:web-research"],
+  "provides": [
+    "skill:web-research"
+  ],
   "requires": [],
   "setup_doc": "SETUP.md",
-  "setup_agent": false
+  "setup_agent": false,
+  "default_category": "Team"
 }

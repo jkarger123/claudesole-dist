@@ -3,25 +3,48 @@
   "name": "Skimlinks Affiliate Intelligence",
   "category": "agent-tool",
   "version": "1.0.0",
-  "icon": "🔗",
+  "icon": "\ud83d\udd17",
   "summary": "Weekly Skimlinks merchant sync + a built-in affiliate-intelligence lens (commissions, new/removed, top movers).",
   "description": "Pulls the full Skimlinks merchant catalog into your Supabase on a schedule and tracks every change -- new/removed merchants, commission moves, tenure. Adds a built-in Affiliate Intelligence lens (searchable merchant grid, top movers, per-merchant commission-change timeline) and lets agents query the data or drag a merchant straight into a session. Replaces the old external dashboard -- everything lives inside the control center.",
-  "provides": ["lens:affiliate", "routine:skimlinks-sync", "agent-tool:skimlinks"],
+  "provides": [
+    "lens:affiliate",
+    "routine:skimlinks-sync",
+    "agent-tool:skimlinks"
+  ],
   "requires": [
-    {"key": "SKIMLINKS_CLIENT_ID", "label": "Your Skimlinks publisher ID"},
-    {"key": "SKIMLINKS_SUPABASE_URL", "label": "Supabase project URL (https://<ref>.supabase.co)"},
-    {"key": "SKIMLINKS_SUPABASE_KEY", "label": "Supabase service-role key (server-side ONLY -- never sent to the browser)"}
+    {
+      "key": "SKIMLINKS_CLIENT_ID",
+      "label": "Your Skimlinks publisher ID"
+    },
+    {
+      "key": "SKIMLINKS_SUPABASE_URL",
+      "label": "Supabase project URL (https://<ref>.supabase.co)"
+    },
+    {
+      "key": "SKIMLINKS_SUPABASE_KEY",
+      "label": "Supabase service-role key (server-side ONLY -- never sent to the browser)"
+    }
   ],
   "setup_doc": "SETUP.md",
   "setup_agent": true,
   "agent_doc": "AGENT.md",
   "tier": "paid",
-  "pricing": {"monthly_usd": 5},
+  "pricing": {
+    "monthly_usd": 5
+  },
   "publisher": "ClaudeFather",
   "draggables": [
-    {"kind": "entity", "label": "merchant", "note": "drag a merchant into a Claude session"}
+    {
+      "kind": "entity",
+      "label": "merchant",
+      "note": "drag a merchant into a Claude session"
+    }
   ],
-  "lens": {"id": "affiliate", "label": "Affiliate Intel", "icon": "🔗"},
+  "lens": {
+    "id": "affiliate",
+    "label": "Affiliate Intel",
+    "icon": "\ud83d\udd17"
+  },
   "data_sources": {
     "backend": "supabase",
     "url_env": "SKIMLINKS_SUPABASE_URL",
@@ -32,15 +55,24 @@
         "select": "id,advertiser_id,name,domain,commission_rate,ecpc,average_order_value,average_daily_sales,conversion_rate,status,first_seen_at,last_seen_at,removed_at,previous_commission_rate,last_commission_change_at,times_commission_changed,days_tracked",
         "order": "average_daily_sales.desc.nullslast",
         "max": 2000,
-        "search": ["name", "domain"],
-        "filter_cols": ["status"]
+        "search": [
+          "name",
+          "domain"
+        ],
+        "filter_cols": [
+          "status"
+        ]
       },
       "changes": {
         "table": "skimlinks_changes",
         "select": "id,advertiser_id,merchant_name,change_type,old_commission,new_commission,change_amount,change_percent,severity,detected_at,merchant_domain",
         "order": "detected_at.desc",
         "max": 500,
-        "filter_cols": ["change_type", "severity", "advertiser_id"]
+        "filter_cols": [
+          "change_type",
+          "severity",
+          "advertiser_id"
+        ]
       }
     }
   },
@@ -48,8 +80,15 @@
     "name": "Skimlinks weekly sync",
     "desc": "Pull the full Skimlinks merchant catalog -> Supabase; track new/removed merchants + commission changes.",
     "cmd": "python3 tools/skimlinks_sync.py",
-    "when": {"weekday": 0, "hour": 3, "minute": 0},
+    "when": {
+      "weekday": 0,
+      "hour": 3,
+      "minute": 0
+    },
     "timeout_sec": 4200,
-    "alert": {"channel": "telegram"}
-  }
+    "alert": {
+      "channel": "telegram"
+    }
+  },
+  "default_category": "Integrations"
 }

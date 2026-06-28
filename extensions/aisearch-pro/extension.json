@@ -186,5 +186,6 @@
       "timeout_sec": 90,
       "tier": "official"
     }
-  }
+  },
+  "default_category": "Integrations"
 }
