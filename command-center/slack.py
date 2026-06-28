@@ -52,10 +52,19 @@ def _cfg():
 
 
 def _token():
-    """Resolve the bot token, secret-clean. Returns the token string or None. NEVER printed/logged."""
+    """Resolve the bot token, secret-clean. Returns the token string or None. NEVER printed/logged.
+    Order: cc.config token -> the VAULT (via deploy_env, the canonical store) -> legacy secret file (retiring)."""
     t = _CTX.get("token") or _cfg().get("token")
     if t: return str(t).strip()
-    # preferred: a gitignored secret file under the extension
+    # the canonical store: deploy_env resolves the per-install vault (then legacy .env). Vault is the one place.
+    de = _CTX.get("deploy_env")
+    if callable(de):
+        try:
+            v = de("SLACK_BOT_TOKEN")
+            if v: return str(v).strip()
+        except Exception:
+            pass
+    # legacy: a gitignored secret file under the extension (migrated into the vault + retired by vault_import_env)
     ext = _CTX.get("EXT_DIR") or (os.path.join(_CTX["CC_HOME"], "extensions") if _CTX.get("CC_HOME") else None)
     if ext:
         sf = _cfg().get("secret_file") or os.path.join(ext, "slack", "secrets", "bot_token")
@@ -63,14 +72,6 @@ def _token():
             if os.path.isfile(sf):
                 v = open(sf, encoding="utf-8", errors="replace").read().strip()
                 if v: return v
-        except Exception:
-            pass
-    # fall back to the per-deployment env secret (.env.claudefather SLACK_BOT_TOKEN)
-    de = _CTX.get("deploy_env")
-    if callable(de):
-        try:
-            v = de("SLACK_BOT_TOKEN")
-            if v: return str(v).strip()
         except Exception:
             pass
     v = os.environ.get("SLACK_BOT_TOKEN")

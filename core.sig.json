@@ -38,7 +38,7 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "ac1dece3c4630b964e12f2802b1ec9783cc7da40a13d13f8e5738a383256a60d",
+      "claudesole.manifest.json": "8ccbed371277ab080a00650a76d1fd259b28b2a46ca36ee25d4609dfce4bec6a",
       "command-center/CLAUDE.md": "ab9b718de3722af62d05ff7ba004bb522283e39405e92166437cd6124fa2d074",
       "command-center/cc-instance-supervise.sh": "e0521eae7f276255afc604e872f9edf5aedc657b86dc55edca4340382d61c342",
       "command-center/cc-session-watchdog.py": "270e2d689edfc8d8e8e992d95c08745c37fbddcbbffd7b2389fd30b36094e6dd",
@@ -53,8 +53,8 @@
       "command-center/preship.py": "f628484ffc6457c12e074cdb63da2ec1a32fd95eea4db6d45844f8bd694011f2",
       "command-center/ralph_runner.py": "7d26a8d8bca83ba6f52c8ab45aae1c5643233e5cf94c6293b8f6f14b6c169f3b",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "439378eb71c9dc89408b8d226f03fc8e1af54974fbd23fecb74f43423059cb29",
-      "command-center/slack.py": "55b3282a2b6a104e6f9cf98b2e5569a2a358741c47a5f5c4b32377f4448222bc",
+      "command-center/server.py": "a0d606264f785d778eb3c6a5426ad257a510da7267fc29f40cebae77071d9c48",
+      "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/zoom.py": "a6ac02eae3b7a7e633ff969bdc34ab9b466b5ce3014577c55015d08688b7d379",
       "desktop/package-lock.json": "09bdae0768c3f9dabbaa556e594b30cf5f947d3009e21a49cc9a530d91140a5d",
@@ -67,7 +67,7 @@
       "docs/APPLIANCE_BRINGUP.md": "519525aafcce807331adce0d382f86da785395a68e65e2fe61dc5965f28ff3c1",
       "docs/ARCHITECTURE.md": "e61a69a2703c9ac9ba5e153855ddfd495ed5dbd0b5f49b190c4954b8f3c85989",
       "docs/CAPTURE.md": "c0833ca6871ba51a3991cfed1d24b8252280e5d004abdddbce99806a9dd1d071",
-      "docs/CHANGELOG.md": "28dd487cde526e3f04ff9288b5b7d3ffe3299ce5b040efcd29f7734d28acbb35",
+      "docs/CHANGELOG.md": "717fcbdd54bcafab52e90b02ea42c5baa212cadf2bb8c09abc2f063749a3dff5",
       "docs/CLAUDE_CODE_REFERENCE.md": "d9acc94772b0a5b6b8dcf81962cea5f36cd050dd7797c6180c69c9b661450b2a",
       "docs/CONTROL_CENTER_BLUEPRINT.md": "3bf2fb328661e1cac513e8a9aacf6fb2bba7c5d9c361f069991c3915caa393e9",
       "docs/CREDENTIALS.md": "c50a52d2c9028a2b898653bf41be01f5b85549d08f3509bf27316a01a09d2d06",
@@ -146,9 +146,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1782622950,
+    "generated": 1782623664,
     "v": 1,
-    "version": "0.94.0"
+    "version": "0.95.0"
   },
-  "sig": "uvMSk5ahn70EYLPhjFTIxFgPUP4YastvZVYNq0Duts3pCvgxnEloFegkg41+3ugMSzjUiT7b+osU0mnx/+5YBA=="
+  "sig": "O7fXpr4j0Im4hCKjVsrEJfkFJtxfSGjm3ZTaISXJ6CjSNqIuF59uP9LRsnx27/g2VSFUj+DYDIvxBDHtMTDEAw=="
 }

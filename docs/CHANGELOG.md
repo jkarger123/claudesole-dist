@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.95.0 -- 2026-06-28
+- Credential vault -> 100%: file-based extension secrets now migrate into the vault too. `vault_import_env`
+  also sweeps slack `bot_token`, google `google_oauth.json` (-> `google_oauth_client`), and the per-account
+  google token JSONs (-> ONE sanitization-safe `google_tokens` dict {account: token}); on scrub it archives
+  those files. Google now loads its OAuth token VAULT-FIRST (`_google_token_load`, file fallback) -- the token
+  is read-only at runtime so this is lossless; slack `_token()` resolves the vault (deploy_env) BEFORE its
+  legacy file. Verified airtight on carsearch: google secret files archived + node restarted (cache cleared)
+  -> Gmail/Calendar still configured + canRead, resolving purely from the vault. After this, no credential
+  (env or file) lives outside the per-install vault. (docs/CREDENTIALS.md.)
+
 ## 0.94.0 -- 2026-06-28
 - CREDENTIALS unified into ONE per-install vault (the only way; docs/CREDENTIALS.md). There is now a single
   encrypted credential store per install at <DEPLOY_ROOT>/.vault/ (shared by co-located instances; under

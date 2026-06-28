@@ -663,12 +663,31 @@ def _google_token_file():
     except Exception: pass
     return None
 
+def _google_token_load(acct=None):
+    """Return (acct, token_dict) from the VAULT (preferred -- key 'google_token:<acct>') or the legacy token
+    file (fallback). The token JSON holds client_id/client_secret/refresh_token. Read-only at runtime (the
+    access token is cached in RAM, never written back), so vault-backing it is safe + lossless."""
+    acct = acct or CC.get("google_account")
+    raw = _vault_local("google_tokens")                          # ONE vault key: {account: token_dict} (sanitization-safe)
+    if raw:
+        try:
+            toks = json.loads(raw)
+            if isinstance(toks, dict) and toks:
+                a = acct if (acct and acct in toks) else sorted(toks)[0]
+                return (a, toks[a])
+        except Exception: pass
+    tf = _google_token_file()                                    # legacy file fallback (being retired)
+    if tf:
+        try: return (os.path.basename(tf)[:-5], json.load(open(tf)))
+        except Exception: pass
+    return (None, None)
+def _google_has_token():
+    return _google_token_load()[1] is not None
 def google_configured():
-    # Show Google ONLY where the operator INSTALLED the extension on THIS instance -- not merely where a token
-    # exists. Local instances share CC_HOME (hence the same secrets/tokens dir), so token-presence alone would
-    # leak the Gmail/Calendar/Drive lenses onto every sibling (text2tune, mission-control). Per-instance
-    # install state (EXT_STATE in the instance's state_dir) is the real gate.
-    if _google_token_file() is None: return False
+    # Show Google ONLY where the operator INSTALLED the extension on THIS instance. A token (vault or legacy
+    # file) must exist AND the extension be installed here (per-instance state gates it so co-located siblings
+    # sharing CC_HOME don't all show the lenses).
+    if not _google_has_token(): return False
     return "google-workspace" in _ext_installed()
 
 def _google_access_token():
@@ -677,16 +696,15 @@ def _google_access_token():
         now = time.time()
         if _GOOGLE_TOK["access"] and now < _GOOGLE_TOK["exp"] - 90:
             return _GOOGLE_TOK["access"]
-        tf = _google_token_file()
-        if not tf: return None
+        acct, d = _google_token_load()
+        if not d: return None
         try:
-            d = json.load(open(tf))
             data = urllib.parse.urlencode({"client_id": d["client_id"], "client_secret": d["client_secret"],
                 "refresh_token": d["refresh_token"], "grant_type": "refresh_token"}).encode()
             req = urllib.request.Request(d.get("token_uri", "https://oauth2.googleapis.com/token"), data=data)
             r = json.loads(urllib.request.urlopen(req, timeout=GOOGLE_TOKEN_TIMEOUT).read())
             _GOOGLE_TOK.update(access=r["access_token"], exp=now + int(r.get("expires_in", 3600)),
-                               email=os.path.basename(tf)[:-5], scopes=d.get("scopes", []))
+                               email=acct, scopes=d.get("scopes", []))
             return _GOOGLE_TOK["access"]
         except Exception:
             return None
@@ -4066,13 +4084,50 @@ def vault_import_env(scrub=False):
                 else: failed.append(k)
         except Exception as e:
             return {"ok": False, "error": str(e)[:140], "imported": imported}
+    # --- file-based extension secrets -> the vault (keys are sanitization-safe; vault_set strips :/@ etc.) ---
+    file_scrubbed = []
+    def _imp_file(path, key):
+        try: val = open(path, encoding="utf-8", errors="replace").read().strip()
+        except Exception: return
+        if not val: return
+        if key in _vault_load(): skipped.append(key)
+        else:
+            r = vault_set(key, val, label=key, scope=["*"])
+            if r.get("ok") and _vault_local(key) == val: imported.append(key)
+            else: failed.append(key); return
+        if scrub:
+            try: os.replace(path, path + ".migrated-%d" % int(time.time())); file_scrubbed.append(os.path.basename(path))
+            except Exception: pass
+    _imp_file(os.path.join(EXT_DIR, "slack", "secrets", "bot_token"), "SLACK_BOT_TOKEN")
+    _imp_file(os.path.join(EXT_DIR, "google-workspace", "secrets", "google_oauth.json"), "google_oauth_client")
+    # google per-account tokens -> ONE 'google_tokens' dict {account: token_json}
+    gtok = os.path.join(EXT_DIR, "google-workspace", "secrets", "tokens"); toks = {}
+    try:
+        for fn in sorted(os.listdir(gtok)):
+            if fn.endswith(".json"):
+                try: toks[fn[:-5]] = json.load(open(os.path.join(gtok, fn)))
+                except Exception: pass
+    except Exception: pass
+    if toks:
+        if "google_tokens" in _vault_load(): skipped.append("google_tokens")
+        else:
+            val = json.dumps(toks); r = vault_set("google_tokens", val, label="google_tokens", scope=["*"])
+            if r.get("ok") and _vault_local("google_tokens") == val: imported.append("google_tokens")
+            else: failed.append("google_tokens")
+        if scrub and "google_tokens" not in failed:
+            for fn in list(toks):
+                p = os.path.join(gtok, fn + ".json")
+                try:
+                    if os.path.isfile(p):
+                        os.replace(p, p + ".migrated-%d" % int(time.time())); file_scrubbed.append(fn + ".json")
+                except Exception: pass
     scrubbed = False
     if scrub and not failed and (imported or skipped) and os.path.isfile(DEPLOY_ENV):
         try:
             os.replace(DEPLOY_ENV, DEPLOY_ENV + ".migrated-%d" % int(time.time())); scrubbed = True  # archive (reversible), not delete
         except Exception: pass
-    _vault_audit("import_env", "", None, "imported=%d skipped=%d failed=%d scrub=%s" % (len(imported), len(skipped), len(failed), scrubbed))
-    return {"ok": not failed, "imported": imported, "skipped": skipped, "failed": failed, "scrubbed": scrubbed}
+    _vault_audit("import_env", "", None, "imported=%d skipped=%d failed=%d scrub=%s files=%s" % (len(imported), len(skipped), len(failed), scrubbed, file_scrubbed))
+    return {"ok": not failed, "imported": imported, "skipped": skipped, "failed": failed, "scrubbed": scrubbed, "files_scrubbed": file_scrubbed}
 
 def notify_send(text):
     """Push a notification to the user via any installed+configured channel (Telegram today). Graceful:
