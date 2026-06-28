@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.15 -- 2026-06-28
+- AUTOMATIC HOUSEKEEPING (Track B core of the context strategy): the doc/context tree now stays clean with zero
+  manual upkeep. New `_housekeeping_loop` (hourly, idempotent, daemon): regenerates the module map (every
+  folder's CC:CHILDREN + the root CC:TREEMAP) so it never drifts even on a node nobody is viewing, runs Doctor,
+  and surfaces NEW issues (over-budget CLAUDE.md, managed-block drift, missing docs) -> logged to
+  `_housekeeping.log`, ERRORs notified once/day per issue (anti-spam). CLAUDE.md budget aligned to Anthropic's
+  **<200 lines** (Doctor flags past 200). Remaining Track B levers (path-scoped `.claude/rules/`, procedures->
+  skills, API tool-result clearing/compaction, SessionStart/PreCompact hooks) are native Claude-Code/API
+  mechanisms documented as available-to-adopt in docs/CONTEXT_STRATEGY.md (the launch context brief already
+  carries the lockdown/files awareness, so those are additive). Track A (context quality) documented as shipped.
+
 ## 0.99.14 -- 2026-06-28
 - CONTEXT QUALITY (Track A.2/A.4/A.5): the substrate now knows our whole operation + every relevant tool's intel.
   - BROADENED INGEST (`_context_backfill`): added operator NOTES (our comms), TASKS (commitments), IDEAS, and

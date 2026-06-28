@@ -7661,7 +7661,7 @@ def doctor():
     """Self-maintenance check: flags over-budget docs, sub-tool duplication, managed-block drift, and
        registered components missing a CLAUDE.md -- so the multi-level doc system stays clean as it grows."""
     issues = []
-    BUDGET = 220
+    BUDGET = 200          # Anthropic guidance: CLAUDE.md adherence drops past ~200 lines -> keep it an index
     for ab, rel in iter_folders():
         cm = os.path.join(ab, "CLAUDE.md")
         if not os.path.isfile(cm):
@@ -8550,6 +8550,40 @@ def _context_backfill_loop():
         try: _context_backfill()
         except Exception: pass
         time.sleep(900)   # re-ingest every 15 min (idempotent)
+
+# ---- AUTOMATIC HOUSEKEEPING (Track B): keep the context/doc tree clean with zero manual upkeep. Regenerates the
+# module map (treemap + per-folder children) so it never drifts on a node nobody is viewing, runs Doctor, and
+# surfaces NEW issues (over-budget CLAUDE.md, managed-block drift, missing docs) -- logged, and ERRORs notified
+# ONCE/day per issue (anti-spam). Idempotent + cheap; runs in a daemon thread so it never blocks serving.
+_HOUSEKEEP_LOG = os.path.join(STATE_DIR, "_housekeeping.log")
+_HOUSEKEEP_SEEN = {}
+def _housekeeping_once():
+    try: regen_all_children()        # regenerates every folder's CC:CHILDREN + the root CC:TREEMAP (idempotent)
+    except Exception: pass
+    try: issues = (doctor() or {}).get("issues", [])
+    except Exception: issues = []
+    now = time.time(); fresh = []
+    for it in issues:
+        key = (it.get("path", "") + "|" + (it.get("msg", "") or "")[:60])
+        if now - _HOUSEKEEP_SEEN.get(key, 0) > 86400:     # once/day per distinct issue
+            _HOUSEKEEP_SEEN[key] = now; fresh.append(it)
+    if fresh:
+        try:
+            with open(_HOUSEKEEP_LOG, "a") as f:
+                for i in fresh:
+                    f.write(time.strftime("%Y-%m-%d %H:%M ") + (i.get("sev") or "?") + " " + (i.get("path") or "") + ": " + (i.get("msg") or "")[:180] + "\n")
+        except Exception: pass
+        errs = [i for i in fresh if i.get("sev") == "err"]
+        if errs:
+            try: notify_send("ClaudeFather housekeeping: %d issue(s) to look at (Doctor): %s" % (len(errs), "; ".join((i.get("path") or "?") for i in errs[:4])))
+            except Exception: pass
+    return {"issues": len(issues), "fresh": len(fresh)}
+def _housekeeping_loop():
+    time.sleep(150)                  # let boot + the first treemap/integrity passes settle
+    while True:
+        try: _housekeeping_once()
+        except Exception: pass
+        time.sleep(3600)             # hourly
 
 # ======================================================================================================
 # CAPTURE SPINE wiring (clips.py engine). Resolve a subject -> its folder + deliverables target, write clip
@@ -20686,6 +20720,7 @@ if __name__ == "__main__":
     threading.Thread(target=_gc_sync_loop, daemon=True).start()         # same for Calendar/Drive (resilient cache)
     threading.Thread(target=_warm_default_views, daemon=True).start()   # boot-warm the UI's default views + prime the OAuth token (non-blocking)
     threading.Thread(target=_context_backfill_loop, daemon=True).start()   # CONTEXT LAYER: ingest existing surfaces into the store (idempotent, every 15 min)
+    threading.Thread(target=_housekeeping_loop, daemon=True).start()        # HOUSEKEEPING: regen module map + Doctor sweep + surface new issues (hourly, idempotent)
     threading.Thread(target=_clips_eod_loop, daemon=True).start()           # CAPTURE SPINE: opt-in end-of-day triage proposals (review-first; off unless clips_eod_process)
     # Bind host: default 0.0.0.0 (existing nodes unchanged). Provisioned standalone bundles set bind_host
     # "127.0.0.1" so the ONLY tailnet-visible surface is the TLS `tailscale serve` URL -- no raw plain-HTTP
