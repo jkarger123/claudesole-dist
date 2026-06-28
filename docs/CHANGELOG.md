@@ -3,6 +3,27 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.98.0 -- 2026-06-28
+- SMART ACCOUNT BURN-ROTATION ("which login to burn next") overhaul, for multi-subscription installs:
+  - RECOMMENDATION BRAIN rewritten (`_acct_recommend`): rank by SOONEST WEEKLY (7-day) reset first =
+    minimize LOCKED-UP capacity (draining an account makes its capacity dead until that account resets, so
+    spend the soonest-resetting one and preserve far-from-reset accounts as reserve). The 5h window is now a
+    pure THROTTLE (near-full -> 'cooling', fall through), never a ranking input. Uses the limit-model's
+    predicted live % when READY. (Replaces the earlier perish-rate model, which optimized the wrong objective.)
+  - TIME-OF-DAY diagnostics (`_acct_tod_report`, `GET /api/account-tod`): weekly capacity is FLAT (fixed
+    budget, ruled out); 5h shows ~34% spread but low-n -- measured, NOT folded into the model.
+  - VERIFY-THEN-ROLLBACK switch (`account_switch_verified`): confirms the new login is live AND can read
+    /usage, else auto-rolls-back to the prior login. Switch-health ledger (`_cc_acct_switch_health.json`) +
+    `auto_proven` gate (>= SWITCH_PROOF_N consecutive verified-good switches; one failure resets). Live-proven.
+  - ACT LAYER: per-node opt-in `account_autopilot` = off | alert | auto, but stored PER macOS-USER (shared by
+    all co-located nodes -- they share ONE Claude login, so the choice can't differ between them; a different
+    user e.g. AFP is independent). 'alert' = loud "Switch now -> <acct>" banner + one-click verified switch.
+    'auto' = idle-gated auto-switch loop (`_acct_autopilot_loop`): only when idle + fresh data + cooldown +
+    verify/rollback; LOCKED until the ledger is proven; kill-switch = flip the mode off. The dashboard Switch
+    button now uses the verified endpoint so manual switches build the proof.
+  - Endpoints: `GET /api/account-tod`, `GET /api/account-switch-health`, `POST /api/account-switch-verified`,
+    `POST /api/account-autopilot`; superadmin actions `switch_account` (now verify+rollback) and `set_autopilot`.
+
 ## 0.97.0 -- 2026-06-28
 - CHIEF WATCHDOG: the Chief of Staff (the always-on inter-chief MESH comms endpoint) is now kept alive. It was
   a singleton started ON DEMAND with no supervisor -- if its claude process exited, nothing respawned it and the

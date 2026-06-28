@@ -87,13 +87,14 @@ SCOPE_SESSIONS = CC.get("scope_sessions", ROLE != "org")
 # grandfather via superadmin set_config. Takes effect on restart (like the other settings).
 FLEET_SHARE = bool(CC.get("fleet_share", True))
 FLEET_VIEW = (CC.get("fleet_view") or "full").lower()
-# Account autopilot: how this node ACTS on the "use next" recommendation when it has >1 subscription account.
-#   off   -> recommendation is computed + shown, but nothing nudges the operator (default; current behavior)
-#   alert -> loudly surface "switch to <account> now" when the live login isn't the recommended pick (Phase 3)
-#   auto  -> idle-gated auto-switch (Phase 3), but ONLY after the verify-then-rollback ledger has proven itself
-# Per-node, opt-in from the Accounts/Usage tab; pushable from the grandfather via superadmin set_config.
-ACCT_AUTOPILOT = (CC.get("account_autopilot") or "off").lower()
-if ACCT_AUTOPILOT not in ("off", "alert", "auto"): ACCT_AUTOPILOT = "off"
+# Account autopilot: how a node ACTS on the "use next" recommendation when there are >1 subscription accounts.
+#   off   -> recommendation is computed + shown, but nothing nudges the operator (default)
+#   alert -> loudly surface "switch to <account> now" when the live login isn't the recommended pick
+#   auto  -> idle-gated auto-switch, but ONLY after the verify-then-rollback ledger has proven itself
+# IT IS PER macOS-USER, NOT per-instance: every CC instance on one macOS user shares ONE Claude keychain login,
+# so the opt-in must be shared too (a co-located node can't independently opt out of a switch its neighbours
+# trigger). Lives in a shared ~/.claude file (see _autopilot_state/_autopilot_mode); a different macOS user
+# (e.g. AFP = sarahaios) is independent. Legacy per-instance cc.config "account_autopilot" is a one-time seed.
 
 # ---- Update identity (ONE white-label point) -------------------------------------------------------
 # A packaged install pulls framework updates from the canonical ClaudeFather dist by default; a private/
@@ -386,7 +387,7 @@ SA_NODE_KEY = os.environ.get("MESH_SUPERADMIN_NODE_KEY") or CC.get("superadmin_n
 SA_SKEW = 300                  # max clock skew (s) tolerated on the issued timestamp
 SA_ALLOWED_KEYS = ("mesh_auth_enforce", "mesh_reply_sla", "subscription_monthly", "pipeline_stale_sec",
                    "deliverables_root", "storage_mode", "account_wallet", "fleet_share", "fleet_view", "side_label",
-                   "extension_routine_host", "account_autopilot", "switch_proof_n")
+                   "extension_routine_host", "switch_proof_n")
 _SA_SEEN = {}                  # nonce -> exp_ts (single-use replay cache)
 _SA_LOCK = threading.Lock()
 # PUBLIC-KEY superadmin (the "every install is auto-under my superadmin" model): MC holds an Ed25519 PRIVATE
@@ -618,6 +619,10 @@ def superadmin_exec(grant):
             r = account_switch(tgt)
         return {"ok": bool(r.get("ok")), "action": action, "email": r.get("email"),
                 "verified": r.get("verified"), "rolled_back": r.get("rolled_back"), "error": r.get("error")}
+    if action == "set_autopilot":
+        # set THIS node's macOS-user autopilot mode (off|alert|auto) -- per-user, shared by its co-located nodes.
+        r = set_account_autopilot(params.get("mode") or "")
+        return {"ok": bool(r.get("ok")), "action": action, "mode": r.get("mode"), "error": r.get("error")}
     return {"ok": False, "error": "unknown superadmin action: " + str(action)}
 
 def _self_restart():
@@ -3180,11 +3185,46 @@ def switch_health():
             "proof_n": SWITCH_PROOF_N, "auto_proven": consec >= SWITCH_PROOF_N,
             "last_fail": d.get("last_fail"), "recent": list(reversed(d.get("events", [])[-12:]))}
 
+# Autopilot opt-in state -- SHARED per macOS USER (the login is global per user, so the opt-in is too). One file
+# under ~/.claude; every co-located instance reads/writes the SAME mode. A different user (AFP) has its own file.
+ACCT_AUTOPILOT_FILE = os.path.expanduser("~/.claude/_cc_acct_autopilot.json")   # {mode, last_switch_ts, last_note}
+_AUTOPILOT_CACHE = {"at": 0.0, "data": None}
+def _autopilot_state():
+    """The shared per-user autopilot state ({mode, last_switch_ts, last_note}). Cached ~3s. Falls back to a
+    one-time seed from this instance's legacy cc.config `account_autopilot` if the shared file doesn't exist yet."""
+    now = time.time()
+    if _AUTOPILOT_CACHE["data"] is not None and now - _AUTOPILOT_CACHE["at"] < 3:
+        return _AUTOPILOT_CACHE["data"]
+    d = None
+    try:
+        d = json.load(open(ACCT_AUTOPILOT_FILE))
+    except Exception:
+        d = None
+    if not isinstance(d, dict):
+        legacy = (CC.get("account_autopilot") or "off").lower()                 # migration seed
+        d = {"mode": legacy if legacy in ("off", "alert", "auto") else "off"}
+    if d.get("mode") not in ("off", "alert", "auto"): d["mode"] = "off"
+    _AUTOPILOT_CACHE.update({"at": now, "data": d}); return d
+def _autopilot_mode(): return _autopilot_state().get("mode", "off")
+def _autopilot_state_save(patch):
+    with _SWITCH_HEALTH_LOCK:
+        d = {}
+        try: d = json.load(open(ACCT_AUTOPILOT_FILE))
+        except Exception: pass
+        if not isinstance(d, dict): d = {}
+        d.update(patch)
+        try:
+            tmp = ACCT_AUTOPILOT_FILE + ".tmp"; json.dump(d, open(tmp, "w")); os.chmod(tmp, 0o600); os.replace(tmp, ACCT_AUTOPILOT_FILE)
+            try: os.chmod(ACCT_AUTOPILOT_FILE, 0o600)
+            except Exception: pass
+        except Exception: pass
+    _AUTOPILOT_CACHE["data"] = None
+    return d
 def set_account_autopilot(mode):
-    """Opt this node into off|alert|auto (the Accounts/Usage toggle). Persists to cc.config AND updates the live
-    global so it applies WITHOUT a restart. 'auto' is REFUSED until the verify-then-rollback ledger has proven
-    itself (>= SWITCH_PROOF_N consecutive verified-good switches) -- the operator's 'prove it's reliable' gate."""
-    global ACCT_AUTOPILOT
+    """Opt this macOS USER (every co-located node shares ONE login) into off|alert|auto. PER-USER, not per-node:
+    setting it on any node sets it for all nodes on this computer-user; a different user (AFP) is independent.
+    Live-applied (no restart). 'auto' is REFUSED until the verify-then-rollback ledger has proven itself
+    (>= SWITCH_PROOF_N consecutive verified-good switches) -- the operator's 'prove it's reliable' gate."""
     mode = (mode or "").lower()
     if mode not in ("off", "alert", "auto"): return {"ok": False, "error": "mode must be off | alert | auto"}
     if mode == "auto":
@@ -3193,69 +3233,46 @@ def set_account_autopilot(mode):
             return {"ok": False, "locked": True,
                     "error": "auto is locked until the switch proves reliable (%d/%d verified-good switches so far — "
                              "use 'alert' and let manual switches build the record first)" % (h.get("consec_ok", 0), SWITCH_PROOF_N)}
-    try:
-        cfg = json.load(open(_CC_CONFIG)) if os.path.isfile(_CC_CONFIG) else {}
-    except Exception as e:
-        return {"ok": False, "error": "read cc.config failed: " + str(e)[:120]}
-    cfg["account_autopilot"] = mode
-    try:
-        tmp = _CC_CONFIG + ".tmp"; json.dump(cfg, open(tmp, "w"), indent=2); os.replace(tmp, _CC_CONFIG)
-        try: os.chmod(_CC_CONFIG, 0o600)
-        except Exception: pass
-    except Exception as e:
-        return {"ok": False, "error": "write failed: " + str(e)[:120]}
-    ACCT_AUTOPILOT = mode                                   # live -- no restart needed
-    return {"ok": True, "mode": mode}
+    _autopilot_state_save({"mode": mode})
+    return {"ok": True, "mode": mode, "scope": "all nodes on this computer-user (they share one login)"}
 
 # ---- Phase 3: idle-gated auto-switch loop (locked until the ledger proves the switch reliable) ----------------
 AUTO_IDLE_SEC = int(CC.get("autopilot_idle_sec") or 300)         # require this much idle before auto-switching
 AUTO_COOLDOWN_SEC = int(CC.get("autopilot_cooldown_sec") or 1800)# min seconds between auto-switches (anti-flap)
 AUTO_FRESH_SEC = int(CC.get("autopilot_fresh_sec") or 3600)      # the pick's /usage reading must be fresher than this
-_AUTOPILOT_STATE = {"last_switch": 0.0, "last_note": ""}
-ACCT_AUTOPILOT_LOCKFILE = os.path.expanduser("~/.claude/_cc_acct_autopilot.lock")
-def _acct_autopilot_claim():
-    """Per-user file lock so exactly ONE co-located instance auto-switches (the 3 hptuner nodes share ONE login)."""
-    now = time.time(); mypid = str(os.getpid())
-    try:
-        age = now - os.stat(ACCT_AUTOPILOT_LOCKFILE).st_mtime; held = open(ACCT_AUTOPILOT_LOCKFILE).read().strip()
-    except Exception:
-        age = 1e9; held = ""
-    if held and held != mypid and age < 360: return False        # another live instance owns it (stale > ~3 cycles)
-    try:
-        fd = os.open(ACCT_AUTOPILOT_LOCKFILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        os.write(fd, mypid.encode()); os.close(fd); return True
-    except Exception:
-        return False
 def _acct_autopilot_loop():
     """Auto-switch the live login to the recommended pick -- but ONLY when EVERY safety gate passes:
-      - this node is in 'auto' AND the verify-then-rollback ledger is auto_proven (>=SWITCH_PROOF_N good)
+      - this macOS user is in 'auto' AND the verify-then-rollback ledger is auto_proven (>=SWITCH_PROOF_N good)
       - the recommended pick differs from the live login and is in THIS node's wallet
       - the user is idle (>= AUTO_IDLE_SEC) so we never yank the login mid-task
       - the pick's /usage reading is OK and fresh (< AUTO_FRESH_SEC) -- never act on stale/errored data
-      - a cooldown since the last auto-switch (anti-flap)
+      - a SHARED cooldown since the last auto-switch (anti-flap, in the per-user state file)
     The switch itself is account_switch_verified (auto-rolls-back a bad login); a failed switch trips the ledger
     back below the proof bar, disabling auto until re-earned. KILL-SWITCH: set the mode to anything but 'auto'
-    (live-applied). Only ONE co-located instance acts (file lock)."""
+    (live-applied, per-user). Co-located instances coordinate via the SHARED state: whoever has the pick in its
+    wallet and passes the gates writes the intent (last_switch_ts) BEFORE acting, so the others back off on the
+    shared cooldown; after the first switch the live login == pick so should_switch is false for everyone."""
     time.sleep(75)                                               # let boot + the first account poll settle
     while True:
         try:
-            if ACCT_AUTOPILOT == "auto" and switch_health().get("auto_proven") and _acct_autopilot_claim():
-                aw = account_windows_all()
-                pick = aw.get("pick"); cur = aw.get("current_email")
-                pa = next((a for a in aw.get("accounts", []) if a.get("email") == pick), None)
-                fresh = bool(pa and pa.get("ok") and pa.get("ts") and (time.time() - pa["ts"]) < AUTO_FRESH_SEC)
-                idle = _user_idle_secs()
-                cooled = (time.time() - _AUTOPILOT_STATE["last_switch"]) > AUTO_COOLDOWN_SEC
-                if (aw.get("should_switch") and aw.get("pick_in_wallet") and pick and pick != cur
-                        and idle >= AUTO_IDLE_SEC and fresh and cooled):
-                    r = account_switch_verified(pick, by="auto")
-                    _AUTOPILOT_STATE["last_switch"] = time.time()
-                    msg = ("auto-switched %s -> %s (%s)" % (cur, pick,
-                           "verified" if r.get("ok") else ("FAILED, " + ("rolled back" if r.get("rolled_back") else "NOT rolled back") + ": " + str(r.get("error"))[:120])))
-                    _AUTOPILOT_STATE["last_note"] = time.strftime("%H:%M ") + msg
-                    try: open(os.path.expanduser("~/.cc-credential-changes.log"), "a").write(
-                        time.strftime("%Y-%m-%d %H:%M:%S") + "  AUTOPILOT " + msg + "\n")
-                    except Exception: pass
+            if _autopilot_mode() == "auto" and switch_health().get("auto_proven"):
+                st = _autopilot_state(); now = time.time()
+                if (now - (st.get("last_switch_ts") or 0)) > AUTO_COOLDOWN_SEC:   # shared cooldown
+                    aw = account_windows_all()
+                    pick = aw.get("pick"); cur = aw.get("current_email")
+                    pa = next((a for a in aw.get("accounts", []) if a.get("email") == pick), None)
+                    fresh = bool(pa and pa.get("ok") and pa.get("ts") and (now - pa["ts"]) < AUTO_FRESH_SEC)
+                    idle = _user_idle_secs()
+                    if (aw.get("should_switch") and aw.get("pick_in_wallet") and pick and pick != cur
+                            and idle >= AUTO_IDLE_SEC and fresh):
+                        _autopilot_state_save({"last_switch_ts": now})           # claim intent (shared) BEFORE acting
+                        r = account_switch_verified(pick, by="auto")
+                        msg = ("auto-switched %s -> %s (%s)" % (cur, pick,
+                               "verified" if r.get("ok") else ("FAILED, " + ("rolled back" if r.get("rolled_back") else "NOT rolled back") + ": " + str(r.get("error"))[:120])))
+                        _autopilot_state_save({"last_switch_ts": time.time(), "last_note": time.strftime("%H:%M ") + msg})
+                        try: open(os.path.expanduser("~/.cc-credential-changes.log"), "a").write(
+                            time.strftime("%Y-%m-%d %H:%M:%S") + "  AUTOPILOT " + msg + "\n")
+                        except Exception: pass
         except Exception: pass
         time.sleep(120)
 
@@ -3607,7 +3624,7 @@ def account_windows_all():
     should_switch = bool(pick and cur and pick != cur and pick_in_wallet)
     return {"accounts": accounts, "now": now, "current_email": cur, "poll_ttl": ACCT_POLL_TTL,
             "rotation_default_all": rot is None, "pick": pick, "pick_why": (pa["why"] if pa else None),
-            "autopilot": ACCT_AUTOPILOT, "multi_account": len(walletset) > 1,
+            "autopilot": _autopilot_mode(), "multi_account": len(walletset) > 1,
             "should_switch": should_switch, "pick_in_wallet": pick_in_wallet,
             "switch_health": switch_health(),
             "sides": [{"side": r.get("side") or r.get("store_id"), "live": r.get("current_email"),
@@ -10422,7 +10439,7 @@ def auth_token_set(new):
 def settings_get():
     return {"project_name": PROJECT_NAME, "brand": BRAND, "role": ROLE, "preset": PRESET,
             "auth_on": bool(AUTH_TOKEN), "fleet_share": FLEET_SHARE, "fleet_view": FLEET_VIEW,
-            "account_autopilot": ACCT_AUTOPILOT,
+            "account_autopilot": _autopilot_mode(),
             "integration": (CC.get("integration") or "").lower(), "is_agency": is_agency(),
             "tier": "grandfather" if ROLE == "org" else "father",
             "type": "agency" if is_agency() else "project",
@@ -10446,9 +10463,6 @@ def settings_save(body):
         if bool(cfg.get("fleet_share", True)) != v: cfg["fleet_share"] = v; changed.append("fleet_share=" + str(v))
     if body.get("fleet_view") in ("full", "own"):
         if (cfg.get("fleet_view") or "full") != body["fleet_view"]: cfg["fleet_view"] = body["fleet_view"]; changed.append("fleet_view=" + body["fleet_view"])
-    if body.get("account_autopilot") in ("off", "alert", "auto"):
-        if (cfg.get("account_autopilot") or "off") != body["account_autopilot"]:
-            cfg["account_autopilot"] = body["account_autopilot"]; changed.append("account_autopilot=" + body["account_autopilot"])
     if not changed: return {"ok": True, "changed": [], "note": "No changes."}
     try:
         tmp = _CC_CONFIG + ".tmp"
@@ -13615,12 +13629,15 @@ function acctFuelSection(){
     var mode=d.autopilot||'off', sh=d.switch_health||{}, proven=!!sh.auto_proven;
     var mk=function(m,lbl,desc,dis){ var on=(mode===m);
       return '<button class="mini'+(on?' go':'')+'" '+(dis?'disabled ':'')+'title="'+e2(desc)+'" onclick="awSetMode(\''+m+'\')" style="'+(on?'':'opacity:.78')+(dis?';cursor:not-allowed':'')+'">'+(on?'● ':'')+lbl+'</button>'; };
-    h+='<div style="margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:#0006">'
+    h+='<div style="margin-top:10px;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:#0006">'
+      +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
       +'<b style="font-size:12.5px;color:#cfd3da">Act on this:</b>'
       +mk('off','Off','Just show the recommendation — never nudge or switch',false)
       +mk('alert','🔔 Alert me','Loudly tell me to switch when the live login is not the best pick',false)
       +mk('auto','🤖 Auto'+(proven?'':' 🔒'),proven?'Switch the login for me when idle + safe (verified, auto-rollback)':('Locked until the switch proves reliable — '+(sh.consec_ok||0)+'/'+(sh.proof_n||3)+' verified-good switches so far. Use Alert and do a few manual switches first.'),!proven)
       +'<span class="sub" style="margin-left:auto">'+(sh.total_ok||0)+' verified · '+(sh.total_fail||0)+' failed · '+(proven?'<span style="color:#3fb950">auto unlocked ✓</span>':('<span style="opacity:.75">auto locked '+(sh.consec_ok||0)+'/'+(sh.proof_n||3)+'</span>'))+'</span>'
+      +'</div>'
+      +'<div class="ucsub" style="margin-top:6px;opacity:.7">This applies to <b>every node on this computer-user account</b> — they all share one Claude login, so the choice can\'t differ between them. A different computer-user (e.g. another machine/agency) sets its own.</div>'
       +'</div>';
   }
   // ---- the loud SWITCH NOW banner: live login is not the recommended pick (only in alert/auto modes) ----
