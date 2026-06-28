@@ -4743,6 +4743,37 @@ def vault_import_env(scrub=False):
         except Exception: pass
     _vault_audit("import_env", "", None, "imported=%d skipped=%d failed=%d scrub=%s files=%s" % (len(imported), len(skipped), len(failed), scrubbed, file_scrubbed))
     return {"ok": not failed, "imported": imported, "skipped": skipped, "failed": failed, "scrubbed": scrubbed, "files_scrubbed": file_scrubbed}
+def _vault_materialize_google():
+    """BRIDGE (gap fix): the EXTERNAL Google MCP server (an agent session launches it) reads google_oauth.json +
+    tokens/<acct>.json FILES, but the live creds live in the VAULT (the in-process client already reads vault-first).
+    After the import scrub those files are gone, orphaning the MCP server. So if the vault HAS the creds and the
+    files are MISSING, write them back 0600 (just-in-time, gitignored, regenerated from the vault) -- the vault
+    stays the system of record; this only re-hydrates what an external process can't read from the vault. Returns
+    a short summary. Idempotent: never overwrites an existing (possibly fresher) file."""
+    out = {"oauth": False, "tokens": []}
+    try:
+        secdir = os.path.join(EXT_DIR, "google-workspace", "secrets")
+        oauth = _vault_local("google_oauth_client")
+        if oauth:
+            op = os.path.join(secdir, "google_oauth.json")
+            if not os.path.isfile(op):
+                os.makedirs(secdir, exist_ok=True)
+                fd = os.open(op, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, oauth.encode()); os.close(fd)
+                out["oauth"] = True
+        toks = _vault_local("google_tokens")
+        if toks:
+            tdir = os.path.join(secdir, "tokens"); os.makedirs(tdir, exist_ok=True)
+            try: d = json.loads(toks)
+            except Exception: d = {}
+            for acct, tj in (d.items() if isinstance(d, dict) else []):
+                tp = os.path.join(tdir, str(acct) + ".json")
+                if not os.path.isfile(tp):
+                    body = tj if isinstance(tj, str) else json.dumps(tj)
+                    fd = os.open(tp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, body.encode()); os.close(fd)
+                    out["tokens"].append(str(acct))
+    except Exception: pass
+    return out
+
 def vault_declare(key, label=None, scope=None, needed_by=None):
     """Create an EMPTY vault slot (no value) so the Vault lens shows 'needed, not set' for an extension's keys.
     No-op if the key already holds a value. Powers auto-provisioning a slot when an extension is enabled."""
@@ -7751,8 +7782,37 @@ def doctor():
             issues.append({"sev": "warn", "path": "storage", "msg": "the project lives on the INTERNAL boot volume -- the enterprise standard is one dedicated SSD per node (project on the SSD, internal drive kept empty). See docs/STORAGE_ARCHITECTURE.md."})
     except Exception:
         pass
+    try:                                   # SECRETS OUTSIDE THE VAULT (the vault should be the single store)
+        loose = _loose_secrets_scan()
+        if loose:
+            issues.append({"sev": "warn", "path": "vault", "msg": "%d secret(s) live OUTSIDE the central vault (they can't be scoped or leased to nodes) -- move them in via the Vault lens: %s" % (len(loose), ", ".join(loose[:6]))})
+    except Exception: pass
     issues.sort(key=lambda x: 0 if x["sev"] == "err" else 1)
     return {"count": len(issues), "issues": issues}
+
+def _loose_secrets_scan():
+    """Find likely SECRETS sitting OUTSIDE the vault (a live .env.claudefather, extension mcp.json env literals) so
+    Doctor flags them. Detection ONLY -- never auto-moves (moving could orphan an external MCP server, like the
+    google scrub did). The operator moves them into the vault deliberately."""
+    hits = []; pat = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|_API)", re.I)
+    try:
+        if os.path.isfile(DEPLOY_ENV):
+            for line in open(DEPLOY_ENV, errors="ignore"):
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line and pat.search(line.split("=", 1)[0]):
+                    hits.append(".env.claudefather:" + line.split("=", 1)[0].strip())
+    except Exception: pass
+    try:
+        for mj in glob.glob(os.path.join(EXT_DIR, "*", "mcp.json")):
+            try: m = json.load(open(mj))
+            except Exception: continue
+            servers = (m.get("mcpServers") or m.get("servers") or {}) if isinstance(m, dict) else {}
+            for srv in (servers.values() if isinstance(servers, dict) else []):
+                for k, v in ((srv or {}).get("env") or {}).items():
+                    if pat.search(k) and isinstance(v, str) and len(v) > 12 and not v.startswith("${") and "vault:" not in v:
+                        hits.append(os.path.relpath(mj, CC_HOME) + ":" + k)
+    except Exception: pass
+    return hits[:20]
 
 # ---- module system: tools/concepts as add/remove/combinable units, two-way context --------------
 MOD_LOCK = threading.Lock()
@@ -21663,6 +21723,8 @@ if __name__ == "__main__":
     threading.Thread(target=_gmail_sync_loop, daemon=True).start()      # keep recently-viewed Gmail lists warm (cache + outage fallback)
     threading.Thread(target=_gc_sync_loop, daemon=True).start()         # same for Calendar/Drive (resilient cache)
     threading.Thread(target=_warm_default_views, daemon=True).start()   # boot-warm the UI's default views + prime the OAuth token (non-blocking)
+    try: _vault_materialize_google()   # re-hydrate google_oauth.json + tokens/ from the vault for the external MCP server (vault stays source of truth)
+    except Exception: pass
     threading.Thread(target=_context_backfill_loop, daemon=True).start()   # CONTEXT LAYER: ingest existing surfaces into the store (idempotent, every 15 min)
     threading.Thread(target=_housekeeping_loop, daemon=True).start()        # HOUSEKEEPING: regen module map + Doctor sweep + surface new issues (hourly, idempotent)
     threading.Thread(target=_clips_eod_loop, daemon=True).start()           # CAPTURE SPINE: opt-in end-of-day triage proposals (review-first; off unless clips_eod_process)

@@ -3,6 +3,25 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.23 -- 2026-06-28
+- VAULT COMPLETION -- the central vault is now the verified single source of truth, and the node-uniformity
+  answer (every node leases its SCOPED secrets from the overseer; adding a node never touches secrets). The
+  authoring/appliance "two families" confusion + the node-forking detour resolved in favor of this. Docs:
+  `docs/NODE_ARCHITECTURE.md` (overseer + uniform nodes), `docs/HANDOFFS.md` (the agentic flow).
+  - GAP 1 (active bug FIXED): the external Google MCP server in agent sessions was orphaned (the import scrub
+    removed google_oauth.json + tokens/ that `.mcp.json` points at, while the live creds moved into the vault).
+    `_vault_materialize_google()` re-hydrates those files 0600 from the vault at boot (vault stays source of
+    truth; just re-hydrates what an external process can't read from the vault). Verified files reappear.
+  - GAP 2: Doctor now flags any secret living OUTSIDE the central vault (live .env.claudefather keys, extension
+    mcp.json env literals) -- detection only, never auto-moves (moving could orphan an MCP server). `_loose_secrets_scan()`.
+  - GAP 3: per-node SCOPE was already supported (Vault lens sets scope + per-node overrides; vault_lease enforces).
+    Confirmed -- the only "gap" was that everything is scope=["*"] today, a data choice the operator tightens per secret.
+  - GAP 4 (the keystone): central-pull verified end-to-end -- a node leases a scoped secret from the overseer
+    vault (auth-gated by the family mesh token, scope-enforced: a carsearch-scoped secret is granted to carsearch,
+    denied to shopos; bogus token denied). Activated live on shopos (`vault_url` -> overseer); it boots healthy
+    and is now capable of leasing its scoped secrets centrally. This is how every node (co-located, appliance, or
+    a new T490 project) gets credentials uniformly.
+
 ## 0.99.22 -- 2026-06-28
 - SMART FIXES -- closed the quality gaps in routing/harvest/drift, using the node's Claude SUBSCRIPTION (headless
   `claude -p`, NO metered cost) deterministic-first (the model fires ONLY on ambiguous cases). `_claude_text()`.
