@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.94.0 -- 2026-06-28
+- CREDENTIALS unified into ONE per-install vault (the only way; docs/CREDENTIALS.md). There is now a single
+  encrypted credential store per install at <DEPLOY_ROOT>/.vault/ (shared by co-located instances; under
+  DEPLOY_ROOT so it's writable even on a read-only-core appliance), and a single resolver: `_deploy_env(key)`
+  now resolves process-env -> the install VAULT (local store, scope+per-node aware; or leased from the overseer
+  for remote nodes) -> legacy .env.claudefather (bootstrap/import only, being retired). Sharing model = central
+  vault + per-secret SCOPE: a secret carries scope=[nodes] with a shared value OR per-node values (billing
+  isolation); rotate once, all in-scope nodes get it. New `_vault_local` (quiet scope-aware local read),
+  `vault_import_env(scrub)` + `POST /api/vault-import`: migrates every key out of plaintext .env into the vault,
+  verifies each reads back, and (scrub) archives the plaintext (.env.claudefather.migrated-<ts>, reversible) so
+  the vault is the ONLY store. Rollout is additive (vault empty -> .env still answers; nothing breaks) then
+  import -> verify -> scrub. Our install migrated: 15 secrets moved into the vault, .env retired, all still
+  resolve. Extensions converge automatically (anything reading via _deploy_env now reads the vault); bespoke
+  secret FILES (google/slack) are the remaining per-extension cleanup. Vault dir/key + migrated .env archives
+  gitignored, never shipped.
+
 ## 0.93.0 -- 2026-06-27
 - NEW EXTENSION: Substack (read + draft -- Substack has no publish API, so this is the honest shape). TRACK:
   poll configured publications' PUBLIC RSS feeds into a node-local cache + a Substack lens (your pub +

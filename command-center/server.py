@@ -3887,9 +3887,12 @@ MCP_JSON = os.path.join(DEPLOY_ROOT, ".mcp.json")             # gitignored MCP s
 #   Lease (family-token authed):   vault_lease(secret_id, node) -> decrypted value if node in scope & not revoked.
 #   Any node:                      vault_get(secret_id) leases from CC.config 'vault_url' + caches in RAM;
 #                                  _deploy_env falls back to it, so existing secret reads resolve transparently.
-VAULT_FILE = os.path.join(STATE_DIR, "_vault.json")          # {sid:{label,scope[],shared:cipher|null,per_node:{node:cipher},revoked,created,updated}}
-VAULT_KEY_FILE = os.environ.get("CC_VAULT_KEY") or CC.get("vault_key_file") or os.path.join(CC_HOME, ".vault_key")   # MC ONLY -- 0600, gitignored, NEVER shipped
-VAULT_AUDIT = os.path.join(STATE_DIR, "_vault_audit.log")
+VAULT_DIR = os.environ.get("CC_VAULT_DIR") or CC.get("vault_dir") or os.path.join(DEPLOY_ROOT, ".vault")   # the INSTALL's single credential store -- under DEPLOY_ROOT (writable even on a read-only-core appliance); shared by co-located instances
+try: os.makedirs(VAULT_DIR, exist_ok=True)
+except Exception: pass
+VAULT_FILE = os.path.join(VAULT_DIR, "_vault.json")          # {sid:{label,scope[],shared:cipher|null,per_node:{node:cipher},revoked,created,updated}} -- ONE per install
+VAULT_KEY_FILE = os.environ.get("CC_VAULT_KEY") or CC.get("vault_key_file") or os.path.join(DEPLOY_ROOT, ".vault_key")   # 0600, gitignored, NEVER shipped; shared by co-located instances
+VAULT_AUDIT = os.path.join(VAULT_DIR, "_vault_audit.log")
 VAULT_URL = (CC.get("vault_url") or os.environ.get("CC_VAULT_URL") or "").rstrip("/")    # node side: upstream MC base url to lease from ("" = no upstream)
 VAULT_LEASE_TTL = int(CC.get("vault_lease_ttl") or 600)      # seconds a leased secret stays valid in a node's RAM cache
 _VAULT_LOCK = threading.Lock()
@@ -4010,23 +4013,66 @@ def vault_get(sid, default=None):
     except Exception: pass
     return default
 
-def _deploy_env(key, default=None):
-    """Read a per-deployment secret: os.environ first, then the gitignored .env.claudefather, then (if a
-    'vault_url' upstream is configured) lease it from the Mission Control credential vault (RAM-cached)."""
-    v = os.environ.get(key)
-    if v: return v
+def _vault_local(key):
+    """Read+decrypt a secret from THIS install's local vault for THIS node (honors scope + per-node override).
+    Quiet (no per-read audit -- secret reads are frequent). Returns None if absent/out-of-scope/revoked."""
+    try:
+        rec = _vault_load().get(key)
+        if not rec or rec.get("revoked"): return None
+        if not _vault_in_scope(rec, INSTANCE_ID): return None
+        over = (rec.get("per_node") or {}).get(INSTANCE_ID); cipher = over or rec.get("shared")
+        return _vault_dec(cipher) if cipher else None
+    except Exception: return None
+def _env_file_get(key):
+    """Bootstrap/import fallback ONLY: read the legacy plaintext .env.claudefather (being retired)."""
     try:
         for line in open(DEPLOY_ENV, encoding="utf-8", errors="replace"):
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, val = line.split("=", 1)
                 if k.strip() == key: return val.strip().strip('"').strip("'")
-    except Exception:
-        pass
-    if VAULT_URL:
+    except Exception: pass
+    return None
+def _deploy_env(key, default=None):
+    """THE single credential resolver. Order: process env -> this install's VAULT (local store, or leased from
+    the install's overseer over the signed channel) -> the legacy .env.claudefather (bootstrap/import only, being
+    retired). The vault is the system of record; everything else is override (env) or migration (.env)."""
+    v = os.environ.get(key)
+    if v: return v
+    val = _vault_local(key)                      # the install's own vault (shared by co-located instances)
+    if val is not None: return val
+    if VAULT_URL:                                # remote node within an install -> lease from the overseer's vault
         vv = vault_get(key)
         if vv is not None: return vv
-    return default
+    ev = _env_file_get(key)                      # legacy plaintext .env -- retired after migration (vault_import_env)
+    return ev if ev is not None else default
+def vault_import_env(scrub=False):
+    """MIGRATION: pull every secret out of the legacy plaintext .env.claudefather INTO the vault (scope ['*'] by
+    default -- re-scope per node afterwards), verify each reads back, and (scrub=True) archive the plaintext .env
+    so the vault is the ONLY store. Idempotent: a key already in the vault is left as-is. Authoring/operator-run."""
+    if not vault_available(): return {"ok": False, "error": "vault needs the 'cryptography' package"}
+    imported, skipped, failed = [], [], []
+    existing = _vault_load()
+    if os.path.isfile(DEPLOY_ENV):
+        try:
+            for line in open(DEPLOY_ENV, encoding="utf-8", errors="replace"):
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line: continue
+                k, val = line.split("=", 1); k = k.strip(); val = val.strip().strip('"').strip("'")
+                if not k or not val: continue
+                if k in existing: skipped.append(k); continue
+                r = vault_set(k, val, label=k, scope=["*"])
+                if r.get("ok") and _vault_local(k) == val: imported.append(k)
+                else: failed.append(k)
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:140], "imported": imported}
+    scrubbed = False
+    if scrub and not failed and (imported or skipped) and os.path.isfile(DEPLOY_ENV):
+        try:
+            os.replace(DEPLOY_ENV, DEPLOY_ENV + ".migrated-%d" % int(time.time())); scrubbed = True  # archive (reversible), not delete
+        except Exception: pass
+    _vault_audit("import_env", "", None, "imported=%d skipped=%d failed=%d scrub=%s" % (len(imported), len(skipped), len(failed), scrubbed))
+    return {"ok": not failed, "imported": imported, "skipped": skipped, "failed": failed, "scrubbed": scrubbed}
 
 def notify_send(text):
     """Push a notification to the user via any installed+configured channel (Telegram today). Graceful:
@@ -10713,6 +10759,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/license-code":              # AUTHORING/MC: mint a single-use purchase code
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(license_code_new(body.get("customer", ""), body.get("days", 365))))
+        if u.path == "/api/vault-import":
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(vault_import_env(scrub=bool(body.get("scrub")))))
         if u.path == "/api/vault-set":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(vault_set(body.get("id", ""), body.get("value"), label=body.get("label"), scope=body.get("scope"), node=body.get("node") or None)))
