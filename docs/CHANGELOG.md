@@ -3,6 +3,26 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.3 -- 2026-06-28
+- BASKET: a persistent sidebar collection you fill with anything draggable, then drag the WHOLE thing into a
+  session at once -- "hand the agent a basket of everything it needs for this task." Replaces the old
+  hardcoded SYSTEM / Bridge / Edge / T490 / T480 machine-status widget (that was this-deployment-specific and
+  not portable -- gone; the config-driven Machines lens stays).
+  - Fill it: drag any `[data-ss]` item (Drive doc, email/thread, calendar event, Granola call, deliverable,
+    or any extension entity) onto the basket; drag files from your computer in (uploaded via /api/basket-upload
+    -> a new `upload` sendable kind); or "Add to basket" from any item's send picker. Dedup'd; remove per item;
+    Clear.
+  - Use it: drag the basket onto a taskbar session tile OR a workspace pane -> every item is resolved to a real
+    file and handed over in ONE message + a summary line (new /api/session-send-batch; reuses the existing
+    per-kind resolvers at full fidelity). Live basket persists in localStorage.
+  - Saved PACKS: save the basket as a reusable named "context pack" (server-side /api/baskets*, survives
+    cache-clears + follows you across browsers); one click re-loads a pack into the basket. Delete packs inline.
+  - Refactor: extracted `_resolve_sendable_to_path` (shared by session_send + the new batch path; centralizes
+    the secret guards). Verified: backend (save/list/delete, batch-send materializes entity body+fields to real
+    files) + headless UI (panel present, SYSTEM widget gone, add/dedup/remove/persist/collapse/clear).
+  - NEXT (filed): let an extension declare a drop-target action so you can drop a basket/item onto its nav
+    button and it runs a function on them.
+
 ## 0.99.2 -- 2026-06-28
 - FIX duplicate AUTO-compact (James: "on auto-compact it asks twice to write the handoff, then ~4x to read
   it -- never happens on a manual /compact"). Root causes, both proven from the `_autocompact.log`s:

@@ -8545,6 +8545,25 @@ def session_upload(session, filename, mime, b64data, note="", enter=False):
         return {"ok": False, "error": "file exceeds %d MB limit" % _session_upload_cap_mb()}
     return _deliver_to_session(sess, filename, mime, raw, note, enter)
 
+def basket_upload(filename, mime, b64data):
+    """Save a computer file the user dropped INTO the basket (no session yet) to the uploads dir, return its
+    path. The basket stores a {kind:'upload', path} descriptor; the file is injected later when the basket is
+    dropped onto a session. Same cap + safe-naming as session_upload, minus the session/inject step."""
+    try: raw = base64.b64decode((b64data or "").split(",")[-1])
+    except Exception: return {"ok": False, "error": "could not decode file data"}
+    if not raw: return {"ok": False, "error": "empty file"}
+    if len(raw) > _sendable_cap(): return {"ok": False, "error": "file exceeds %d MB limit" % _session_upload_cap_mb()}
+    fn = _ensure_ext(_sanitize_filename(filename or "file"), mime or "")
+    stem, ext = os.path.splitext(fn)
+    uniq = "%s_%s%s" % (stem[:60] or "file", secrets.token_hex(4), ext)
+    try: os.makedirs(SESSION_UPLOAD_ROOT, exist_ok=True)
+    except Exception as e: return {"ok": False, "error": "uploads dir: " + str(e)[:80]}
+    dest = os.path.join(SESSION_UPLOAD_ROOT, uniq)
+    try:
+        with open(dest, "wb") as f: f.write(raw)
+    except Exception as e: return {"ok": False, "error": str(e)[:120]}
+    return {"ok": True, "path": dest, "name": os.path.basename(dest)}
+
 def _inject_path_into_session(sess, path, note="", enter=False):
     """tmux send-keys an ABSOLUTE path (+ optional inline note) into a session so Claude reads it BY PATH.
     Trailing space lets the operator append an instruction; Enter is OFF by default (operator reviews first).
@@ -8713,7 +8732,50 @@ register_sendable("drive", _send_drive)
 register_sendable("gmail", _send_gmail)
 register_sendable("calendar", _send_calendar)
 register_sendable("granola", _send_granola)
+def _send_upload(d):
+    """A file the user dropped INTO the basket from their computer -- already saved under the uploads dir by
+    /api/basket-upload. Inject its path in place (bounds-checked to the uploads root; secret-clean)."""
+    real = os.path.realpath(d.get("path") or "")
+    root = os.path.realpath(SESSION_UPLOAD_ROOT)
+    if not (real == root or real.startswith(root + os.sep)): return {"error": "upload path out of bounds"}
+    if _path_has_secret(real): return {"error": "refusing to send a secret file"}
+    if not os.path.isfile(real): return {"error": "uploaded file is no longer available"}
+    return {"ok": True, "path": real, "note": d.get("note") or ("(file: %s)" % os.path.basename(real))}
+
 register_sendable("entity", _send_entity)   # generic extension/lens draggable -- self-contained, no per-type server code
+register_sendable("upload", _send_upload)   # a computer file dropped into the basket (pre-uploaded to the uploads dir)
+
+def _resolve_sendable_to_path(kind, desc):
+    """Resolve a {kind,...} descriptor to an ON-DISK path the agent can read (materializing resolver bytes to
+    the uploads dir if needed) WITHOUT injecting it. The shared core behind both session_send (one item) and
+    session_send_batch (a whole basket). Centralizes the secret guards. Returns {ok,path,note} or {error}."""
+    fn = SESSION_SEND_RESOLVERS.get(str(kind or ""))
+    if not fn: return {"error": "don't know how to send '%s'" % kind}
+    desc = desc if isinstance(desc, dict) else {}
+    try: out = fn(desc)
+    except Exception as e: return {"error": "resolve failed: " + str(e)[:140]}
+    if not isinstance(out, dict) or out.get("error") or not out.get("ok", True):
+        return {"error": (out or {}).get("error", "could not resolve item")}
+    rnote = (out.get("note") or "").strip()
+    if out.get("path"):   # an existing file -> use it in place (no copy)
+        real = out["path"]
+        if _path_has_secret(real): return {"error": "refusing to send a secret file"}
+        return {"ok": True, "path": real, "note": rnote}
+    raw = out.get("data")
+    if isinstance(raw, str): raw = raw.encode("utf-8")
+    if not isinstance(raw, (bytes, bytearray)): return {"error": "resolver returned no content"}
+    if len(raw) > _sendable_cap(): return {"error": "item exceeds %d MB limit" % _session_upload_cap_mb()}
+    fnm = _ensure_ext(_sanitize_filename(out.get("filename") or "item"), out.get("mime", ""))
+    stem, ext = os.path.splitext(fnm)
+    uniq = "%s_%s%s" % (stem[:60] or "file", secrets.token_hex(4), ext)
+    try: os.makedirs(SESSION_UPLOAD_ROOT, exist_ok=True)
+    except Exception as e: return {"error": "uploads dir: " + str(e)[:80]}
+    dest = os.path.join(SESSION_UPLOAD_ROOT, uniq)
+    if _path_has_secret(dest): return {"error": "refusing to write to a secret path"}
+    try:
+        with open(dest, "wb") as f: f.write(bytes(raw))
+    except Exception as e: return {"error": str(e)[:120]}
+    return {"ok": True, "path": dest, "note": rnote}
 
 def session_send(session, kind, desc, note="", enter=False):
     """Resolve a {kind,id,...} descriptor to content and hand it to a session (the drag-ANYTHING endpoint).
@@ -8722,25 +8784,64 @@ def session_send(session, kind, desc, note="", enter=False):
     if not sess: return {"ok": False, "error": "no session given"}
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
         return {"ok": False, "error": "session not found (it may have closed)"}
-    fn = SESSION_SEND_RESOLVERS.get(str(kind or ""))
-    if not fn: return {"ok": False, "error": "don't know how to send '%s'" % kind}
-    desc = desc if isinstance(desc, dict) else {}
-    try: out = fn(desc)
-    except Exception as e: return {"ok": False, "error": "resolve failed: " + str(e)[:140]}
-    if not isinstance(out, dict) or out.get("error") or not out.get("ok", True):
-        return {"ok": False, "error": (out or {}).get("error", "could not resolve item")}
-    extra = (note or "").strip(); rnote = (out.get("note") or "").strip()
+    r = _resolve_sendable_to_path(kind, desc)
+    if not r.get("ok"): return {"ok": False, "error": r.get("error", "could not resolve item")}
+    extra = (note or "").strip(); rnote = (r.get("note") or "").strip()
     full_note = (rnote + ((" " + extra) if extra else "")).strip()
-    if out.get("path"):   # inject an existing file in place (no copy)
-        real = out["path"]
-        if _path_has_secret(real): return {"ok": False, "error": "refusing to send a secret file"}
-        r = _inject_path_into_session(sess, real, full_note, enter); r["kind"] = kind; return r
-    raw = out.get("data")
-    if isinstance(raw, str): raw = raw.encode("utf-8")
-    if not isinstance(raw, (bytes, bytearray)): return {"ok": False, "error": "resolver returned no content"}
-    if len(raw) > _sendable_cap(): return {"ok": False, "error": "item exceeds %d MB limit" % _session_upload_cap_mb()}
-    r = _deliver_to_session(sess, out.get("filename", "item"), out.get("mime", ""), bytes(raw), full_note, enter)
-    r["kind"] = kind; return r
+    out = _inject_path_into_session(sess, r["path"], full_note, enter); out["kind"] = kind; return out
+
+def session_send_batch(session, items, note="", enter=False):
+    """Drag a BASKET into a session: resolve EVERY item to a path, then inject ALL paths in ONE message + a
+    single summary line (instead of N noisy per-item injections). Each item keeps full fidelity -- it's the
+    real Drive file / email / export, the same resolvers session_send uses. Items that fail to resolve are
+    skipped + reported. The basket itself lives client-side; this is the one server hop that hands it over."""
+    sess = re.sub(r"[^A-Za-z0-9_-]", "", session or "")[:64]
+    if not sess: return {"ok": False, "error": "no session given"}
+    if sh([TMUX, "has-session", "-t", sess])[0] != 0:
+        return {"ok": False, "error": "session not found (it may have closed)"}
+    if not isinstance(items, list) or not items: return {"ok": False, "error": "basket is empty"}
+    paths = []; failed = []
+    for it in items[:50]:   # sane cap; a basket is a curated set, not a dump
+        it = it if isinstance(it, dict) else {}
+        r = _resolve_sendable_to_path(it.get("kind"), it)
+        if r.get("ok"): paths.append(r["path"])
+        else: failed.append({"name": it.get("name") or it.get("title") or it.get("kind") or "item", "error": r.get("error")})
+    if not paths:
+        return {"ok": False, "error": "no items could be sent: " + "; ".join(f.get("error", "?") for f in failed[:3])}
+    extra = (note or "").strip()
+    summary = "Context basket: %d item%s for this task%s" % (len(paths), "" if len(paths) == 1 else "s", (" -- " + extra) if extra else "")
+    msg = " ".join(paths) + "  (" + summary + ") "   # trailing space -> operator can append an instruction
+    sh([TMUX, "send-keys", "-t", sess, "-l", msg])
+    if enter: sh([TMUX, "send-keys", "-t", sess, "Enter"])
+    return {"ok": True, "session": sess, "sent": len(paths), "failed": failed}
+
+# ---- Saved baskets ("context packs"): a reusable named set of sendable descriptors, persisted server-side so
+# packs survive cache-clears + follow the user across browsers/devices. The LIVE basket is client-side
+# (localStorage) for instant drag; only explicitly-SAVED packs land here. Descriptors only -- no resolved bytes.
+BASKETS_FILE = os.path.join(STATE_DIR, "_baskets.json")
+def baskets_list():
+    d = load(BASKETS_FILE, {"packs": []})
+    return {"ok": True, "packs": (d.get("packs", []) if isinstance(d, dict) else [])}
+def baskets_save(name, items):
+    name = (name or "").strip()[:80]
+    if not name: return {"ok": False, "error": "a pack name is required"}
+    if not isinstance(items, list) or not items: return {"ok": False, "error": "nothing to save -- the basket is empty"}
+    clean = [it for it in items[:50] if isinstance(it, dict)]
+    d = load(BASKETS_FILE, {"packs": []})
+    if not isinstance(d, dict): d = {"packs": []}
+    packs = [p for p in d.get("packs", []) if p.get("name") != name]   # replace a same-named pack
+    packs.insert(0, {"id": secrets.token_hex(6), "name": name, "items": clean, "ts": int(time.time())})
+    d["packs"] = packs[:50]
+    try: save(BASKETS_FILE, d)
+    except Exception as e: return {"ok": False, "error": str(e)[:120]}
+    return {"ok": True, "packs": d["packs"]}
+def baskets_delete(pid):
+    d = load(BASKETS_FILE, {"packs": []})
+    if not isinstance(d, dict): d = {"packs": []}
+    d["packs"] = [p for p in d.get("packs", []) if p.get("id") != pid]
+    try: save(BASKETS_FILE, d)
+    except Exception as e: return {"ok": False, "error": str(e)[:120]}
+    return {"ok": True, "packs": d["packs"]}
 
 def context_brief(session, subject=None, query=None, budget=4000):
     """CATCH ME UP: ask the context router to assemble the cited slice for a subject/question, then hand it to
@@ -10824,6 +10925,7 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(secure_pending()))
         if u.path == "/api/secure-get":
             return self._s(200, json.dumps(secure_get((q.get("id") or [""])[0])))
+        if u.path == "/api/baskets": return self._s(200, json.dumps(baskets_list()))   # saved "context packs"
         if u.path == "/api/update-status": return self._s(200, json.dumps(update_status()))
         if u.path == "/api/settings": return self._s(200, json.dumps(settings_get()))
         if u.path == "/api/chief": return self._s(200, json.dumps(chief_overview()))
@@ -11081,6 +11183,15 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(session_send(
                 body.get("session", ""), body.get("kind", ""), body,   # the whole body IS the descriptor (id/thread/full/rel/...)
                 body.get("note", ""), bool(body.get("enter", False)))))
+        if u.path == "/api/session-send-batch":  # drag a BASKET -> session: resolve every item, inject all paths + one summary
+            return self._s(200, json.dumps(session_send_batch(
+                body.get("session", ""), body.get("items", []), body.get("note", ""), bool(body.get("enter", False)))))
+        if u.path == "/api/baskets-save":      # save the live basket as a reusable named "context pack"
+            return self._s(200, json.dumps(baskets_save(body.get("name", ""), body.get("items", []))))
+        if u.path == "/api/baskets-delete":    # delete a saved pack by id
+            return self._s(200, json.dumps(baskets_delete(body.get("id", ""))))
+        if u.path == "/api/basket-upload":     # a computer file dropped into the basket -> save it, return its path
+            return self._s(200, json.dumps(basket_upload(body.get("filename", ""), body.get("mime", ""), body.get("data", ""))))
         if u.path == "/api/compact-session":  # handoff -> /compact -> re-read handoff (preserve agent memory)
             return self._s(200, json.dumps(compact_session(body.get("name", ""))))
         if u.path == "/api/autocompact":      # turn graceful auto-compact on/off + set the % threshold (persists to cc.config, live)
@@ -11995,6 +12106,34 @@ body.wk-dragging .wkdrop{display:flex;pointer-events:auto}
 .cstats{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}.cstats .cstat{padding:14px}
 @media(max-width:820px){.chiefhero{flex-direction:column;align-items:flex-start}.cherobtn{width:100%}}
 .health{border-top:1px solid var(--line);padding-top:13px;margin-top:8px;display:flex;flex-direction:column;gap:6px}
+/* BASKET: a persistent sidebar collection -- drag any sendable (or a computer file) IN, then drag the whole
+   basket onto a session/pane. Lives where the old machine-status widget was. */
+.basketwrap{border-top:1px solid var(--line);margin-top:8px;padding-top:10px;display:flex;flex-direction:column;gap:7px}
+.bk-h{display:flex;align-items:center;gap:6px}
+.bk-grab{flex:1;min-width:0;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--mut);cursor:grab;border:1px dashed transparent;border-radius:7px;padding:3px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bk-grab b{color:var(--accent);font-weight:800}
+.basketwrap.has .bk-grab{border-color:rgba(var(--accent-rgb),.45);background:rgba(var(--accent-rgb),.06)}
+.basketwrap.has .bk-grab:active{cursor:grabbing}
+.bk-acts{display:flex;gap:3px;flex:0 0 auto}
+.bk-acts button{background:transparent;border:1px solid var(--line);color:var(--mut);border-radius:6px;width:24px;height:24px;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+.bk-acts button:hover{border-color:var(--accent);color:var(--accent)}
+.bk-body{display:flex;flex-direction:column;gap:5px}
+.basketwrap.collapsed .bk-body{display:none}
+.bk-items{display:flex;flex-direction:column;gap:3px;max-height:200px;overflow:auto}
+.bk-item{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--mut);background:var(--card,rgba(255,255,255,.03));border:1px solid var(--line);border-radius:6px;padding:3px 6px}
+.bk-item .bk-ic{flex:0 0 auto}
+.bk-item .bk-lb{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bk-item .bk-x{flex:0 0 auto;cursor:pointer;color:var(--dim);border:0;background:transparent;font-size:13px;line-height:1;padding:0 2px}
+.bk-item .bk-x:hover{color:var(--err)}
+.bk-empty{font-size:11px;color:var(--dim);line-height:1.45;padding:2px 2px 0}
+.bk-packs{display:flex;flex-wrap:wrap;gap:4px;border-top:1px dashed var(--line);padding-top:6px;margin-top:2px}
+.bk-pack{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--mut);background:transparent;border:1px solid var(--line);border-radius:999px;padding:2px 8px;cursor:pointer}
+.bk-pack:hover{border-color:var(--accent);color:var(--accent)}
+.bk-pack .bk-pdel{color:var(--dim);font-size:12px}
+.bk-pack .bk-pdel:hover{color:var(--err)}
+.basketwrap.bk-over{outline:2px dashed rgba(var(--accent-rgb),.7);outline-offset:3px;border-radius:8px}
+body.ss-dragging .basketwrap{box-shadow:0 0 0 2px rgba(var(--accent-rgb),.35) inset;border-radius:8px}
+@media(max-width:980px){.basketwrap{display:none}}
 #main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .topbar{display:flex;align-items:center;gap:12px;padding:15px 24px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 .topbar h2{margin:0;font-size:19px;font-weight:800;flex:0 0 auto;letter-spacing:.2px}
@@ -13128,7 +13267,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="doctor"><i class="ph-light ph-stethoscope"></i>Doctor</button>
 <button data-l="settings"><i class="ph-light ph-gear"></i>Settings</button></nav>
 <div id="navmode" title="Tabs reorder themselves by how often you use them. Drag any tab to pin a custom order."></div>
-<div class="health" id="svchealth"></div>
+<div id="basketwrap" class="basketwrap"></div>
 </aside>
 <main id="main">
 <div class="topbar"><h2 id="viewtitle">Sessions</h2><button class="btn" id="refreshBtn" title="Refresh" onclick="location.reload()" style="padding:7px 11px">⟳</button><button class="btn" id="helpBtn" title="How this works" onclick="ccHelp(LENS)" style="padding:7px 11px">?</button><button class="btn cf-srbtn" id="searchTog" title="Search" onclick="cfTopSearch()" style="padding:7px 11px">🔍</button><input id="search" placeholder="Search…"><span id="lensTools" class="lenstools"></span><button class="btn" id="agentBtn" style="display:none" onclick="openAgent(LENS)">🤖 Agent</button><button class="btn" id="addBtn" onclick="openAdd()">＋ Add</button><button class="btn go" id="newSessBtn" onclick="openLaunch()">▶ New session</button><button class="btn go" id="cfTopBtn" style="display:none" onclick="cfAddWizard()">➕ Add a ClaudeFather</button></div>
@@ -13182,11 +13321,7 @@ async function dlFile(rel,name){
   }
   toast('Still syncing from iCloud — give it a few seconds and click again.',6000);
 }
-function paintSvc(){const el=document.getElementById("svchealth");if(!el)return;
-  const c=s=>s=="online"?"var(--ok)":(s=="offline"?"var(--err)":"var(--dim)");
-  const row=(s,lbl)=>'<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--mut)" title="'+lbl+': '+(s||"?")+'"><span style="width:8px;height:8px;border-radius:50%;background:'+c(s)+';flex:0 0 8px"></span>'+lbl+'</div>';
-  el.innerHTML='<div style="font-size:10px;font-weight:700;letter-spacing:.6px;color:var(--dim);margin-bottom:3px">SYSTEM</div>'+row(ST.bridge,"Bridge")+row(ST.edge,"Edge")+row(ST.t490,"T490")+row(ST.t480,"T480");}
-async function load(){D=await(await fetch("/api/data")).json();render();fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;paintSvc();if(LENS=="machines")render();});}
+async function load(){D=await(await fetch("/api/data")).json();render();fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;if(LENS=="machines")render();});}
 function render(){
   lensTopbar();
   const q=document.getElementById("search").value.toLowerCase();let h="";
@@ -17633,6 +17768,7 @@ function ccWireDropzones(){
     (function(ov,name){
       ov.addEventListener('dragover',function(e){e.preventDefault();e.stopPropagation();try{e.dataTransfer.dropEffect='copy';}catch(_){ }});
       ov.addEventListener('drop',function(e){e.preventDefault();e.stopPropagation();ccShowDrops(false);if(typeof ssHi==='function')ssHi(false);
+        if(window.BASKETDRAG){window.BASKETDRAG=false;if(typeof basketSendTo==='function')basketSendTo(name);return;}   // a whole basket -> this pane
         var dt=e.dataTransfer;
         if(dt&&dt.files&&dt.files.length){ccUploadFile(name,dt.files[0]);return;}   // a real OS file -> upload
         var d=(typeof SSDRAG!=='undefined'&&SSDRAG)||null;                          // an in-portal sendable -> resolve + send
@@ -18895,10 +19031,12 @@ function ssWire(){
     bar.addEventListener('dragleave',function(e){ var t=e.target&&e.target.closest&&e.target.closest('.sb-tile'); if(t)t.classList.remove('ss-over'); });
     bar.addEventListener('drop',function(e){
       var t=e.target&&e.target.closest&&e.target.closest('.sb-tile'); if(!t) return;
-      e.preventDefault(); e.stopPropagation();
+      e.preventDefault(); e.stopPropagation(); ssHi(false); var name=t.getAttribute('data-n'); if(!name) return;
+      if(window.BASKETDRAG){ window.BASKETDRAG=false; basketSendTo(name); return; }   // a whole basket dropped on a session
       var d=SSDRAG; if(!d){ try{ d=JSON.parse(e.dataTransfer.getData('application/x-cc-sendable')); }catch(_){} }
-      ssHi(false); var name=t.getAttribute('data-n'); if(name&&d) ssSend(name,d);
+      if(d) ssSend(name,d);
     });
+    bar.addEventListener('dragover',function(e){ if(window.BASKETDRAG){ e.preventDefault(); try{e.dataTransfer.dropEffect='copy';}catch(_){} var t=e.target&&e.target.closest&&e.target.closest('.sb-tile'); ssDockTiles().forEach(function(x){x.classList.toggle('ss-over',x===t);}); } });
   }
 }
 // --- mobile: long-press to pick up -> floating ghost -> drop on a dock tile ---
@@ -18944,13 +19082,107 @@ function ssPick(d){
   h+='<div class="ss-pick">'+list.slice().sort(function(a,b){var x=(a.label||a.name),y=(b.label||b.name);return x<y?-1:x>y?1:0;}).map(function(s){
     return '<button class="ss-pickb" onclick="ssPickGo(\''+esc(s.name)+'\')">'+(s.chief?'&#11088; ':'')+e2(s.label||s.name)+'</button>';
   }).join('')+'</div>';
-  h+='<div style="margin-top:12px;text-align:right"><button class="mini" onclick="closeM()">Cancel</button></div>';
+  h+='<div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center"><button class="mini" onclick="basketAdd(SS_PICK);closeM();">&#129530; Add to basket</button><button class="mini" onclick="closeM()">Cancel</button></div>';
   SS_PICK=d; showM(h);
 }
 function ssPickGo(name){ var d=SS_PICK; SS_PICK=null; closeM(); if(d) ssSend(name,d); }
 function ssPickDrive(i){ var f=(typeof drSorted==='function')&&drSorted()[i]; if(f) ssPick({kind:'drive',id:f.id,name:f.name}); }   // Drive context-menu entry
 function ssPickThread(){ if(typeof GM!=='undefined'&&GM.thread) ssPick({kind:'gmail',thread:GM.thread.id,full:1,name:GM.thread.subject}); }   // email reader: send the whole thread
 function ssPickEvent(id,name){ if(!id) return; if(!name&&typeof CAL!=='undefined'&&CAL.events){ var e=CAL.events.find(function(x){return x.id==id;}); if(e) name=e.summary; } ssPick({kind:'calendar',id:id,name:name||'event'}); }   // calendar event modal
+// ====================================================================================================
+// BASKET: a persistent sidebar collection of sendable descriptors. Drag any [data-ss] item (or a computer
+// file) IN; drag the WHOLE basket onto a session tile / pane and every item is handed to the agent at once
+// (one /api/session-send-batch). Live basket = localStorage (instant); explicitly-SAVED named "packs" =
+// server-side (/api/baskets*). Items are the SAME descriptors the drag-to-session engine already resolves,
+// so the basket inherits every kind (drive, gmail, calendar, granola, deliverable, extension entity, upload).
+// ====================================================================================================
+var BASKET=[], BK_PACKS=[];
+var BK_ICONS={gmail:'✉️',drive:'📄',calendar:'📅',granola:'🎤',deliverable:'📎',entity:'🔖',upload:'📁'};
+function bkIcon(d){ return BK_ICONS[(d&&d.kind)||'']||'📎'; }
+function bkLabel(d){ return (d&&(d.name||d.title||d.kind))||'item'; }
+function bkKey(d){ try{ return (d.kind||'')+'|'+(d.id||d.thread||d.path||d.title||d.name||JSON.stringify(d.fields||d.body||'')); }catch(e){ return Math.random()+''; } }
+function basketLoadLS(){ try{ BASKET=JSON.parse(localStorage.getItem('cc_basket')||'[]')||[]; }catch(e){ BASKET=[]; } if(!Array.isArray(BASKET))BASKET=[]; }
+function basketPersist(){ try{ localStorage.setItem('cc_basket',JSON.stringify(BASKET)); }catch(e){} renderBasket(); }
+function basketCollapsed(){ try{ return localStorage.getItem('cc_basket_collapsed')==='1'; }catch(e){ return false; } }
+function basketToggle(){ try{ localStorage.setItem('cc_basket_collapsed',basketCollapsed()?'0':'1'); }catch(e){} renderBasket(); }
+function basketHas(d){ var k=bkKey(d); return BASKET.some(function(x){return bkKey(x)===k;}); }
+function basketAdd(d){ if(typeof d==='string'){try{d=JSON.parse(d);}catch(e){return false;}} if(!d||!d.kind) return false;
+  if(basketHas(d)){ toast('Already in the basket',2200); return false; }
+  BASKET.push(d); basketPersist(); toast('&#129530; Added to basket ('+BASKET.length+')',2200); return true; }
+function basketRemove(i){ BASKET.splice(i,1); basketPersist(); }
+function basketClear(){ if(!BASKET.length)return; if(!confirm('Clear all '+BASKET.length+' item(s) from the basket?'))return; BASKET=[]; basketPersist(); }
+function basketUploadFile(file){ var rd=new FileReader(); rd.onload=function(){
+  fetch('/api/basket-upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:file.name,mime:file.type||'',data:rd.result})})
+    .then(function(r){return r.json();}).then(function(r){ if(r&&r.ok){ basketAdd({kind:'upload',path:r.path,name:file.name}); } else { toast('Upload failed: '+((r||{}).error||'?'),5000); } })
+    .catch(function(){ toast('Upload failed.',4000); }); };
+  rd.readAsDataURL(file); }
+async function basketSendTo(session){
+  if(!session) return;
+  if(!BASKET.length){ toast('The basket is empty.',3000); return; }
+  toast('Sending basket ('+BASKET.length+') to '+esc(session)+'…',3500);
+  try{
+    var r=await(await fetch('/api/session-send-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:session,items:BASKET})})).json();
+    if(r&&r.ok){ var f=(r.failed||[]).length; toast('&#10148; Sent '+r.sent+' item(s) to '+esc(session)+(f?(' — '+f+' skipped'):'')+'. Review &amp; press Enter.',6500); }
+    else toast('Basket send failed: '+((r||{}).error||'?'),6000);
+  }catch(e){ toast('Basket send failed.',5000); }
+}
+function basketSavePack(){ if(!BASKET.length){ toast('Add items first, then save them as a pack.',3500); return; }
+  var name=prompt('Save this basket as a reusable pack named:',''); if(name==null) return; name=name.trim(); if(!name) return;
+  fetch('/api/baskets-save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,items:BASKET})})
+    .then(function(r){return r.json();}).then(function(r){ if(r&&r.ok){ BK_PACKS=r.packs||[]; toast('&#128190; Saved pack “'+esc(name)+'”',3500); renderBasket(); } else toast('Save failed: '+((r||{}).error||'?'),5000); }); }
+function basketLoadPack(id){ var p=BK_PACKS.find(function(x){return x.id===id;}); if(!p)return;
+  var added=0; (p.items||[]).forEach(function(d){ if(d&&d.kind&&!basketHas(d)){ BASKET.push(d); added++; } });
+  basketPersist(); toast('&#129530; Loaded '+added+' item(s) from “'+esc(p.name)+'”',3000); }
+function basketDelPack(ev,id){ if(ev){ev.stopPropagation();} var p=BK_PACKS.find(function(x){return x.id===id;}); if(!p)return;
+  if(!confirm('Delete the saved pack “'+p.name+'”?'))return;
+  fetch('/api/baskets-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})
+    .then(function(r){return r.json();}).then(function(r){ if(r&&r.ok){ BK_PACKS=r.packs||[]; renderBasket(); } }); }
+function basketFetchPacks(){ fetch('/api/baskets').then(function(r){return r.json();}).then(function(r){ if(r&&r.ok){ BK_PACKS=r.packs||[]; renderBasket(); } }).catch(function(){}); }
+function renderBasket(){
+  var el=document.getElementById('basketwrap'); if(!el) return;
+  var col=basketCollapsed(), n=BASKET.length;
+  el.className='basketwrap'+(n?' has':'')+(col?' collapsed':'');
+  var h='<div class="bk-h"><span class="bk-grab" id="bkGrab" draggable="'+(n?'true':'false')+'" title="'+(n?'Drag the whole basket onto a session or pane':'Drag items here to fill the basket')+'">&#129530; Basket <b>('+n+')</b></span>'
+    +'<span class="bk-acts">'
+    +'<button title="Save the basket as a reusable pack" onclick="basketSavePack()">&#128190;</button>'
+    +'<button title="Clear the basket" onclick="basketClear()">&#10005;</button>'
+    +'<button class="bk-toggle" title="'+(col?'expand':'collapse')+'" onclick="basketToggle()">'+(col?'&#9656;':'&#9662;')+'</button>'
+    +'</span></div>';
+  h+='<div class="bk-body">';
+  if(n){ h+='<div class="bk-items">'+BASKET.map(function(d,i){
+      return '<div class="bk-item"><span class="bk-ic">'+bkIcon(d)+'</span><span class="bk-lb" title="'+e2(bkLabel(d))+'">'+e2(bkLabel(d))+'</span><button class="bk-x" title="remove" onclick="basketRemove('+i+')">&times;</button></div>';
+    }).join('')+'</div>'; }
+  else { h+='<div class="bk-empty">Drag emails, files, Drive docs, calendar events or any extension item here — or a file from your computer. Then drag the basket onto a session to hand it all to the agent.</div>'; }
+  if(BK_PACKS.length){ h+='<div class="bk-packs">'+BK_PACKS.map(function(p){
+      return '<span class="bk-pack" title="Load this pack into the basket" onclick="basketLoadPack(\''+esc(p.id)+'\')">'+e2(p.name)+' <span style="opacity:.6">'+(p.items||[]).length+'</span> <span class="bk-pdel" title="delete pack" onclick="basketDelPack(event,\''+esc(p.id)+'\')">&times;</span></span>';
+    }).join('')+'</div>'; }
+  h+='</div>';
+  el.innerHTML=h;
+  bkWire();
+}
+function bkWire(){
+  var el=document.getElementById('basketwrap'); if(!el) return;
+  // drag the whole basket OUT (to a session tile / pane)
+  var grab=document.getElementById('bkGrab');
+  if(grab&&BASKET.length){
+    grab.addEventListener('dragstart',function(e){ window.BASKETDRAG=true; try{ e.dataTransfer.setData('application/x-cc-basket','1'); e.dataTransfer.effectAllowed='copy'; }catch(_){}
+      if(typeof ssHi==='function')ssHi(true); if(typeof ccShowDrops==='function')ccShowDrops(true); });
+    grab.addEventListener('dragend',function(){ window.BASKETDRAG=false; if(typeof ssHi==='function')ssHi(false); if(typeof ccShowDrops==='function')ccShowDrops(false); });
+  }
+  // drop sendables / computer files INTO the basket
+  if(!el._bkdrop){ el._bkdrop=true;
+    el.addEventListener('dragover',function(e){ var d=(typeof SSDRAG!=='undefined'&&SSDRAG); var f=e.dataTransfer&&e.dataTransfer.types&&Array.prototype.indexOf.call(e.dataTransfer.types,'Files')>=0;
+      if(window.BASKETDRAG)return; if(!d&&!f)return; e.preventDefault(); try{e.dataTransfer.dropEffect='copy';}catch(_){} el.classList.add('bk-over'); });
+    el.addEventListener('dragleave',function(e){ if(e.target===el||!el.contains(e.relatedTarget)) el.classList.remove('bk-over'); });
+    el.addEventListener('drop',function(e){ el.classList.remove('bk-over'); if(window.BASKETDRAG)return;
+      var dt=e.dataTransfer; var got=false;
+      var d=(typeof SSDRAG!=='undefined'&&SSDRAG)||null; if(!d&&dt){ try{ d=JSON.parse(dt.getData('application/x-cc-sendable')); }catch(_){} }
+      if(d){ e.preventDefault(); e.stopPropagation(); basketAdd(d); got=true; }
+      if(dt&&dt.files&&dt.files.length){ e.preventDefault(); e.stopPropagation(); for(var i=0;i<dt.files.length;i++) basketUploadFile(dt.files[i]); got=true; }
+      if(got&&typeof ssHi==='function')ssHi(false);
+    });
+  }
+}
 // --- ssTut: ONE-TIME animated coach-mark. The FIRST time a draggable item AND a session tile are both on
 // screen, play a demo: a chip flies from the item down INTO a real dock tile (the tile lights up + a ✓ burst),
 // so users SEE how drag->session works. Shown once ever (localStorage); a "Got it" / backdrop tap dismisses. ---
@@ -19018,6 +19250,7 @@ function ssTutTick(){
 }
 function ssTutInit(){ if(ssTutSeen())return; ssTut.iv=setInterval(ssTutTick,1500); setTimeout(ssTutTick,1400); }
 ssWire(); ssTouchWire(); ssTutInit();
+basketLoadLS(); renderBasket(); basketFetchPacks();   // the persistent sidebar basket (drag items in -> drag the basket into a session)
 // RUNTIME AWARENESS: detect whether we're in the ClaudeFather DESKTOP shell (Electron injects window.cfDesktop
 // with a real browser + capture) or a plain web browser, expose it on window.CC, and report it so the server
 // + agents know what this user can actually do. Adapts UI hints (desktop-only features show how to unlock).
@@ -19215,7 +19448,7 @@ if(!restoreFromHash())syncHash(false);   // restore exact place on refresh; else
 cfReportFocus();   // report the landing lens to the focus engine (web-side context bridge)
 (function(){var hb=document.getElementById("helpBtn");if(hb)hb.style.display=HELP[LENS]?"":"none";ccHelpAuto(LENS);})();  // help for the landing lens
 // live health: repaint the header strip (+ machines lens) every 60s without a page reload
-setInterval(()=>{fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;paintSvc();if(LENS=="machines")render();}).catch(()=>{});},60000);
+setInterval(()=>{fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;if(LENS=="machines")render();}).catch(()=>{});},60000);
 
 // ===================================================================================================
 // LIVE "DELIVERABLE READY" SLIDE-OUT  (global, self-contained overlay -- the reverse of file UPLOAD)
