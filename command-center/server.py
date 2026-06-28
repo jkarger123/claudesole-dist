@@ -4288,11 +4288,7 @@ def agent_open(slug):
           "For sudo/interactive commands you can't run (no TTY): pre-type them into the project Admin "
           "shell (tmux send-keys, no Enter) + ask the operator to run them in the Sessions tab -- see "
           "docs/SESSIONS_AND_SUDO.md in the ClaudeFather framework. "
-          "When you create a file FOR the user (a report, export, or doc they asked for), save it to the "
-          "current module folder's deliverables/ subdir -- that is THE way to deliver it: it appears in that "
-          "module's Files panel AND the top-level Files lens for them to open/download (and on iCloud "
-          "deployments it auto-syncs to their devices). ALWAYS use deliverables/; never leave them a raw path "
-          "to hunt for. %s %s'" % (slug, _extend_brief(), roster_text()))
+          "%s %s %s'" % (slug, _files_brief(), _extend_brief(), roster_text()))
     sh([TMUX, "new-session", "-d", "-s", sess, "-c", d, cl])
     def _trust():
         for _ in range(10):
@@ -8183,6 +8179,38 @@ def system_info():
                          "slack": _mod_on(slack, "configured"), "zoom": _mod_on(zoom, "is_configured"),
                          "focus": _focus_capture(), "mesh": bool([p for p in peers() if p.get("id") != INSTANCE_ID])}}
 
+def _ext_available_brief():
+    """A TINY 'these exist but are NOT enabled' tier (id + one-line summary only) so the general assistant KNOWS
+    a capability is available to enable -- without paying for full docs it can't use yet. Chief-only (a scoped
+    agent-tool stays lean). Pairs with _ext_agent_context (the full docs for ENABLED tools)."""
+    try:
+        inst = _ext_installed(); avail = []
+        for d in sorted(os.listdir(EXT_DIR)):
+            if d.startswith(("_", ".")) or d in inst: continue
+            mf = os.path.join(EXT_DIR, d, "extension.json")
+            if not os.path.isfile(mf): continue
+            mm = json.load(open(mf))
+            if _ext_authorized(mm.get("id", d)) is None: continue
+            avail.append("- %s: %s" % (mm.get("id", d), re.sub(r"\s+", " ", (mm.get("summary") or "")).strip()[:90]))
+        if not avail: return ""
+        return ("ALSO IN THE MARKETPLACE (NOT enabled here -- do NOT assume they're active; if a task needs one, "
+                "tell the user it can be enabled in the Marketplace lens):\n" + "\n".join(avail[:40]))
+    except Exception:
+        return ""
+
+def _files_brief():
+    """How an agent should place files: by RELEVANCE (the module the work belongs to), not merely where it was
+    launched -- and leave a well-laid-out, self-describing structure for the next agent. Shared by chief +
+    agent-tools so placement is consistent everywhere."""
+    return ("FILES + STRUCTURE: deliver every file you create FOR the user into a `deliverables/` subdir -- it "
+            "then shows in that module's Files panel + the top-level Files lens (and auto-syncs on iCloud "
+            "deployments). Place it under the module the work BELONGS to, found via the Module map in the root "
+            "CLAUDE.md -- NOT merely where you were launched; if you were started in the wrong place, save by "
+            "relevance. When you build something new (a tool, an area), give its folder a CLAUDE.md (an H1 title "
+            "+ ONE plain sentence describing it) so the platform + future agents recognize + can navigate it, and "
+            "file any durable learning into that module's CC:NOTES. Keep each CLAUDE.md an INDEX (point to "
+            "detail), never a dump -- the goal is a tree any newcomer instantly understands.")
+
 def _extend_brief():
     """Node-aware awareness of the LOCKED core + how to ADD capability the RIGHT way (custom sandbox on a
     developer node, or a Change Request to Mission Control) -- so an agent asked to 'add to ClaudeFather' guides
@@ -8241,11 +8269,17 @@ def _system_brief():
                  "write it to a 0600 temp file and run `cc-secure reveal \"<label>\" <file>` (a box shows them; "
                  "nothing hits the chat). Credentials live ONLY in the per-install vault -- read them with the "
                  "normal secret resolver, never hardcode or echo them.")
+        try: base += "\n\n" + _files_brief()    # place files by relevance + keep the tree self-describing
+        except Exception: pass
         try: base += "\n\n" + _extend_brief()   # node-aware: locked core + how to add capability (sandbox / CCR)
         except Exception: pass
         try:
-            extc = _ext_agent_context()      # only the extensions INSTALLED on this node -> per-node-clean tool awareness
+            extc = _ext_agent_context()      # FULL docs for the extensions ENABLED on this node (per-node-clean)
             if extc: base += "\n\n" + extc
+        except Exception: pass
+        try:
+            av = _ext_available_brief()      # tiny "also available, not enabled" tier -- chief-only awareness
+            if av: base += "\n\n" + av
         except Exception: pass
         return base
     except Exception:

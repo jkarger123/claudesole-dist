@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.12 -- 2026-06-28
+- CONTEXT ENGINEERING audit + two efficiency wins (agents get exactly what they need, no more):
+  - **Extension awareness TIERING:** the Chief now also hears a TINY "also in the Marketplace, NOT enabled" tier
+    (id + one-line summary only; `_ext_available_brief`) so it KNOWS a capability exists and can offer to enable
+    it -- without paying for full docs it can't use. ENABLED extensions still get their full AGENT.md
+    (`_ext_agent_context`). Scoped agent-tools stay lean (enabled-only) -- right context by ROLE.
+  - **Right-place file output:** new shared `_files_brief()` -- agents place deliverables under the module the
+    work BELONGS to (via the root Module map), NOT merely where they were launched; new tools/areas get their own
+    CLAUDE.md + CC:NOTES so the tree stays self-describing for the next agent. Injected into the Chief + every
+    scoped agent-tool (replaces the old cwd-bound deliverables note).
+  - Audit doc: `docs/CONTEXT_ENGINEERING.md` -- the model (cascading CLAUDE.md CC:CHILDREN/CC:TREEMAP/CC:NOTES,
+    220-line budget, retrieval-over-preload context router, self-organizing folders), the SOTA principles it
+    embodies, and the invariants to keep it efficient as projects grow. Audit finding: the cascading-doc +
+    treemap + budget + retrieval system was already strong; these close the extension-tiering + placement gaps.
+
 ## 0.99.11 -- 2026-06-28
 - AGENT AWARENESS of the lockdown + sandbox: launched agents now KNOW that core + official `extensions/` are
   signed/locked and how to ADD capability the right way, so they guide the user instead of hand-editing signed
