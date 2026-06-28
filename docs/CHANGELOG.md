@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.5 -- 2026-06-28
+- Granola API key now resolves VAULT-FIRST (`_deploy_env("GRANOLA_API_KEY")`), falling back to the legacy
+  `cc.config granola.api_key`. Before, granola.py read ONLY cc.config -- so a key added the standard way (Vault
+  lens / secure-field, which is where install reserves the slot) was silently ignored, and Granola looked
+  "broken" even though a key had been provided. Now adding the key to the vault "just works" -- no cc.config
+  hand-edit. (granola.init gets the `secret` resolver; `_api_key()` used by source/_api_get/_gr_ready/has_key.)
+
 ## 0.99.4 -- 2026-06-28
 - FIX: the Granola "Calls" lens never appeared on ANY node -- a latent framework bug. The dashboard surfaces
   an extension's lens from `_ext_lenses()`, which reads `extension.json` -> `"lens":{id,label,icon}`. Granola

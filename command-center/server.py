@@ -7570,7 +7570,8 @@ def _agency_subfolders(absdir):
     return out
 
 granola.init({"CC": CC, "PROJECT": PROJECT, "STATE_DIR": STATE_DIR,
-              "agency_dirs": _agency_dirs, "agency_subfolders": _agency_subfolders})
+              "agency_dirs": _agency_dirs, "agency_subfolders": _agency_subfolders,
+              "secret": _deploy_env})   # vault-first GRANOLA_API_KEY resolution (falls back to cc.config)
 try: slack.init({"CC": CC, "STATE_DIR": STATE_DIR, "CC_HOME": CC_HOME, "EXT_DIR": EXT_DIR, "deploy_env": _deploy_env})
 except Exception as _e: print("[slack] init failed:", _e)
 try: zoom.init({"CC": CC, "PROJECT": PROJECT, "STATE_DIR": STATE_DIR, "secret": _deploy_env})

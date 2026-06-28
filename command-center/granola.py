@@ -29,6 +29,20 @@ def _cfg():
     return (_CTX.get("CC", {}) or {}).get("granola") or {}
 
 
+def _api_key():
+    """Resolve the Granola API key VAULT-FIRST (the platform standard: every credential lives in the per-install
+    encrypted vault, scope/per-node aware), falling back to the legacy cc.config granola.api_key for nodes that
+    haven't migrated. So a key added via the Vault lens / secure-field 'just works' -- no cc.config hand-edit."""
+    sec = _CTX.get("secret")
+    if callable(sec):
+        try:
+            k = sec("GRANOLA_API_KEY")
+            if k: return k
+        except Exception:
+            pass
+    return _cfg().get("api_key") or ""
+
+
 def _state_path():
     return os.path.join(_CTX.get("STATE_DIR", "."), "_granola.json")
 
@@ -47,12 +61,11 @@ def _save_state(s):
 # ---- ingest: meetings + transcripts (official API, or local cache) -------------------------------------
 def _source():
     c = _cfg()
-    return c.get("source") or ("api" if c.get("api_key") else "cache")
+    return c.get("source") or ("api" if _api_key() else "cache")
 
 
 def _api_get(path):
-    c = _cfg()
-    key = c.get("api_key") or ""
+    key = _api_key()
     if not key:
         raise RuntimeError("no Granola API key set (cc.config granola.api_key). Create one in Granola -> "
                            "Settings -> Connectors -> API keys (needs a Business plan; the workspace must have "
@@ -243,7 +256,7 @@ def _gr_ready():
     c = _cfg()
     if not c: return (False, "Granola isn't enabled on this node (cc.config 'granola').")
     src = _source()
-    if src == "api" and not c.get("api_key"):
+    if src == "api" and not _api_key():
         return (False, "Add your Granola API key (granola.api_key). Create it in Granola -> Settings -> "
                        "Connectors -> API keys (Business plan; workspace end-to-end encryption must be OFF "
                        "for the public API to read notes).")
@@ -258,7 +271,7 @@ def gr_proposals():
     ready, hint = _gr_ready()
     return {"ok": True, "proposals": st.get("proposals", [])[:80], "last_sync": st.get("last_sync", 0),
             "configured": bool(_cfg()), "ready": ready, "hint": hint, "source": _source(),
-            "has_key": bool((_cfg() or {}).get("api_key")),
+            "has_key": bool(_api_key()),
             "clients": [nm for nm, _ in _client_dirs()], "destinations": _cfg().get("destinations") or ["cc"]}
 
 
