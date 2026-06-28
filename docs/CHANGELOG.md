@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.26 -- 2026-06-28
+- FLEET-WIDE "All nodes" taskbar. The taskbar is built from LOCAL tmux, so cross-user/remote nodes (AFP runs as
+  `sarahaios` on its own tmux; future T490 nodes are another machine) never appeared. Now the unscoped overseer's
+  "All nodes" view ALSO aggregates each remote peer's sessions over HTTP (`_remote_sessions`, family-auth scrape,
+  cached ~15s + refreshed in a background thread so the poll never blocks). Remote sessions show as read-only
+  tiles tagged by node (e.g. "7th avenue - afp ↗") that DEEP-LINK to that node's dashboard -- a remote terminal
+  can't be attached cross-user/cross-machine, so the tile opens the node's console instead. Co-located nodes stay
+  live/drivable. "Mine" hides all of it; "All nodes" shows the whole fleet.
+
 ## 0.99.25 -- 2026-06-28
 - SESSIONS TASKBAR CLARITY (the bottom bar). It was showing raw infrastructure on the unscoped overseer --
   the CC SERVER processes (cc-overseer/cc-carsearch/cc-shopos/hpcc) and the product SERVICES (t2tbridge =

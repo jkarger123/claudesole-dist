@@ -7203,6 +7203,52 @@ def _pane_busy(name):
     _, o, _ = sh([TMUX, "capture-pane", "-t", name, "-p"])
     return "esc to interrupt" in o.lower()
 
+_REMOTE_SB = {"ts": 0, "v": [], "running": False}
+def _scrape_auth(url, timeout=2.5):
+    """Cross-node GET that carries this console's auth (the family shares the token) -- for reading a peer's
+    session-bar over HTTP (a node on another user/machine, e.g. AFP/`sarahaios`, that this tmux can't see)."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(url)
+        if AUTH_TOKEN: req.add_header("Cookie", "cc_auth=" + AUTH_TOKEN); req.add_header("X-CC-Token", AUTH_TOKEN)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception: return None
+def _local_instance_ids():
+    """Instance ids already represented in THIS tmux (co-located) -- so the fleet aggregator skips them (they're
+    shown live/drivable already) and only pulls in genuinely REMOTE nodes."""
+    ids = {INSTANCE_ID}
+    try:
+        for ln in (sh([TMUX, "list-sessions", "-F", "#{session_name}"])[1] or "").splitlines():
+            ln = ln.strip()
+            if ln.startswith("chief-"): ids.add(ln[6:])
+    except Exception: pass
+    return ids
+def _remote_sessions_refresh():
+    try:
+        local = _local_instance_ids(); out = []
+        for pr in peers():
+            pid = pr.get("id"); url = (pr.get("url") or "").rstrip("/")
+            if not url or pid in local: continue        # skip self + co-located (already live in this taskbar)
+            sb = _scrape_auth(url + "/api/session-bar")
+            for s in ((sb or {}).get("sessions") or []):
+                if s.get("kind") in ("service", "loop"): continue
+                out.append({"name": pid + "/" + (s.get("name") or ""), "label": s.get("label") or s.get("name") or "",
+                            "kind": s.get("kind", "work"), "node": pid, "mine": False, "remote": True, "url": url,
+                            "busy": bool(s.get("busy")), "chief": bool(s.get("chief")), "attached": False,
+                            "protected": True, "loc": pid})
+        _REMOTE_SB["v"] = out; _REMOTE_SB["ts"] = time.time()
+    finally:
+        _REMOTE_SB["running"] = False
+def _remote_sessions():
+    """Cross-node taskbar tiles (cached ~15s, refreshed in the background so the poll never blocks). Only the
+    unscoped overseer aggregates the fleet; remote tiles are read-only + deep-link to that node's dashboard."""
+    if SCOPE_SESSIONS: return []
+    if (time.time() - _REMOTE_SB["ts"]) >= 15 and not _REMOTE_SB["running"]:
+        _REMOTE_SB["running"] = True
+        threading.Thread(target=_remote_sessions_refresh, daemon=True).start()
+    return list(_REMOTE_SB["v"])
+
 def session_bar():
     """Lightweight feed for the global desktop sessions taskbar: every project session + its live busy state
     (busy = Claude is mid-turn). The frontend watches for busy->idle transitions to flash a tile gold ('done').
@@ -7215,11 +7261,12 @@ def session_bar():
     ts = [threading.Thread(target=chk, args=(s["name"],)) for s in sess]
     for t in ts: t.start()
     for t in ts: t.join()
-    return {"sessions": [{"name": s["name"], "label": s["label"], "kind": s.get("kind", "work"),
-                          "node": s.get("node", ""), "mine": s.get("mine", True),
-                          "loc": s.get("loc", ""), "cwd": s.get("cwd", ""), "busy": busy.get(s["name"], False),
-                          "chief": s.get("chief", False), "attached": s.get("attached", False),
-                          "protected": bool(s.get("protected", False))} for s in sess],
+    local = [{"name": s["name"], "label": s["label"], "kind": s.get("kind", "work"),
+              "node": s.get("node", ""), "mine": s.get("mine", True),
+              "loc": s.get("loc", ""), "cwd": s.get("cwd", ""), "busy": busy.get(s["name"], False),
+              "chief": s.get("chief", False), "attached": s.get("attached", False),
+              "protected": bool(s.get("protected", False))} for s in sess]
+    return {"sessions": local + _remote_sessions(),   # local (drivable) + fleet (read-only, deep-link) tiles
             "unscoped": (not SCOPE_SESSIONS), "instance": INSTANCE_ID}
 
 def _wait_idle(name, timeout, settle=3):
@@ -20793,12 +20840,14 @@ function sbRender(list){
   var doneCount=list.filter(function(s){return SB.done[s.name];}).length;
   // Rebuild the DOM ONLY when the SET of tiles changes -- not every poll -- so the tile under your cursor is
   // not destroyed mid-hover (that's what made them "move around"/hard to use). State is applied in place below.
-  function sbLbl(s){ return (s.label||s.name)+((s.node&&!s.chief)?(' · '+s.node):''); }   // a NODE's chief -> "Chief of Staff · carsearch"; your own -> just "Chief of Staff"
+  function sbLbl(s){ return (s.label||s.name)+((s.node&&!(s.chief&&s.mine))?(' · '+s.node):''); }   // a NODE's chief -> "Chief of Staff · carsearch"; only YOUR OWN -> just "Chief of Staff"
   var sig=(window.SB_SCOPE||'')+'#'+list.map(function(s){return s.name+':'+(s.label||'')+':'+(s.node||'');}).join('|');
   if(sig!==SB._sig){
     var tog=window.SB_UNSCOPED?('<button class="sb-tog" onclick="sbScopeToggle()" title="Switch between this overseer\'s own sessions and every node\'s sessions" style="margin:0 8px 0 4px;background:var(--card2,#1a1a22);border:1px solid var(--line,#2a2a33);color:var(--mut,#aab);border-radius:7px;padding:2px 9px;font-size:11px;cursor:pointer">'+(window.SB_SCOPE==='mine'?'◉ Mine':'◈ All nodes')+'</button>'):'';
     var h='<span class="sb-title">Sessions</span>'+tog;
     h+= list.length ? list.map(function(s){
+      if(s.remote) return '<div class="sb-tile sb-remote" data-n="'+e2(s.name)+'" onclick="window.open(\''+esc(s.url)+'\',\'_blank\')" title="'+e2(sbLbl(s))+' — remote node; opens its dashboard in a new tab (a remote terminal can not be attached here)" style="opacity:.82;border-style:dashed">'
+        +'<span class="sb-dot"></span><span class="sb-lbl">'+e2(sbLbl(s))+' ↗</span></div>';
       return '<div class="sb-tile" data-n="'+e2(s.name)+'" draggable="true" ondragstart="sbDragStart(event,\''+esc(s.name)+'\')" ondragend="sbDragEnd()" onmouseenter="sbHover(\''+esc(s.name)+'\',this)" onmouseleave="sbLeave()" onclick="sbClick(\''+esc(s.name)+'\')" title="'+e2(sbLbl(s))+' — drag up to split, or click to toggle in the workspace">'
         +'<span class="sb-dot"></span><span class="sb-lbl">'+e2(sbLbl(s))+'</span></div>';
     }).join('') : '<span class="sb-empty">'+(window.SB_UNSCOPED&&window.SB_SCOPE==='mine'?'no sessions here — click All nodes to see node sessions':'no sessions')+'</span>';
