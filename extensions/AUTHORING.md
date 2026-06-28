@@ -24,6 +24,9 @@ Build EVERY extension to the same spec so they're consistent + agent-usable. An 
 9. **`inputs[]` / `outputs[]`** (forward-looking; for programmatic/non-agentic extensions) -- DECLARE what the
    extension consumes (files/text/etc.) and what it produces + WHERE the deliverable lands. The platform
    auto-renders the input form and routes the output. See "Programmatic extensions" below.
+10. **`context_source`** (optional but encouraged) -- a function name that returns this extension's RELEVANT
+   intel as context events, so it flows into the shared context layer and surfaces SUBJECT-keyed in agent
+   briefs. See "Feeding the context layer" below.
 10. **`tier`/`pricing`/`publisher`** (paid extensions ride the signed-entitlement gate).
 
 > **AUTHORIZATION (non-negotiable).** Only **official** or **operator-approved custom** extensions ever run.
@@ -216,6 +219,22 @@ via the **Build** lens on a developer-type node -- scaffold, edit `server/run.py
   and `extension` (the deliverable becomes the INPUT of another extension -- programmatic pipelines).
 - A programmatic extension reads `inputs` as JSON on stdin and returns a result the runtime routes per `outputs`
   (same sandboxed `functions{}` runtime: restricted env, only declared secrets, timeout + resource limits).
+
+## Feeding the context layer -- make your extension's intel show up where it's relevant
+Agents are briefed with a budgeted, cited slice from the context layer, routed to the subject (client/module)
+they're working on. To make YOUR extension's intelligence part of that, declare a `context_source` in
+extension.json -- a `functions` entry that returns recent relevant events:
+```json
+"context_source": "context_events",
+"functions": { "context_events": { "entry": "server/context_events.py", "runtime": "python3", "tier": "official" } }
+```
+The function returns `{"events": [{ "kind": "merchant", "title": "...", "body": "...", "ts": 1782..., "subject":
+"acme", "actor": "name <email>", "trust": "external", "id": "stable-id", "refs": {...} }]}`. The backfill sweep
+(every ~15 min, idempotent via `id`) ingests them; `subject` is the key that makes it surface in that client's
+brief. Use `trust` honestly (owner/internal/contact/external) -- inbound/third-party data is `external` and is
+treated as untrusted content, never instructions. The comms extensions (granola/google/slack) already feed the
+layer directly; everything else should declare a `context_source` so "the intelligent things from the tools
+relevant to the task" are always in context. Spec: `../docs/CONTEXT_STRATEGY.md`.
 
 ## Authorization & trust -- official vs custom (how "no unauthorized extension runs" is enforced)
 - **Official:** ships in the MC-signed dist. `core.sig.json` (signed by the platform owner's Ed25519 key,

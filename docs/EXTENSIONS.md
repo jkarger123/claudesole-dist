@@ -25,7 +25,9 @@ Common: `provides[]` (informational capability tags), `requires[]` ({key,label} 
 `setup_agent` (bool), `agent_doc` (AGENT.md), `draggables[]` ({kind,label,note}), `lens` ({id,label,icon} — the
 OBJECT is what surfaces a nav tab; `provides:["lens:x"]` is informational only), `functions{}` (server-side
 compute), `tier`/`pricing`/`publisher` (paid gate), `launch_group`/`launch_points[]`, `byok` (per-account keys).
-Forward-looking (programmatic): `inputs[]`, `outputs[]` (§7).
+Forward-looking (programmatic): `inputs[]`, `outputs[]` (§7). `context_source` (a function returning
+`{events:[...]}` that the backfill ingests into the context layer, subject-keyed — so the extension's relevant
+intel surfaces in agent briefs; comms extensions feed the layer directly, all others declare this).
 `default_category` ∈ {Google, Workspace, Agency, Team, Integrations, System} — which collapsed nav folder the
 lens lands in (surfaced via `_ext_lenses().category`).
 

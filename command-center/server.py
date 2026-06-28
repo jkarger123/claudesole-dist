@@ -8310,6 +8310,21 @@ def _system_brief():
             av = _ext_available_brief()      # tiny "also available, not enabled" tier -- chief-only awareness
             if av: base += "\n\n" + av
         except Exception: pass
+        # KNOW US (A.4): a compact operator/org profile so the chief acts in-context about WHO it serves + current
+        # priorities. cc.config `operator_profile` (free text); falls back to brand. Keep it short.
+        try:
+            prof = (CC.get("operator_profile") or "").strip()
+            if prof: base += "\n\nWHO YOU SERVE: " + prof[:800]
+        except Exception: pass
+        # RECENT ACROSS THE OPERATION (A.5): a budgeted, cited recency slice from the context layer so the chief is
+        # current on our movements -- calls/emails/tasks/actions/notes -- without having to go ask for it.
+        try:
+            rb = context.assemble(budget_tokens=1000)
+            if isinstance(rb, dict) and rb.get("items"):
+                base += ("\n\nRECENT ACROSS THE OPERATION (freshest first, cited -- you're already caught up on our "
+                         "calls/emails/tasks/actions/notes; call /api/context/brief for any subject in depth):\n\n"
+                         + (rb.get("text") or "").strip()[:4500])
+        except Exception: pass
         return base
     except Exception:
         return "SYSTEM MAP: ClaudeFather context OS (context layer + capture + focus + mesh)."
@@ -8450,6 +8465,67 @@ def _context_backfill():
     except Exception: pass
     # --- Zoom cloud recordings -> the shared granola proposal queue (no-op if unconfigured) ---
     try: zoom.zoom_sync(15)
+    except Exception: pass
+    # --- Operator notes (human<->human comms -- OUR movements; trust: owner outbound / contact inbound) ---
+    try:
+        for peer, msgs in (_opnotes_load().get("threads") or {}).items():
+            for m in (msgs or [])[-60:]:
+                out = m.get("dir") == "out"
+                if context.ingest_event("note", "opnote", ("note to " if out else "note from ") + str(peer),
+                                        (m.get("text") or ""), ts=m.get("ts"), actor=peer, subject=peer,
+                                        trust=("owner" if out else "contact"), ext_id="opnote:" + str(m.get("id"))): n += 1
+    except Exception: pass
+    # --- Tasks (our commitments / to-dos; trust: owner) ---
+    try:
+        for t in (tasks_load() or [])[:300]:
+            tid = t.get("id")
+            if not tid: continue
+            if context.ingest_event("task", "tasks", t.get("title") or "task", (t.get("detail") or ""),
+                                    ts=t.get("ts") or t.get("created"), subject=(t.get("client") or None),
+                                    trust="owner", ext_id="task:" + str(tid),
+                                    refs={"status": t.get("status"), "due": t.get("due")}): n += 1
+    except Exception: pass
+    # --- Ideas (captured thinking; trust: owner) ---
+    try:
+        for it in (ideas_list() or [])[:200]:
+            iid = it.get("id")
+            if not iid: continue
+            if context.ingest_event("idea", "ideas", it.get("title") or "idea", (it.get("notes") or ""),
+                                    ts=it.get("created"), trust="owner", ext_id="idea:" + str(iid),
+                                    refs={"status": it.get("status")}): n += 1
+    except Exception: pass
+    # --- Actions (OUR interactions with tools/the world via the review-gated queue; trust: internal) ---
+    try:
+        for a in (_actions_load().get("actions") or [])[:200]:
+            aid = a.get("id")
+            if not aid: continue
+            pay = a.get("payload") or {}
+            ttl = (str(a.get("kind") or "action") + ": " + str(pay.get("subject") or pay.get("to") or pay.get("title") or pay.get("destination") or ""))[:120]
+            if context.ingest_event("action", (a.get("origin") or "action"), ttl, json.dumps(pay)[:1000],
+                                    ts=a.get("created_ts"), trust="internal", ext_id="action:" + str(aid),
+                                    refs={"status": a.get("status"), "tier": a.get("tier")}): n += 1
+    except Exception: pass
+    # --- EXTENSION-contributed intel: every installed+authorized extension may declare a `context_source`
+    # (a function returning {events:[{kind,title,body,ts,subject,actor,trust,id,refs}]}) so its RELEVANT data
+    # (e.g. affiliate/merchant intel, AI-visibility findings, billing events) flows into the substrate and
+    # surfaces SUBJECT-keyed in the right brief. The comms extensions (granola/google/slack) already feed it
+    # directly above; this is the standard, forward-thinking hook for all the rest. Sandboxed + idempotent. ---
+    try:
+        for eid in _ext_installed():
+            if _ext_authorized(eid) is None: continue
+            cs = (_ext_meta(eid).get("context_source") or "").strip()
+            if not cs: continue
+            try: r = _ext_fn_run(eid, cs, {"task": "context_events"})
+            except Exception: continue
+            if not isinstance(r, dict) or not r.get("ok"): continue
+            for ev in ((r.get("result") or {}).get("events") or [])[:200]:
+                try:
+                    if context.ingest_event(ev.get("kind") or "ext", ev.get("source") or eid,
+                            (ev.get("title") or "")[:300], (ev.get("body") or "")[:4000], ts=ev.get("ts"),
+                            actor=ev.get("actor"), subject=ev.get("subject"), trust=(ev.get("trust") or "external"),
+                            ext_id=eid + ":" + str(ev.get("id") or ev.get("ext_id") or ev.get("title") or ""),
+                            refs=ev.get("refs")): n += 1
+                except Exception: pass
     except Exception: pass
     return n
 

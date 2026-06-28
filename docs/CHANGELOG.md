@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.14 -- 2026-06-28
+- CONTEXT QUALITY (Track A.2/A.4/A.5): the substrate now knows our whole operation + every relevant tool's intel.
+  - BROADENED INGEST (`_context_backfill`): added operator NOTES (our comms), TASKS (commitments), IDEAS, and
+    ACTIONS (our interactions with tools/the world via the review-gated queue) on top of calls/email/calendar/
+    clips/web/slack/zoom. Verified live: the store now carries task/action/idea events, subject-keyed.
+  - EXTENSION CONTEXT HOOK: any installed+authorized extension can declare `context_source` (a function returning
+    `{events:[...]}`); the backfill ingests its RELEVANT intel into the context layer, subject-keyed, so it
+    surfaces in the right brief. Comms extensions (granola/google/slack) already feed it directly; this is the
+    standard hook for all the rest (affiliate/AI-visibility/billing/etc.). Sandboxed + idempotent. Documented in
+    AUTHORING.md ("Feeding the context layer") + docs/EXTENSIONS.md.
+  - CHIEF "RECENT ACROSS THE OPERATION" (A.5): the Chief brief now includes a budgeted, cited recency slice
+    (calls/emails/tasks/actions/notes) so it's already caught up. Plus a "WHO YOU SERVE" operator profile hook
+    (A.4): cc.config `operator_profile` is injected so the chief acts in-context about whom it serves.
+
 ## 0.99.13 -- 2026-06-28
 - CONTEXT QUALITY (Track A.1 of the context strategy, docs/CONTEXT_STRATEGY.md): launched sessions now ride in
   ALREADY KNOWING their subject. `launch()` injects a SYSTEM-level block via `--append-system-prompt` (no forced
