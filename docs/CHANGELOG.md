@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.20 -- 2026-06-28
+- WARM-TRANSFER LIFECYCLE (the session topology, completing v0.99.19). When you confirm a transfer:
+  - RESUME-DON'T-DUPLICATE: if a live session already owns the destination scope, the packet is delivered INTO
+    that home agent (one coherent conversation per home) instead of spawning a parallel twin. An "open separate"
+    option forces a parallel session for deliberate concurrent work (Ralph/teams/refactors still fine).
+  - MOVE TO DESTINATION: accepting now opens the destination session in your workspace (you follow the topic).
+  - GRACEFUL ORIGIN STAND-DOWN: the origin session is told the topic was transferred and to return to its lane --
+    it is NEVER killed (that would destroy its context); it persists as the home for its own scope.
+  - SAME-FOLDER AWARENESS: launching a manual New session into a folder that already has live session(s) warns you
+    they share its files (`launch()` returns `siblings`). `_sessions_in_scope()` / `_live_sessions()`.
+  - Router tokenization fix: folder names are split on `_`/`-` and matched on name-part subset, so "mongoose seed
+    key read write" correctly routes to `read_write` (was missing it).
+
 ## 0.99.19 -- 2026-06-28
 - THE WARM TRANSFER DESK -- agent routing + handoff (the "good customer-service desk" for your agents). The
   orchestration layer that finally USES the substrate (context + scout + scoped CLAUDE.md memory + launch):

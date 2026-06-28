@@ -3971,8 +3971,13 @@ def launch(target, name, cid=None, rel=None, extra_sys=None):
                 sh([TMUX, "send-keys", "-t", name, "Enter"])
                 return
     threading.Thread(target=_accept_trust, daemon=True).start()
+    # SAME-FOLDER AWARENESS: other live sessions already in this exact scope (resume-don't-duplicate is the default
+    # for transfers; for a manual New-session the UI uses this to warn that a home agent is already open here).
+    sibs = []
+    try: sibs = [s for s in _sessions_in_scope(rel) if s != name] if rel else []
+    except Exception: sibs = []
     return {"ok": True, "session": name, "term": "/term?name=" + urllib.parse.quote(name),
-            "attach": 'ssh -t hptuner@%s "%s attach -t %s"' % (STUDIO_TS, TMUX, name)}
+            "attach": 'ssh -t hptuner@%s "%s attach -t %s"' % (STUDIO_TS, TMUX, name), "siblings": sibs}
 
 # ---- the Chief of Staff: a persistent top-level session you can reach any time ----
 # Per-instance Chief session -- MUST be unique per ClaudeFather, else every instance's "Talk to Chief"
@@ -8754,15 +8759,15 @@ def route(text, exclude=None):
     hit + keyword overlap of the topic against the folder name + its CLAUDE.md one-liner. Low confidence =>
     needs_new_home + a suggested parent (the most-relevant shallow area to create under). The agent's own
     judgment is the agentic fallback (it can hand off to an explicit scope or to 'new')."""
-    low = (text or "").strip().lower()
-    toks = set(re.findall(r"[a-z0-9]{3,}", low))
+    def _toks(s): return set(re.findall(r"[a-z0-9]{3,}", (s or "").lower().replace("_", " ").replace("-", " ")))
+    toks = _toks(text)
     scored = []
     for c in _scope_candidates():
         if exclude and c["rel"] == exclude: continue
-        nm = c["name"].lower()
-        name_hit = len(nm) >= 3 and re.search(r"\b" + re.escape(nm) + r"\b", low) is not None
-        ctoks = set(re.findall(r"[a-z0-9]{3,}", (c["name"] + " " + c["summary"]).lower()))
-        score = (0.6 if name_hit else 0.0) + min(0.4, len(toks & ctoks) * 0.08)
+        nmt = _toks(c["name"])                              # split folder name on _/- too: read_write -> {read,write}
+        name_hit = bool(nmt) and nmt.issubset(toks)        # every part of the folder name appears in the topic
+        ctoks = _toks(c["name"] + " " + c["summary"])
+        score = (0.6 if name_hit else 0.0) + min(0.4, len(toks & ctoks) * 0.1)
         if score > 0: scored.append((round(min(1.0, score), 2), c))
     scored.sort(key=lambda x: x[0], reverse=True)
     top = scored[:5]; best = top[0] if top else None; conf = best[0] if best else 0.0
@@ -8848,10 +8853,48 @@ def _handoff_note(pkt):
     return "Handoff received (%s): %s%s" % (time.strftime("%Y-%m-%d"),
             (pkt.get("goal") or pkt.get("to_subject") or "topic"), ("; next: " + pkt["next"]) if pkt.get("next") else "")
 
-def handoff_accept(hid):
-    """Operator confirms the warm transfer (Assisted): creates a home if needed, launches a session THERE with the
-    packet + scope CLAUDE.md + fresh slice, writes the durable summary to the DESTINATION's memory (never the
-    origin's -- anti-taint), marks delivered."""
+def _live_sessions():
+    code, o, _ = sh([TMUX, "list-sessions", "-F", "#{session_name}"])
+    return [s.strip() for s in o.splitlines() if s.strip()] if code == 0 else []
+
+def _sessions_in_scope(rel):
+    """Live sessions whose cwd is EXACTLY this project-relative scope -- so a transfer/launch can RESUME the home
+    agent instead of duplicating it. Skips system sessions (the Chief, admin shells) -- never hand a packet there."""
+    out = []
+    for s in _live_sessions():
+        if s == CHIEF or s.startswith("admin-") or s.startswith("chief"): continue
+        try:
+            if _session_scope(s) == rel: out.append(s)
+        except Exception: pass
+    return out
+
+def _handoff_message(pkt):
+    """The packet as a SINGLE-LINE turn injected into an ALREADY-RUNNING destination session (resume path) --
+    _mesh_deliver types it as one message, so no embedded newlines (they'd submit early in the TUI)."""
+    bits = ["[warm transfer] a conversation was handed to you because it belongs in your scope -- continue it here.",
+            "GOAL: " + (pkt.get("goal") or "(unspecified)")]
+    if pkt.get("state"): bits.append("WHERE IT LEFT OFF: " + pkt["state"])
+    if pkt.get("decisions"): bits.append("DECISIONS: " + "; ".join(pkt["decisions"]))
+    if pkt.get("open"): bits.append("OPEN: " + "; ".join(pkt["open"]))
+    if pkt.get("next"): bits.append("NEXT: " + pkt["next"])
+    if pkt.get("pointers"):
+        bits.append("POINTERS: " + " | ".join("[%s] %s%s" % (p.get("kind"), (p.get("title") or "")[:70],
+                    (" -> " + p["ref"]) if p.get("ref") else "") for p in pkt["pointers"][:6]))
+    return re.sub(r"\s+", " ", " // ".join(bits)).strip()[:2400]
+
+def _standdown_message(pkt):
+    """The graceful stand-down injected into the ORIGIN session: the topic left; drop it, back to your lane. We
+    never KILL the origin (that destroys its context) -- it persists as the home for its own scope."""
+    return ("[handoff] the topic \"%s\" was transferred to %s -- stand down on it (you don't need to continue that "
+            "thread); return to your own scope. The operator confirmed the transfer." %
+            ((pkt.get("goal") or pkt.get("to_subject") or "that topic")[:120], pkt.get("to_scope") or "another home"))
+
+def handoff_accept(hid, force_new=False):
+    """Operator confirms the warm transfer (Assisted) -- the full scope-aware lifecycle:
+       1) create a home if none fits; 2) RESUME-DON'T-DUPLICATE: if a live session already owns the destination
+       scope, deliver the packet INTO it (one coherent home agent) -- else launch a fresh one with the packet +
+       scope CLAUDE.md + slice; 3) ANTI-TAINT: durable summary -> DESTINATION memory, never the origin; 4) GRACEFUL
+       STAND-DOWN: tell the origin the topic left (never kill it). force_new overrides resume for deliberate parallel."""
     d = _hand_load(); pkt = next((h for h in d.get("handoffs", []) if h["id"] == hid), None)
     if not pkt: return {"ok": False, "error": "no such handoff"}
     if pkt.get("status") == "delivered": return {"ok": True, "already": True, "session": pkt.get("to_session")}
@@ -8861,17 +8904,30 @@ def handoff_accept(hid):
         if not r.get("ok"): return {"ok": False, "error": "could not create home: " + str(r.get("error"))}
         to_rel = r["rel"]; pkt["to_scope"] = to_rel; created = True
     if not to_rel: return {"ok": False, "error": "no destination scope"}
-    extra = _handoff_sysblock(pkt)
-    if created:
-        extra = (_NEW_FOLDER_BRIEF + "\n\n" + extra + "\n\nThis is a BRAND-NEW home: FIRST deep-dive the project "
-                 "for everything relevant to this topic + fill in this folder's CLAUDE.md (title + one-line + what "
-                 "you learned), THEN continue the goal above.")
-    res = launch("studio", "ho-" + _slug(pkt["to_subject"]), rel=to_rel, extra_sys=extra)
-    try: module_note(to_rel, _handoff_note(pkt))     # ANTI-TAINT: durable summary -> DESTINATION, never the origin
+    existing = [] if (created or force_new) else _sessions_in_scope(to_rel)
+    if existing:                                       # RESUME: hand the packet to the home agent already there
+        target = existing[0]
+        try: _mesh_deliver(target, _handoff_message(pkt))
+        except Exception: pass
+        res = {"ok": True, "session": target, "resumed": True, "term": "/term?name=" + urllib.parse.quote(target)}
+    else:                                              # else open a fresh session in the destination
+        extra = _handoff_sysblock(pkt)
+        if created:
+            extra = (_NEW_FOLDER_BRIEF + "\n\n" + extra + "\n\nThis is a BRAND-NEW home: FIRST deep-dive the project "
+                     "for everything relevant to this topic + fill in this folder's CLAUDE.md (title + one-line + what "
+                     "you learned), THEN continue the goal above.")
+        res = launch("studio", "ho-" + _slug(pkt["to_subject"]), rel=to_rel, extra_sys=extra)
+    try: module_note(to_rel, _handoff_note(pkt))       # ANTI-TAINT: durable summary -> DESTINATION, never the origin
     except Exception: pass
+    if pkt.get("from_session"):                        # GRACEFUL STAND-DOWN of the origin (never killed)
+        try:
+            if sh([TMUX, "has-session", "-t", pkt["from_session"]])[0] == 0:
+                _mesh_deliver(pkt["from_session"], _standdown_message(pkt))
+        except Exception: pass
     pkt["status"] = "delivered"; pkt["to_session"] = res.get("session"); pkt["delivered_ts"] = int(time.time())
-    pkt["created_home"] = created; _hand_save(d)
-    return {"ok": True, "session": res.get("session"), "to_scope": to_rel, "created_home": created, "term": res.get("term")}
+    pkt["created_home"] = created; pkt["resumed"] = bool(res.get("resumed")); _hand_save(d)
+    return {"ok": True, "session": res.get("session"), "to_scope": to_rel, "created_home": created,
+            "resumed": bool(res.get("resumed")), "term": res.get("term")}
 
 def handoff_decline(hid, reason=""):
     d = _hand_load(); pkt = next((h for h in d.get("handoffs", []) if h["id"] == hid), None)
@@ -12306,7 +12362,7 @@ class H(BaseHTTPRequestHandler):
                 summary=body.get("summary", ""), decisions=body.get("decisions"), open_q=body.get("open"),
                 next_step=body.get("next", ""), subject=body.get("subject"), by=(body.get("by") or "agent"),
                 hops=body.get("hops", 0)), default=str))
-        if u.path == "/api/handoff-accept":    return self._s(200, json.dumps(handoff_accept(body.get("id", "")), default=str))
+        if u.path == "/api/handoff-accept":    return self._s(200, json.dumps(handoff_accept(body.get("id", ""), bool(body.get("force_new"))), default=str))
         if u.path == "/api/handoff-decline":   return self._s(200, json.dumps(handoff_decline(body.get("id", ""), body.get("reason", "")), default=str))
         if u.path == "/api/module-remove": return self._s(200, json.dumps(module_remove(body.get("rel",""))))
         if u.path == "/api/module-combine":return self._s(200, json.dumps(module_combine(body.get("a",""), body.get("b",""))))
@@ -14839,6 +14895,7 @@ async function doLaunch(target,comp,name,rel){
   toast("Launching…");
   const r=await(await fetch("/api/launch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({target,component:comp,name:(name||"session"),rel:(rel||"")})})).json();
   if(!r.ok){toast("Failed: "+(r.error||"?"),6000);return;}
+  if(r.siblings&&r.siblings.length){toast("Heads up: "+r.siblings.length+" other session"+(r.siblings.length>1?"s":"")+" already open in this folder &mdash; they share its files.",6000);}
   closeM();
   _openTerm(r);}
 let SESSVIEW='workspace', SESSDATA=[], SESSBIG=null, SNAPTIMER=null, PEEKEL=null, PEEKT=null, PEEKSUP=0, TOKDATA={}, SESSRANGE=localStorage.getItem('hpcc_sessrange')||'24h';
@@ -18305,10 +18362,10 @@ function hoCard(p,active){
     +(p.next?'<div class="meta" style="margin-top:4px"><b>Next:</b> '+e2(p.next)+'</div>':'')
     +(ptr?'<div class="meta" style="margin-top:6px"><b>Pointers it&rsquo;ll carry:</b><ul style="margin:4px 0 0 16px">'+ptr+'</ul></div>':'')
     +flag
-    +(active?'<div style="margin-top:10px;display:flex;gap:8px"><button class="mini go" onclick="hoAccept(\''+esc(p.id)+'\')">&#128260; Warm-transfer there</button><button class="mini" onclick="hoDecline(\''+esc(p.id)+'\')">Decline</button></div>':'')
+    +(active?'<div style="margin-top:10px;display:flex;gap:8px;align-items:center"><button class="mini go" onclick="hoAccept(\''+esc(p.id)+'\')">&#128260; Warm-transfer there</button><button class="mini" onclick="hoDecline(\''+esc(p.id)+'\')">Decline</button><a href="#" class="sub" style="margin-left:auto;font-size:11px" title="Open a separate parallel session instead of resuming the home agent already there" onclick="event.preventDefault();hoAccept(\''+esc(p.id)+'\',true)">open separate</a></div>':'')
     +'</div>';
 }
-async function hoAccept(id){toast('Opening the right place&hellip;',3000);try{var r=await(await fetch('/api/handoff-accept',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})).json();if(r.ok){toast('Transferred &rarr; '+esc(r.to_scope)+(r.created_home?' (new home created)':''),5000);}else{toast('Accept failed: '+esc(r.error||''),4500);}}catch(e){toast('Accept failed',3500);}loadHandoffs();}
+async function hoAccept(id,forceNew){toast('Opening the right place&hellip;',2500);try{var r=await(await fetch('/api/handoff-accept',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,force_new:!!forceNew})})).json();if(r.ok){toast((r.resumed?'Resumed the home agent in ':'Opened ')+esc(r.to_scope)+(r.created_home?' (new home created)':''),5000);if(r.session){try{gotoLens('sessions');}catch(e){}setTimeout(function(){try{openInSessions(r.session);}catch(e){}},300);return;}}else{toast('Accept failed: '+esc(r.error||''),4500);}}catch(e){toast('Accept failed',3500);}loadHandoffs();}
 async function hoDecline(id){try{await fetch('/api/handoff-decline',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});}catch(e){}toast('Declined',2000);loadHandoffs();}
 async function hoRoute(){var el=document.getElementById('hoRouteOut');var q=((document.getElementById('hoRouteQ')||{}).value||'').trim();if(!q){el.innerHTML='';return;}el.innerHTML='Routing&hellip;';try{var d=await(await fetch('/api/route?q='+encodeURIComponent(q))).json();if(d.needs_new_home){el.innerHTML='&rarr; <b style="color:var(--accent)">No home yet</b> &mdash; would create one under <code>'+esc(d.suggested_parent||'(root)')+'</code>.';}else{var dd=d.destination||{};el.innerHTML='&rarr; <code>'+esc(dd.rel)+'</code> <span class="sub">('+Math.round((dd.confidence||0)*100)+'% match)</span>'+((d.alternatives&&d.alternatives.length>1)?(' &middot; also: '+d.alternatives.slice(1,4).map(function(a){return '<code>'+esc(a.rel)+'</code>';}).join(', ')):'');}}catch(e){el.innerHTML='route failed';}}
 function hoSetBadge(n){var b=document.getElementById('transfersBadge');if(b){if(n>0){b.textContent=n>99?'99+':n;b.style.display='inline-block';}else{b.textContent='';b.style.display='none';}}try{paintNavNotif();}catch(e){}}
