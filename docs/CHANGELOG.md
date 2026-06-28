@@ -3,6 +3,25 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.10 -- 2026-06-28
+- CUSTOM SANDBOX + PROGRAMMATIC RUN ENGINE (Ship B of the extension-system standardization) -- the place users
+  BUILD, and the engine that runs non-agentic programmatic extensions end to end.
+  - **Sandbox:** `custom/extensions/<id>/` (under DEPLOY_ROOT, writable, PRESERVE, gitignored, NEVER signed) on a
+    `type:developer` node. A custom ext is programmatic ONLY (functions{} + inputs[]/outputs[]); it runs only
+    after the operator APPROVES it (`custom/_approved.json`). `_ext_dir`/`_ext_category` now resolve custom exts;
+    `_ext_fn_run` runs an approved-custom function in the restricted tier -- NO core secrets, 120s ceiling,
+    CPU/file/mem limits, path-confined, audited.
+  - **Run engine:** `ext_run` -> `_ext_marshal_inputs` (validate/coerce; files resolve to safe bounds-checked
+    paths) -> `_ext_fn_run` -> `_ext_route_outputs`. The output-destination registry (`_ext_route_one`) is
+    EXTENSIBLE: deliverable/download (file), inline, agent (drop into a session), extension (chain into another
+    ext), email/telegram/slack/webhook (staged to the review-gated action queue -- never auto-sent), tree, vault.
+  - **Build lens** (developer-type only; hidden otherwise): scaffold a new custom ext, edit its `server/run.py`,
+    Approve/Revoke, and Run it with an auto-rendered input form + routed-output display. APIs: `GET /api/custom-list`,
+    `POST /api/custom-scaffold|custom-approve|ext-run`.
+  - Verified live on a developer-type node: scaffold -> blocked-while-unapproved -> approve -> run-in-sandbox ->
+    deliverable file written + inline returned + a real file input marshaled (read 340 chars); Build tab shows on
+    developer, hidden on agency. Docs: `docs/EXTENSIONS.md` + `AUTHORING.md` updated (runtime now live).
+
 ## 0.99.9 -- 2026-06-28
 - EXTENSION AUTHORIZATION (Ship A of the extension-system standardization). A node now runs ONLY extensions it
   is authorized to: **official** (the `extension.json` is in the MC-signed `core.sig.json`, verified vs

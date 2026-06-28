@@ -50,7 +50,13 @@ Enforcement points: `extension_install`, `_ext_lenses`, `_ext_agent_context`, `_
   lens / agent-tool / MCP, no core secrets. (Restricted runtime: only declared secrets, timeout + CPU/file/mem
   limits, path-confined entry, audited.)
 - Gate: the operator must **approve** a custom extension before it runs (recorded in `custom/_approved.json`);
-  only `type:developer` nodes may build/run custom extensions. (Approval flow + runtime: Ship B.)
+  only `type:developer` nodes may build/run custom extensions.
+- **How a user builds (the flow):** open the **Build** lens (developer-type only) → "Scaffold" a new id (creates
+  `custom/extensions/<id>/` with a starter `extension.json` + `server/run.py` declaring `inputs[]`/`outputs[]`/a
+  `third_party` function) → edit `server/run.py` → **Approve** → **Run** (the lens renders the input form, runs
+  it, shows/routes the outputs). APIs: `GET /api/custom-list`, `POST /api/custom-scaffold|custom-approve|ext-run`.
+- Runtime guarantees (`_ext_fn_run` for `auth==custom`): runs the entry under `custom/extensions/<id>/`, NO core
+  secrets injected, tighter timeout ceiling (120s), CPU/file/mem limits, path-confined, audited to `_ext_fn.log`.
 
 ## 6. Standardized installs — `type` and `edition`
 Every install is identical except two axes + which extensions are installed:
@@ -69,7 +75,13 @@ platform renders the input form, runs the function, and routes the deliverable.
   `slack` (outward — ALWAYS review-gated via the action queue, never auto-sends) · `agent` (drop the file into a
   live Claude session, like a Basket item) · `extension` (chain into another extension's input — programmatic
   pipelines) · `webhook` · `tree` (write into the project tree) · `vault`.
-The FIELDS are standard now so extensions are built forward-compatible; the routing ENGINE lands in Ship B.
+**The run engine is live** (`ext_run` → `_ext_marshal_inputs` → `_ext_fn_run` → `_ext_route_outputs`): it
+validates + coerces declared inputs (files resolve to safe, bounds-checked abs paths), runs the sandboxed
+function, and routes each declared output through `_ext_route_one` — an **extensible registry** (add a
+destination by adding one branch). The function reads `{"inputs":{...}}` on stdin and prints
+`{"outputs":{id:value}}` on stdout; an output value is `{filename,mime,content|b64|path}` for file-ish types or
+any JSON for `inline`. Outward types (`email`/`telegram`/`slack`/`webhook`) are staged to the review-gated action
+queue (never auto-sent). `agent` drops the file into a session; `extension` calls `ext_run` on the target (chain).
 
 ## 8. Lifecycle
 Install → `_ext_wire_mcp` (integration) / `_ext_apply_payload` (agent-tool, skill, theme) → `_ext_register_routine`

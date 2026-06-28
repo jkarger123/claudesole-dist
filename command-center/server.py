@@ -4354,8 +4354,11 @@ def _ext_save(s):
 
 def _ext_dir(eid):
     eid = re.sub(r"[^a-z0-9_-]", "", (eid or "").lower())[:48]
-    d = os.path.join(EXT_DIR, eid)
-    return (eid, d) if eid and os.path.isfile(os.path.join(d, "extension.json")) else (eid, None)
+    if not eid: return (eid, None)
+    for base in (EXT_DIR, CUSTOM_EXT_DIR):              # official catalog first, then the custom sandbox
+        d = os.path.join(base, eid)
+        if os.path.isfile(os.path.join(d, "extension.json")): return (eid, d)
+    return (eid, None)
 
 def extensions_list():
     """Scan the extensions/ catalog + merge this deployment's installed state."""
@@ -5262,7 +5265,9 @@ def _ext_wire_mcp(eid, remove=False):
     return touched
 
 def _ext_category(eid):
-    try: return (json.load(open(os.path.join(EXT_DIR, eid, "extension.json"))) or {}).get("category", "")
+    try:
+        _, d = _ext_dir(eid)
+        return (json.load(open(os.path.join(d, "extension.json"))) or {}).get("category", "") if d else ""
     except Exception: return ""
 
 def _gitignore_add(line):
@@ -5437,13 +5442,18 @@ def _ext_fn_run(eid, fn, inp, secret_resolver=None):
     """Run an extension's declared server-side function in a sandboxed subprocess. `secret_resolver(key)` lets a
     caller supply per-account BYOK secrets; defaults to the node deploy env."""
     eid, d = _ext_dir(eid)
-    if _ext_authorized(eid) is None: return {"ok": False, "error": "unauthorized extension -- refusing to run its functions"}
+    auth = _ext_authorized(eid)
+    if auth is None: return {"ok": False, "error": "unauthorized extension -- refusing to run its functions"}
     m = _ext_meta(eid)
     spec = (m.get("functions") or {}).get(fn)
     if not isinstance(spec, dict) or not spec.get("entry"): return {"ok": False, "error": "no such function '%s'" % fn}
-    if str(spec.get("tier", "official")) != "official":
+    is_custom = (auth == "custom")
+    if not is_custom and str(spec.get("tier", "official")) != "official":
         return {"ok": False, "error": "non-official functions are not enabled (third_party sandbox pending)"}
-    base = os.path.realpath(os.path.join(AGENTS_DIR, eid) if _ext_category(eid) == "agent-tool" else os.path.join(EXT_DIR, eid, "payload"))
+    # base dir: custom -> the sandbox ext dir; official agent-tool -> agents/<id>; else -> extensions/<id>/payload
+    if is_custom: base = os.path.realpath(d)
+    elif _ext_category(eid) == "agent-tool": base = os.path.realpath(os.path.join(AGENTS_DIR, eid))
+    else: base = os.path.realpath(os.path.join(EXT_DIR, eid, "payload"))
     entry = os.path.realpath(os.path.join(base, spec["entry"]))
     if not (entry == base or entry.startswith(base + os.sep)) or not os.path.isfile(entry):
         return {"ok": False, "error": "function entry not found / outside extension dir"}
@@ -5452,12 +5462,14 @@ def _ext_fn_run(eid, fn, inp, secret_resolver=None):
            "HOME": os.path.expanduser("~"), "LANG": "en_US.UTF-8", "CF_FN": fn, "CF_EXT": eid}
     if ((m.get("data_sources") or {}).get("backend") == "sqlite"):   # give the function its OWN scoped store
         _ext_store_init(eid, m); env["CF_STORE_DB"] = _ext_store_db(eid)
-    resolve = secret_resolver or _deploy_env
-    for k in (spec.get("secrets") or []):
-        try: v = resolve(k)
-        except Exception: v = None
-        if v: env[k] = v
-    to = max(1, min(int(spec.get("timeout_sec", 60)), 600))
+    if not is_custom:                                   # CUSTOM gets ZERO secrets (tighter sandbox; no core creds)
+        resolve = secret_resolver or _deploy_env
+        for k in (spec.get("secrets") or []):
+            try: v = resolve(k)
+            except Exception: v = None
+            if v: env[k] = v
+    _cap = 120 if is_custom else 600                    # custom: tighter timeout ceiling
+    to = max(1, min(int(spec.get("timeout_sec", 60)), _cap))
     def _limits():
         try:
             import resource
@@ -5695,6 +5707,202 @@ def _ent_verify_token(tok):
         if exp and int(time.time()) > exp: return None
     except Exception: return None
     return payload
+
+# ==== CUSTOM SANDBOX + PROGRAMMATIC RUN ENGINE (Ship B) ======================================================
+# Where developer-type nodes BUILD: custom/extensions/<id>/ (writable, PRESERVE, never signed). A custom ext is
+# programmatic ONLY (functions{} + inputs[]/outputs[]); it runs ONLY after the operator APPROVES it, in the
+# restricted sandbox (no core secrets, tight limits). The run engine marshals declared inputs -> runs the fn ->
+# routes declared outputs through an EXTENSIBLE destination registry. Spec: docs/EXTENSIONS.md.
+def _custom_save_approved(s):
+    try:
+        os.makedirs(CUSTOM_ROOT, exist_ok=True)
+        json.dump({"approved": sorted(s)}, open(CUSTOM_APPROVED_FILE, "w"), indent=2)
+    except Exception: pass
+
+def custom_list():
+    """Custom extensions in the sandbox + their approval/authorization state (developer-type nodes)."""
+    out = []
+    if _node_type() == "developer" and os.path.isdir(CUSTOM_EXT_DIR):
+        appr = _custom_approved()
+        for d in sorted(os.listdir(CUSTOM_EXT_DIR)):
+            if d.startswith((".", "_")): continue
+            mf = os.path.join(CUSTOM_EXT_DIR, d, "extension.json")
+            if not os.path.isfile(mf): continue
+            try: m = json.load(open(mf))
+            except Exception: m = {"id": d, "name": d, "error": "bad extension.json"}
+            out.append({"id": m.get("id", d), "name": m.get("name", d), "summary": m.get("summary", ""),
+                        "approved": (m.get("id", d) in appr), "authorized": _ext_authorized(m.get("id", d)),
+                        "inputs": m.get("inputs") or [], "outputs": m.get("outputs") or [],
+                        "functions": list((m.get("functions") or {}).keys())})
+    return {"ok": True, "type": _node_type(), "custom": out, "dir": CUSTOM_EXT_DIR}
+
+def custom_approve(eid, approve=True):
+    """Operator gate: approve/revoke a custom extension so it may run. Developer-type only."""
+    if _node_type() != "developer": return {"ok": False, "error": "custom extensions require a developer-type node"}
+    eid = re.sub(r"[^a-z0-9_-]", "", (eid or "").lower())[:48]
+    if not eid or not os.path.isfile(os.path.join(CUSTOM_EXT_DIR, eid, "extension.json")):
+        return {"ok": False, "error": "no such custom extension"}
+    s = _custom_approved()
+    s.add(eid) if approve else s.discard(eid)
+    _custom_save_approved(s)
+    return {"ok": True, "approved": bool(approve), "id": eid, "authorized": _ext_authorized(eid)}
+
+_CUSTOM_TEMPLATE = ('#!/usr/bin/env python3\n'
+    '"""Custom programmatic extension. Reads {"inputs":{...}} on stdin, prints {"outputs":{...}} on stdout.\n'
+    'Runs in the restricted sandbox: NO core secrets, timeout + resource limits, path-confined."""\n'
+    'import sys, json\n'
+    'req = json.loads(sys.stdin.read() or "{}")\n'
+    'inputs = req.get("inputs", {})\n'
+    'text = ""\n'
+    'p = inputs.get("file")\n'
+    'if p:\n'
+    '    try: text = open(p, encoding="utf-8", errors="replace").read()\n'
+    '    except Exception as e: text = "could not read input: %s" % e\n'
+    'summary = "Custom extension ran. Inputs: %d. Input file length: %d chars." % (len(inputs), len(text))\n'
+    'print(json.dumps({"outputs": {\n'
+    '    "summary": {"filename": "summary.txt", "content": summary},\n'
+    '    "preview": summary}}))\n')
+
+def custom_scaffold(eid, name=""):
+    """Create a starter custom extension in the sandbox (developer-type). This is HOW a user builds: scaffold ->
+    edit server/run.py -> Approve -> Run. The template declares inputs[]/outputs[] + one third_party function."""
+    if _node_type() != "developer": return {"ok": False, "error": "custom extensions require a developer-type node (cc.config type=developer)"}
+    eid = re.sub(r"[^a-z0-9-]", "", (eid or "").lower())[:48]
+    if not eid: return {"ok": False, "error": "bad id"}
+    d = os.path.join(CUSTOM_EXT_DIR, eid)
+    if os.path.exists(d): return {"ok": False, "error": "a custom extension '%s' already exists" % eid}
+    try:
+        os.makedirs(os.path.join(d, "server"), exist_ok=True)
+        man = {"id": eid, "name": name or eid, "category": "programmatic", "version": "0.1.0", "icon": "\U0001f6e0",
+               "summary": "A custom programmatic extension (sandbox).",
+               "description": "Built locally in the custom sandbox; runs in the restricted runtime.",
+               "default_category": "Integrations", "publisher": "custom",
+               "inputs": [{"id": "file", "type": "file", "label": "Input file", "required": False}],
+               "outputs": [{"id": "summary", "type": "deliverable", "label": "Summary report", "format": "txt"},
+                           {"id": "preview", "type": "inline", "label": "Preview"}],
+               "functions": {"run": {"entry": "server/run.py", "runtime": "python3", "timeout_sec": 60, "tier": "third_party"}}}
+        json.dump(man, open(os.path.join(d, "extension.json"), "w"), indent=2)
+        open(os.path.join(d, "server", "run.py"), "w").write(_CUSTOM_TEMPLATE)
+        return {"ok": True, "id": eid, "dir": d, "note": "scaffolded -- edit server/run.py, then Approve it to run."}
+    except Exception as e: return {"ok": False, "error": str(e)[:160]}
+
+def _ext_resolve_input_file(v, src=None):
+    """Resolve an input file reference to a readable abs path (secret-clean, bounds-checked to uploads/project)."""
+    try:
+        up = os.path.realpath(SESSION_UPLOAD_ROOT); rp = os.path.realpath(v); cands = []
+        if rp == up or rp.startswith(up + os.sep): cands.append(rp)
+        try: cands.append(os.path.realpath(projpath(v)))
+        except Exception: pass
+        for c in cands:
+            if os.path.isfile(c) and not _path_has_secret(c): return c
+    except Exception: pass
+    return None
+
+def _ext_marshal_inputs(m, supplied):
+    """Validate + coerce declared inputs[] against supplied {id:value}; files -> safe abs paths. (payload, err)."""
+    supplied = supplied if isinstance(supplied, dict) else {}
+    out = {}
+    for spec in (m.get("inputs") or []):
+        iid = spec.get("id")
+        if not iid: continue
+        val = supplied.get(iid)
+        if val in (None, ""):
+            if spec.get("required"): return None, "missing required input '%s'" % iid
+            continue
+        t = spec.get("type", "text")
+        if t in ("file", "files"):
+            vals = val if isinstance(val, list) else [val]; paths = []
+            for v in vals:
+                p = _ext_resolve_input_file(str(v), spec.get("from"))
+                if not p: return None, "input '%s': file not found / not allowed" % iid
+                paths.append(p)
+            out[iid] = paths if t == "files" else paths[0]
+        elif t == "number":
+            try: out[iid] = float(val)
+            except Exception: return None, "input '%s' must be a number" % iid
+        elif t == "boolean": out[iid] = (str(val).lower() not in ("0", "false", "no", ""))
+        else: out[iid] = str(val)[:200000]
+    return out, None
+
+def _ext_deliv_dir(eid):
+    base = DELIV_LOCAL_ROOT or os.path.join(PROJECT, "deliverables")
+    p = os.path.join(base, "ext-output", re.sub(r"[^a-z0-9_-]", "", eid)); os.makedirs(p, exist_ok=True); return p
+
+def _ext_out_bytes(v):
+    """Normalize an output value to (filename, mime, bytes). Accepts {filename,mime,content|b64|path} or a scalar."""
+    if isinstance(v, dict):
+        if v.get("path"):
+            rp = os.path.realpath(v["path"])
+            if _path_has_secret(rp): raise ValueError("refusing a secret path")
+            return (os.path.basename(rp), v.get("mime", ""), open(rp, "rb").read())
+        data = base64.b64decode(v["b64"]) if v.get("b64") else v.get("content")
+        if isinstance(data, (dict, list)): data = json.dumps(data, indent=2)
+        if isinstance(data, str): data = data.encode("utf-8")
+        return (v.get("filename", "output.txt"), v.get("mime", "text/plain"), data or b"")
+    return ("output.txt", "text/plain", (v if isinstance(v, str) else json.dumps(v)).encode("utf-8"))
+
+# Output-destination registry -- EXTENSIBLE: add a destination by adding a branch here (forward-thinking).
+def _ext_route_one(eid, spec, v, session):
+    t = spec.get("type", "inline")
+    if t == "inline":
+        return {"inline": v}
+    if t in ("deliverable", "download", "file"):
+        fn, mime, raw = _ext_out_bytes(v)
+        fn = _ensure_ext(_sanitize_filename(spec.get("filename") or fn), mime)
+        dest = os.path.join(_ext_deliv_dir(eid), fn)
+        with open(dest, "wb") as f: f.write(raw)
+        return {"path": dest, "bytes": len(raw), "downloadable": True}
+    if t == "agent":
+        sess = re.sub(r"[^A-Za-z0-9_-]", "", session or "")[:64]
+        if not sess: return {"error": "no session to hand the output to"}
+        fn, mime, raw = _ext_out_bytes(v)
+        r = _deliver_to_session(sess, fn, mime, raw, "(output of %s)" % eid)
+        return {"session": sess, "path": r.get("path"), "ok": r.get("ok", True)}
+    if t == "extension":
+        tgt = spec.get("to_extension") or spec.get("destination")
+        if not tgt: return {"error": "no target extension"}
+        c = ext_run(tgt, None, v if isinstance(v, dict) else {"input": v})
+        return {"chained": tgt, "ok": c.get("ok"), "error": c.get("error")}
+    if t in ("email", "telegram", "slack", "webhook"):    # outward -> ALWAYS review-gated via the action queue
+        aid = action_propose("ext_output_" + t, {"ext": eid, "output_id": spec.get("id"),
+                             "destination": spec.get("destination") or spec.get("channel"),
+                             "value": v if isinstance(v, (str, dict, list)) else str(v)}, origin="ext:" + eid, tier="outward")
+        return {"staged": aid, "review": True}
+    if t == "tree":
+        ap = projpath(spec.get("destination") or ("ext-output/%s/output.txt" % eid))
+        os.makedirs(os.path.dirname(ap), exist_ok=True)
+        _, _, raw = _ext_out_bytes(v)
+        with open(ap, "wb") as f: f.write(raw)
+        return {"path": ap}
+    if t == "vault":
+        key = spec.get("destination") or (re.sub(r"[^A-Z0-9]", "_", eid.upper()) + "_OUTPUT")
+        vault_set(key, v if isinstance(v, str) else json.dumps(v)); return {"vault": key}
+    return {"inline": v, "note": "unknown output type '%s' -> returned inline" % t}
+
+def _ext_route_outputs(eid, m, result, session):
+    vals = result.get("outputs") if isinstance(result, dict) and isinstance(result.get("outputs"), dict) else (result if isinstance(result, dict) else {})
+    routed = []
+    for spec in (m.get("outputs") or []):
+        oid = spec.get("id")
+        if not oid or vals.get(oid) is None: continue
+        try: routed.append({"id": oid, "type": spec.get("type", "inline"), **_ext_route_one(eid, spec, vals.get(oid), session)})
+        except Exception as e: routed.append({"id": oid, "type": spec.get("type"), "error": str(e)[:160]})
+    return routed
+
+def ext_run(eid, fn, inputs, session=None):
+    """Run a programmatic extension: marshal declared inputs -> run the sandboxed fn -> route declared outputs."""
+    eid, d = _ext_dir(eid)
+    if not d: return {"ok": False, "error": "no such extension"}
+    if _ext_authorized(eid) is None: return {"ok": False, "error": "unauthorized extension"}
+    m = _ext_meta(eid); funcs = m.get("functions") or {}
+    fn = fn or (next(iter(funcs)) if funcs else None)
+    if not fn or fn not in funcs: return {"ok": False, "error": "no runnable function declared"}
+    payload, err = _ext_marshal_inputs(m, inputs)
+    if err: return {"ok": False, "error": err}
+    r = _ext_fn_run(eid, fn, {"inputs": payload, "fn": fn})
+    if not r.get("ok"): return r
+    result = r.get("result") or {}
+    return {"ok": True, "result": result, "routed": _ext_route_outputs(eid, m, result, session)}
 
 def _ext_meta(eid):
     eid, d = _ext_dir(eid)
@@ -11179,6 +11387,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/baskets": return self._s(200, json.dumps(baskets_list()))   # saved "context packs"
         if u.path == "/api/opnotes": return self._s(200, json.dumps(op_thread((q.get("peer") or [""])[0]) if q.get("peer") else op_threads()))
         if u.path == "/api/opnotes-unread": return self._s(200, json.dumps(op_unread()))   # corner-alert poller
+        if u.path == "/api/custom-list": return self._s(200, json.dumps(custom_list()))    # custom sandbox extensions
         if u.path == "/api/update-status": return self._s(200, json.dumps(update_status()))
         if u.path == "/api/settings": return self._s(200, json.dumps(settings_get()))
         if u.path == "/api/chief": return self._s(200, json.dumps(chief_overview()))
@@ -11451,6 +11660,12 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(op_note_read(body.get("peer", ""))))
         if u.path == "/api/opnote-recv":       # INGRESS: a peer operator's note arrives here (mesh-token auth)
             return self._s(200, json.dumps(op_note_recv(body.get("from", ""), body.get("text", ""), body.get("from_label"))))
+        if u.path == "/api/custom-scaffold":   # developer: create a starter custom extension in the sandbox
+            return self._s(200, json.dumps(custom_scaffold(body.get("id", ""), body.get("name", ""))))
+        if u.path == "/api/custom-approve":     # developer: approve/revoke a custom extension so it may run
+            return self._s(200, json.dumps(custom_approve(body.get("id", ""), body.get("approve", True))))
+        if u.path == "/api/ext-run":            # run a PROGRAMMATIC extension: marshal inputs -> run -> route outputs
+            return self._s(200, json.dumps(ext_run(body.get("ext", ""), body.get("fn"), body.get("inputs") or {}, body.get("session"))))
         if u.path == "/api/compact-session":  # handoff -> /compact -> re-read handoff (preserve agent memory)
             return self._s(200, json.dumps(compact_session(body.get("name", ""))))
         if u.path == "/api/autocompact":      # turn graceful auto-compact on/off + set the % threshold (persists to cc.config, live)
@@ -13540,6 +13755,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="calendar"><i class="ph-light ph-calendar-dots"></i>Calendar</button>
 <button data-l="drive"><i class="ph-light ph-cloud"></i>Drive</button>
 <button data-l="marketplace"><i class="ph-light ph-storefront"></i>Marketplace</button>
+<button data-l="build"><i class="ph-light ph-wrench"></i>Build</button>
 <button data-l="vault"><i class="ph-light ph-key"></i>Credential Vault</button>
 <button data-l="agency"><i class="ph-light ph-buildings"></i>Agency</button>
 <button data-l="calls"><i class="ph-light ph-phone-call"></i>Calls</button>
@@ -13654,6 +13870,7 @@ function render(){
   else if(LENS=="context"){loadContext();return;}
   else if(LENS=="comms"){loadComms();return;}
   else if(LENS=="notes"){loadNotes();return;}
+  else if(LENS=="build"){loadBuild();return;}
   else if(LENS=="skills"){loadSkills();return;}
   else if(LENS=="teams"){loadTeams();return;}
   else if(LENS=="audit"){loadAudit();return;}
@@ -17401,6 +17618,65 @@ function opHideAlert(){var el=document.getElementById("opAlert");if(el)el.classL
 function opDismiss(id){if(id)OP_ALERT_SEEN[id]=1;opHideAlert();}
 function opOpen(peer){opHideAlert();NOTES.peer=peer;LENS="notes";[].slice.call(document.querySelectorAll("#lens button")).forEach(function(b){b.classList.toggle("on",b.dataset.l==="notes");});var vt=document.getElementById("viewtitle");if(vt)vt.textContent="Notes";render();try{syncHash(true);}catch(e){}}
 setInterval(notesBadgePoll,6000);setTimeout(notesBadgePoll,2500);
+// ===== BUILD lens: the custom-extension sandbox (developer-type) -- scaffold, approve, run programmatic exts =====
+async function loadBuild(){
+  var box=document.getElementById("grid");if(!box)return;
+  var d={};try{d=await(await fetch("/api/custom-list")).json();}catch(e){box.innerHTML=empty("Couldn't load the sandbox.");return;}
+  if(d.type!=="developer"){box.innerHTML=empty("The Build sandbox is available on <b>developer-type</b> nodes only (cc.config type=developer). Set the type to build + run custom programmatic extensions here.");return;}
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128295; Build &mdash; custom extension sandbox</b> <span class="sub">programmatic, sandboxed (no core secrets), operator-approved &middot; '+esc(d.dir||"custom/extensions")+'</span></div>'
+    +'<div class="meta sub" style="margin-top:6px">Custom extensions are pure code with declared <b>inputs</b> &rarr; <b>outputs</b>. They are the ONLY non-official tools allowed, run in the restricted sandbox, and must be approved before they run. Scaffold one, edit its <code>server/run.py</code>, Approve, then Run.</div>'
+    +'<div style="margin-top:10px;display:flex;gap:7px;flex-wrap:wrap"><input id="bldId" placeholder="new-extension-id" style="'+COMMS_INP+';flex:0 0 220px"><input id="bldName" placeholder="Display name" style="'+COMMS_INP+';flex:0 0 200px"><button class="btn go" onclick="buildScaffold()">+ Scaffold</button></div></div>';
+  var exts=d.custom||[];
+  if(!exts.length){h+=empty("No custom extensions yet. Scaffold one above to start building.");}
+  else exts.forEach(function(x){
+    var auth=x.authorized; var badge=auth==="custom"?'<span class="badge" style="background:#3fb95022;color:#3fb950">approved &middot; runnable</span>':'<span class="badge" style="background:#d2992222;color:#d29922">not approved</span>';
+    h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3 style="display:flex;align-items:center;gap:9px"><span>&#129520; '+e2(x.name||x.id)+'</span> '+badge+'</h3>'
+      +'<div class="meta sub">'+e2(x.summary||"")+'</div>'
+      +'<div class="meta sub" style="margin-top:3px">id: <code>'+esc(x.id)+'</code> &middot; functions: '+esc((x.functions||[]).join(", ")||"none")+' &middot; edit: <code>custom/extensions/'+esc(x.id)+'/server/run.py</code></div>'
+      +'<div class="btns" style="margin-top:8px">'
+      +(x.approved?'<button class="mini" onclick="buildApprove(\''+esc(x.id)+'\',false)">Revoke approval</button>':'<button class="mini go" onclick="buildApprove(\''+esc(x.id)+'\',true)">&#10003; Approve to run</button>')
+      +'</div>';
+    if(auth==="custom"){
+      h+='<div class="bld-run" style="margin-top:10px;border-top:1px dashed var(--line);padding-top:9px"><div class="meta sub" style="margin-bottom:6px"><b>Run</b></div>'+buildInputs(x)
+        +'<div style="margin-top:8px"><button class="btn go" onclick="buildRun(\''+esc(x.id)+'\')">&#9654; Run</button></div>'
+        +'<div id="bldout_'+esc(x.id)+'" class="bld-out"></div></div>';
+    }
+    h+='</div>';
+  });
+  box.innerHTML='<div class="modstack">'+h+'</div>';
+}
+function buildInputs(x){
+  var ins=x.inputs||[];if(!ins.length)return '<div class="meta sub">(no declared inputs)</div>';
+  return ins.map(function(i){var id='bin_'+x.id+'_'+i.id;var lbl=e2(i.label||i.id)+(i.required?' *':'');
+    if(i.type==="file"||i.type==="files")return '<div style="margin:5px 0"><label class="meta sub">'+lbl+'</label><br><input type="file" id="'+id+'" data-iid="'+esc(i.id)+'" data-path="" onchange="buildUpload(this)"><span class="meta sub" id="'+id+'_s"></span></div>';
+    if(i.type==="select")return '<div style="margin:5px 0"><label class="meta sub">'+lbl+'</label><br><select id="'+id+'" data-iid="'+esc(i.id)+'" style="'+COMMS_INP+'">'+(i.options||[]).map(function(o){return '<option>'+e2(o)+'</option>';}).join('')+'</select></div>';
+    if(i.type==="boolean")return '<div style="margin:5px 0"><label class="meta sub"><input type="checkbox" id="'+id+'" data-iid="'+esc(i.id)+'"> '+lbl+'</label></div>';
+    return '<div style="margin:5px 0"><label class="meta sub">'+lbl+'</label><br><input id="'+id+'" data-iid="'+esc(i.id)+'" type="'+(i.type==="number"?"number":"text")+'" style="'+COMMS_INP+';min-width:260px"></div>';
+  }).join('');
+}
+async function buildUpload(el){var f=el.files&&el.files[0];if(!f)return;var s=document.getElementById(el.id+'_s');if(s)s.textContent=' uploading…';
+  var rd=new FileReader();rd.onload=function(){fetch('/api/basket-upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:f.name,mime:f.type||'',data:rd.result})}).then(function(r){return r.json();}).then(function(r){if(r&&r.ok){el.setAttribute('data-path',r.path);if(s)s.textContent=' '+esc(f.name);}else if(s)s.textContent=' upload failed';});};rd.readAsDataURL(f);}
+async function buildScaffold(){var id=(document.getElementById('bldId')||{}).value,nm=(document.getElementById('bldName')||{}).value;if(!id||!id.trim()){toast('enter an id');return;}
+  var r=await(await fetch('/api/custom-scaffold',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id.trim(),name:(nm||'').trim()})})).json();
+  if(r&&r.ok){toast('Scaffolded '+esc(r.id)+' — edit '+esc(r.dir)+'/server/run.py',6000);loadBuild();}else toast('Scaffold failed: '+((r||{}).error||'?'),5000);}
+async function buildApprove(id,on){var r=await(await fetch('/api/custom-approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,approve:on})})).json();
+  if(r&&r.ok){toast(on?'Approved — runnable':'Approval revoked',3000);loadBuild();}else toast('Failed: '+((r||{}).error||'?'),5000);}
+async function buildRun(id){var inputs={};document.querySelectorAll('[id^="bin_'+id+'_"]').forEach(function(el){var iid=el.getAttribute('data-iid');if(!iid)return;
+    if(el.type==="file"){var p=el.getAttribute('data-path');if(p)inputs[iid]=p;}
+    else if(el.type==="checkbox")inputs[iid]=el.checked;else if(el.value!=="")inputs[iid]=el.value;});
+  var outEl=document.getElementById('bldout_'+id);if(outEl)outEl.innerHTML='<div class="meta sub" style="margin-top:8px">running…</div>';
+  var r;try{r=await(await fetch('/api/ext-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ext:id,inputs:inputs})})).json();}catch(e){if(outEl)outEl.innerHTML='<div class="meta" style="color:#f85149">run failed</div>';return;}
+  if(!r||!r.ok){if(outEl)outEl.innerHTML='<div class="meta" style="color:#f85149;margin-top:8px">'+e2((r||{}).error||'failed')+(r&&r.stderr?'<pre class="snap" style="white-space:pre-wrap">'+e2(r.stderr)+'</pre>':'')+'</div>';return;}
+  var h='<div class="meta sub" style="margin-top:9px;color:#3fb950">&#10003; ran</div>';
+  (r.routed||[]).forEach(function(o){
+    if(o.error)h+='<div class="meta" style="color:#f85149">'+esc(o.id)+' ('+esc(o.type)+'): '+e2(o.error)+'</div>';
+    else if(o.type==="inline")h+='<div class="meta" style="margin-top:5px"><b>'+esc(o.id)+':</b><pre class="snap" style="white-space:pre-wrap;margin-top:3px">'+e2(typeof o.inline==="string"?o.inline:JSON.stringify(o.inline,null,2))+'</pre></div>';
+    else if(o.path)h+='<div class="meta" style="margin-top:5px"><b>'+esc(o.id)+'</b> &rarr; '+esc(o.type)+': <code>'+esc(o.path)+'</code>'+(o.bytes?' ('+fmtBytes(o.bytes):'')+(o.bytes?')':'')+' &middot; <span class="sub">see Files lens</span></div>';
+    else if(o.staged)h+='<div class="meta" style="margin-top:5px"><b>'+esc(o.id)+'</b> &rarr; '+esc(o.type)+': staged for review (Actions)</div>';
+    else h+='<div class="meta" style="margin-top:5px"><b>'+esc(o.id)+'</b> &rarr; '+esc(o.type)+': '+e2(JSON.stringify(o))+'</div>';
+  });
+  if(outEl)outEl.innerHTML=h;
+}
 // ===== Credential Vault lens (MC-hosted, encrypted, checkout/lease) =====
 var VAULT={data:null};
 async function loadVault(){
@@ -18561,7 +18837,7 @@ async function treeResume(id,cwd,fork){const _c=CONVOMAP[id]||{};toast((fork?"Fo
   const r=await(await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({machine:"studio",id:id,cwd:cwd,fork:!!fork,label:_c.label||""})})).json();
   if(!r||!r.ok){toast("Failed: "+((r||{}).error||"?"),5000);return;}
   closeInfo();_openTerm(r);}
-const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',vault:'Credential Vault',agency:'Agency',calls:'Calls',capture:'Capture',comms:'Comms',notes:'Notes',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Accounts / Usage',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Accounts / Usage'};
+const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',build:'Build (custom extensions)',vault:'Credential Vault',agency:'Agency',calls:'Calls',capture:'Capture',comms:'Comms',notes:'Notes',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Accounts / Usage',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Accounts / Usage'};
 // ---- Chief of Staff: your office (top-level command + a direct line to me) ----
 function gotoLens(l){const b=document.querySelector('#lens button[data-l="'+l+'"]');if(b)b.click();}
 async function talkChief(){toast("Opening your Chief of Staff…");
@@ -19003,6 +19279,7 @@ function applyPreset(){
   {var _ab=document.querySelector('#lens button[data-l="accounts"]');if(_ab)_ab.style.display=(window.CC&&window.CC.accountWallet)?'':'none';}  // Claude Accounts lens self-hides until the wallet is enabled on this node
   {var _tk=document.querySelector('#lens button[data-l="tasks"]');if(_tk)_tk.style.display='';}  // Tasks is a built-in feature -- always available, outside the preset lens list
   {var _nt=document.querySelector('#lens button[data-l="notes"]');if(_nt)_nt.style.display='';}  // Notes (operator<->operator) is a built-in -- always available
+  {var _bd=document.querySelector('#lens button[data-l="build"]');if(_bd)_bd.style.display=(window.CC&&window.CC.type==='developer')?'':'none';}  // Build lens = developer-type only (custom sandbox)
   if(!(window.CC&&window.CC.role==='org')){var _pb=document.querySelector('#lens button[data-l="portfolio"]');if(_pb)_pb.style.display='none';
     var _pj=document.querySelector('#lens button[data-l="projects"]');if(_pj)_pj.style.display='none';}  // Portfolio + Projects = ClaudeGrandfather (overseer) only
   LENS=L[0];   // land on the preset's first lens (portfolio for an overseer, sessions for a project)

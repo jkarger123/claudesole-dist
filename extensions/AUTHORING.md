@@ -180,8 +180,10 @@ is the only authority. Default = locked, so a sold/downloaded product never leak
 ## Programmatic extensions -- inputs, outputs & the deliverable contract (forward-looking)
 An extension does NOT have to drive an agent. A **programmatic** extension is pure code (a `functions{}` entry)
 that takes declared INPUTS and produces declared OUTPUTS. Declaring the I/O contract lets the platform render
-the input form, run the function, and route the deliverable -- with zero bespoke UI. (Runtime engine: Ship B;
-the FIELDS are the standard now so extensions are built forward-compatible.)
+the input form, run the function, and route the deliverable -- with zero bespoke UI. The run engine is LIVE:
+`POST /api/ext-run {ext,fn,inputs}` -> `ext_run` marshals inputs -> runs the sandboxed function -> routes outputs
+via the extensible `_ext_route_one` registry. (Custom programmatic extensions are built in the `custom/` sandbox
+via the **Build** lens on a developer-type node -- scaffold, edit `server/run.py`, approve, run.)
 ```json
 "inputs": [
   { "id": "report",              // stable key passed to the function

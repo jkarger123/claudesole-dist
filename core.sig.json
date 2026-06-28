@@ -38,7 +38,7 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "73f39ec96fef89481c2213ff2f9987c08667f64bf82f95d8e1d6315b0ac5fded",
+      "claudesole.manifest.json": "09a45d9a6b2bcc23f2dd43c739fed6ffb71e25f45894863d7c997b008f03526d",
       "command-center/CLAUDE.md": "5c7da814c73da59da59c4019fbbaa21f78a79ce961cf16d5600488cecd14bf8e",
       "command-center/cc-instance-supervise.sh": "e0521eae7f276255afc604e872f9edf5aedc657b86dc55edca4340382d61c342",
       "command-center/cc-secure": "285b6e94ca470aa74a4cb86abbb9486ad4b8fdfa3fd1a69872ef688405711d62",
@@ -54,7 +54,7 @@
       "command-center/preship.py": "f628484ffc6457c12e074cdb63da2ec1a32fd95eea4db6d45844f8bd694011f2",
       "command-center/ralph_runner.py": "7d26a8d8bca83ba6f52c8ab45aae1c5643233e5cf94c6293b8f6f14b6c169f3b",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "5ebaf52dfa2cc1a7c74bd8d3653449d97b12dd85e54f013e1f251e82180242f2",
+      "command-center/server.py": "8ae8ca720469f1325e10b1558e0a19262b2749c3e9d97e068bf491406d08a141",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/vault/CLAUDE.md": "76e4f6160e6c67968e49e7e89b8618e3d2130c0093f2b582080b7bccb33871c6",
@@ -69,11 +69,11 @@
       "docs/APPLIANCE_BRINGUP.md": "519525aafcce807331adce0d382f86da785395a68e65e2fe61dc5965f28ff3c1",
       "docs/ARCHITECTURE.md": "e61a69a2703c9ac9ba5e153855ddfd495ed5dbd0b5f49b190c4954b8f3c85989",
       "docs/CAPTURE.md": "c0833ca6871ba51a3991cfed1d24b8252280e5d004abdddbce99806a9dd1d071",
-      "docs/CHANGELOG.md": "2575746a490ae3a1f6cd53c2e0511e02ee8a204ca6b50154f7f648d346354281",
+      "docs/CHANGELOG.md": "aa589b73453efc4c4df624c275e7ccc15d546afc76560fbe6638abfb12553469",
       "docs/CLAUDE_CODE_REFERENCE.md": "d9acc94772b0a5b6b8dcf81962cea5f36cd050dd7797c6180c69c9b661450b2a",
       "docs/CONTROL_CENTER_BLUEPRINT.md": "3bf2fb328661e1cac513e8a9aacf6fb2bba7c5d9c361f069991c3915caa393e9",
       "docs/CREDENTIALS.md": "05fc63ea2461058876eb185e14c35c3959f67b8db5ff9673565a1c2647ead778",
-      "docs/EXTENSIONS.md": "538e851478453e7516f3123b35b267f5e284abb66226b2265888cb53831cf75d",
+      "docs/EXTENSIONS.md": "1295227bb2e61b7313265c888fd24fbd0dc57119ba1801926bba86c5b8065751",
       "docs/FEATURES.md": "e7c5f16a8220b90e0e7c90cf8ca78dda2cecedf07f764901fe2bd4e5913e0b3d",
       "docs/HARDENING.md": "0db952709046fd13b4f4e39048ddaeebac3761767a4ceabe2b22b58492342001",
       "docs/ICLOUD_STORAGE.md": "f34a102d528be2f33e14ff8b0f38d28625d4d6134625e66ef389623e31db1cb1",
@@ -149,9 +149,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1782655226,
+    "generated": 1782656026,
     "v": 1,
-    "version": "0.99.9"
+    "version": "0.99.10"
   },
-  "sig": "0WXdFKzFrFjtXA/HStQTNkIyvfMbDOdAdVf4DNT4rkVrnQ1Bj9fXSuUSMHQYYa2X4hEkAOPG0eYptnmGBVa2Cw=="
+  "sig": "3ujPYQXv2b2Vvi4c+XI7tXr7U/sv1CbBQX2fWvjWEYPqP+1/X+JOaH/ZT0KThEL+k+Viwiiuu9p6yrs8Ri+XBA=="
 }
