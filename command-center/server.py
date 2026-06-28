@@ -3918,12 +3918,20 @@ def launch(target, name, cid=None, rel=None):
     if target == "studio":
         try: wd = projpath(rel) if rel else (comp_dir(cid) if cid else PROJECT)
         except Exception: wd = PROJECT
+        # SYSTEM-LEVEL context (no forced turn): files/placement + locked-core awareness + a focus-routed,
+        # budgeted context brief about the subject this session opens into -> the agent rides in already knowing
+        # the client/module (people, recent calls/emails, decisions). Subject = the module/client name.
+        try:
+            subj = os.path.basename((rel or "").rstrip("/")) or (os.path.basename(comp_dir(cid)) if cid else "")
+        except Exception: subj = ""
+        sysctx = _launch_sys_context(subj)
+        cl2 = cl + (" --append-system-prompt " + _shlex.quote(sysctx) if sysctx else "")
         # if launching into a folder with NO CLAUDE.md, brief the agent to create one (purpose + the one-line
         # description our system previews) -> the system LEARNS this launch point. (Guarded by rel; root has one.)
         seed = ""
         if rel and os.path.isdir(wd) and not os.path.isfile(os.path.join(wd, "CLAUDE.md")):
             seed = " " + _shlex.quote(_NEW_FOLDER_BRIEF)
-        sh([TMUX, "new-session", "-d", "-s", name, "-c", wd, cl + seed])
+        sh([TMUX, "new-session", "-d", "-s", name, "-c", wd, cl2 + seed])
     else:
         sub = ""
         if cid:
@@ -8210,6 +8218,27 @@ def _files_brief():
             "+ ONE plain sentence describing it) so the platform + future agents recognize + can navigate it, and "
             "file any durable learning into that module's CC:NOTES. Keep each CLAUDE.md an INDEX (point to "
             "detail), never a dump -- the goal is a tree any newcomer instantly understands.")
+
+def _launch_context_brief(subject, budget=900):
+    """Pre-load a small, CITED, time-decayed slice about the launch subject (client/module/person) from the
+    context layer, so the agent rides in already KNOWING recent calls/emails/decisions/people -- just-in-time +
+    budgeted (no context rot). '' if the context layer is unavailable or has nothing relevant. (Track A.)"""
+    if not subject: return ""
+    try:
+        b = context.assemble(subject=str(subject), budget_tokens=int(budget))
+    except Exception:
+        return ""
+    if not isinstance(b, dict) or not b.get("items"): return ""
+    return ("CONTEXT BRIEF -- what we already know about '%s' (%d cited items, freshest first; pre-loaded so you "
+            "start informed. Call /api/context/brief for the full picture; honor provenance/trust):\n\n%s"
+            % (subject, b.get("count", len(b.get("items", []))), (b.get("text") or "").strip()))[:6000]
+
+def _launch_sys_context(subject=None):
+    """The SYSTEM-level context block injected into a launched session via --append-system-prompt (no forced
+    turn): how to place files + the locked-core/extend awareness + a focus-routed context brief about the
+    subject. Maximizes what the agent knows without bloating -- each part self-skips when empty."""
+    parts = [_files_brief(), _extend_brief(), _launch_context_brief(subject)]
+    return "\n\n".join(p for p in parts if p)
 
 def _extend_brief():
     """Node-aware awareness of the LOCKED core + how to ADD capability the RIGHT way (custom sandbox on a

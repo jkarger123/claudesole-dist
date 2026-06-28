@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.13 -- 2026-06-28
+- CONTEXT QUALITY (Track A.1 of the context strategy, docs/CONTEXT_STRATEGY.md): launched sessions now ride in
+  ALREADY KNOWING their subject. `launch()` injects a SYSTEM-level block via `--append-system-prompt` (no forced
+  turn): `_files_brief` (place files by relevance) + `_extend_brief` (locked core / how to extend) + a budgeted,
+  cited **context brief** about the module/client the session opens into (`_launch_context_brief` -> the context
+  layer's `assemble()`: time-decayed, trust-weighted, ~900-token slice of recent calls/emails/decisions/people).
+  Self-skips when the context layer has nothing -> no empty injection, no rot. Verified live (session opens
+  clean on Claude Code v2.1.195 with the appended context; flag confirmed real). Next: broaden what the context
+  layer ingests (tool interactions, comms/tasks, AI-landscape) so the briefs get richer (Track A.2).
+
 ## 0.99.12 -- 2026-06-28
 - CONTEXT ENGINEERING audit + two efficiency wins (agents get exactly what they need, no more):
   - **Extension awareness TIERING:** the Chief now also hears a TINY "also in the Marketplace, NOT enabled" tier
