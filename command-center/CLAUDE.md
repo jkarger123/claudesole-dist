@@ -2,7 +2,7 @@
 
 <!-- CC:CHILDREN auto-managed by the Command Center; do not hand-edit -->
 **Sub-tools in this folder** (you can launch into any of these; file a learning to the one it belongs to):
-- `Usage/` -- >> Resume here: read _handoffs/20260628-0536__Usage.md first -- it is the latest handoff.
+- `Usage/` -- >> Resume here: read _handoffs/20260628-1942__Usage.md first -- it is the latest handoff.
 - `update/` -- This folder is the home + documentation of how a ClaudeFather node gets new framework code, reliably,
 - `vault/` -- This folder is the documentation home for ClaudeFather's credential system: the per-install vault, the
 <!-- /CC:CHILDREN -->
