@@ -1527,7 +1527,7 @@ def _web_manifest():
 # Peer/machine-to-machine ingress: NOT gated by the operator token (that's a human surface). These are
 # peer surface, protected on their own MESH_TOKEN track, so enabling operator auth on a node never severs
 # the mesh (a peer POSTs here with X-Mesh-Token or nothing, never the operator cookie/bearer).
-AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store", "/api/account-windows-store", "/api/vault-lease")
+AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store", "/api/account-windows-store", "/api/vault-lease", "/api/opnote-recv")
 
 # Security frame stamped onto EVERY inbound peer message (appended AFTER the literal "[message from X]" so
 # the Stop-hook sender regex still matches). Makes the trust boundary explicit in the message itself -- a
@@ -4090,6 +4090,142 @@ def peers():
             if url and url not in seen:
                 seen.add(url); out.append({"id": e.get("id") or url, "url": url})
     return out
+
+# ======================================================================================================
+# OPERATOR NOTES -- a HUMAN-to-human chat between the people running the nodes (e.g. James at Mission Control
+# <-> Sarah at AFP), distinct from the chief(agent) mesh. Leave a note; it lands in the peer operator's
+# dashboard as a can't-miss corner alert + a Notes lens thread; they reply and it comes back here. Durable
+# (own retry worker), threaded per peer, history saved. Rides the SAME secure transport as the mesh
+# (X-Mesh-Token), but delivers to /api/opnote-recv -> the peer's HUMAN, never their agent.
+# ======================================================================================================
+OPNOTES_FILE = os.path.join(STATE_DIR, "_opnotes.json")   # {threads:{peerId:[{id,dir,text,ts,read}]}, outq:[...]}
+_OPNOTES_LOCK = threading.Lock()
+_OPNOTE_WORKER_ON = [False]
+
+def _opnotes_load():
+    d = load(OPNOTES_FILE, {})
+    if not isinstance(d, dict): d = {}
+    d.setdefault("threads", {}); d.setdefault("outq", [])
+    return d
+
+def _op_peer_name(pid):
+    """Pretty label for a peer id, scanning the raw peer registries for a name/brand (peers() drops them)."""
+    if not pid: return "peer"
+    for src in (load(PEERS_FILE, []), load(INSTANCES, [])):
+        if isinstance(src, dict): src = src.get("instances", [])
+        for e in (src or []):
+            if (e.get("id") or e.get("url")) == pid:
+                return e.get("label") or e.get("name") or e.get("brand") or e.get("side_label") or pid
+    return pid
+
+def _op_append(peer, direction, text, read=False):
+    with _OPNOTES_LOCK:
+        d = _opnotes_load()
+        t = d["threads"].setdefault(peer, [])
+        rec = {"id": "%d-%d" % (int(time.time() * 1000), len(t)), "dir": direction,
+               "text": (text or "")[:4000], "ts": int(time.time()), "read": read}
+        t.append(rec)
+        if len(t) > 500: d["threads"][peer] = t[-500:]
+        _opnotes_save(d)
+    return rec
+
+def _opnotes_save(d): save(OPNOTES_FILE, d)
+
+def op_note_send(peer, text):
+    """Operator sends a note to a peer node's operator. Stores it (dir=out, read) + queues durable delivery."""
+    text = (text or "").strip()
+    if not text: return {"ok": False, "error": "empty note"}
+    if not any(p["id"] == peer for p in peers()): return {"ok": False, "error": "unknown peer"}
+    rec = _op_append(peer, "out", text, read=True)
+    with _OPNOTES_LOCK:
+        d = _opnotes_load(); d["outq"].append({"id": rec["id"], "peer": peer, "text": text, "attempts": 0, "next_try": 0}); _opnotes_save(d)
+    _ensure_opnote_worker()
+    return {"ok": True, "id": rec["id"]}
+
+def op_note_recv(sender, text, from_label=None):
+    """A peer operator's note arrives -> store inbound (unread) + also ping the notify channel (Telegram)."""
+    text = (text or "").strip()
+    if not text: return {"ok": False, "error": "empty"}
+    peer = sender or "unknown"
+    _op_append(peer, "in", text, read=False)
+    try: notify_send("\U0001f4ac Note from %s: %s" % (from_label or _op_peer_name(peer), text[:160]))
+    except Exception: pass
+    return {"ok": True}
+
+def op_threads():
+    """Thread summaries (one row per known peer + any unknown senders) for the Notes lens list."""
+    d = _opnotes_load(); out = []; seen = set()
+    rows = [{"peer": p["id"]} for p in peers() if p["id"] != INSTANCE_ID]
+    rows += [{"peer": pid} for pid in d["threads"] if pid != INSTANCE_ID]
+    for r in rows:
+        pid = r["peer"]
+        if pid in seen: continue
+        seen.add(pid)
+        msgs = d["threads"].get(pid, [])
+        last = msgs[-1] if msgs else None
+        out.append({"peer": pid, "label": _op_peer_name(pid),
+                    "unread": sum(1 for m in msgs if m.get("dir") == "in" and not m.get("read")),
+                    "last": (last or {}).get("text", ""), "last_ts": (last or {}).get("ts", 0), "count": len(msgs)})
+    out.sort(key=lambda x: x["last_ts"], reverse=True)
+    return {"ok": True, "threads": out, "unread": sum(x["unread"] for x in out)}
+
+def op_thread(peer):
+    d = _opnotes_load()
+    return {"ok": True, "peer": peer, "label": _op_peer_name(peer), "messages": d["threads"].get(peer, [])}
+
+def op_note_read(peer):
+    with _OPNOTES_LOCK:
+        d = _opnotes_load()
+        for m in d["threads"].get(peer, []):
+            if m.get("dir") == "in": m["read"] = True
+        _opnotes_save(d)
+    return {"ok": True}
+
+def op_unread():
+    """Total unread inbound + the single most-recent unread note (drives the can't-miss corner alert)."""
+    d = _opnotes_load(); n = 0; latest = None
+    for pid, msgs in d["threads"].items():
+        for m in msgs:
+            if m.get("dir") == "in" and not m.get("read"):
+                n += 1
+                if not latest or m["ts"] > latest["ts"]:
+                    latest = {"peer": pid, "label": _op_peer_name(pid), "text": m["text"], "ts": m["ts"], "id": m["id"]}
+    return {"ok": True, "unread": n, "latest": latest}
+
+def _ensure_opnote_worker():
+    if _OPNOTE_WORKER_ON[0]: return
+    _OPNOTE_WORKER_ON[0] = True
+    threading.Thread(target=_opnote_worker, daemon=True).start()
+
+def _opnote_worker():
+    """Durably deliver queued outbound notes to peers' /api/opnote-recv with retry/backoff (mesh-style)."""
+    import urllib.request
+    while True:
+        try:
+            d = _opnotes_load(); q = d.get("outq", [])
+            if q:
+                now = int(time.time()); urlmap = {p["id"]: p["url"] for p in peers()}; still = []
+                for item in q:
+                    if item.get("next_try", 0) > now: still.append(item); continue
+                    url = urlmap.get(item["peer"])
+                    if not url: still.append(item); continue
+                    ok = False
+                    try:
+                        hdr = {"Content-Type": "application/json"}
+                        if MESH_TOKEN: hdr["X-Mesh-Token"] = MESH_TOKEN
+                        body = json.dumps({"from": INSTANCE_ID, "from_label": _side_label(), "text": item["text"]}).encode()
+                        req = urllib.request.Request(url + "/api/opnote-recv", data=body, headers=hdr)
+                        with urllib.request.urlopen(req, timeout=20) as r:
+                            ok = json.loads(r.read().decode()).get("ok", False)
+                    except Exception: ok = False
+                    if not ok:
+                        item["attempts"] = item.get("attempts", 0) + 1
+                        if item["attempts"] < 30: item["next_try"] = now + min(300, 10 * item["attempts"]); still.append(item)
+                    # delivered (or given up after 30 tries) -> drop from queue
+                with _OPNOTES_LOCK:
+                    d2 = _opnotes_load(); d2["outq"] = still; _opnotes_save(d2)
+        except Exception: pass
+        time.sleep(5)
 
 def chief_broadcast(text, targets=None, sender=None, timeout=55):
     """ANY -> ANY/ALL. From ANY instance, fan a message out to OTHER instances' chiefs (via their
@@ -10928,6 +11064,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/secure-get":
             return self._s(200, json.dumps(secure_get((q.get("id") or [""])[0])))
         if u.path == "/api/baskets": return self._s(200, json.dumps(baskets_list()))   # saved "context packs"
+        if u.path == "/api/opnotes": return self._s(200, json.dumps(op_thread((q.get("peer") or [""])[0]) if q.get("peer") else op_threads()))
+        if u.path == "/api/opnotes-unread": return self._s(200, json.dumps(op_unread()))   # corner-alert poller
         if u.path == "/api/update-status": return self._s(200, json.dumps(update_status()))
         if u.path == "/api/settings": return self._s(200, json.dumps(settings_get()))
         if u.path == "/api/chief": return self._s(200, json.dumps(chief_overview()))
@@ -11194,6 +11332,12 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(baskets_delete(body.get("id", ""))))
         if u.path == "/api/basket-upload":     # a computer file dropped into the basket -> save it, return its path
             return self._s(200, json.dumps(basket_upload(body.get("filename", ""), body.get("mime", ""), body.get("data", ""))))
+        if u.path == "/api/opnote-send":       # operator -> peer operator: leave/reply to a human note
+            return self._s(200, json.dumps(op_note_send(body.get("peer", ""), body.get("text", ""))))
+        if u.path == "/api/opnote-read":       # mark a peer's thread read (clears the corner alert + badge)
+            return self._s(200, json.dumps(op_note_read(body.get("peer", ""))))
+        if u.path == "/api/opnote-recv":       # INGRESS: a peer operator's note arrives here (mesh-token auth)
+            return self._s(200, json.dumps(op_note_recv(body.get("from", ""), body.get("text", ""), body.get("from_label"))))
         if u.path == "/api/compact-session":  # handoff -> /compact -> re-read handoff (preserve agent memory)
             return self._s(200, json.dumps(compact_session(body.get("name", ""))))
         if u.path == "/api/autocompact":      # turn graceful auto-compact on/off + set the % threshold (persists to cc.config, live)
@@ -12141,6 +12285,43 @@ body.wk-dragging .wkdrop{display:flex;pointer-events:auto}
 .basketwrap.bk-over{outline:2px dashed rgba(var(--accent-rgb),.7);outline-offset:3px;border-radius:8px}
 body.ss-dragging .basketwrap{box-shadow:0 0 0 2px rgba(var(--accent-rgb),.35) inset;border-radius:8px}
 @media(max-width:980px){.basketwrap{display:none}}
+/* NOTES lens: operator<->operator chat (messaging-app layout: peer rail + conversation + composer) */
+.noteswrap{display:flex;gap:0;height:calc(100vh - 210px);min-height:420px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card,rgba(255,255,255,.02))}
+.note-rail{flex:0 0 230px;border-right:1px solid var(--line);overflow:auto;background:rgba(0,0,0,.12)}
+.note-peer{display:flex;gap:9px;align-items:center;padding:11px 12px;cursor:pointer;border-bottom:1px solid var(--line)}
+.note-peer:hover{background:var(--card)}
+.note-peer.on{background:rgba(var(--accent-rgb),.12);box-shadow:inset 3px 0 0 0 var(--accent)}
+.np-av{flex:0 0 34px;width:34px;height:34px;border-radius:50%;background:var(--grad,linear-gradient(135deg,#c9a227,#8a6d10));color:#15120a;font-weight:800;display:flex;align-items:center;justify-content:center;font-size:15px}
+.np-meta{flex:1;min-width:0}
+.np-name{font-weight:700;font-size:13px;display:flex;align-items:center;gap:6px;color:var(--mut)}
+.np-unread{background:#f85149;color:#fff;border-radius:9px;font-size:10px;font-weight:800;padding:0 6px;min-width:16px;text-align:center}
+.np-last{font-size:11px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.note-conv{flex:1;min-width:0;display:flex;flex-direction:column}
+.note-head{padding:11px 14px;border-bottom:1px solid var(--line);font-weight:700;color:var(--mut);display:flex;align-items:baseline;gap:9px}
+.note-head .sub{font-size:11px;color:var(--dim);font-weight:400}
+.note-msgs{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:9px}
+.note-row{display:flex}
+.note-row.out{justify-content:flex-end}
+.note-row.in{justify-content:flex-start}
+.note-bub{max-width:74%;padding:9px 13px;border-radius:14px;font-size:13.5px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+.note-row.in .note-bub{background:var(--card,rgba(255,255,255,.05));border:1px solid var(--line);border-bottom-left-radius:4px;color:var(--near,#e8e8ef)}
+.note-row.out .note-bub{background:linear-gradient(135deg,rgba(var(--accent-rgb),.92),rgba(var(--accent-rgb),.72));color:#15120a;border-bottom-right-radius:4px}
+.note-t{font-size:10px;opacity:.6;margin-top:4px}
+.note-empty-conv{color:var(--dim);font-size:12.5px;margin:auto;text-align:center}
+.note-compose{display:flex;gap:8px;padding:11px;border-top:1px solid var(--line);align-items:flex-end}
+.note-compose textarea{flex:1;min-width:0;resize:vertical;background:var(--inp,rgba(0,0,0,.25));color:var(--near,#e8e8ef);border:1px solid var(--line);border-radius:9px;padding:9px 11px;font:inherit;font-size:13.5px}
+@media(max-width:820px){.noteswrap{flex-direction:column;height:calc(100dvh - 180px)}.note-rail{flex:0 0 auto;max-height:130px;display:flex;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line)}.note-peer{flex:0 0 auto;border-bottom:0;border-right:1px solid var(--line)}.np-last{display:none}}
+/* CAN'T-MISS corner alert: a new operator note slides into the bottom-right and STAYS until opened/dismissed */
+#opAlert{position:fixed;right:18px;bottom:54px;z-index:99998;width:330px;max-width:calc(100vw - 36px);background:#15151c;border:1.5px solid #f85149;border-radius:14px;box-shadow:0 14px 50px rgba(0,0,0,.6),0 0 0 4px rgba(248,81,73,.18);padding:13px 15px;transform:translateY(28px) scale(.96);opacity:0;pointer-events:none;transition:all .28s cubic-bezier(.2,.8,.25,1)}
+#opAlert.show{transform:none;opacity:1;pointer-events:auto;animation:opPulse 2.6s ease-in-out infinite}
+@keyframes opPulse{0%,100%{box-shadow:0 14px 50px rgba(0,0,0,.6),0 0 0 4px rgba(248,81,73,.18)}50%{box-shadow:0 14px 50px rgba(0,0,0,.6),0 0 0 8px rgba(248,81,73,.34)}}
+#opAlert .opa-h{display:flex;align-items:center;gap:8px;font-size:13px;color:#fff}
+#opAlert .opa-h b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#opAlert .opa-dot{width:9px;height:9px;border-radius:50%;background:#f85149;flex:0 0 auto;box-shadow:0 0 8px #f85149}
+#opAlert .opa-x{cursor:pointer;color:var(--dim);font-size:18px;line-height:1;flex:0 0 auto}
+#opAlert .opa-x:hover{color:#fff}
+#opAlert .opa-body{font-size:12.5px;color:var(--near,#e8e8ef);margin:8px 0 11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto}
+#opAlert .opa-act{text-align:right}
 #main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .topbar{display:flex;align-items:center;gap:12px;padding:15px 24px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 .topbar h2{margin:0;font-size:19px;font-weight:800;flex:0 0 auto;letter-spacing:.2px}
@@ -13251,6 +13432,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="calls"><i class="ph-light ph-phone-call"></i>Calls</button>
 <button data-l="capture"><i class="ph-light ph-scissors"></i>Capture</button>
 <button data-l="comms"><i class="ph-light ph-chats-circle"></i>Comms<span id="commsBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
+<button data-l="notes"><i class="ph-light ph-note-pencil"></i>Notes<span id="notesBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="ccr"><i class="ph-light ph-git-pull-request"></i>Change Requests<span id="ccrBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="propose"><i class="ph-light ph-paper-plane-tilt"></i>Propose Change</button>
 <button data-l="ralph"><i class="ph-light ph-repeat"></i>Ralph Loops</button>
@@ -13358,6 +13540,7 @@ function render(){
   else if(LENS=="capture"){loadCapture();return;}
   else if(LENS=="context"){loadContext();return;}
   else if(LENS=="comms"){loadComms();return;}
+  else if(LENS=="notes"){loadNotes();return;}
   else if(LENS=="skills"){loadSkills();return;}
   else if(LENS=="teams"){loadTeams();return;}
   else if(LENS=="audit"){loadAudit();return;}
@@ -17049,6 +17232,62 @@ async function loadComms(){
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
   clearInterval(window.COMMSTIMER);window.COMMSTIMER=setInterval(function(){if(LENS!="comms"){clearInterval(window.COMMSTIMER);return;}commsRefresh();},5000);
 }
+// ===== NOTES lens: operator<->operator chat (human notes between node owners; NOT the chief mesh) =====
+var NOTES={peer:null,threads:[]};
+function notesTime(ts){if(!ts)return"";try{return new Date(ts*1000).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});}catch(e){return"";}}
+async function loadNotes(){
+  var box=document.getElementById("grid");if(!box)return;
+  var d={};try{d=await(await fetch("/api/opnotes")).json();}catch(e){box.innerHTML=empty("Couldn't load notes.");return;}
+  NOTES.threads=d.threads||[];
+  if(!NOTES.threads.length){box.innerHTML=empty("No other nodes to message yet. Notes let you leave a message for another node's operator — e.g. Mission Control ↔ AFP — saved as a thread, with a reply coming back here.");return;}
+  if(!NOTES.peer||!NOTES.threads.some(function(t){return t.peer===NOTES.peer;}))NOTES.peer=NOTES.threads[0].peer;
+  var th={messages:[]};try{th=await(await fetch("/api/opnotes?peer="+encodeURIComponent(NOTES.peer))).json();}catch(e){}
+  try{await fetch("/api/opnote-read",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({peer:NOTES.peer})});notesBadgePoll();}catch(e){}
+  var rail=NOTES.threads.map(function(t){
+    return '<div class="note-peer'+(t.peer===NOTES.peer?" on":"")+'" onclick="notesPick(\''+esc(t.peer)+'\')">'
+      +'<div class="np-av">'+e2((t.label||t.peer).slice(0,1).toUpperCase())+'</div>'
+      +'<div class="np-meta"><div class="np-name">'+e2(t.label||t.peer)+(t.unread?' <span class="np-unread">'+t.unread+'</span>':'')+'</div>'
+      +'<div class="np-last">'+e2(t.last||"no messages yet")+'</div></div></div>';
+  }).join("");
+  var cur=NOTES.threads.filter(function(t){return t.peer===NOTES.peer;})[0]||{label:NOTES.peer};
+  var conv=(th.messages||[]).map(function(m){var out=m.dir==="out";
+    return '<div class="note-row '+(out?"out":"in")+'"><div class="note-bub">'+e2(m.text)+'<div class="note-t">'+notesTime(m.ts)+'</div></div></div>';
+  }).join("")||'<div class="note-empty-conv">No messages yet — leave '+e2(cur.label||NOTES.peer)+' a note below.</div>';
+  box.innerHTML='<div class="noteswrap">'
+    +'<div class="note-rail">'+rail+'</div>'
+    +'<div class="note-conv"><div class="note-head">✍️ '+e2(cur.label||NOTES.peer)+' <span class="sub">operator note · saved thread · they get a corner alert</span></div>'
+    +'<div class="note-msgs" id="noteMsgs">'+conv+'</div>'
+    +'<div class="note-compose"><textarea id="noteInput" rows="2" placeholder="Leave '+e2(cur.label||NOTES.peer)+' a note… (Enter to send, Shift+Enter = newline)" onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){event.preventDefault();notesSend();}"></textarea><button class="btn go" onclick="notesSend()">Send</button></div>'
+    +'</div></div>';
+  var mc=document.getElementById("noteMsgs");if(mc)mc.scrollTop=mc.scrollHeight;
+  clearInterval(window.NOTESTIMER);window.NOTESTIMER=setInterval(function(){if(LENS!=="notes"){clearInterval(window.NOTESTIMER);return;}notesRefresh();},5000);
+}
+function notesPick(p){NOTES.peer=p;loadNotes();}
+async function notesSend(){var ta=document.getElementById("noteInput");if(!ta)return;var v=ta.value.trim();if(!v)return;ta.value="";
+  try{var r=await(await fetch("/api/opnote-send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({peer:NOTES.peer,text:v})})).json();if(!r||!r.ok){toast("Send failed: "+((r||{}).error||"?"),5000);ta.value=v;return;}}catch(e){toast("Send failed.",4000);ta.value=v;return;}
+  toast("Note sent — it'll pop in their corner.",3000);loadNotes();}
+async function notesRefresh(){var ta=document.getElementById("noteInput");var v=ta?ta.value:"";var f=ta&&document.activeElement===ta;await loadNotes();var t2=document.getElementById("noteInput");if(t2){t2.value=v;if(f)t2.focus();}}
+// ---- unread badge + the CAN'T-MISS bottom-right corner alert (fires on any lens when a note arrives) ----
+function notesSetBadge(n){var b=document.getElementById("notesBadge");if(b){if(n>0){b.textContent=n>99?"99+":n;b.style.display="inline-block";}else{b.textContent="";b.style.display="none";}}try{paintNavNotif();}catch(e){}}
+var OP_ALERT_SEEN={};
+async function notesBadgePoll(){
+  try{var d=await(await fetch("/api/opnotes-unread")).json();notesSetBadge(d.unread||0);
+    if(d.latest&&LENS!=="notes"&&!OP_ALERT_SEEN[d.latest.id])opShowAlert(d.latest);
+    else if(!d.unread)opHideAlert();
+  }catch(e){}
+}
+function opShowAlert(n){var el=document.getElementById("opAlert");
+  if(!el){el=document.createElement("div");el.id="opAlert";document.body.appendChild(el);}
+  el.innerHTML='<div class="opa-h"><span class="opa-dot"></span><b>New note from '+e2(n.label)+'</b><span class="opa-x" title="dismiss" onclick="opDismiss(\''+esc(n.id)+'\')">&times;</span></div>'
+    +'<div class="opa-body">'+e2(n.text.length>200?n.text.slice(0,200)+"…":n.text)+'</div>'
+    +'<div class="opa-act"><button class="btn go" onclick="opOpen(\''+esc(n.peer)+'\')">Open &amp; reply</button></div>';
+  el.classList.add("show");
+  try{if(navigator.vibrate)navigator.vibrate([40,60,40]);}catch(e){}
+}
+function opHideAlert(){var el=document.getElementById("opAlert");if(el)el.classList.remove("show");}
+function opDismiss(id){if(id)OP_ALERT_SEEN[id]=1;opHideAlert();}
+function opOpen(peer){opHideAlert();NOTES.peer=peer;LENS="notes";[].slice.call(document.querySelectorAll("#lens button")).forEach(function(b){b.classList.toggle("on",b.dataset.l==="notes");});var vt=document.getElementById("viewtitle");if(vt)vt.textContent="Notes";render();try{syncHash(true);}catch(e){}}
+setInterval(notesBadgePoll,6000);setTimeout(notesBadgePoll,2500);
 // ===== Credential Vault lens (MC-hosted, encrypted, checkout/lease) =====
 var VAULT={data:null};
 async function loadVault(){
@@ -18209,7 +18448,7 @@ async function treeResume(id,cwd,fork){const _c=CONVOMAP[id]||{};toast((fork?"Fo
   const r=await(await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({machine:"studio",id:id,cwd:cwd,fork:!!fork,label:_c.label||""})})).json();
   if(!r||!r.ok){toast("Failed: "+((r||{}).error||"?"),5000);return;}
   closeInfo();_openTerm(r);}
-const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',vault:'Credential Vault',agency:'Agency',calls:'Calls',capture:'Capture',comms:'Comms',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Accounts / Usage',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Accounts / Usage'};
+const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',vault:'Credential Vault',agency:'Agency',calls:'Calls',capture:'Capture',comms:'Comms',notes:'Notes',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Accounts / Usage',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Accounts / Usage'};
 // ---- Chief of Staff: your office (top-level command + a direct line to me) ----
 function gotoLens(l){const b=document.querySelector('#lens button[data-l="'+l+'"]');if(b)b.click();}
 async function talkChief(){toast("Opening your Chief of Staff…");
@@ -18650,6 +18889,7 @@ function applyPreset(){
   ['gmail','calendar','drive'].forEach(function(l){var _gb=document.querySelector('#lens button[data-l="'+l+'"]');if(_gb)_gb.style.display=(window.CC&&window.CC.google)?'':'none';});
   {var _ab=document.querySelector('#lens button[data-l="accounts"]');if(_ab)_ab.style.display=(window.CC&&window.CC.accountWallet)?'':'none';}  // Claude Accounts lens self-hides until the wallet is enabled on this node
   {var _tk=document.querySelector('#lens button[data-l="tasks"]');if(_tk)_tk.style.display='';}  // Tasks is a built-in feature -- always available, outside the preset lens list
+  {var _nt=document.querySelector('#lens button[data-l="notes"]');if(_nt)_nt.style.display='';}  // Notes (operator<->operator) is a built-in -- always available
   if(!(window.CC&&window.CC.role==='org')){var _pb=document.querySelector('#lens button[data-l="portfolio"]');if(_pb)_pb.style.display='none';
     var _pj=document.querySelector('#lens button[data-l="projects"]');if(_pj)_pj.style.display='none';}  // Portfolio + Projects = ClaudeGrandfather (overseer) only
   LENS=L[0];   // land on the preset's first lens (portfolio for an overseer, sessions for a project)
@@ -19877,6 +20117,7 @@ if __name__ == "__main__":
     threading.Thread(target=_license_activate_loop, daemon=True).start() # LICENSE: a sold box auto-activates from its configured activation server on boot if unlicensed
     threading.Thread(target=_fleet_converge_loop, daemon=True).start() # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     threading.Thread(target=_routines_loop, daemon=True).start()       # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts
+    _ensure_opnote_worker()                                            # OPERATOR NOTES: drain any queued human-to-human notes (durable across restart)
     threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
     threading.Thread(target=_gmail_sync_loop, daemon=True).start()      # keep recently-viewed Gmail lists warm (cache + outage fallback)
     threading.Thread(target=_gc_sync_loop, daemon=True).start()         # same for Calendar/Drive (resilient cache)

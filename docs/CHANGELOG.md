@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.7 -- 2026-06-28
+- NOTES: an operator-to-operator chat between the PEOPLE running the nodes (e.g. James @ Mission Control <->
+  Sarah @ AFP), separate from the chief(agent) mesh. Leave a note; it lands in the other operator's dashboard
+  as a CAN'T-MISS bottom-right corner alert (slides in, pulses, stays until opened/dismissed) + a Notes tab
+  thread + a nav badge + a Telegram ping if configured; they reply and it comes back here. New "Notes" lens is
+  a real messaging-app UI (peer rail + conversation bubbles + composer); threads are saved per peer.
+  - Rides the SAME durable, secure transport as the mesh (own retry worker, X-Mesh-Token auth) but delivers to
+    /api/opnote-recv -> the peer's HUMAN, never their agent. Endpoints: /api/opnotes[,-unread], /api/opnote-send,
+    /api/opnote-read, /api/opnote-recv (mesh-ingress allowlisted). State: per-node `_opnotes.json` (gitignored).
+  - Verified live: MC->carsearch note delivered + reply round-tripped; headless: corner alert fires on a
+    non-Notes lens with the sender+preview+Open, badge counts, and the chat renders both bubbles.
+
 ## 0.99.6 -- 2026-06-28
 - NAV CATEGORIES (declutter the crowded sidebar). The nav now ships GROUPED into default categories that are
   COLLAPSED by default, with a few daily-driver tabs pinned at the top (Sessions, Chief, Comms, Notes, Tasks,
