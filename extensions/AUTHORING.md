@@ -21,7 +21,18 @@ Build EVERY extension to the same spec so they're consistent + agent-usable. An 
 7. **A `default_category`** -- which nav folder the lens lands in (Google/Workspace/Agency/Team/Integrations/
    System); the sidebar groups lenses into collapsed categories by default. EVERY extension declares one.
 8. **Server functions** (if it needs server-side compute) -- declare `functions{}`; runs sandboxed; no worker.
-9. **`tier`/`pricing`/`publisher`** (paid extensions ride the signed-entitlement gate).
+9. **`inputs[]` / `outputs[]`** (forward-looking; for programmatic/non-agentic extensions) -- DECLARE what the
+   extension consumes (files/text/etc.) and what it produces + WHERE the deliverable lands. The platform
+   auto-renders the input form and routes the output. See "Programmatic extensions" below.
+10. **`tier`/`pricing`/`publisher`** (paid extensions ride the signed-entitlement gate).
+
+> **AUTHORIZATION (non-negotiable).** Only **official** or **operator-approved custom** extensions ever run.
+> *Official* = the extension ships in the MC-**signed** dist (its `extension.json` is in `core.sig.json`,
+> verified vs `superadmin.pub` -- forging needs the MC private key). *Custom* = built locally in the
+> `custom/extensions/` sandbox on a **developer-type** node and explicitly approved by the operator. Anything
+> else is UNAUTHORIZED: it will not install or load, and a rogue dir under `extensions/` is **quarantined** on an
+> appliance + flagged in Doctor. So you do NOT hand-drop extensions into a tenant's `extensions/` -- you author
+> at Mission Control, it gets signed into the dist, and tenants receive it via `cc-update`. (Per `docs/EXTENSIONS.md`.)
 Reversible install (uninstall archives, never deletes user data/keys). ASCII only. The sections below detail each.
 
 ## Credentials & secrets (the ONE way -- non-negotiable)
@@ -166,8 +177,66 @@ is the only authority. Default = locked, so a sold/downloaded product never leak
 - Billing automation (charging the card) is SEPARATE and not required: a future Stripe webhook simply calls
   `entitlement_grant` on payment. Authors only declare `tier`/`pricing`/`publisher`; the platform enforces.
 
+## Programmatic extensions -- inputs, outputs & the deliverable contract (forward-looking)
+An extension does NOT have to drive an agent. A **programmatic** extension is pure code (a `functions{}` entry)
+that takes declared INPUTS and produces declared OUTPUTS. Declaring the I/O contract lets the platform render
+the input form, run the function, and route the deliverable -- with zero bespoke UI. (Runtime engine: Ship B;
+the FIELDS are the standard now so extensions are built forward-compatible.)
+```json
+"inputs": [
+  { "id": "report",              // stable key passed to the function
+    "type": "file",              // file | files | text | number | select | boolean | secret | session | extension
+    "label": "Report to analyze",
+    "accept": [".pdf",".csv"],   // (file) extension/mime filter
+    "from": "upload",            // OPTIONAL source hint: upload | deliverable | drive | vault | basket
+    "required": true,
+    "options": ["weekly","monthly"]   // (select)
+  }
+],
+"outputs": [
+  { "id": "summary",
+    "type": "deliverable",       // WHERE it goes -- an OPEN, extensible registry (we are the official builder):
+                                 //   deliverable (file in deliverables/) | inline (render in its lens) |
+                                 //   download (browser) | email | telegram | slack (outward, review-gated) |
+                                 //   agent (hand the file into a Claude session) | extension (chain into another
+                                 //   extension's input) | webhook | tree (write into the project tree) | vault
+    "label": "Summary report",
+    "destination": "deliverables/<module>",  // file: target dir; agent: session; extension: target ext id
+    "format": "md",              // md | csv | pdf | json | png | text
+    "review": true               // outward types (email/telegram/slack/webhook) ALWAYS ride the review-gated
+                                 //   action queue -- a programmatic extension never auto-sends outward.
+  }
+]
+```
+- **Forward-thinking by design:** the output `type` is an open registry -- new destinations (a new channel, a
+  new chaining target) are added centrally by us, the official builder; an extension just names the type. Two
+  powerful ones to design around: `agent` (the deliverable is dropped into a live session, like a Basket item)
+  and `extension` (the deliverable becomes the INPUT of another extension -- programmatic pipelines).
+- A programmatic extension reads `inputs` as JSON on stdin and returns a result the runtime routes per `outputs`
+  (same sandboxed `functions{}` runtime: restricted env, only declared secrets, timeout + resource limits).
+
+## Authorization & trust -- official vs custom (how "no unauthorized extension runs" is enforced)
+- **Official:** ships in the MC-signed dist. `core.sig.json` (signed by the platform owner's Ed25519 key,
+  verified on every node vs `superadmin.pub`) lists each official `extension.json`. `_ext_authorized(id)` returns
+  `official` only if the id is in that signed manifest (an AUTHORING node trusts its own catalog -- it signs
+  before shipping). Forging this needs the MC private key, which never leaves Mission Control.
+- **Custom:** lives under `custom/extensions/<id>/` (writable, PRESERVE, NEVER signed) on a **developer-type**
+  node, and is authorized only after the operator **approves** it (recorded in `custom/_approved.json`). Custom
+  extensions run in the restricted sandbox runtime (no core secrets) and are clearly marked unofficial.
+- **Everything else = UNAUTHORIZED:** refused at install, skipped by every loader (lens/agent-context/functions),
+  and a rogue dir under `extensions/` is moved to `_quarantine/` on an appliance (reversible; never deleted) +
+  raised in Doctor. The ONLY place non-core tools may live is the `custom/` sandbox.
+
+## Standardized installs -- type & edition
+Every install is **identical** except two axes + which extensions are installed:
+- **`type`** (cc.config `type`): `agency` (official-only + the Clients/Tools agency tree) or `developer` (may
+  build + run approved custom extensions in the sandbox). Default `agency`.
+- **`edition`** (authority tier, separate): `authoring` (Mission Control -- signs core, mints grants/licenses) or
+  `appliance` (a shipped/sold node -- read-only core, self-heals, enforces authorization + license).
+
 ## Hard rules
-- ASCII only. Secrets ONLY in the gitignored deployment env; never in extension.json/SETUP.md/git; never echo
-  a full token. Default to read-only/least-privilege. The extension dir is FRAMEWORK (propagates via
-  cc-update); per-deployment install state + secrets are PRESERVE (per-deployment, gitignored).
+- ASCII only. Secrets ONLY in the gitignored deployment env / vault; never in extension.json/SETUP.md/git; never
+  echo a full token. Default to read-only/least-privilege. The `extensions/` dir is FRAMEWORK + SIGNED (propagates
+  via cc-update; modifying or adding to it on a tenant is detected/quarantined); custom tools go in `custom/`.
+- Per-deployment install state + secrets are PRESERVE (per-deployment, gitignored).
 - Every extension is reversible (uninstall archives, never deletes user accounts/keys).

@@ -3,6 +3,29 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.9 -- 2026-06-28
+- EXTENSION AUTHORIZATION (Ship A of the extension-system standardization). A node now runs ONLY extensions it
+  is authorized to: **official** (the `extension.json` is in the MC-signed `core.sig.json`, verified vs
+  `superadmin.pub` -- reuses the existing signing, no new keys) or an operator-approved **custom** one. Anything
+  else is UNAUTHORIZED: refused at install, skipped by every loader (`_ext_lenses`/`_ext_agent_context`/
+  `_ext_fn_run`), and a rogue dir under `extensions/` is QUARANTINED to `_quarantine/` on an appliance (reversible,
+  never deleted) + raised in Doctor. New: `_ext_authorized`/`_official_ext_ids`/`_ext_unauthorized`/
+  `_ext_quarantine_rogue` (in the integrity loop). FAIL-OPEN safety: if the signed manifest can't be verified we
+  never block/quarantine a whole catalog (the missing/invalid manifest is flagged separately). Proven with a
+  6-scenario harness (clean appliance, rogue quarantined, fail-open no-brick, empty-set skip, authoring-permissive,
+  custom dev/agency gating).
+- STANDARDIZED installs: `type` axis (`agency` | `developer`) added (cc.config `type`; default `agency`),
+  orthogonal to `edition` (authoring | appliance). `developer` unlocks the custom sandbox. Bootstrapped to
+  `window.CC.type`. `/api/extensions` now returns each item's `authorized` state + an `unauthorized` block + `type`.
+- FORWARD-LOOKING SCHEMA (for non-agentic/programmatic extensions): documented `inputs[]` (file/text/select/...
+  with `accept`/`from`) and `outputs[]` with an OPEN destination registry -- deliverable file, inline, download,
+  email/telegram/slack (review-gated), and the forward ones `agent` (drop into a session) + `extension` (chain
+  into another extension) + webhook/tree/vault. Fields are standard now; the routing ENGINE + the custom-sandbox
+  runtime + approval flow are Ship B.
+- DOCS: new `docs/EXTENSIONS.md` (canonical system reference); `AUTHORING.md` (authorization + I/O + type
+  sections, `inputs`/`outputs`), `extensions/CLAUDE.md` (authorization). Audit result: AFP is CLEAN (all
+  extensions official, zero rogue) and all 24 official extensions conform to the standard.
+
 ## 0.99.8 -- 2026-06-28
 - DOCS: documented this stretch's work in the module CLAUDE.md files + the standards (no code change).
   `command-center/CLAUDE.md` (compact cross-instance lock; operator-notes section; drag-anything + Basket;

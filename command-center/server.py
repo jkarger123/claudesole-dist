@@ -183,7 +183,7 @@ def render_page():
     except Exception: _lenses = None
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
-        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(),
+        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(),
         "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md", "MASTER_HANDOFF.md",
             "FILE_SYSTEM_GOVERNANCE.md", "TEXT2TUNE_ARCHITECTURE.md", "ENTERPRISE_MIGRATION.md",
             "BRIDGE_MIGRATION.md"]})
@@ -4372,13 +4372,111 @@ def extensions_list():
             m["paid"] = _ext_is_paid(m)                 # commercial annotation (tier/pricing already in m from extension.json)
             m["entitled"] = _entitled(m.get("id", d), m)
             m["locked"] = m["paid"] and not m["entitled"]
+            m["authorized"] = _ext_authorized(m.get("id", d))   # 'official' | 'custom' | None(unauthorized)
             out.append(m)
-    return {"extensions": out, "version": _manifest_version(), "n": len(out)}
+    # include operator-approved CUSTOM extensions from the sandbox (developer-type only) so they show + can run
+    if _node_type() == "developer" and os.path.isdir(CUSTOM_EXT_DIR):
+        for d in sorted(os.listdir(CUSTOM_EXT_DIR)):
+            if d.startswith(("_", ".")): continue
+            mf = os.path.join(CUSTOM_EXT_DIR, d, "extension.json")
+            if not os.path.isfile(mf): continue
+            try: m = json.load(open(mf))
+            except Exception: continue
+            m["custom"] = True; m["installed"] = m.get("id", d) in inst
+            m["authorized"] = _ext_authorized(m.get("id", d)); m["approved"] = (m.get("id", d) in _custom_approved())
+            out.append(m)
+    return {"extensions": out, "version": _manifest_version(), "type": _node_type(),
+            "unauthorized": _ext_unauthorized(), "n": len(out)}
 
 # ---- extension payloads: per-deployment secrets + notify channel + generic MCP wiring ----------------
 DEPLOY_ROOT = os.path.expanduser(CC.get("deploy_root") or CC_HOME)   # where per-deploy secrets/.mcp live; an APPLIANCE points this at a WRITABLE runtime dir so CORE stays read-only
 DEPLOY_ENV = os.path.join(DEPLOY_ROOT, ".env.claudefather")    # gitignored per-deployment secrets (KEY=VALUE)
 MCP_JSON = os.path.join(DEPLOY_ROOT, ".mcp.json")             # gitignored MCP server config for sessions
+
+# ==== EXTENSION AUTHORIZATION -- only OFFICIAL (MC-signed) or operator-APPROVED CUSTOM extensions may run ======
+# The guarantee: a tenant/appliance can NEVER load an extension we didn't ship (or the operator didn't explicitly
+# approve in the sandbox). "Official" REUSES the existing signed core (`core.sig.json`, verified vs `superadmin.pub`
+# -- forging it needs the MC private key), so an extension is official IFF its `extension.json` is in that signed
+# manifest. "Custom" = an operator-approved ext in the writable `custom/` sandbox (developer-type nodes only).
+# Anything else is UNAUTHORIZED -> never installed/loaded, and rogue catalog dirs get quarantined on an appliance.
+# The AUTHORING node (source of truth) is permissive on its OWN catalog (we sign before it reaches anyone).
+# Standardized: every install is identical except its `type` (agency|developer) + which extensions are installed.
+CUSTOM_ROOT = os.path.join(DEPLOY_ROOT, "custom")                  # writable, PRESERVE, NEVER signed/shipped
+CUSTOM_EXT_DIR = os.path.join(CUSTOM_ROOT, "extensions")           # custom/extensions/<id>/ (the build sandbox)
+CUSTOM_APPROVED_FILE = os.path.join(CUSTOM_ROOT, "_approved.json") # {approved:[ids]} -- operator-gated approvals
+
+def _node_type():
+    """Deployment TYPE (orthogonal to EDITION). 'agency' = official-only + the agency tree shape; 'developer' =
+    may build + run operator-approved CUSTOM extensions in the sandbox. Default 'agency' (safe: no custom)."""
+    t = str(CC.get("type") or CC.get("node_type") or "").lower()
+    return t if t in ("agency", "developer") else "agency"
+
+def _custom_approved():
+    try: return set(json.load(open(CUSTOM_APPROVED_FILE)).get("approved", []))
+    except Exception: return set()
+
+def _official_ext_ids():
+    """Extension ids in the MC-SIGNED core manifest -- the authority on a tenant (verified vs superadmin.pub).
+    Returns None if the signed manifest is UNAVAILABLE/unverifiable (no core.sig.json, no crypto, bad sig) so
+    callers can FAIL-OPEN -- we never block/quarantine a node's whole catalog over a transient signing gap
+    (the missing/invalid manifest is flagged separately by core integrity + Doctor)."""
+    try:
+        payload = _core_manifest_trusted()
+        if not payload: return None                          # cannot verify -> caller fails open
+        out = set()
+        for rel in (payload.get("files") or {}):
+            mm = re.match(r"extensions/([^/]+)/extension\.json$", rel)
+            if mm: out.add(mm.group(1))
+        return out
+    except Exception:
+        return None
+
+def _ext_authorized(eid):
+    """'official' | 'custom' | None(unauthorized). Official: in the signed manifest (or ANY catalog ext on an
+    AUTHORING node -- we're the source + sign before shipping; or when the manifest can't be verified -- fail
+    open, never brick a node). Custom: operator-approved sandbox ext, developer-type."""
+    eid = re.sub(r"[^a-z0-9_-]", "", (eid or "").lower())[:48]
+    if not eid: return None
+    if os.path.isfile(os.path.join(EXT_DIR, eid, "extension.json")):
+        ids = _official_ext_ids()
+        if _authoring() or ids is None or eid in ids: return "official"   # ids is None -> fail-open (can't verify)
+    if (_node_type() == "developer" and eid in _custom_approved()
+            and os.path.isfile(os.path.join(CUSTOM_EXT_DIR, eid, "extension.json"))): return "custom"
+    return None
+
+def _ext_unauthorized():
+    """{installed_unauthorized:[ids], rogue_dirs:[ids]} -- installed exts that aren't authorized + catalog dirs
+    that aren't official/approved. Surfaced in Doctor + Marketplace; rogue dirs are quarantined on an appliance."""
+    bad = sorted(e for e in _ext_installed() if not _ext_authorized(e))
+    rogue = []
+    if os.path.isdir(EXT_DIR):
+        for d in sorted(os.listdir(EXT_DIR)):
+            if d.startswith(("_", ".")): continue
+            if os.path.isfile(os.path.join(EXT_DIR, d, "extension.json")) and not _ext_authorized(d):
+                rogue.append(d)
+    return {"installed_unauthorized": bad, "rogue_dirs": rogue}
+
+def _ext_quarantine_rogue():
+    """Appliance self-defense: move any rogue extension dir (under extensions/ but NOT official/approved) into
+    `_quarantine/` so it cannot load. Authoring is permissive (it's the builder). Never deletes; fully reversible."""
+    if _authoring(): return []
+    if not _official_ext_ids(): return []                    # SAFETY: only quarantine when we POSITIVELY know the
+                                                             # signed official set (None/empty -> never nuke a catalog)
+    moved = []
+    try:
+        qroot = os.path.join(DEPLOY_ROOT, "_quarantine")
+        for d in (_ext_unauthorized().get("rogue_dirs") or []):
+            try:
+                os.makedirs(qroot, exist_ok=True)
+                dst = os.path.join(qroot, "%s.%d" % (d, int(time.time())))
+                shutil.move(os.path.join(EXT_DIR, d), dst); moved.append(d)
+                _core_log("ext-quarantine", {"ext": d, "to": dst})
+            except Exception: pass
+        if moved:
+            try: notify_send("ClaudeFather: quarantined unauthorized extension(s): %s" % ", ".join(moved))
+            except Exception: pass
+    except Exception: pass
+    return moved
 
 # ==== ENTERPRISE CREDENTIAL VAULT -- MC-hosted, encrypted-at-rest, checkout/lease on demand ===================
 # Stops the "copy every API key into every node's .env by hand" problem. Mission Control holds ONE encrypted
@@ -5249,6 +5347,10 @@ def _ext_declare_secrets(eid, m):
 def extension_install(eid):
     eid, d = _ext_dir(eid)
     if not d: return {"ok": False, "error": "no such extension"}
+    if _ext_authorized(eid) is None:                    # not official (signed) AND not an approved custom ext -> refuse
+        return {"ok": False, "unauthorized": True, "error": "unauthorized extension -- it is not an official "
+                "(signed-dist) extension, and not an operator-approved custom one. Official extensions ship in the "
+                "signed dist; custom extensions live under custom/ on a developer-type node and must be approved first."}
     m = _ext_meta(eid)
     if _ext_is_paid(m) and not _entitled(eid, m):       # paid + no valid signed grant -> locked (cannot self-grant)
         return {"ok": False, "locked": True, "error": "locked",
@@ -5335,6 +5437,7 @@ def _ext_fn_run(eid, fn, inp, secret_resolver=None):
     """Run an extension's declared server-side function in a sandboxed subprocess. `secret_resolver(key)` lets a
     caller supply per-account BYOK secrets; defaults to the node deploy env."""
     eid, d = _ext_dir(eid)
+    if _ext_authorized(eid) is None: return {"ok": False, "error": "unauthorized extension -- refusing to run its functions"}
     m = _ext_meta(eid)
     spec = (m.get("functions") or {}).get(fn)
     if not isinstance(spec, dict) or not spec.get("entry"): return {"ok": False, "error": "no such function '%s'" % fn}
@@ -5672,6 +5775,7 @@ def _ext_lenses():
     for each. Per-node-clean: a node without the extension never sees the lens. extension.json: 'lens':{id,label,icon}."""
     out = []
     for eid in _ext_installed():
+        if _ext_authorized(eid) is None: continue            # unauthorized -> never contributes a lens
         m = _ext_meta(eid); L = m.get("lens")
         if not isinstance(L, dict) or not L.get("id"): continue
         if _ext_is_paid(m) and not _entitled(eid, m): continue
@@ -5689,6 +5793,7 @@ def _ext_agent_context():
     if not inst: return ""
     blocks = []
     for eid in sorted(inst):
+        if _ext_authorized(eid) is None: continue            # unauthorized -> agents never told it exists
         eid2, d = _ext_dir(eid)
         if not d: continue
         m = _ext_meta(eid2)
@@ -7380,6 +7485,12 @@ def doctor():
         if not _lic.get("licensed"):
             sev = "err" if _lic.get("enforce") else "warn"
             issues.append({"sev": sev, "path": "license", "msg": "appliance is NOT licensed (%s)%s. Fingerprint: %s -- issue a license for it (POST /api/license-issue on MC) and install it (POST /api/license-install)." % (_lic.get("reason", "?"), " [ENFORCED -- service refused]" if _lic.get("enforce") else " [soft -- not yet enforced]", _lic.get("fingerprint", "?"))})
+    # Extension authorization (ALWAYS, every edition): only official (signed-dist) or operator-approved custom run.
+    _unauth = _ext_unauthorized()
+    if _unauth.get("rogue_dirs"):
+        issues.append({"sev": "err", "path": "extensions", "msg": "UNAUTHORIZED extension(s) present (not official/signed, not an approved custom): %s. They are blocked from loading%s. Only official (signed-dist) or operator-approved custom extensions may run." % (", ".join(_unauth["rogue_dirs"][:6]), " and quarantined on an appliance" if not _authoring() else " (authoring node: not quarantined)")})
+    if _unauth.get("installed_unauthorized"):
+        issues.append({"sev": "err", "path": "extensions", "msg": "installed extension(s) are no longer authorized and will NOT load: %s. Uninstall them or restore the signed dist." % ", ".join(_unauth["installed_unauthorized"][:6])})
     # Storage architecture: a node's home (hence its iCloud container + project) should live on its own
     # dedicated SSD, not the small internal boot drive. Compare the home's volume to the root volume.
     try:
@@ -10342,6 +10453,8 @@ def _core_integrity_loop():
     time.sleep(12)
     while True:
         try: core_verify(heal=True)
+        except Exception: pass
+        try: _ext_quarantine_rogue()                          # appliance: move any unauthorized extension dir out of harm's way
         except Exception: pass
         time.sleep(900)                                       # re-verify every 15 min (+ on boot)
 

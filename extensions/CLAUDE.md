@@ -21,6 +21,16 @@ A dir `extensions/<id>/` containing:
   Prerequisites/Setup steps/Verify/Usage/Best practices) — see AUTHORING.md.
 - Category-specific payload (below).
 
+## Authorization — only official or approved-custom extensions run (server.py `_ext_authorized`)
+The platform refuses to load anything we didn't ship or the operator didn't approve. **Official** = the
+`extension.json` is in the MC-**signed** `core.sig.json` (verified vs `superadmin.pub`; an authoring node trusts
+its own catalog). **Custom** = under `custom/extensions/<id>/` on a `type:developer` node + in
+`custom/_approved.json`. **Everything else = unauthorized** → refused at install, skipped by every loader
+(`_ext_lenses`/`_ext_agent_context`/`_ext_fn_run`), quarantined to `_quarantine/` on an appliance, flagged in
+Doctor. So NEVER hand-drop an extension into a tenant's `extensions/` — author at MC, sign into the dist, ship
+via `cc-update`. The only place non-core tools may live is the `custom/` sandbox. Full reference:
+`../docs/EXTENSIONS.md`; build-to-this: `AUTHORING.md`.
+
 ## Categories — how `install` wires each (server.py, `_ext_apply_payload` + `_ext_wire_mcp`)
 - **`integration`** (MCP / external service): ships `mcp.json` (template with `<PLACEHOLDERS>`). Install
   merges its `mcpServers` into the deployment `.mcp.json`; the setup agent fills credentials + writes
