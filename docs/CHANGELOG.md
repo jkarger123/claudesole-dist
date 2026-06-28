@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.17 -- 2026-06-28
+- PAYLOAD CHIP IN THE SESSION: right next to each session's context-% gauge there's now a 📦 badge showing the
+  ~token weight of the "payload" (everything sent to that agent EVERY trip beyond your message). Hover = a
+  one-line explainer; CLICK = a popup with the EXACT per-session breakdown (system briefing + the CLAUDE.md chain
+  + the cited context brief + enabled tools, each with a token bar + expandable content). Makes context
+  engineering visible exactly where people watch context. Backend: `_payload_baseline()` (cheap, cached
+  node-level estimate added to `/api/token-usage` as `payload_tokens`); `ctxChip` renders the badge; shared
+  `ctxPkgHTML` renderer powers both the Context-lens inspector and the per-session popup (`ctxPkgPopup`).
+  Verified headless (chip shows "📦 35K", click opens the breakdown).
+
 ## 0.99.16 -- 2026-06-28
 - THE CONTEXT TAB -- one home for all context-engineering features, fully documented, with toggles + a payload
   inspector:

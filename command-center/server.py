@@ -2248,7 +2248,20 @@ def token_usage_payload():
         sctx[s["name"]] = {"used": used, "window": CTX_WINDOW, "pct": max(0.0, min(100.0, pct))}
     up = usage_payload()
     return {"totals": up["totals"], "sessions": sctx, "spark": [b["tok"] for b in up["series"]["24h"]],
+            "payload_tokens": _payload_baseline(),   # ~node-level 'payload' weight for the per-session chip (cheap, cached)
             "series": {k: [b["tok"] for b in v] for k, v in up["series"].items()}}   # per-range tok buckets for the strip's range selector
+
+_PAYLOAD_BASE = {"ts": 0.0, "tok": 0}
+def _payload_baseline():
+    """Cheap node-level estimate of the per-trip 'payload' weight (system briefing + root CLAUDE.md + enabled
+    tools) for the per-session context chip. Cached ~5 min so the Sessions poll stays light; the EXACT
+    per-session breakdown is computed on click via context_package()."""
+    now = time.time()
+    if now - _PAYLOAD_BASE["ts"] < 300 and _PAYLOAD_BASE["tok"]: return _PAYLOAD_BASE["tok"]
+    try: _PAYLOAD_BASE["tok"] = context_package(None, None).get("total_tokens", 0)
+    except Exception: pass
+    _PAYLOAD_BASE["ts"] = now
+    return _PAYLOAD_BASE["tok"]
 
 # ---- Pipeline Live-View -------------------------------------------------------
 # A GENERIC "where is the run right now" lens. Any node whose pipeline writes the standard contract to
@@ -12782,6 +12795,8 @@ body.wk-dragging .wkdrop{display:flex;pointer-events:auto}
 .dsnap{flex:1;margin:0;padding:6px;overflow:hidden;font:7.5px/1.25 ui-monospace,Menlo,monospace;color:#ccccdd;background:#0a0a0f;white-space:pre-wrap;word-break:break-word}
 /* remaining-context chip (per session) + token-totals strip (Sessions header) */
 .ctxchip{font:600 10.5px/1 ui-monospace,Menlo,monospace;border:1px solid;border-radius:6px;padding:2px 5px;margin-left:4px;white-space:nowrap;flex:0 0 auto}
+.plchip{font:600 10.5px/1 ui-monospace,Menlo,monospace;border:1px solid var(--line);border-radius:6px;padding:2px 5px;margin-left:4px;white-space:nowrap;flex:0 0 auto;color:var(--dim);cursor:pointer}
+.plchip:hover{color:var(--accent);border-color:var(--accent)}
 .tkstrip{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:9px;padding-top:9px;border-top:1px solid var(--line);font-size:11.5px;color:var(--mut)}
 .tkstrip>span:first-child{font-weight:700;color:var(--ink)}
 .tkcell{display:inline-flex;flex-direction:column;align-items:center;gap:1px;background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:4px 11px}
@@ -14558,7 +14573,15 @@ function sparkSVG(arr,w,h,gid){w=w||128;h=h||28;gid=gid||'sg';if(!arr||!arr.leng
 function cssid(name){return (name||'').replace(/[^A-Za-z0-9]/g,'_');}
 function ctxCol(pct){return pct<10?'#f85149':(pct<20?'#d29922':'#3fb950');}
 function ctxChip(name){const c=(TOKDATA.sessions||{})[name];if(!c)return '';const pct=Math.round(c.pct);const col=ctxCol(pct);
-  return '<span class="ctxchip" id="ctx_'+cssid(name)+'" title="context: '+fmtTok(c.used)+' / '+fmtTok(c.window)+' used · '+pct+'% free" style="color:'+col+';border-color:'+col+'55">'+pct+'%</span>';}
+  var pl=TOKDATA.payload_tokens||0;
+  var plb=pl?('<span class="plchip" title="Context package: ~'+fmtTok(pl)+' tokens go to this agent EVERY trip BEYOND your message (system briefing + CLAUDE.md + context brief + tools). Click to see exactly what\'s in the payload." onclick="event.stopPropagation();ctxPkgPopup(\''+esc(name)+'\')">&#128230; '+fmtTok(pl)+'</span>'):'';
+  return '<span class="ctxchip" id="ctx_'+cssid(name)+'" title="context: '+fmtTok(c.used)+' / '+fmtTok(c.window)+' used · '+pct+'% free" style="color:'+col+';border-color:'+col+'55">'+pct+'%</span>'+plb;}
+// Click the 📦 by a session's context % -> a popup of the EXACT payload for THAT session (everything sent each trip).
+async function ctxPkgPopup(name){
+  showM('<h3 style="margin:0 0 6px">&#128230; Context package &mdash; '+e2(name)+'</h3><div class="meta sub" style="margin-bottom:10px">Everything sent to this agent on each trip, BEYOND your message. This is the "payload" — what makes a ClaudeFather agent start informed instead of blank.</div><div id="pkgPopOut" class="meta sub">assembling…</div><div style="margin-top:12px;text-align:right"><button class="mini" onclick="closeM()">Close</button></div>');
+  var d;try{d=await(await fetch('/api/context-package?session='+encodeURIComponent(name))).json();}catch(e){var o=document.getElementById('pkgPopOut');if(o)o.innerHTML='<span style="color:#f85149">failed</span>';return;}
+  var o=document.getElementById('pkgPopOut'); if(o)o.innerHTML=ctxPkgHTML(d);
+}
 // ---- Sessions usage strip (design "A3"): SPEND stat-rail + click-to-cycle trend graph + monochrome-gold
 // FLEET FUEL (N equal per-account gauges per window; gold = headroom left, dark = used). ----
 // window defs: [key, label, totals-key, series-key]
@@ -15205,27 +15228,31 @@ function ctxPkgCard(){
     +'<button class="mini go" onclick="ctxPackage()">Inspect payload</button></div>'
     +'<div id="pkgOut" style="margin-top:10px"></div></div>';
 }
+// Shared renderer for the payload breakdown -- used by the Context lens inspector AND the per-session 📦 popup.
+function ctxPkgHTML(d){
+  if(!d||!d.ok)return '<div class="meta" style="color:#f85149">'+e2((d||{}).error||'failed')+'</div>';
+  var comps=d.components||[]; var tot=d.total_tokens||0;
+  if(!comps.length)return '<div class="meta sub">No ClaudeFather-assembled payload for '+(d.subject?('&ldquo;'+e2(d.subject)+'&rdquo;'):'this')+' yet (the awareness briefs still apply). Pick a session or a subject with activity.</div>';
+  var max=Math.max.apply(null,comps.map(function(c){return c.tokens||0;}).concat([1]));
+  var col={system:'#c9a227',brief:'#3fb950',tools:'#58a6ff'};
+  var rows=comps.map(function(c,i){var w=Math.round(100*(c.tokens||0)/max);var bc=col[c.id]||(String(c.id).indexOf('claudemd')===0?'#a371f7':'#8b949e');var pid='pkgc'+Math.random().toString(36).slice(2,8);
+    return '<div style="margin-top:9px"><div style="display:flex;align-items:center;gap:8px"><b style="font-size:12.5px;color:var(--mut);flex:1;min-width:0">'+e2(c.label)+'</b>'
+      +'<span class="sub" style="flex:0 0 auto">~'+(c.tokens||0)+' tok</span>'
+      +'<button class="mini" style="flex:0 0 auto" onclick="var e=document.getElementById(\''+pid+'\');e.style.display=e.style.display===\'block\'?\'none\':\'block\';">view</button></div>'
+      +'<div style="height:7px;border-radius:4px;background:var(--line);margin-top:4px;overflow:hidden"><div style="height:100%;width:'+w+'%;background:'+bc+'"></div></div>'
+      +'<div class="meta sub" style="margin-top:3px">'+e2(c.note||'')+'</div>'
+      +'<pre id="'+pid+'" class="snap" style="display:none;white-space:pre-wrap;margin-top:5px;max-height:280px;overflow:auto">'+e2(c.content||'')+'</pre></div>';
+  }).join('');
+  return '<div style="display:flex;align-items:baseline;gap:8px;border-bottom:1px solid var(--line);padding-bottom:6px"><b>Payload for '+(d.subject?('&ldquo;'+e2(d.subject)+'&rdquo;'):'this session')+'</b><span class="sub">~'+tot+' tokens across '+comps.length+' parts</span></div>'
+    +rows
+    +'<div class="meta sub" style="margin-top:10px;border-top:1px dashed var(--line);padding-top:8px">'+e2(d.note||'')+'</div>';
+}
 async function ctxPackage(){
   var sess=(document.getElementById('pkgSess')||{}).value||'';
   var subj=(document.getElementById('pkgSubj')||{}).value||'';
   var out=document.getElementById('pkgOut'); if(out)out.innerHTML='<div class="meta sub">assembling…</div>';
   var d;try{d=await(await fetch('/api/context-package?session='+encodeURIComponent(sess)+'&subject='+encodeURIComponent(subj))).json();}catch(e){if(out)out.innerHTML='<div class="meta" style="color:#f85149">failed</div>';return;}
-  if(!d||!d.ok){if(out)out.innerHTML='<div class="meta" style="color:#f85149">'+e2((d||{}).error||'failed')+'</div>';return;}
-  var comps=d.components||[]; var tot=d.total_tokens||0;
-  if(!comps.length){if(out)out.innerHTML='<div class="meta sub">No ClaudeFather-assembled payload for '+(d.subject?('&ldquo;'+e2(d.subject)+'&rdquo;'):'this')+' yet (the awareness briefs still apply). Pick a session or a subject with activity.</div>';return;}
-  var max=Math.max.apply(null,comps.map(function(c){return c.tokens||0;}).concat([1]));
-  var col={system:'#c9a227',brief:'#3fb950',tools:'#58a6ff'};
-  var rows=comps.map(function(c,i){var w=Math.round(100*(c.tokens||0)/max);var bc=col[c.id]||(String(c.id).indexOf('claudemd')===0?'#a371f7':'#8b949e');
-    return '<div style="margin-top:9px"><div style="display:flex;align-items:center;gap:8px"><b style="font-size:12.5px;color:var(--mut);flex:1;min-width:0">'+e2(c.label)+'</b>'
-      +'<span class="sub" style="flex:0 0 auto">~'+(c.tokens||0)+' tok</span>'
-      +'<button class="mini" style="flex:0 0 auto" onclick="var e=document.getElementById(\'pkgc'+i+'\');e.style.display=e.style.display===\'block\'?\'none\':\'block\';">view</button></div>'
-      +'<div style="height:7px;border-radius:4px;background:var(--line);margin-top:4px;overflow:hidden"><div style="height:100%;width:'+w+'%;background:'+bc+'"></div></div>'
-      +'<div class="meta sub" style="margin-top:3px">'+e2(c.note||'')+'</div>'
-      +'<pre id="pkgc'+i+'" class="snap" style="display:none;white-space:pre-wrap;margin-top:5px;max-height:280px;overflow:auto">'+e2(c.content||'')+'</pre></div>';
-  }).join('');
-  out.innerHTML='<div style="display:flex;align-items:baseline;gap:8px;border-bottom:1px solid var(--line);padding-bottom:6px"><b>Payload for '+(d.subject?('&ldquo;'+e2(d.subject)+'&rdquo;'):'this session')+'</b><span class="sub">~'+tot+' tokens across '+comps.length+' parts</span></div>'
-    +rows
-    +'<div class="meta sub" style="margin-top:10px;border-top:1px dashed var(--line);padding-top:8px">'+e2(d.note||'')+'</div>';
+  if(out)out.innerHTML=ctxPkgHTML(d);
 }
 // FOCUS row: "what you're on" (on-demand, trust-dialed). Off by default; one tap to enable (app-only, no perm).
 async function loadFocus(){
