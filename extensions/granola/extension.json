@@ -9,6 +9,11 @@
   "provides": [
     "lens:calls"
   ],
+  "lens": {
+    "id": "calls",
+    "label": "Calls",
+    "icon": "PH"
+  },
   "requires": [
     {
       "key": "GRANOLA_API_KEY",

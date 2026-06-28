@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.4 -- 2026-06-28
+- FIX: the Granola "Calls" lens never appeared on ANY node -- a latent framework bug. The dashboard surfaces
+  an extension's lens from `_ext_lenses()`, which reads `extension.json` -> `"lens":{id,label,icon}`. Granola
+  declared only `"provides":["lens:calls"]` (a different, informational field the lens code never reads), so it
+  contributed no lens; and `calls` is in no preset lens list, so the nav button was always hidden. Added the
+  `"lens"` object to granola's extension.json. Now the Calls tab shows on any node where granola is INSTALLED
+  (and is_agency). (Granola still needs the node's grn_ API key + workspace E2E OFF to produce proposals.)
+
 ## 0.99.3 -- 2026-06-28
 - BASKET: a persistent sidebar collection you fill with anything draggable, then drag the WHOLE thing into a
   session at once -- "hand the agent a basket of everything it needs for this task." Replaces the old

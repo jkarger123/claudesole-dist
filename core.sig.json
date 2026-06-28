@@ -38,7 +38,7 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "9f574bcf0a21d8c2e11ad168b9607b54776c4d50c439cb7f30719bf9704952dc",
+      "claudesole.manifest.json": "512a6162dcc5c57d7440e89041de9fd98f5093cfede75a819f4902e8ee4ea6d0",
       "command-center/CLAUDE.md": "ab9b718de3722af62d05ff7ba004bb522283e39405e92166437cd6124fa2d074",
       "command-center/cc-instance-supervise.sh": "e0521eae7f276255afc604e872f9edf5aedc657b86dc55edca4340382d61c342",
       "command-center/cc-secure": "285b6e94ca470aa74a4cb86abbb9486ad4b8fdfa3fd1a69872ef688405711d62",
@@ -69,7 +69,7 @@
       "docs/APPLIANCE_BRINGUP.md": "519525aafcce807331adce0d382f86da785395a68e65e2fe61dc5965f28ff3c1",
       "docs/ARCHITECTURE.md": "e61a69a2703c9ac9ba5e153855ddfd495ed5dbd0b5f49b190c4954b8f3c85989",
       "docs/CAPTURE.md": "c0833ca6871ba51a3991cfed1d24b8252280e5d004abdddbce99806a9dd1d071",
-      "docs/CHANGELOG.md": "c79aa0bf88c867bebbfc8be03a31641bce5394f9492e820efc7fd00e441efe7b",
+      "docs/CHANGELOG.md": "17aab74609534972c37f5a285964638da4ecc35998381d6a4260084952160943",
       "docs/CLAUDE_CODE_REFERENCE.md": "d9acc94772b0a5b6b8dcf81962cea5f36cd050dd7797c6180c69c9b661450b2a",
       "docs/CONTROL_CENTER_BLUEPRINT.md": "3bf2fb328661e1cac513e8a9aacf6fb2bba7c5d9c361f069991c3915caa393e9",
       "docs/CREDENTIALS.md": "385ba49de07b52c070603728e8268be63116aa1e788b8d9f118a27af8a6424f2",
@@ -112,7 +112,7 @@
       "extensions/google-workspace/bin/verify.py": "42731879c93e364ff21073b99b4162bc861899aa28a51682bbe7423fd21b95d7",
       "extensions/google-workspace/extension.json": "1b7e0e92e1eab6203516b824bb1bfe4f2a70a8772773aef664d4e938eba3651e",
       "extensions/google-workspace/mcp.json": "352d9e96f6a4c16c9057e174398c7d4e2c30df92198a9086ad05e3325cebd913",
-      "extensions/granola/extension.json": "b01ba4b27b5f5a294b2583728303898fca480c5aff37d9f9e37e4ea4e4a28c04",
+      "extensions/granola/extension.json": "4ad5e3eb9f4770d0e405e00c8390bf54ac509e86ab8c642bd895ce792dce5204",
       "extensions/incident-commander/extension.json": "998f5bc600b50be7a59bf4b24e5188a569400d2d2a09d34c5194b9788147c93f",
       "extensions/incident-commander/payload/reports/latest.json": "b73f3884e30c408de58abc34d83178479536dc466780a518531b5562b2c15f9f",
       "extensions/incident-commander/payload/tools/run.py": "1b550eaaa7d29b687a470d0ea7d5d4d71152c2070ee5f64cfada8143f054419a",
@@ -148,9 +148,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1782633435,
+    "generated": 1782633841,
     "v": 1,
-    "version": "0.99.3"
+    "version": "0.99.4"
   },
-  "sig": "rMJ3frSe3iNXGvfSNrfUyOOvBBoL7qM4cAa09kBZPqPeCoj5GZPVVZq9IHhhrLDKCoqFhyg4fHwfx3hdIKeEBw=="
+  "sig": "4Fs1Gg2+rcRrMmT8TG0sj/vKNRikyMWbdGRy3XfGOMEcqyLFVKpcVT4ha36DCE5xwm2s1p44GNjRnyzlnaTsDw=="
 }
