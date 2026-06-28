@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# cc-onboard [adopt|scaffold]  -- bring THIS node's project up to ClaudeFather spec. Launches the Onboarding agent
+# (cheap model) to: ADOPT an existing codebase (read it with parallel subagents, structure + document it, vault its
+# secrets) or SCAFFOLD a new shell -- then hand off to the Chief of Staff. Run on the node where the project lives.
+set -uo pipefail
+MODE="${1:-adopt}"
+case "$MODE" in adopt|scaffold) ;; *) echo "usage: cc-onboard [adopt|scaffold]"; exit 1;; esac
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
+[ -f "$CFG" ] || CFG="$HOME/hptuners-control/cc.config.json"
+PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
+TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
+BODY="$(python3 -c "import json,sys;print(json.dumps({'mode':sys.argv[1]}))" "$MODE")"
+RES="$(curl -s -X POST "http://127.0.0.1:${PORT}/api/onboard" -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODY" 2>/dev/null)"
+if [ -n "$RES" ]; then
+  python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+if d.get('ok'): print('* onboarding (%s) launched on %s -> session %s. It will ask you a few questions, then map + structure the project and hand it to the Chief.' % (d.get('mode'), d.get('model'), d.get('session')))
+else: print('cc-onboard:', d.get('error','could not start'))
+" "$RES"
+else
+  echo "could not reach the dashboard on port ${PORT}"
+fi

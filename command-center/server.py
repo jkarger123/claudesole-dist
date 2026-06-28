@@ -3937,7 +3937,7 @@ _NEW_FOLDER_BRIEF = (
     "becomes the folder's one-line description in the New-session picker and Projects lens. Add more sections "
     "below as useful. Then give me a one-line status and stand by.")
 
-def launch(target, name, cid=None, rel=None, extra_sys=None):
+def launch(target, name, cid=None, rel=None, extra_sys=None, model=None):
     """Create a tmux session ON THE STUDIO. studio target runs Claude locally in the pillar dir;
        windows target wraps `ssh -t <alias> claude` so it's still a persistent, browser-attachable Studio session.
        extra_sys = an extra SYSTEM-level block appended to the launch context (used by the warm-transfer desk to
@@ -3949,7 +3949,8 @@ def launch(target, name, cid=None, rel=None, extra_sys=None):
     # so it must work even on a deployment with no machines registered (the record is a per-deployment
     # preserve-path that fresh installs lack). Only remote targets need a registered machine (for the ssh alias).
     if target != "studio" and not m: return {"ok": False, "error": "unknown target: " + str(target)}
-    cl = 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG
+    _mdl = (" --model " + _shlex.quote(model)) if model else ""   # cost tier (e.g. sonnet for cheap onboarding readers)
+    cl = 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions' + _mdl + ' ' + CC_TITLE_FLAG
     if target == "studio":
         try: wd = projpath(rel) if rel else (comp_dir(cid) if cid else PROJECT)
         except Exception: wd = PROJECT
@@ -7202,6 +7203,57 @@ def _pane_busy(name):
     """Claude Code shows 'esc to interrupt' while it's working; absence of it = idle/ready for input."""
     _, o, _ = sh([TMUX, "capture-pane", "-t", name, "-p"])
     return "esc to interrupt" in o.lower()
+
+# ---- PROJECT ONBOARDING: bring a just-added project up to ClaudeFather spec, then hand to the Chief of Staff.
+# ADOPT (brownfield) = point at an existing codebase, fan out cheap readers, structure + document it to spec.
+# SCAFFOLD (greenfield) = build a lean starter shell. Runs on a cheap model (Sonnet); the CoS (Opus) does the work.
+ONBOARD_MODEL = CC.get("onboard_model") or "claude-sonnet-4-6"
+def _onboard_brief(mode, rel, name=""):
+    proj = rel or "this project root"
+    common = ("You are the ONBOARDING agent for a project just added to ClaudeFather. Goal: bring it up to our "
+              "STANDARD LAYOUT, then HAND OFF to the Chief of Staff. Be thorough but efficient (you're on a cheap "
+              "model -- use SUBAGENTS for breadth).\nOUR STANDARD (see docs/NODE_ARCHITECTURE.md + the module system): "
+              "a LEAN root CLAUDE.md that is an INDEX, not a dump (<200 authored lines: identity + where-things-live + "
+              "hard rules + pointers); EVERY meaningful folder has its own CLAUDE.md whose line 1 is '# Title' and the "
+              "next non-blank line is ONE plain sentence of what it is (that becomes its one-liner); the Command Center "
+              "auto-stamps the CC:CHILDREN/CC:TREEMAP module map from those; SECRETS live ONLY in the vault "
+              "(`cc-secure request \"<label>\" vault:<KEY>` -- NEVER a key in a file or in chat); file durable learnings "
+              "with `cc-note`.")
+    if mode == "scaffold":
+        body = ("\n\nMODE = SCAFFOLD (brand-new product, little or no code yet):\n"
+                "1) Ask me: what is this product, its MVP scope, and the first 1-3 things to build (a sentence each).\n"
+                "2) Scaffold a lean root CLAUDE.md (identity + scope + where things live + hard rules) and a sensible "
+                "starter folder structure, each folder with its CLAUDE.md.\n"
+                "3) Capture the first goals as Tasks. Run the Doctor (GET /api/doctor) and fix what it flags.")
+    else:
+        body = ("\n\nMODE = ADOPT (an EXISTING codebase at %s):\n"
+                "1) Ask me the few things only I know: what this project is, its main entry points, where any "
+                "secrets/keys live, and what I want from it. Keep it short.\n"
+                "2) MAP THE CODEBASE: spin up SUBAGENTS (the Task tool) to read the tree IN PARALLEL -- each reports its "
+                "area's purpose, the modules/pillars, entry points, deps, and any secrets it finds. Do NOT read it all "
+                "serially yourself.\n"
+                "3) STRUCTURE TO SPEC: decide the module layout; WRITE a lean root CLAUDE.md (index) + a CLAUDE.md in "
+                "every meaningful folder (title + one-liner + a CC:NOTES region). This is ADDITIVE + safe. The Command "
+                "Center regenerates the CC:CHILDREN/CC:TREEMAP map from them. Do NOT move/rename existing code -- if a "
+                "reorg would help, PROPOSE it to me, never do it silently.\n"
+                "4) SECRETS: for every key/token found, get it into the vault via `cc-secure request` (scoped to this "
+                "node); never leave it loose, never echo it.\n"
+                "5) Run the Doctor (GET /api/doctor) until clean (lean docs, map in sync)." % proj)
+    tail = ("\n\nFINISH: write a short ONBOARDING REPORT (what the project is, the layout you set, secrets vaulted, "
+            "anything you propose I review), then tell the Chief of Staff the project is onboarded + ready -- it takes "
+            "over the actual work. Give me a one-line status and stand by.")
+    return common + body + tail
+
+def onboard_start(rel="", mode="adopt", name="", model=None):
+    """Launch the Onboarding agent in the project on the cheap model with the playbook; then nudge it to begin."""
+    mode = "scaffold" if str(mode).lower() == "scaffold" else "adopt"
+    res = launch("studio", "onboard-" + _slug(name or os.path.basename((rel or "project").rstrip("/")) or "project"),
+                 rel=(rel or None), extra_sys=_onboard_brief(mode, rel, name), model=(model or ONBOARD_MODEL))
+    if res.get("ok") and res.get("session"):
+        try: _mesh_deliver(res["session"], "You are the Onboarding agent -- your full playbook is in your system context. Begin now: ask me the short intake questions for this project, then map + structure it to spec.")
+        except Exception: pass
+    return {"ok": bool(res.get("ok")), "mode": mode, "model": (model or ONBOARD_MODEL),
+            "session": res.get("session"), "term": res.get("term"), "rel": rel, "error": res.get("error")}
 
 _REMOTE_SB = {"ts": 0, "v": [], "running": False}
 def _scrape_auth(url, timeout=2.5):
@@ -13123,6 +13175,8 @@ class H(BaseHTTPRequestHandler):
             if ROLE != "org":
                 return self._s(403, json.dumps({"ok": False, "error": "provisioning is ClaudeGrandfather (overseer) only"}))
             return self._s(200, json.dumps(instance_provision(body, do_launch=bool(body.get("launch")), dry=bool(body.get("dry")))))
+        if u.path == "/api/onboard":   # PROJECT ONBOARDING: launch the Onboarding agent (adopt existing / scaffold new)
+            return self._s(200, json.dumps(onboard_start(body.get("rel", "") or "", body.get("mode", "adopt"), body.get("name", ""), body.get("model")), default=str))
         return self._s(404, "{}")
 
 TERM_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude session</title>

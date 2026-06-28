@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.27 -- 2026-06-28
+- PROJECT ONBOARDING -- bring a just-added project up to ClaudeFather spec automatically, then hand to the Chief.
+  Two modes: ADOPT (point at an EXISTING codebase -> the Onboarding agent fans out parallel SUBAGENTS to read the
+  whole tree, then structures + documents it to spec -- lean root CLAUDE.md + per-folder CLAUDE.mds + the module
+  map + Doctor-clean + secrets into the vault -- WITHOUT moving code, proposing any reorg for review) and SCAFFOLD
+  (new product -> a lean starter shell). Runs on a CHEAP model (`claude-sonnet-4-6`, config `onboard_model`); the
+  CoS (Opus) takes over the actual work. `_onboard_brief()` + `onboard_start()` + `/api/onboard` + `cc-onboard
+  [adopt|scaffold]` CLI; `launch()` gained a `model` tier. The Setup agent now points an existing-codebase node at
+  `cc-onboard adopt`. Verified: onboarding launches on Sonnet with the playbook + a kickoff turn.
+
 ## 0.99.26 -- 2026-06-28
 - FLEET-WIDE "All nodes" taskbar. The taskbar is built from LOCAL tmux, so cross-user/remote nodes (AFP runs as
   `sarahaios` on its own tmux; future T490 nodes are another machine) never appeared. Now the unscoped overseer's
