@@ -4128,6 +4128,98 @@ def vault_import_env(scrub=False):
         except Exception: pass
     _vault_audit("import_env", "", None, "imported=%d skipped=%d failed=%d scrub=%s files=%s" % (len(imported), len(skipped), len(failed), scrubbed, file_scrubbed))
     return {"ok": not failed, "imported": imported, "skipped": skipped, "failed": failed, "scrubbed": scrubbed, "files_scrubbed": file_scrubbed}
+def vault_declare(key, label=None, scope=None, needed_by=None):
+    """Create an EMPTY vault slot (no value) so the Vault lens shows 'needed, not set' for an extension's keys.
+    No-op if the key already holds a value. Powers auto-provisioning a slot when an extension is enabled."""
+    key = re.sub(r"[^A-Za-z0-9_.\-]", "", key or "")[:64]
+    if not key or not vault_available(): return {"ok": False, "error": "bad key / no crypto"}
+    d = _vault_load(); rec = d.get(key)
+    if rec and (rec.get("shared") or rec.get("per_node")): return {"ok": True, "already": True}
+    rec = rec or {"created": int(time.time()), "per_node": {}}
+    rec["label"] = label or key; rec["scope"] = scope or rec.get("scope") or ["*"]
+    rec["needed_by"] = sorted(set((rec.get("needed_by") or []) + ([needed_by] if needed_by else [])))
+    rec["updated"] = int(time.time()); rec.setdefault("revoked", False); d[key] = rec; _vault_save(d)
+    return {"ok": True, "declared": key}
+
+# ==== SECURE FIELDS -- out-of-band channel for sensitive values (they NEVER touch the chat/transcript) =========
+# REQUEST (user -> destination): an agent needs a secret -> POST /api/secure-request {label, dest}. A box pops up
+#   in the operator's dashboard (mobile/desktop); the user types it; it routes straight to `dest` (the vault by
+#   default) -- browser -> server -> vault, never through the agent's stdin or the chat. The agent then LEASES it
+#   from the vault. dest type "return" hands the value back to the agent ONCE (encrypted, single-fetch) for
+#   transient use without storing it.
+# REVEAL (agent -> user): the agent writes the value to a 0600 FILE and POSTs /api/secure-reveal {label, file}
+#   (the request carries the PATH, not the value, so it never appears in the pane); a box shows the user the value
+#   (one-time, auto-expiring), never in the transcript. This is the ONE way to move secrets to/from a session.
+SECURE_FILE = os.path.join(STATE_DIR, "_secure.json")
+_SECURE_LOCK = threading.Lock()
+def _secure_load():
+    try: return json.load(open(SECURE_FILE))
+    except Exception: return {"items": []}
+def _secure_save(d):
+    with _SECURE_LOCK:
+        try:
+            fd = os.open(SECURE_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, json.dumps(d).encode()); os.close(fd)
+        except Exception: pass
+def _secure_prune(d):
+    now = time.time(); d["items"] = [i for i in d.get("items", []) if not (i.get("expires") and i["expires"] < now)][-100:]; return d
+def secure_request(label, dest=None, note="", session=""):
+    if not (label or "").strip(): return {"ok": False, "error": "label required"}
+    dest = dest or {"type": "vault"}
+    if dest.get("type") == "vault" and not dest.get("key"): return {"ok": False, "error": "vault dest needs a key"}
+    d = _secure_prune(_secure_load())
+    item = {"id": "sr-" + secrets.token_hex(8), "kind": "request", "label": label[:120], "note": (note or "")[:300],
+            "dest": dest, "session": session or "", "status": "pending", "created": int(time.time())}
+    d["items"].append(item); _secure_save(d); return {"ok": True, "id": item["id"]}
+def secure_fulfill(id, value):
+    """Browser/operator submits the user's value -> routed to dest. The value NEVER returns to the chat."""
+    d = _secure_load(); it = next((x for x in d["items"] if x["id"] == id and x["kind"] == "request"), None)
+    if not it: return {"ok": False, "error": "no such request"}
+    if it["status"] != "pending": return {"ok": False, "error": "already " + it["status"]}
+    dest = it.get("dest") or {}; t = dest.get("type", "vault")
+    if t == "vault":
+        r = vault_set(dest["key"], value, label=dest.get("label") or dest["key"], scope=dest.get("scope") or ["*"], node=dest.get("node") or None)
+        if not r.get("ok"): return {"ok": False, "error": r.get("error", "vault store failed")}
+        it["status"] = "done"; it["result"] = "stored:" + dest["key"]
+    elif t == "return":
+        it["status"] = "done"; it["enc"] = _vault_enc(value); it["expires"] = time.time() + 300  # single agent fetch, 5m
+    else: return {"ok": False, "error": "unknown dest type"}
+    _secure_save(d); return {"ok": True, "routed": t}
+def secure_get(id):
+    """Agent polls its request status. For dest=return, returns the value ONCE then clears it (in-process, not chat)."""
+    d = _secure_load(); it = next((x for x in d["items"] if x["id"] == id), None)
+    if not it: return {"ok": False, "error": "unknown"}
+    out = {"ok": True, "status": it["status"]}
+    if it.get("status") == "done" and it.get("enc"):
+        out["value"] = _vault_dec(it.pop("enc")); _secure_save(d)   # one-time read
+    return out
+def secure_reveal(label, value=None, file=None, session="", ttl=180):
+    v = value
+    if file:
+        try:
+            with open(file, encoding="utf-8", errors="replace") as f: v = f.read()
+            try: os.remove(file)   # shred the carrier file
+            except Exception: pass
+        except Exception: return {"ok": False, "error": "could not read file"}
+    if v is None: return {"ok": False, "error": "value or file required"}
+    d = _secure_prune(_secure_load())
+    item = {"id": "rv-" + secrets.token_hex(8), "kind": "reveal", "label": (label or "value")[:120],
+            "enc": _vault_enc(v), "session": session or "", "status": "pending", "created": int(time.time()),
+            "expires": time.time() + max(30, int(ttl))}
+    d["items"].append(item); _secure_save(d); return {"ok": True, "id": item["id"]}
+def secure_pending():
+    """Dashboard poll: pending requests (need input) + reveals (decrypted only here, for one-time display)."""
+    d = _secure_prune(_secure_load()); _secure_save(d); out = []
+    for it in d["items"]:
+        if it.get("status") != "pending": continue
+        e = {"id": it["id"], "kind": it["kind"], "label": it["label"], "note": it.get("note", ""), "session": it.get("session", "")}
+        if it["kind"] == "request": e["dest_type"] = (it.get("dest") or {}).get("type", "vault")
+        if it["kind"] == "reveal": e["value"] = _vault_dec(it.get("enc"))
+        out.append(e)
+    return {"ok": True, "items": out}
+def secure_ack(id):
+    d = _secure_load(); it = next((x for x in d["items"] if x["id"] == id), None)
+    if it: it["status"] = "seen"; _secure_save(d)
+    return {"ok": True}
 
 def notify_send(text):
     """Push a notification to the user via any installed+configured channel (Telegram today). Graceful:
@@ -4649,6 +4741,25 @@ def _ext_apply_payload(eid, d, remove=False):
                 except Exception as e: out["agent_error"] = str(e)
     return out
 
+def _ext_declare_secrets(eid, m):
+    """Auto-provision an EMPTY vault slot for each credential an extension declares (requires[].key env-style,
+    byok.keys[].id, function secrets[]) -- so enabling an extension reserves its spot in the vault ('needed by
+    <ext>, not set'), and Set up / the secure-field prompt fills it. The single standardized path for ext creds."""
+    keys = set()
+    for r in (m.get("requires") or []):
+        k = (r.get("key") or "").strip()
+        if k and re.match(r"^[A-Za-z][A-Za-z0-9_]*$", k): keys.add(k)   # env-style keys only (skip prose labels)
+    for b in ((m.get("byok") or {}).get("keys") or []):
+        k = (b.get("id") or "").strip()
+        if k: keys.add(k)
+    for fn in (m.get("functions") or {}).values():
+        for k in (fn.get("secrets") or []):
+            if k: keys.add(k)
+    out = []
+    for k in sorted(keys):
+        r = vault_declare(k, label=k, needed_by=eid)
+        if r.get("ok") and not r.get("already"): out.append(k)
+    return out
 def extension_install(eid):
     eid, d = _ext_dir(eid)
     if not d: return {"ok": False, "error": "no such extension"}
@@ -4664,6 +4775,8 @@ def extension_install(eid):
     out.update(_ext_apply_payload(eid, d))
     r = _ext_register_routine(eid, m)        # an extension can declare a scheduled routine -> auto-register on install
     if r: out["routine"] = r
+    slots = _ext_declare_secrets(eid, m)     # reserve a vault slot for each credential this extension needs
+    if slots: out["vault_slots"] = slots
     return out
 
 def extension_uninstall(eid):
@@ -7226,6 +7339,15 @@ def _system_brief():
                 "follows the user). Live surfaces on THIS node: " + on + ". The user is on the '" + rt +
                 "' runtime" + rtnote + ". Prefer the context router/brief to get caught up on a subject rather "
                 "than guessing; honor review-first (propose, never auto-apply); everything is provenance-stamped.")
+        base += ("\n\nSECRETS / SECURE FIELDS: NEVER ask the user to paste an API key, password, token, or any "
+                 "confidential value into the chat, and never print one in your replies. Use the secure-field "
+                 "channel so it never enters the transcript: to GET a secret, run `cc-secure request \"<label>\" "
+                 "vault:<KEY>` (a box pops up for the user; the value goes straight to the encrypted VAULT, never "
+                 "to you/chat) then read it via the vault when you need it; for a one-time value you need in-hand, "
+                 "use `cc-secure ask \"<label>\"` (returned to you once, not via chat). To SHOW the user a secret, "
+                 "write it to a 0600 temp file and run `cc-secure reveal \"<label>\" <file>` (a box shows them; "
+                 "nothing hits the chat). Credentials live ONLY in the per-install vault -- read them with the "
+                 "normal secret resolver, never hardcode or echo them.")
         try:
             extc = _ext_agent_context()      # only the extensions INSTALLED on this node -> per-node-clean tool awareness
             if extc: base += "\n\n" + extc
@@ -10292,6 +10414,11 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"edition": _edition(), "authoring": _authoring(),
                                             "signed": os.path.isfile(CORE_SIG_FILE), **core_verify(heal=False)}))
         if u.path == "/api/license": return self._s(200, json.dumps(license_status()))
+        if u.path == "/api/secure-pending":
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(secure_pending()))
+        if u.path == "/api/secure-get":
+            return self._s(200, json.dumps(secure_get((q.get("id") or [""])[0])))
         if u.path == "/api/update-status": return self._s(200, json.dumps(update_status()))
         if u.path == "/api/settings": return self._s(200, json.dumps(settings_get()))
         if u.path == "/api/chief": return self._s(200, json.dumps(chief_overview()))
@@ -10817,6 +10944,16 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/vault-import":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(vault_import_env(scrub=bool(body.get("scrub")))))
+        if u.path == "/api/secure-request":   # AGENT: ask the user for a secret -> routes to dest, never the chat
+            return self._s(200, json.dumps(secure_request(body.get("label", ""), body.get("dest"), body.get("note", ""), body.get("session", ""))))
+        if u.path == "/api/secure-reveal":    # AGENT: show the user a secret without it hitting the chat (value via a 0600 file)
+            return self._s(200, json.dumps(secure_reveal(body.get("label", ""), body.get("value"), body.get("file"), body.get("session", ""), body.get("ttl", 180))))
+        if u.path == "/api/secure-fulfill":   # BROWSER: the user submitted the value -> route it (operator only)
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(secure_fulfill(body.get("id", ""), body.get("value", ""))))
+        if u.path == "/api/secure-ack":
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(secure_ack(body.get("id", ""))))
         if u.path == "/api/vault-set":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(vault_set(body.get("id", ""), body.get("value"), label=body.get("label"), scope=body.get("scope"), node=body.get("node") or None)))
@@ -18676,6 +18813,49 @@ setInterval(()=>{fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;paintSvc()
   setTimeout(poll, 1500);              // seed quietly shortly after load
   setInterval(poll, POLL_MS);
   window.cfDeliverablesPoll=poll;      // optional manual nudge (e.g. right after an action that made a file) -- no Sessions coupling
+})();
+// ===== SECURE FIELDS: a modal pops up when an agent needs a secret (input -> straight to the vault, never the
+// chat) or wants to show the user one (display, one-time). Polls /api/secure-pending; works mobile + desktop. =====
+(function(){
+  var showing=null;
+  function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];});}
+  function close(){var o=document.getElementById('cfsec');if(o)o.remove();showing=null;}
+  function render(it){
+    if(showing===it.id)return; showing=it.id;
+    var req=it.kind==='request';
+    var o=document.createElement('div'); o.id='cfsec';
+    o.setAttribute('style','position:fixed;inset:0;z-index:99999;background:rgba(2,6,12,.72);display:flex;align-items:center;justify-content:center;padding:20px');
+    var inner=req
+      ? '<input id="cfsecv" type="password" autocomplete="new-password" placeholder="paste the value here" style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:8px;padding:11px 12px;font:inherit;margin-top:12px">'
+        +'<div style="display:flex;gap:8px;margin-top:12px"><button id="cfsecok" style="flex:1;background:#238636;color:#fff;border:0;border-radius:8px;padding:10px;font:inherit;cursor:pointer">Submit securely</button><button id="cfsecx" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:8px;padding:10px 14px;font:inherit;cursor:pointer">Cancel</button></div>'
+        +'<div style="color:#8b949e;font-size:11px;margin-top:9px">Goes straight to the encrypted vault — never into the chat or transcript.</div>'
+      : '<div style="margin-top:12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:11px 12px;font-family:ui-monospace,Menlo,monospace;font-size:13px;color:#e6edf3;word-break:break-all;user-select:all">'+esc(it.value)+'</div>'
+        +'<div style="display:flex;gap:8px;margin-top:12px"><button id="cfseccopy" style="flex:1;background:#1f6feb;color:#fff;border:0;border-radius:8px;padding:10px;font:inherit;cursor:pointer">Copy</button><button id="cfsecok" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:8px;padding:10px 14px;font:inherit;cursor:pointer">Done</button></div>'
+        +'<div style="color:#8b949e;font-size:11px;margin-top:9px">Shown once — this value is not in the chat or transcript.</div>';
+    o.innerHTML='<div style="width:100%;max-width:440px;background:#161b22;border:1px solid #30363d;border-radius:14px;padding:18px 18px 16px;box-shadow:0 18px 60px rgba(0,0,0,.5)">'
+      +'<div style="font-size:15px;font-weight:700;color:#e6edf3">&#128272; '+(req?'A value is needed':'Sensitive value')+'</div>'
+      +'<div style="color:#c9d1d9;font-size:13.5px;margin-top:4px">'+esc(it.label)+(it.note?(' <span style="color:#8b949e">— '+esc(it.note)+'</span>'):'')+'</div>'
+      +(it.session?'<div style="color:#8b949e;font-size:11px;margin-top:2px">from session: '+esc(it.session)+'</div>':'')
+      +inner+'</div>';
+    document.body.appendChild(o);
+    var v=document.getElementById('cfsecv'); if(v)v.focus();
+    function submit(){
+      if(req){var val=(document.getElementById('cfsecv')||{}).value||"";
+        fetch('/api/secure-fulfill',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:it.id,value:val})}).then(function(){close();});
+      } else { fetch('/api/secure-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:it.id})}).then(function(){close();}); }
+    }
+    var ok=document.getElementById('cfsecok'); if(ok)ok.onclick=submit;
+    var cp=document.getElementById('cfseccopy'); if(cp)cp.onclick=function(){try{navigator.clipboard.writeText(it.value);}catch(e){}};
+    var x=document.getElementById('cfsecx'); if(x)x.onclick=function(){fetch('/api/secure-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:it.id})}).catch(function(){});close();};
+    if(v)v.addEventListener('keydown',function(e){if(e.key==='Enter')submit();});
+  }
+  function poll(){
+    fetch('/api/secure-pending',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+      if(!d||!d.items||!d.items.length){if(showing)close();return;}
+      if(!showing)render(d.items[0]);
+    }).catch(function(){});
+  }
+  setInterval(poll,4000); setTimeout(poll,1200);
 })();
 </script></body></html>"""
 

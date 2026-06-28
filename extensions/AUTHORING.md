@@ -5,6 +5,34 @@ An Extension is an installable capability in the Marketplace lens. The promise t
 that to work, every extension MUST ship clear, structured instructions -- what it is, why you'd want it, how
 it works, and the safe way to run it. No extension ships without this.
 
+## THE STANDARD -- every extension is built to this (checklist)
+Build EVERY extension to the same spec so they're consistent + agent-usable. An extension ships:
+1. **`extension.json`** -- catalog card + model-facing `summary`/`description` + `provides[]`/`requires[]` (below).
+2. **`SETUP.md`** -- the guided setup-agent script (fixed section order, below).
+3. **`AGENT.md`** -- agent-facing "here's the tool you have + how to use it" (declare `agent_doc`); auto-injected
+   into agent context ONLY where the extension is installed. Every extension that an agent would USE ships one.
+4. **Credentials via the VAULT only** (see "Credentials & secrets" below) -- DECLARE needed secrets; READ them
+   only via `_deploy_env(key)`; NEVER a bespoke secret file, cc.config secret, or hardcoded value.
+5. **Draggables** (if it has items a user would hand to a session) -- declare `draggables[]` + attach `ssAttr`
+   to rows so they drag into a Claude session (the generic `entity` sendable needs zero server code).
+6. **A `lens`** (if it has a UI) -- declare `lens:{id,label,icon}`; it self-shows when installed (extLenses),
+   built dense (KPI strip + tables/2-col panels -- NEVER a stack of full-width cards).
+7. **Server functions** (if it needs server-side compute) -- declare `functions{}`; runs sandboxed; no worker.
+8. **`tier`/`pricing`/`publisher`** (paid extensions ride the signed-entitlement gate).
+Reversible install (uninstall archives, never deletes user data/keys). ASCII only. The sections below detail each.
+
+## Credentials & secrets (the ONE way -- non-negotiable)
+Every credential lives in the per-install **vault**; nothing sensitive ever enters the chat/transcript. (Full
+reference: `command-center/vault/CLAUDE.md`; spec: `docs/CREDENTIALS.md`.)
+- **DECLARE** what you need: `requires[].key` (env-style names), `byok.keys[].id`, function `secrets[]`. On
+  install the platform AUTO-PROVISIONS an empty vault slot per key (Vault lens shows "needed by <ext>, not set").
+- **READ** secrets ONLY via `_deploy_env(key)` (resolves the vault). NEVER your own `secrets/` file, NEVER a
+  cc.config secret, NEVER hardcoded, NEVER printed.
+- **COLLECT** a secret via the SECURE-FIELD flow, never by asking the user to paste it in chat: the setup agent
+  runs `cc-secure request "<label>" vault:<KEY>` -> a box pops up for the user -> the value goes straight to the
+  vault. To show the user a secret: `cc-secure reveal "<label>" <0600-file>`. (Agents know this from their brief.)
+- Legacy bespoke secret files are migrated into the vault + retired (`vault_import_env`); don't add new ones.
+
 ## Required files (in `extensions/<id>/`)
 ### 1. `extension.json` -- the catalog entry + the model-facing trigger
 ```json

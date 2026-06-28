@@ -3,6 +3,23 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.96.0 -- 2026-06-28
+- SECURE FIELDS -- a universal out-of-band channel so secrets NEVER touch the chat/transcript, both directions.
+  REQUEST: an agent runs `cc-secure request "<label>" vault:<KEY>` -> a modal pops up in the dashboard
+  (mobile/desktop) -> the user types the value -> it routes STRAIGHT to the vault (browser->server->vault), never
+  through the agent or chat; the agent then reads the key from the vault. ASK: `cc-secure ask` returns a one-time
+  value to the agent (encrypted, single-fetch), never via chat. REVEAL: the agent writes a value to a 0600 file +
+  `cc-secure reveal "<label>" <file>` (path travels, not the value; file shredded) -> a one-time modal shows the
+  user. New backend (`secure_request/fulfill/get/reveal/pending/ack`, encrypted `_secure.json`), endpoints, the
+  `cc-secure` agent helper, and a global dashboard modal+poller. Agents are told about it automatically (injected
+  into every launch brief). Enabling an extension now AUTO-PROVISIONS an empty vault slot per declared secret
+  (`_ext_declare_secrets`/`vault_declare`) so its key shows "needed, not set." Tested end-to-end (request->vault
+  no-leak, return one-time, reveal, modal render). Docs: the new `command-center/vault/` folder (full credential
+  reference), `docs/CREDENTIALS.md` (secure fields + ext contract), and `extensions/AUTHORING.md` elevated to the
+  mandatory build-to-this standard (vault-only creds, secure-field collection, AGENT.md, draggables, lens).
+  Extension audit done: all declare secrets + read via the vault; added AGENT.md to google-workspace + slack;
+  remaining MCP integrations' AGENT.md filed as a backfill task (MCP tools self-describe).
+
 ## 0.95.0 -- 2026-06-28
 - Credential vault -> 100%: file-based extension secrets now migrate into the vault too. `vault_import_env`
   also sweeps slack `bot_token`, google `google_oauth.json` (-> `google_oauth_client`), and the per-account

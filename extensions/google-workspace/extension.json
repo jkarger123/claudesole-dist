@@ -13,8 +13,12 @@
     "agent:google"
   ],
   "requires": [
-    {"key": "GOOGLE_OAUTH", "label": "A Google account + an OAuth Desktop client JSON from Google Cloud Console (the setup agent walks you through creating it -- project, enable APIs, Testing-mode consent + test-user, Desktop client; then mints the headless token for you)"}
+    {
+      "key": "GOOGLE_OAUTH",
+      "label": "A Google account + an OAuth Desktop client JSON from Google Cloud Console (the setup agent walks you through creating it -- project, enable APIs, Testing-mode consent + test-user, Desktop client; then mints the headless token for you)"
+    }
   ],
   "setup_doc": "SETUP.md",
-  "setup_agent": true
+  "setup_agent": true,
+  "agent_doc": "AGENT.md"
 }

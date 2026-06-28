@@ -12,10 +12,20 @@
     "comms:slack"
   ],
   "requires": [
-    {"key": "SLACK_BOT_TOKEN", "label": "A Slack app Bot User OAuth Token (xoxb-...). Context-ingest read scopes: channels:history, channels:read, users:read, im:read (+ im:history). For the COMMS feature also: chat:write (post), channels:history + groups:history (read replies in the comms channel)."},
-    {"key": "SLACK_COMMS_CHANNEL", "label": "OPTIONAL -- the channel ID (e.g. C0123ABCD) for per-session team comms. Set here or as cc.config slack.comms_channel. Invite the bot to that channel. Omit to disable the comms feature (context + agent posting still work)."},
-    {"key": "SLACK_TEAM_ID", "label": "Your Slack workspace/team ID (only needed for the agent/MCP post path)"}
+    {
+      "key": "SLACK_BOT_TOKEN",
+      "label": "A Slack app Bot User OAuth Token (xoxb-...). Context-ingest read scopes: channels:history, channels:read, users:read, im:read (+ im:history). For the COMMS feature also: chat:write (post), channels:history + groups:history (read replies in the comms channel)."
+    },
+    {
+      "key": "SLACK_COMMS_CHANNEL",
+      "label": "OPTIONAL -- the channel ID (e.g. C0123ABCD) for per-session team comms. Set here or as cc.config slack.comms_channel. Invite the bot to that channel. Omit to disable the comms feature (context + agent posting still work)."
+    },
+    {
+      "key": "SLACK_TEAM_ID",
+      "label": "Your Slack workspace/team ID (only needed for the agent/MCP post path)"
+    }
   ],
   "setup_doc": "SETUP.md",
-  "setup_agent": true
+  "setup_agent": true,
+  "agent_doc": "AGENT.md"
 }

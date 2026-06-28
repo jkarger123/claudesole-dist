@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# cc-secure -- the agent's interface to SECURE FIELDS: move secrets to/from the user WITHOUT them ever touching
+# the chat/transcript. Resolves this node's port + token from cc.config (like cc-task).
+#
+#   cc-secure request "<label>" vault:<KEY> [scope]   # ask the user for a secret -> stored straight in the VAULT
+#                                                       # (a box pops up for them; the value never reaches you/chat).
+#                                                       # Then read <KEY> via the normal secret resolver to use it.
+#   cc-secure ask "<label>"                            # ask the user for a one-time value RETURNED to you once
+#                                                       # (printed here only, never via chat). For transient use.
+#   cc-secure reveal "<label>" <file>                  # SHOW the user a secret you put in a 0600 <file> (the file
+#                                                       # path travels, not the value); a box shows them; file is shredded.
+set -uo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CFG="${CC_CONFIG:-$HERE/../cc.config.json}"; [ -f "$CFG" ] || CFG="$HOME/hptuners-control/cc.config.json"
+PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
+TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
+API="http://127.0.0.1:${PORT}"
+post(){ curl -s -X POST "$API$1" -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$2"; }
+CMD="${1:-}"; LABEL="${2:-}"; ARG="${3:-}"; SCOPE="${4:-*}"
+case "$CMD" in
+  request)
+    [ -n "$LABEL" ] && [ -n "$ARG" ] || { echo "usage: cc-secure request \"<label>\" vault:<KEY> [scope]"; exit 1; }
+    KEY="${ARG#vault:}"
+    BODY="$(python3 -c "import json,sys;print(json.dumps({'label':sys.argv[1],'dest':{'type':'vault','key':sys.argv[2],'scope':sys.argv[3].split(',')}}))" "$LABEL" "$KEY" "$SCOPE")"
+    R="$(post /api/secure-request "$BODY")"; ID="$(python3 -c "import json,sys;print(json.load(sys.stdin).get('id',''))" <<<"$R")"
+    [ -n "$ID" ] || { echo "request failed: $R"; exit 1; }
+    echo "Asked the user for \"$LABEL\" -> vault key $KEY. Waiting (a secure box is up for them)…"
+    for i in $(seq 1 120); do sleep 3; S="$(curl -s "$API/api/secure-get?id=$ID" -H "X-CC-Token: $TOK")"
+      st="$(python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))" <<<"$S" 2>/dev/null)"
+      [ "$st" = "done" ] && { echo "Done -- stored in the vault as $KEY. Read it with the normal secret resolver (never echo it)."; exit 0; }; done
+    echo "Timed out waiting for the user."; exit 1 ;;
+  ask)
+    [ -n "$LABEL" ] || { echo "usage: cc-secure ask \"<label>\""; exit 1; }
+    BODY="$(python3 -c "import json,sys;print(json.dumps({'label':sys.argv[1],'dest':{'type':'return'}}))" "$LABEL")"
+    R="$(post /api/secure-request "$BODY")"; ID="$(python3 -c "import json,sys;print(json.load(sys.stdin).get('id',''))" <<<"$R")"
+    [ -n "$ID" ] || { echo "request failed: $R"; exit 1; }
+    echo "(secure box up for the user; the value will print ONCE below, never in chat)…" >&2
+    for i in $(seq 1 120); do sleep 3; S="$(curl -s "$API/api/secure-get?id=$ID" -H "X-CC-Token: $TOK")"
+      st="$(python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))" <<<"$S" 2>/dev/null)"
+      if [ "$st" = "done" ]; then python3 -c "import json,sys;print(json.load(sys.stdin).get('value',''))" <<<"$S"; exit 0; fi; done
+    echo "Timed out." >&2; exit 1 ;;
+  reveal)
+    [ -n "$LABEL" ] && [ -f "$ARG" ] || { echo "usage: cc-secure reveal \"<label>\" <file-with-the-value>"; exit 1; }
+    BODY="$(python3 -c "import json,sys;print(json.dumps({'label':sys.argv[1],'file':sys.argv[2]}))" "$LABEL" "$ARG")"
+    R="$(post /api/secure-reveal "$BODY")"
+    python3 -c "import json,sys;d=json.load(sys.stdin);print('Shown to the user in a secure box (not in chat).' if d.get('ok') else 'reveal failed: '+str(d))" <<<"$R" ;;
+  *) echo "usage: cc-secure {request \"<label>\" vault:<KEY> [scope] | ask \"<label>\" | reveal \"<label>\" <file>}"; exit 1 ;;
+esac

@@ -42,6 +42,24 @@ Run per install (each deployment imports its own `.env`). Rollout is additive-fi
 resolution (vault empty -> `.env` still answers, nothing breaks) -> import (no scrub) -> verify reads come from
 the vault -> THEN scrub.
 
+## Secure fields -- secrets to/from a session WITHOUT the chat (v0.96)
+Sensitive values NEVER go in the chat/transcript. The out-of-band channel (deep ref: command-center/vault/CLAUDE.md):
+- **REQUEST (user -> vault):** an agent runs `cc-secure request "<label>" vault:<KEY>` -> a modal pops up in the
+  dashboard (mobile/desktop) -> the user types the value -> it routes STRAIGHT to the vault (browser->server->vault),
+  never through the agent or chat. The agent then reads `<KEY>` via the resolver.
+- **ASK (one-time to the agent):** `cc-secure ask "<label>"` -> the value is returned to the agent ONCE (encrypted,
+  single-fetch), for transient use, never via chat.
+- **REVEAL (agent -> user):** the agent writes the value to a 0600 file + `cc-secure reveal "<label>" <file>` (the
+  path travels, not the value; file shredded) -> a modal shows the user one-time.
+Agents are told this automatically (injected into every launch brief). APIs: `POST /api/secure-request|secure-reveal`,
+`GET /api/secure-get` (agent); `GET /api/secure-pending`, `POST /api/secure-fulfill|secure-ack` (operator/browser).
+
+## Extension credential contract (every extension follows this)
+- DECLARE needed secrets (`requires[].key`, `byok.keys[].id`, function `secrets[]`). On install the platform
+  AUTO-PROVISIONS an empty vault slot per key (`vault_declare`) -> Vault lens shows "needed by <ext>, not set."
+- READ via `_deploy_env(key)` ONLY (-> the vault). No bespoke secret files, no cc.config secrets, nothing hardcoded.
+- Fill via the secure-field flow or the Vault lens -- never by asking the user to paste into chat.
+
 ## APIs (operator-only except lease)
 `GET /api/vault` (list, never values) · `POST /api/vault-set {id,value,label,scope,node}` ·
 `POST /api/vault-revoke|vault-delete` · `POST /api/vault-import {scrub}` · `POST /api/vault-lease {id,node}`
