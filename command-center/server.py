@@ -11760,6 +11760,20 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .focuswrap{display:flex;flex-direction:column;gap:10px;height:calc(100vh - 272px);min-height:430px}
 .bigsess{flex:1;min-height:0;display:flex;flex-direction:column;border:1px solid var(--accent);border-radius:12px;overflow:hidden;box-shadow:var(--glow);position:relative}
 .bigsess .sthead{cursor:default}
+/* WORKSPACE: split-pane columns (drag a session from the dock; resize the splitter; push panes back down) */
+.wkspace{display:flex;flex-direction:row;align-items:stretch;gap:0;height:calc(100vh - 255px);min-height:420px;width:100%}   /* offset = topbar + usage strip + bottom taskbar (matches the old focus view so the page never scrolls) */
+.wkpane{display:flex;flex-direction:column;min-width:0;overflow:hidden;border:1px solid var(--accent);border-radius:12px;box-shadow:var(--glow);position:relative}
+.wkpane .stframe{flex:1;min-height:0;width:100%;border:0}
+.pane-split{flex:0 0 10px;cursor:col-resize;align-self:stretch;display:flex;align-items:center;justify-content:center;touch-action:none}
+.pane-split::before{content:"";width:3px;height:46px;border-radius:3px;background:var(--line)}
+.pane-split:hover::before,.pane-split.drag::before{background:var(--accent)}
+.wkpane .sthead .stbtns .panedown{color:var(--accent)}
+.wkdrop{position:fixed;inset:64px 14px 56px 14px;z-index:9990;border:2px dashed var(--accent);border-radius:16px;background:rgba(var(--accent-rgb),.10);display:none;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:var(--accent);pointer-events:none}
+body.wk-dragging .wkdrop{display:flex;pointer-events:auto}
+#sessbar .sb-tile.up{border-color:var(--accent);background:rgba(var(--accent-rgb),.16)}
+#sessbar .sb-tile.up .sb-lbl::after{content:" \2191";color:var(--accent);font-weight:800}
+#sessbar .sb-tile{cursor:grab}
+@media(max-width:820px){.wkspace{flex-direction:column;height:auto}.pane-split{display:none}.wkpane{height:calc(100dvh - 200px);min-height:380px}}
 .stile.big{position:relative}
 /* "Give Claude a file": visible drop bar (header fallback + mobile tap) + a drag overlay that covers the
    terminal iframe. The iframe normally swallows drag events, so the overlay only becomes pointer-active while
@@ -13231,9 +13245,9 @@ async function modLaunch(rel){toast("Launching a session in "+rel+"…");
   openInSessions(r.session);}
 // drop into the Sessions lens (Focus view) with this session as the BIG terminal; the previous big
 // becomes a dock little. Beats opening a new browser tab.
-function openInSessions(name){SESSVIEW='focus';localStorage.setItem('hpcc_sessview','focus');SESSBIG=name;
+function openInSessions(name){ panesSet(wkMobile()?[name]:(PANES.indexOf(name)>=0?PANES:PANES.concat([name])));   // pull it up into the workspace
   if(typeof sbAck==='function')sbAck(name);   // viewing it clears its taskbar gold flash immediately
-  gotoLens('sessions');setTimeout(()=>loadSessions(true),1000);}
+  gotoLens('sessions');setTimeout(()=>loadSessions(true),300);}
 // Default: open a session/terminal INLINE in the Sessions tab. New browser tabs ONLY via the arrow icon.
 function _openTerm(r){const n=(r&&(r.session||decodeURIComponent((String(r.term||'').split('name=')[1]||''))))||'';
   if(n)openInSessions(n); else if(r&&r.term)location.href=r.term;}
@@ -13464,7 +13478,21 @@ async function doLaunch(target,comp,name,rel){
   if(!r.ok){toast("Failed: "+(r.error||"?"),6000);return;}
   closeM();
   _openTerm(r);}
-let SESSVIEW=localStorage.getItem('hpcc_sessview')||'focus', SESSDATA=[], SESSBIG=null, SNAPTIMER=null, PEEKEL=null, PEEKT=null, PEEKSUP=0, TOKDATA={}, SESSRANGE=localStorage.getItem('hpcc_sessrange')||'24h';
+let SESSVIEW='workspace', SESSDATA=[], SESSBIG=null, SNAPTIMER=null, PEEKEL=null, PEEKT=null, PEEKSUP=0, TOKDATA={}, SESSRANGE=localStorage.getItem('hpcc_sessrange')||'24h';
+// WORKSPACE state: PANES = ordered session names "pulled up" into the main area (columns); PANEW = per-name
+// flex-grow width. SESSBIG is kept as an alias for PANES[0] so existing references keep working.
+let PANES=[], PANEW={};
+try{PANES=JSON.parse(localStorage.getItem('hpcc_panes')||'[]')||[];}catch(e){PANES=[];}
+try{PANEW=JSON.parse(localStorage.getItem('hpcc_panew')||'{}')||{};}catch(e){PANEW={};}
+function panesSet(arr){PANES=arr.slice();SESSBIG=PANES[0]||null;try{localStorage.setItem('hpcc_panes',JSON.stringify(PANES));}catch(e){}}
+function panesSaveW(){try{localStorage.setItem('hpcc_panew',JSON.stringify(PANEW));}catch(e){}}
+function wkMobile(){return !!(window.matchMedia&&window.matchMedia('(max-width:820px)').matches);}
+function paneUp(name){ if(wkMobile()){panesSet([name]);} else if(PANES.indexOf(name)<0){panesSet(PANES.concat([name]));} loadSessions(true); }
+function paneDown(name){ var up=PANES.filter(function(n){return n!=name;});
+  if(!up.length){ var nx=(SESSDATA.find(function(x){return x.name!=name&&!x.protected;})||SESSDATA.find(function(x){return x.name!=name;})); up=nx?[nx.name]:[]; }
+  panesSet(up); loadSessions(true); }
+function paneToggle(name){ (PANES.indexOf(name)>=0 && !wkMobile()) ? paneDown(name) : paneUp(name); }
+function wkMarkDock(){ var b=document.getElementById('sessbar'); if(!b)return; b.querySelectorAll('.sb-tile').forEach(function(t){ t.classList.toggle('up', LENS==='sessions' && PANES.indexOf(t.getAttribute('data-n'))>=0); }); }
 function fmtTok(n){n=n||0;return n>=1e9?(n/1e9).toFixed(n>=1e10?0:1)+'B':n>=1e6?(n/1e6).toFixed(n>=1e7?0:1)+'M':n>=1e3?Math.round(n/1e3)+'K':''+n;}
 function fmtUSD(n){n=n||0;return n>=1e6?'$'+(n/1e6).toFixed(2)+'M':n>=1e3?'$'+(n/1e3).toFixed(1)+'k':'$'+n.toFixed(2);}
 function sparkSVG(arr,w,h,gid){w=w||128;h=h||28;gid=gid||'sg';if(!arr||!arr.length)return '';
@@ -13568,9 +13596,10 @@ function toggleAutocompact(ev){
   fetch('/api/autocompact',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:ACMP.on===false})}).then(r=>r.json()).then(r=>{if(r){ACMP={on:r.on,pct:r.pct};paintSessTools(SESSDATA?SESSDATA.length:null);}});
 }
 function sessToolsHTML(count){
-  var modes=[['focus','⊞ Focus'],['grid','▦ Grid'],['list','☰ List']].map(function(m){return '<button class="mini'+(SESSVIEW==m[0]?' go':'')+'" onclick="setSessView(\''+m[0]+'\')">'+m[1]+'</button>';}).join("");
+  // Workspace model (no focus/grid/list): drag sessions up from the taskbar into resizable split panes.
   var live=(count!=null)?('<span class="sesslive" title="'+count+' live session'+(count==1?'':'s')+'">🟢 '+count+'</span>'):'<span class="sesslive"></span>';
-  return live+modes+acmpBtn()+'<button class="mini" title="Admin shell — a plain shell in this project for sudo / interactive commands (type your password here)" onclick="openAdminShell()">🔑 Admin</button>';
+  var hint='<span class="sub" style="font-size:11px;color:var(--dim)" title="Drag a session up from the taskbar into the workspace to split the screen; drag the bar between panes to resize; ⏷ pushes a pane back down.">drag from the taskbar ↓ to split</span>';
+  return live+hint+acmpBtn()+'<button class="mini" title="Admin shell — a plain shell in this project for sudo / interactive commands (type your password here)" onclick="openAdminShell()">🔑 Admin</button>';
 }
 function paintSessTools(count){var el=document.getElementById('lensTools');if(el)el.innerHTML=(LENS=='sessions')?sessToolsHTML(count):'';}
 function setSessView(v){SESSVIEW=v;localStorage.setItem('hpcc_sessview',v);loadSessions(true);syncHash();}
@@ -17452,7 +17481,7 @@ async function loadSessions(quiet){
   let s=[],tok={};
   try{const[a,b,c]=await Promise.all([fetch("/api/sessions"),fetch("/api/token-usage"),fetch("/api/autocompact")]);s=await a.json();tok=await b.json();try{ACMP=(await c.json())||ACMP;}catch(e){}}catch(e){}
   TOKDATA=tok||{};
-  s=s.filter(x=>!x.protected||x.name==SESSBIG||x.chief);   // protected (bridge/crons/loops) stay hidden -- EXCEPT the focused big AND the Chief of Staff (the always-on mesh comms endpoint is always shown)
+  s=s.filter(x=>!x.protected||PANES.indexOf(x.name)>=0||x.chief);   // protected (bridge/crons/loops) stay hidden -- EXCEPT any pulled up into the workspace AND the Chief of Staff (always-on mesh endpoint)
   if(SESSBIG && !s.find(x=>x.name==SESSBIG)) s.unshift({name:SESSBIG,label:SESSBIG,attached:true,protected:false});
   var _cn=(window.CC&&window.CC.chiefSession);
   if(_cn && !s.find(x=>x.chief)) s.push({name:_cn,label:"Chief of Staff",attached:false,protected:true,chief:true,down:true});  // constant endpoint -- show even when not yet started
@@ -17462,11 +17491,9 @@ async function loadSessions(quiet){
   let head='<div id="tkstripwrap" style="grid-column:1/-1;margin:0 0 7px">'+totalsStrip()+'</div>';   // slim: just the metered-usage strip (hidden on mobile); the old title/control card + hint are gone -> the terminal moves up
   let body;
   if(!s.length)body=empty("No live sessions — click ▶ New session above to start one.");
-  else if(SESSVIEW=='list')body=s.map(sessRow).join("");
-  else if(SESSVIEW=='grid')body='<div id="desk" class="desk desk-grid">'+s.map((x,i)=>sessTile(x,i)).join("")+'</div>';
-  else body=renderFocus(s);
+  else body=renderWorkspace(s);
   document.getElementById("grid").innerHTML='<div class="modstack">'+head+body+'</div>';   // clean vertical stack -- usage strip (in head) sits ABOVE the focus block, never overlapped
-  unpeekNow(); startSnaps(); ccWireDropzones();
+  unpeekNow(); startSnaps(); ccWireDropzones(); wkWire();   // wire split-pane resizers + the dock->workspace drop
   termApplySaved(); termResizeInit();   // restore the user's remembered terminal height + wire the drag-resize grip
 }
 // ---- Give Claude a file: drag-drop / tap-to-attach onto a session ----------------------------------
@@ -17540,6 +17567,59 @@ function renderFocus(s){
     +'</div>'
     +'</div>';
   return h;
+}
+// ===== WORKSPACE: split-pane columns. Drag a session up from the dock; resize the splitter; push panes down. =====
+function paneHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)
+  +'<span class="stbtns">'
+  +'<button class="mini panedown" title="push this session back down to the taskbar" onclick="paneDown(\''+esc(x.name)+'\')">&#11015;</button>'
+  +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
+  +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
+  +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
+  +'<button class="mini" style="color:#f85149" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
+  +'</span></div>';}
+function renderWorkspace(s){
+  // reconcile PANES with live sessions; never empty (auto-show one big)
+  var up=PANES.filter(function(n){return s.find(function(x){return x.name==n;});});
+  if(!up.length) up=[s[0].name];
+  if(up.length!==PANES.length || up.some(function(n,i){return n!==PANES[i];})) panesSet(up);
+  var panes = wkMobile() ? [up[0]] : up;
+  var h='<div class="wkspace" id="wkspace">';
+  panes.forEach(function(name,idx){
+    var x=s.find(function(y){return y.name==name;})||{name:name,label:name};
+    if(idx>0) h+='<div class="pane-split" data-l="'+esc(panes[idx-1])+'" data-r="'+esc(name)+'" title="drag to resize"></div>';
+    var grow=PANEW[name]||1;
+    h+='<div class="wkpane bigsess" data-ccsess="'+esc(name)+'" data-pane="'+esc(name)+'" style="flex:'+grow+' 1 0">'
+      + paneHead(x) + ccDropBar(name) + '<iframe class="stframe" src="/term?name='+encodeURIComponent(name)+'"></iframe>' + ccDropOverlay()
+      +'</div>';
+  });
+  h+='</div><div id="wkdrop" class="wkdrop">&#11014; Drop to add this session to the workspace</div>';
+  return h;
+}
+// splitter drag (adjust the two adjacent panes' widths) + dock->workspace drop, wired after each render
+function wkWire(){
+  document.querySelectorAll('#wkspace .pane-split').forEach(function(sp){
+    if(sp._w)return; sp._w=1;
+    sp.addEventListener('pointerdown',function(e){
+      e.preventDefault(); var L=sp.previousElementSibling, R=sp.nextElementSibling; if(!L||!R)return;
+      var lw=L.getBoundingClientRect().width, rw=R.getBoundingClientRect().width, x0=e.clientX, total=lw+rw;
+      sp.classList.add('drag'); sp.setPointerCapture(e.pointerId);
+      function mv(ev){ var dx=ev.clientX-x0; var nl=Math.max(120,Math.min(total-120,lw+dx)); var nr=total-nl;
+        var ln=L.getAttribute('data-pane'), rn=R.getAttribute('data-pane');
+        PANEW[ln]=nl/total*2; PANEW[rn]=nr/total*2;   // keep them summing ~constant; flex-grow proportional to px
+        L.style.flex=PANEW[ln]+' 1 0'; R.style.flex=PANEW[rn]+' 1 0'; }
+      function up(ev){ sp.classList.remove('drag'); try{sp.releasePointerCapture(e.pointerId);}catch(_){}
+        document.removeEventListener('pointermove',mv); document.removeEventListener('pointerup',up); panesSaveW(); }
+      document.addEventListener('pointermove',mv); document.addEventListener('pointerup',up);
+    });
+  });
+  wkMarkDock();
+  var drop=document.getElementById('wkdrop');
+  if(drop&&!drop._w){ drop._w=1;
+    drop.addEventListener('dragover',function(e){e.preventDefault();try{e.dataTransfer.dropEffect='copy';}catch(_){}}) ;
+    drop.addEventListener('drop',function(e){e.preventDefault();document.body.classList.remove('wk-dragging');
+      var n=window.WKDRAG; if(!n&&e.dataTransfer){try{n=e.dataTransfer.getData('application/x-cc-pane');}catch(_){}}
+      window.WKDRAG=null; if(n)paneUp(n);});
+  }
 }
 // ---- Mobile focus-terminal resize: drag the grip (or tap -/+) to size the terminal; remembered per device.
 // Max is innerHeight-based (STABLE -- no unreliable element-top, no scrollTo anywhere, so the page scrolls
@@ -17801,7 +17881,7 @@ var HELP={
  calendar:{t:'📅 Calendar',h:'<p>Day / week / month / agenda. <b>Drag</b> the grid to create, drag edges to resize, drag to move. <b>Natural-language quick-add</b> — type "lunch with Sam thu 1pm". Click an event to edit, RSVP, or delete (with undo). Gold line = now.</p>'},
  drive:{t:'🗂️ Drive',h:'<p>Browse folders with breadcrumbs, search, grid/list. <b>Spacebar = Quick Look</b> (full-screen preview without leaving). Multi-select for batch actions; open or download anything.</p>'},
  files:{t:'📁 Files',h:'<p>Everything your agents make for you, newest first — open or download from anywhere (mobile too). Email attachments you "Save to…" a folder land here.</p>'},
- sessions:{t:'🖥 Sessions + the bottom taskbar',h:'<p>The bar pinned at the bottom is every live session, like a Windows taskbar. A tile <b>blinks gold while working</b> and <b>pulses gold when it finishes</b> — a done agent pulls you back even if you\'re in email. <b>Hover a tile</b> to blow it up into a full interactive terminal with Usage / New-tab / Graceful-exit / Kill.</p>'},
+ sessions:{t:'🖥 Sessions — your split-pane workspace',h:'<p>The bar pinned at the bottom is every live session (like a Windows taskbar). <b>Drag a session up</b> into the main area to open it; drag a <b>second</b> up and the screen <b>splits</b> — drag the bar between panes to set the widths, pull in as many as you want. A pane\'s <b>⏷</b> button pushes it back down to the taskbar; the taskbar highlights which sessions are currently up. A tile <b>pulses gold when it finishes</b> so a done agent pulls you back even from another lens. (On a phone: tap a tile to swap the single full-screen pane.)</p>'},
  pipeline:{t:'🚦 Pipeline Live-View',h:'<p>A live run-map of your nightly/scheduled pipeline. A loud full-width banner goes <b>red</b> if a run FAILS or STALLS, <b>amber</b> if a run is MISSED — so a silent failure can never slip by unnoticed again.</p>'},
  comms:{t:'📡 Comms — the inter-chief mesh',h:'<p>Your Chief of Staff talks to the Chiefs of your other instances over a durable mesh. Message one or all; replies come back here.</p>'},
  correspondence:{t:'Correspondence — a project\'s shared inbox',h:'<p>Every project / client folder can <b>auto-collect the Gmail threads that belong to it</b> — so the email about a job lives next to the job instead of being lost in your inbox.</p><p>You teach it with <b>matchers</b>, set just below the list:</p><ul><li>a sender <b>domain</b> — <code>brand.com</code> pulls in everyone at that company</li><li>a specific <b>email</b> — <code>jane@brand.com</code></li><li>a <b>keyword</b> — a project codename that appears in the subject or body</li></ul><p>Any thread that matches shows up here automatically. It is <b>read-only</b>: listing never marks mail read, and <b>nothing is ever sent from here</b>. Click <b>open</b> on a thread to jump to it in Gmail, and use <b>Save to…</b> on a Gmail attachment to drop the file straight into this project folder.</p>'},
@@ -18559,7 +18639,7 @@ function sbRender(list){
   if(sig!==SB._sig){
     var h='<span class="sb-title">Sessions</span>';
     h+= list.length ? list.map(function(s){
-      return '<div class="sb-tile" data-n="'+e2(s.name)+'" onmouseenter="sbHover(\''+esc(s.name)+'\',this)" onmouseleave="sbLeave()" onclick="sbClick(\''+esc(s.name)+'\')" title="'+e2(s.label||s.name)+'">'
+      return '<div class="sb-tile" data-n="'+e2(s.name)+'" draggable="true" ondragstart="sbDragStart(event,\''+esc(s.name)+'\')" ondragend="sbDragEnd()" onmouseenter="sbHover(\''+esc(s.name)+'\',this)" onmouseleave="sbLeave()" onclick="sbClick(\''+esc(s.name)+'\')" title="'+e2(s.label||s.name)+' — drag up to split, or click to toggle in the workspace">'
         +'<span class="sb-dot"></span><span class="sb-lbl">'+e2(s.label||s.name)+'</span></div>';
     }).join('') : '<span class="sb-empty">no sessions</span>';
     bar.innerHTML=h; SB._sig=sig;
@@ -18567,6 +18647,7 @@ function sbRender(list){
   list.forEach(function(s){   // apply busy/done/chief in place -- no DOM churn
     var t=bar.querySelector('.sb-tile[data-n="'+((window.CSS&&CSS.escape)?CSS.escape(s.name):s.name)+'"]'); if(!t)return;
     t.classList.toggle('busy', !!s.busy); t.classList.toggle('done', !!SB.done[s.name]); t.classList.toggle('chief', !!s.chief);
+    t.classList.toggle('up', LENS==='sessions' && PANES.indexOf(s.name)>=0);   // mark which sessions are pulled up into the workspace
   });
   document.title=(doneCount? '\u{1F7E1} '+doneCount+' done · ':'')+SB.baseTitle;   // cue even when in another browser tab
 }
@@ -18628,7 +18709,10 @@ async function sbKill(name){
     if(r&&r.protected&&typeof toast==='function')toast(r.error||'Protected session — cannot be killed.',6000); }catch(e){}
   sbHide(); setTimeout(sbPoll,700);
 }
-function sbClick(name){ sbAck(name); sbOpen(name); }
+function sbClick(name){ sbAck(name); if(LENS==='sessions'){ paneToggle(name); } else { sbOpen(name); } }
+function sbDragStart(ev,name){ window.WKDRAG=name; try{ev.dataTransfer.setData('application/x-cc-pane',name);ev.dataTransfer.effectAllowed='copy';}catch(_){}
+  document.body.classList.add('wk-dragging'); if(LENS!=='sessions')gotoLens('sessions'); }
+function sbDragEnd(){ document.body.classList.remove('wk-dragging'); window.WKDRAG=null; }
 // ===== Taskbar REORDER: press-hold a tile -> the dock wiggles + the tile lifts -> drag to reposition.
 // The new order saves per device (localStorage) and survives refresh. Pointer-based (mouse + touch);
 // a hold (300ms, finger steady) starts it, a quick tap still opens the session, an early move = scroll. =====

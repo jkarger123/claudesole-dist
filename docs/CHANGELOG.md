@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.0 -- 2026-06-28
+- SESSIONS WORKSPACE: replaced focus/grid/list with a modular split-pane workspace. DRAG a session up from the
+  bottom taskbar into the main area to open it; drag a SECOND up and the screen SPLITS into resizable columns --
+  drag the bar between panes to set widths, pull in as many as you want. Each pane has a "push down" button back
+  to the taskbar; the taskbar highlights which sessions are currently "up" (click a tile to toggle in/out). Never
+  empty (auto-shows one big; dragging the last down auto-promotes the next). Mobile = one full pane, tap a tile
+  to swap. State (which panes are up + their widths) persists per device. Built on the existing per-session
+  iframes; the view-mode toggle is gone. New PANES/PANEW state + renderWorkspace/paneHead/wkWire (splitter drag +
+  dock->workspace drop) + draggable, "up"-marked taskbar tiles; sized to the proven offset so the page never
+  scrolls. Verified headless (split / resize / push-down / no overflow).
+
 ## 0.98.0 -- 2026-06-28
 - SMART ACCOUNT BURN-ROTATION ("which login to burn next") overhaul, for multi-subscription installs:
   - RECOMMENDATION BRAIN rewritten (`_acct_recommend`): rank by SOONEST WEEKLY (7-day) reset first =
