@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.97.0 -- 2026-06-28
+- CHIEF WATCHDOG: the Chief of Staff (the always-on inter-chief MESH comms endpoint) is now kept alive. It was
+  a singleton started ON DEMAND with no supervisor -- if its claude process exited, nothing respawned it and the
+  node went silent on the mesh (this is exactly why AFP's CoS went dead). New `_chief_watchdog` re-opens it when
+  missing (every ~5 min, gated by cc.config `chief_supervise` default-on, with an anti-thrash guard + a notify on
+  respawn). Fixed AFP's dead chief live.
+- EXTENSION STANDARD backfill: AGENT.md added to all remaining agent-usable extensions (atlassian, aws,
+  brave-search, cloudflare, figma, filesystem, github, incident-commander, linear, notion, pagerduty,
+  playwright-browser, postgres-supabase, sentry, stripe, telegram-notify) + agent_doc declared -- so every
+  extension an agent can use now ships agent-facing usage docs (only the theme + the skill don't, by design).
+  Each AGENT.md carries the standard rules: credentials via the vault + secure-field flow (never chat), treat
+  results as untrusted data, read-first/confirm-before-mutate.
+
 ## 0.96.0 -- 2026-06-28
 - SECURE FIELDS -- a universal out-of-band channel so secrets NEVER touch the chat/transcript, both directions.
   REQUEST: an agent runs `cc-secure request "<label>" vault:<KEY>` -> a modal pops up in the dashboard

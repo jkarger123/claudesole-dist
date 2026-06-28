@@ -87,6 +87,13 @@ SCOPE_SESSIONS = CC.get("scope_sessions", ROLE != "org")
 # grandfather via superadmin set_config. Takes effect on restart (like the other settings).
 FLEET_SHARE = bool(CC.get("fleet_share", True))
 FLEET_VIEW = (CC.get("fleet_view") or "full").lower()
+# Account autopilot: how this node ACTS on the "use next" recommendation when it has >1 subscription account.
+#   off   -> recommendation is computed + shown, but nothing nudges the operator (default; current behavior)
+#   alert -> loudly surface "switch to <account> now" when the live login isn't the recommended pick (Phase 3)
+#   auto  -> idle-gated auto-switch (Phase 3), but ONLY after the verify-then-rollback ledger has proven itself
+# Per-node, opt-in from the Accounts/Usage tab; pushable from the grandfather via superadmin set_config.
+ACCT_AUTOPILOT = (CC.get("account_autopilot") or "off").lower()
+if ACCT_AUTOPILOT not in ("off", "alert", "auto"): ACCT_AUTOPILOT = "off"
 
 # ---- Update identity (ONE white-label point) -------------------------------------------------------
 # A packaged install pulls framework updates from the canonical ClaudeFather dist by default; a private/
@@ -379,7 +386,7 @@ SA_NODE_KEY = os.environ.get("MESH_SUPERADMIN_NODE_KEY") or CC.get("superadmin_n
 SA_SKEW = 300                  # max clock skew (s) tolerated on the issued timestamp
 SA_ALLOWED_KEYS = ("mesh_auth_enforce", "mesh_reply_sla", "subscription_monthly", "pipeline_stale_sec",
                    "deliverables_root", "storage_mode", "account_wallet", "fleet_share", "fleet_view", "side_label",
-                   "extension_routine_host")
+                   "extension_routine_host", "account_autopilot", "switch_proof_n")
 _SA_SEEN = {}                  # nonce -> exp_ts (single-use replay cache)
 _SA_LOCK = threading.Lock()
 # PUBLIC-KEY superadmin (the "every install is auto-under my superadmin" model): MC holds an Ed25519 PRIVATE
@@ -602,9 +609,15 @@ def superadmin_exec(grant):
         return {"ok": True, "action": action, "result": icloud_age_off(params.get("days"))}
     if action == "switch_account":
         # switch THIS node's (its macOS user's) live Claude login to a wallet account -- lets the overseer
-        # orchestrate the fleet (assign each user a distinct account). Reads the new account's windows right after.
-        r = account_switch(params.get("label") or params.get("email") or "")
-        return {"ok": bool(r.get("ok")), "action": action, "email": r.get("email"), "error": r.get("error")}
+        # orchestrate the fleet (assign each user a distinct account). With verify=True (the safe default for
+        # unattended/fleet use) it verifies the new login can read /usage and ROLLS BACK on failure.
+        tgt = params.get("label") or params.get("email") or ""
+        if params.get("verify", True):
+            r = account_switch_verified(tgt, by="superadmin")
+        else:
+            r = account_switch(tgt)
+        return {"ok": bool(r.get("ok")), "action": action, "email": r.get("email"),
+                "verified": r.get("verified"), "rolled_back": r.get("rolled_back"), "error": r.get("error")}
     return {"ok": False, "error": "unknown superadmin action: " + str(action)}
 
 def _self_restart():
@@ -3127,6 +3140,185 @@ def _user_idle_secs():
         return max(0, int(time.time() - last)) if last else 99999
     except Exception: return 99999
 
+# ---- Switch reliability: verify-then-rollback + a health ledger (Phase 2) ------------------------------------
+# A switch isn't "done" when the keychain write returns -- only when the new account is actually LIVE and can
+# READ /usage (proof it's a working login). account_switch_verified() does exactly that and, on ANY failure,
+# ROLLS BACK to the prior login so a bad/expired blob can never strand a node on a broken account. Every attempt
+# is logged; AUTO-switch (Phase 3) stays LOCKED until there are >= SWITCH_PROOF_N consecutive verified-good
+# switches (reliability earned in real manual use), and a single failure trips the counter back to 0.
+ACCT_SWITCH_HEALTH = os.path.expanduser("~/.claude/_cc_acct_switch_health.json")   # shared per macOS user
+_SWITCH_HEALTH_LOCK = threading.Lock()
+SWITCH_PROOF_N = int(CC.get("switch_proof_n") or 3)
+def _switch_health_load():
+    try:
+        d = json.load(open(ACCT_SWITCH_HEALTH))
+        if isinstance(d, dict): d.setdefault("events", []); return d
+    except Exception: pass
+    return {"events": [], "consec_ok": 0, "total_ok": 0, "total_fail": 0}
+def _switch_health_log(frm, to, ok, by="manual", stage="", err=None, rolled_back=None):
+    with _SWITCH_HEALTH_LOCK:
+        d = _switch_health_load()
+        ev = {"ts": int(time.time()), "from": frm or "", "to": to or "", "ok": bool(ok), "by": by, "stage": stage}
+        if err: ev["err"] = str(err)[:160]
+        if rolled_back is not None: ev["rolled_back"] = bool(rolled_back)
+        d["events"] = (d.get("events", []) + [ev])[-200:]
+        if ok:
+            d["consec_ok"] = d.get("consec_ok", 0) + 1; d["total_ok"] = d.get("total_ok", 0) + 1
+        else:
+            d["consec_ok"] = 0; d["total_fail"] = d.get("total_fail", 0) + 1; d["last_fail"] = ev
+        try:
+            tmp = ACCT_SWITCH_HEALTH + ".tmp"; json.dump(d, open(tmp, "w")); os.chmod(tmp, 0o600); os.replace(tmp, ACCT_SWITCH_HEALTH)
+            try: os.chmod(ACCT_SWITCH_HEALTH, 0o600)
+            except Exception: pass
+        except Exception: pass
+    return d
+def switch_health():
+    """Summary the UI + the (future) auto loop consume to decide whether auto-switch is trustworthy yet.
+    auto_proven flips True only after SWITCH_PROOF_N consecutive verified-good switches; one failure resets it."""
+    d = _switch_health_load(); consec = d.get("consec_ok", 0)
+    return {"consec_ok": consec, "total_ok": d.get("total_ok", 0), "total_fail": d.get("total_fail", 0),
+            "proof_n": SWITCH_PROOF_N, "auto_proven": consec >= SWITCH_PROOF_N,
+            "last_fail": d.get("last_fail"), "recent": list(reversed(d.get("events", [])[-12:]))}
+
+def set_account_autopilot(mode):
+    """Opt this node into off|alert|auto (the Accounts/Usage toggle). Persists to cc.config AND updates the live
+    global so it applies WITHOUT a restart. 'auto' is REFUSED until the verify-then-rollback ledger has proven
+    itself (>= SWITCH_PROOF_N consecutive verified-good switches) -- the operator's 'prove it's reliable' gate."""
+    global ACCT_AUTOPILOT
+    mode = (mode or "").lower()
+    if mode not in ("off", "alert", "auto"): return {"ok": False, "error": "mode must be off | alert | auto"}
+    if mode == "auto":
+        h = switch_health()
+        if not h.get("auto_proven"):
+            return {"ok": False, "locked": True,
+                    "error": "auto is locked until the switch proves reliable (%d/%d verified-good switches so far — "
+                             "use 'alert' and let manual switches build the record first)" % (h.get("consec_ok", 0), SWITCH_PROOF_N)}
+    try:
+        cfg = json.load(open(_CC_CONFIG)) if os.path.isfile(_CC_CONFIG) else {}
+    except Exception as e:
+        return {"ok": False, "error": "read cc.config failed: " + str(e)[:120]}
+    cfg["account_autopilot"] = mode
+    try:
+        tmp = _CC_CONFIG + ".tmp"; json.dump(cfg, open(tmp, "w"), indent=2); os.replace(tmp, _CC_CONFIG)
+        try: os.chmod(_CC_CONFIG, 0o600)
+        except Exception: pass
+    except Exception as e:
+        return {"ok": False, "error": "write failed: " + str(e)[:120]}
+    ACCT_AUTOPILOT = mode                                   # live -- no restart needed
+    return {"ok": True, "mode": mode}
+
+# ---- Phase 3: idle-gated auto-switch loop (locked until the ledger proves the switch reliable) ----------------
+AUTO_IDLE_SEC = int(CC.get("autopilot_idle_sec") or 300)         # require this much idle before auto-switching
+AUTO_COOLDOWN_SEC = int(CC.get("autopilot_cooldown_sec") or 1800)# min seconds between auto-switches (anti-flap)
+AUTO_FRESH_SEC = int(CC.get("autopilot_fresh_sec") or 3600)      # the pick's /usage reading must be fresher than this
+_AUTOPILOT_STATE = {"last_switch": 0.0, "last_note": ""}
+ACCT_AUTOPILOT_LOCKFILE = os.path.expanduser("~/.claude/_cc_acct_autopilot.lock")
+def _acct_autopilot_claim():
+    """Per-user file lock so exactly ONE co-located instance auto-switches (the 3 hptuner nodes share ONE login)."""
+    now = time.time(); mypid = str(os.getpid())
+    try:
+        age = now - os.stat(ACCT_AUTOPILOT_LOCKFILE).st_mtime; held = open(ACCT_AUTOPILOT_LOCKFILE).read().strip()
+    except Exception:
+        age = 1e9; held = ""
+    if held and held != mypid and age < 360: return False        # another live instance owns it (stale > ~3 cycles)
+    try:
+        fd = os.open(ACCT_AUTOPILOT_LOCKFILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(fd, mypid.encode()); os.close(fd); return True
+    except Exception:
+        return False
+def _acct_autopilot_loop():
+    """Auto-switch the live login to the recommended pick -- but ONLY when EVERY safety gate passes:
+      - this node is in 'auto' AND the verify-then-rollback ledger is auto_proven (>=SWITCH_PROOF_N good)
+      - the recommended pick differs from the live login and is in THIS node's wallet
+      - the user is idle (>= AUTO_IDLE_SEC) so we never yank the login mid-task
+      - the pick's /usage reading is OK and fresh (< AUTO_FRESH_SEC) -- never act on stale/errored data
+      - a cooldown since the last auto-switch (anti-flap)
+    The switch itself is account_switch_verified (auto-rolls-back a bad login); a failed switch trips the ledger
+    back below the proof bar, disabling auto until re-earned. KILL-SWITCH: set the mode to anything but 'auto'
+    (live-applied). Only ONE co-located instance acts (file lock)."""
+    time.sleep(75)                                               # let boot + the first account poll settle
+    while True:
+        try:
+            if ACCT_AUTOPILOT == "auto" and switch_health().get("auto_proven") and _acct_autopilot_claim():
+                aw = account_windows_all()
+                pick = aw.get("pick"); cur = aw.get("current_email")
+                pa = next((a for a in aw.get("accounts", []) if a.get("email") == pick), None)
+                fresh = bool(pa and pa.get("ok") and pa.get("ts") and (time.time() - pa["ts"]) < AUTO_FRESH_SEC)
+                idle = _user_idle_secs()
+                cooled = (time.time() - _AUTOPILOT_STATE["last_switch"]) > AUTO_COOLDOWN_SEC
+                if (aw.get("should_switch") and aw.get("pick_in_wallet") and pick and pick != cur
+                        and idle >= AUTO_IDLE_SEC and fresh and cooled):
+                    r = account_switch_verified(pick, by="auto")
+                    _AUTOPILOT_STATE["last_switch"] = time.time()
+                    msg = ("auto-switched %s -> %s (%s)" % (cur, pick,
+                           "verified" if r.get("ok") else ("FAILED, " + ("rolled back" if r.get("rolled_back") else "NOT rolled back") + ": " + str(r.get("error"))[:120])))
+                    _AUTOPILOT_STATE["last_note"] = time.strftime("%H:%M ") + msg
+                    try: open(os.path.expanduser("~/.cc-credential-changes.log"), "a").write(
+                        time.strftime("%Y-%m-%d %H:%M:%S") + "  AUTOPILOT " + msg + "\n")
+                    except Exception: pass
+        except Exception: pass
+        time.sleep(120)
+
+def _wallet_rec(target):
+    """Resolve a wallet account by label OR email -> its stored record (blob + account identity), else None."""
+    target = (target or "").strip()
+    if not target: return None
+    pth = _acct_path(target)
+    if pth and os.path.isfile(pth):
+        try: return json.load(open(pth))
+        except Exception: pass
+    try:                                                   # fall back: match by email across the wallet
+        for fn in os.listdir(ACCT_WALLET_DIR):
+            if not fn.endswith(".json"): continue
+            r = json.load(open(os.path.join(ACCT_WALLET_DIR, fn)))
+            if (r.get("email") or "") == target: return r
+    except Exception: pass
+    return None
+
+def account_switch_verified(target, by="manual"):
+    """Switch this macOS user's live login to `target` (wallet label or email), then VERIFY the new account is
+    actually live AND can read /usage; on ANY failure ROLL BACK to the prior login. Logs every attempt to the
+    health ledger. Blocks ~20s (the verify spawns a /usage read). Returns a rich result the UI surfaces."""
+    snap = _kc_read()                                      # prior login -> the rollback target
+    prev_email = ((snap or {}).get("account") or {}).get("emailAddress") or _current_email()
+    rec = _wallet_rec(target)
+    if not rec:
+        _switch_health_log(prev_email, target, False, by, "resolve", "not in this node's wallet")
+        return {"ok": False, "error": "account not in this node's wallet: " + str(target)}
+    tgt_email = rec.get("email") or target
+    if prev_email and tgt_email and prev_email == tgt_email:
+        return {"ok": True, "noop": True, "verified": True, "email": tgt_email, "note": "already live"}
+    if not _kc_write(rec.get("blob"), rec.get("account")):
+        _switch_health_log(prev_email, tgt_email, False, by, "write", "keychain write failed")
+        return {"ok": False, "error": "keychain write failed (login not changed)"}
+    time.sleep(1.0)
+    live_now = _current_email(); verified = False; werr = None; windows = None
+    if live_now == tgt_email:                              # identity flipped -> now prove it can actually read
+        try:
+            with _ACCT_POLL_LOCK: vr = _read_usage_session(label="verify")
+            verified = bool(vr.get("ok")); werr = vr.get("error"); windows = vr.get("windows")
+        except Exception as e: werr = str(e)[:140]
+    else:
+        werr = "identity did not flip (live shows %s)" % (live_now or "none")
+    if verified:                                           # success: persist the fresh windows + mark proven-good
+        try:
+            store = _acct_windows_load()
+            store[tgt_email] = {"email": tgt_email, "windows": windows or {}, "ts": int(time.time()),
+                                "ok": True, "side": _side_label(), "error": None}
+            _acct_windows_save(store); _acct_validate(tgt_email)
+            _acct_calib_log(tgt_email, _side_label(), windows or {}, int(time.time()))
+        except Exception: pass
+        _switch_health_log(prev_email, tgt_email, True, by, "verified")
+        return {"ok": True, "verified": True, "email": tgt_email, "from": prev_email,
+                "note": "live + verified (read /usage on the new login)"}
+    rolled = bool(snap and _kc_write(snap.get("blob"), snap.get("account")))   # verify failed -> ROLL BACK
+    _switch_health_log(prev_email, tgt_email, False, by, "verify", werr, rolled_back=rolled)
+    return {"ok": False, "verified": False, "rolled_back": rolled, "target": tgt_email,
+            "email": (prev_email if rolled else live_now),
+            "error": ("switch to %s failed verification (%s); %s" %
+                      (tgt_email, werr or "unknown",
+                       ("rolled back to " + (prev_email or "?")) if rolled else "ROLLBACK ALSO FAILED — check login"))}
+
 def _acct_windows_load():
     try:
         d = json.load(open(ACCT_WINDOWS_FILE)); return d if isinstance(d, dict) else {}
@@ -3221,33 +3413,63 @@ def _win_view(x, now, kind=None):
             "resets_ts": rts, "ttr": (rts - now) if rts else None, "expired": expired}
 
 def _acct_recommend(accounts, now):
-    """Decide which in-rotation account to USE NEXT, optimizing to MINIMIZE WASTED CAPACITY: prefer the
-    account whose 5-hour window resets soonest while it still has free headroom (that unused capacity
-    evaporates at the reset), gated so we never recommend one whose slow weekly cap is nearly spent.
-    Returns {email: {status, why, score, use_next}} plus the single pick email."""
+    """Decide which in-rotation account to USE NEXT to MINIMIZE LOCKED-UP CAPACITY across all accounts.
+
+    Principle (operator's): draining an account makes its capacity DEAD until that account's window resets,
+    so the COST of spending from an account is how long until it refreshes. Therefore always spend from the
+    account whose WEEKLY (7-day) window resets SOONEST -- that capacity comes back fastest, so consuming it
+    is cheapest -- and PRESERVE the accounts that won't reset for a while (keep them full as reserve). Goal
+    state: about-to-reset accounts are the most-drained; the longest-to-reset accounts have the most left.
+    The worst move is maxing out a far-from-reset account while a soon-to-reset one still had headroom (you
+    lose the far one for a week AND wasted the soon one's imminent refresh).
+
+    The 5-HOUR window is ONLY a throttle, NEVER a ranking input: if it's momentarily near full the account
+    can't be burned right now ('cooling') -> fall through to the next-soonest-reset account; it frees again
+    at its own soon 5h reset. The weekly window is the scarce one that actually drives the choice.
+
+    Gates: weekly drained (<=5% free) -> 'resting'; 5h throttle full (<=8% free) -> 'cooling'; else 'ready',
+    ranked by SOONEST weekly reset (headroom is only a faint tie-breaker between near-equal reset times).
+    When the fitted limit-model is READY it supplies a PREDICTED LIVE % (continuous telemetry between
+    scrapes) -- fresher than the last /usage scrape -- used for the free%.
+    Returns {email: {...}} plus the single pick email."""
+    WK_LEN_H = 7 * 24.0; S_LEN_H = 5.0
     info = {}
     for a in accounts:
-        em = a["email"]; w = a.get("windows") or {}; s = w.get("session"); wk = w.get("week")
+        em = a["email"]; w = a.get("windows") or {}; s = w.get("session"); wk = w.get("week") or {}
+        mdl = a.get("model") or {}
         if not a.get("in_rotation"):
             info[em] = {"status": "tracked", "why": "tracked, not in your rotation", "score": -9, "use_next": False}; continue
         if not a.get("ok") or not s:
             info[em] = {"status": "no_data", "score": -9, "use_next": False,
                         "why": "no reading yet — log into this account on any node to read it"}; continue
-        s_free = s.get("free", 0); s_ttr = s.get("ttr"); s_ttr_h = max(0.1, (s_ttr if s_ttr else 360) / 3600.0)
-        wk_free = (wk.get("free", 100) if wk else 100); wk_ttr = wk.get("ttr") if wk else None
-        perish = s_free / s_ttr_h                       # unused 5h capacity lost per idle hour (higher = use sooner)
-        if wk_free <= 8:
-            st, why, score = "resting", ("weekly nearly spent (%d%% used%s) — rest it" %
-                (100 - wk_free, (", resets in " + _acct_dur(wk_ttr)) if wk_ttr else "")), -1
+        def _free(winkey, wv, fallback):
+            pp = (mdl.get(winkey) or {}).get("pred_pct")   # model's predicted live % (live account only)
+            if pp is not None: return max(0.0, 100.0 - pp)
+            return wv.get("free", fallback)
+        s_free = _free("session", s, 0)
+        wk_free = _free("week", wk, 100)
+        s_ttr = s.get("ttr"); s_ttr_h = max(0.05, (s_ttr if s_ttr else S_LEN_H * 3600) / 3600.0)
+        wk_ttr = wk.get("ttr"); wk_ttr_h = max(0.05, (wk_ttr if wk_ttr else WK_LEN_H * 3600) / 3600.0)
+        modeled = bool((mdl.get("week") or {}).get("pred_pct") is not None
+                       or (mdl.get("session") or {}).get("pred_pct") is not None)
+        tag = " (modeled)" if modeled else ""
+        if wk_free <= 5:
+            st, score = "resting", -1.0
+            why = ("weekly drained (%d%% used) — resets in %s; keep resting%s" %
+                   (100 - wk_free, _acct_dur(wk_ttr), tag))
         elif s_free <= 8:
-            st, why, score = "cooling", ("5h window almost full (%d%% used) — resets in %s" %
-                (100 - s_free, _acct_dur(s_ttr))), 0
+            st, score = "cooling", 0.0
+            why = ("5h throttle full (%d%% used) — switch away; frees in %s · weekly %d%% free%s" %
+                   (100 - s_free, _acct_dur(s_ttr), wk_free, tag))
         else:
-            st, score = "ready", perish
-            why = ("%d%% of the 5h window free, resets in %s · weekly %d%% used" %
-                   (s_free, _acct_dur(s_ttr), 100 - wk_free))
-        info[em] = {"status": st, "why": why, "score": score, "use_next": False,
-                    "usable": min(s_free, wk_free)}
+            st = "ready"
+            # soonest weekly reset wins (its capacity is the cheapest to spend — refreshes first).
+            # headroom is only a faint tie-breaker so two near-equal resets prefer the fuller one.
+            score = (WK_LEN_H / wk_ttr_h) + (wk_free / 10000.0)
+            why = ("weekly resets soonest in %s · %d%% free%s" % (_acct_dur(wk_ttr), wk_free, tag))
+        info[em] = {"status": st, "why": why, "score": round(score, 4), "use_next": False,
+                    "usable": round(min(s_free, wk_free), 1), "wk_resets_h": round(wk_ttr_h, 1),
+                    "s_free": round(s_free, 1), "wk_free": round(wk_free, 1)}
     ready = [(em, d) for em, d in info.items() if d["status"] == "ready"]
     pick = max(ready, key=lambda kv: kv[1]["score"])[0] if ready else None
     if pick:
@@ -3379,8 +3601,15 @@ def account_windows_all():
     order = {"use_next": 0, "ready": 1, "cooling": 2, "resting": 3, "tracked": 4, "no_data": 5}
     accounts.sort(key=lambda a: (order.get(a.get("status"), 9), -(a.get("score") or -9)))
     pa = next((a for a in accounts if a["email"] == pick), None)
+    # Should the operator switch RIGHT NOW? Yes when the recommended pick exists, differs from the live login,
+    # and the live login is switchable on this node (the pick is in our wallet). This drives the alert (Phase 3).
+    pick_in_wallet = pick in walletset if pick else False
+    should_switch = bool(pick and cur and pick != cur and pick_in_wallet)
     return {"accounts": accounts, "now": now, "current_email": cur, "poll_ttl": ACCT_POLL_TTL,
             "rotation_default_all": rot is None, "pick": pick, "pick_why": (pa["why"] if pa else None),
+            "autopilot": ACCT_AUTOPILOT, "multi_account": len(walletset) > 1,
+            "should_switch": should_switch, "pick_in_wallet": pick_in_wallet,
+            "switch_health": switch_health(),
             "sides": [{"side": r.get("side") or r.get("store_id"), "live": r.get("current_email"),
                        "idle_secs": r.get("idle_secs")} for r in reps]}
 
@@ -3562,6 +3791,53 @@ def _acct_model_view(account, windows_now, now, live=False, log=None):
         out[wkey] = v
     return out
 
+def _acct_tod_report():
+    """Time-of-day diagnostics: does a window fill with FEWER tokens at certain hours (peak-throttling)?
+    For each window we estimate the IMPLIED full-window capacity from every informative calibration row
+    (`feature / (pct/100)`, using that window's best-fit feature) and bucket it by the local hour-of-day of
+    the reading. A flat profile means the budget is a fixed token count (no time effect -> nothing to fold
+    into the model); a large spread is a candidate signal to fold a per-hour correction into the 5h capacity.
+    Finding to date: the WEEKLY window is flat (~4% spread, ruled out); the 5h shows ~34% on small n
+    (a maybe -- keep measuring before trusting). Read-only; computed live from the calib log."""
+    try:
+        from zoneinfo import ZoneInfo; TZ = ZoneInfo(CC.get("timezone") or "America/Chicago")
+    except Exception:
+        TZ = None
+    import datetime as _dt
+    feat_for = {}                                                   # window -> best-fit feature (from the model)
+    for acct, wins in (_acct_model_fit() or {}).items():
+        for win, m in wins.items(): feat_for.setdefault(win, m.get("feature"))
+    DEF = {"session": "billable", "week": "cost", "week_sonnet": "context"}
+    BUCKETS = ["00-06", "06-12", "12-18", "18-24"]
+    out = {}
+    for win in ("session", "week", "week_sonnet"):
+        feat = feat_for.get(win) or DEF[win]
+        buck = {b: [] for b in BUCKETS}; allc = []
+        for r in _acct_calib_load():
+            if r.get("window") != win: continue
+            pct = r.get("pct") or 0
+            if not (5 <= pct <= 95): continue                      # avoid noise at the extremes
+            f = float(r.get(feat, 0) or 0)
+            if f <= 0: continue
+            cap = f / (pct / 100.0)
+            try:
+                h = _dt.datetime.fromtimestamp(r["ts"], TZ).hour if TZ else _dt.datetime.fromtimestamp(r["ts"]).hour
+            except Exception: continue
+            b = BUCKETS[min(3, h // 6)]; buck[b].append(cap); allc.append(cap)
+        if not allc:
+            out[win] = {"feature": feat, "n": 0, "buckets": {}, "spread_pct": None, "verdict": "no data"}; continue
+        mean = sum(allc) / len(allc)
+        bmeans = {b: (sum(v) / len(v) if v else None) for b, v in buck.items()}
+        present = [m for m in bmeans.values() if m]
+        spread = ((max(present) - min(present)) / mean * 100.0) if len(present) >= 2 else 0.0
+        out[win] = {"feature": feat, "n": len(allc), "mean": round(mean, 2),
+                    "buckets": {b: {"cap": round(m, 2) if m else None,
+                                    "rel_pct": round(m / mean * 100, 1) if m else None,
+                                    "n": len(buck[b])} for b, m in bmeans.items()},
+                    "spread_pct": round(spread, 1),
+                    "verdict": ("meaningful — time-of-day matters" if spread > 15 else "flat — no real effect")}
+    return {"windows": out, "note": "implied full-window capacity by local hour-of-day; flat = fixed budget"}
+
 _NEW_FOLDER_BRIEF = (
     "You're starting in a folder that has no CLAUDE.md yet. FIRST understand what this folder is for (read the "
     "files here and the parent CLAUDE.md; ask me if it's ambiguous). THEN create a CLAUDE.md in THIS folder so "
@@ -3622,6 +3898,23 @@ def launch(target, name, cid=None, rel=None):
 # resumes the SAME tmux session (carsearch would open the hptuners chief). Named by project.
 CHIEF = CC.get("chief_session") or ("chief-" + (re.sub(r"[^a-z0-9]+", "-", PROJECT_NAME.lower()).strip("-") or "main"))
 _FRIENDLY[CHIEF] = "Chief of Staff"
+_CHIEF_WD = {"respawns": 0, "last": 0}
+def _chief_watchdog():
+    """Keep the Chief of Staff (the always-on inter-chief MESH comms endpoint) alive. It's a protected singleton
+    started on demand; if its claude process exits, nothing else respawns it -> the node goes silent on the mesh
+    (this is why AFP's CoS went dead). This loop re-opens it when missing. Gated by cc.config chief_supervise
+    (default on); a generous interval + a thrash guard so a chief that keeps dying doesn't burn tokens."""
+    time.sleep(75)                                   # let boot + the normal on-boot open settle first
+    while True:
+        try:
+            if CC.get("chief_supervise", True) and sh([TMUX, "has-session", "-t", CHIEF])[0] != 0:
+                now = time.time()
+                if now - _CHIEF_WD["last"] > 540:    # don't respawn more than ~once/9min (anti-thrash)
+                    chief_open(); _CHIEF_WD["respawns"] += 1; _CHIEF_WD["last"] = now
+                    try: notify_send("Chief of Staff (%s) had exited -- watchdog respawned it (mesh comms restored)." % CHIEF)
+                    except Exception: pass
+        except Exception: pass
+        time.sleep(300)                              # check every ~5 min
 def chief_open():
     """Resume the persistent chief session if alive, else start it at the top level (briefed)."""
     if sh([TMUX, "has-session", "-t", CHIEF])[0] == 0:
@@ -10129,6 +10422,7 @@ def auth_token_set(new):
 def settings_get():
     return {"project_name": PROJECT_NAME, "brand": BRAND, "role": ROLE, "preset": PRESET,
             "auth_on": bool(AUTH_TOKEN), "fleet_share": FLEET_SHARE, "fleet_view": FLEET_VIEW,
+            "account_autopilot": ACCT_AUTOPILOT,
             "integration": (CC.get("integration") or "").lower(), "is_agency": is_agency(),
             "tier": "grandfather" if ROLE == "org" else "father",
             "type": "agency" if is_agency() else "project",
@@ -10152,6 +10446,9 @@ def settings_save(body):
         if bool(cfg.get("fleet_share", True)) != v: cfg["fleet_share"] = v; changed.append("fleet_share=" + str(v))
     if body.get("fleet_view") in ("full", "own"):
         if (cfg.get("fleet_view") or "full") != body["fleet_view"]: cfg["fleet_view"] = body["fleet_view"]; changed.append("fleet_view=" + body["fleet_view"])
+    if body.get("account_autopilot") in ("off", "alert", "auto"):
+        if (cfg.get("account_autopilot") or "off") != body["account_autopilot"]:
+            cfg["account_autopilot"] = body["account_autopilot"]; changed.append("account_autopilot=" + body["account_autopilot"])
     if not changed: return {"ok": True, "changed": [], "note": "No changes."}
     try:
         tmp = _CC_CONFIG + ".tmp"
@@ -10521,6 +10818,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/session-bar":   return self._s(200, json.dumps(session_bar()))
         if u.path == "/api/claude-accounts": return self._s(200, json.dumps(account_list()))
         if u.path == "/api/account-windows": return self._s(200, json.dumps(account_windows_all()))
+        if u.path == "/api/account-tod": return self._s(200, json.dumps(_acct_tod_report()))
+        if u.path == "/api/account-switch-health": return self._s(200, json.dumps(switch_health()))
         if u.path == "/api/google/gmail-thread":  return self._s(200, json.dumps(gmail_thread(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-att":
             b, err = gmail_attachment_bytes(q.get("id", [""])[0], q.get("att", [""])[0])
@@ -10643,6 +10942,10 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(account_snapshot(body.get("label") or None)))
         if u.path == "/api/claude-account/switch":
             return self._s(200, json.dumps(account_switch(body.get("label", ""))))
+        if u.path == "/api/account-switch-verified":   # switch + verify + auto-rollback on failure (Phase 2)
+            return self._s(200, json.dumps(account_switch_verified(body.get("target") or body.get("label") or body.get("email") or "", by=body.get("by") or "manual")))
+        if u.path == "/api/account-autopilot":         # opt this node into off|alert|auto (auto is gated)
+            return self._s(200, json.dumps(set_account_autopilot(body.get("mode", ""))))
         if u.path == "/api/claude-account/remove":
             return self._s(200, json.dumps(account_remove(body.get("label", ""))))
         if u.path == "/api/claude-account/usage":
@@ -13307,6 +13610,29 @@ function acctFuelSection(){
   var accts=d.accounts||[], sides=d.sides||[];
   var h='<div class="card" style="cursor:default;grid-column:1/-1;background:linear-gradient(135deg,#16140c,#0d0f17);border-color:#e8c54744;box-shadow:0 0 22px #e8c54712">'
    +'<div class="modnav"><b>🔋 Account fuel — which login to burn next</b> <span class="sub">subscription rate limits · the live account on each machine auto-refreshes every '+Math.round((d.poll_ttl||1800)/60)+'m · others show last-known</span> <button class="mini" onclick="awRefreshAll(this)">↻ read live now</button></div>';
+  // ---- opt-in: how THIS node acts on the recommendation (only meaningful with >1 subscription account) ----
+  if(d.multi_account){
+    var mode=d.autopilot||'off', sh=d.switch_health||{}, proven=!!sh.auto_proven;
+    var mk=function(m,lbl,desc,dis){ var on=(mode===m);
+      return '<button class="mini'+(on?' go':'')+'" '+(dis?'disabled ':'')+'title="'+e2(desc)+'" onclick="awSetMode(\''+m+'\')" style="'+(on?'':'opacity:.78')+(dis?';cursor:not-allowed':'')+'">'+(on?'● ':'')+lbl+'</button>'; };
+    h+='<div style="margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:#0006">'
+      +'<b style="font-size:12.5px;color:#cfd3da">Act on this:</b>'
+      +mk('off','Off','Just show the recommendation — never nudge or switch',false)
+      +mk('alert','🔔 Alert me','Loudly tell me to switch when the live login is not the best pick',false)
+      +mk('auto','🤖 Auto'+(proven?'':' 🔒'),proven?'Switch the login for me when idle + safe (verified, auto-rollback)':('Locked until the switch proves reliable — '+(sh.consec_ok||0)+'/'+(sh.proof_n||3)+' verified-good switches so far. Use Alert and do a few manual switches first.'),!proven)
+      +'<span class="sub" style="margin-left:auto">'+(sh.total_ok||0)+' verified · '+(sh.total_fail||0)+' failed · '+(proven?'<span style="color:#3fb950">auto unlocked ✓</span>':('<span style="opacity:.75">auto locked '+(sh.consec_ok||0)+'/'+(sh.proof_n||3)+'</span>'))+'</span>'
+      +'</div>';
+  }
+  // ---- the loud SWITCH NOW banner: live login is not the recommended pick (only in alert/auto modes) ----
+  if(d.should_switch && (d.autopilot==='alert'||d.autopilot==='auto') && d.pick){
+    h+='<div style="margin-top:11px;padding:14px 16px;border:2px solid #f0b429;border-radius:13px;background:linear-gradient(135deg,#2a1d05,#1a1206);box-shadow:0 0 26px #f0b42933">'
+      +'<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'
+      +'<div style="font-size:22px">⚠️</div>'
+      +'<div style="flex:1;min-width:200px"><div style="font-size:17px;font-weight:800;color:#ffd866;letter-spacing:-.2px">Switch now → '+e2(d.pick)+'</div>'
+      +'<div class="ucsub" style="margin-top:2px;color:#e8c98a">Live login is <b>'+e2(d.current_email||'?')+'</b>, but '+e2(d.pick)+' is the account to burn — '+e2(d.pick_why||'')+(d.autopilot==='auto'?' · auto will switch when you\'re idle':'')+'</div></div>'
+      +'<button class="mini go" style="font-size:14px;padding:9px 16px" onclick="awSwitchNow(\''+esc(d.pick)+'\')">▶ Switch now</button>'
+      +'</div></div>';
+  }
   if(d.pick){ h+='<div style="margin-top:11px;padding:13px 15px;border:1px solid #e8c54766;border-radius:12px;background:#e8c5470d">'
       +'<div style="font-size:19px;font-weight:800;color:#f0d05a;letter-spacing:-.2px">▶ Use '+e2(d.pick)+' next</div>'
       +'<div class="ucsub" style="margin-top:3px">'+e2(d.pick_why||'')+'</div></div>'; }
@@ -17817,11 +18143,21 @@ async function acctSnapshot(){
 // merged one (the "it went back to the old look" bug).
 function acctReload(){ if(LENS==='usage'){ loadAcctWin(); } else { loadAccounts(); } }
 async function acctSwitch(label,email){
-  if(!confirm('Switch the Claude login for EVERY session to '+email+'?\\n\\nThis is live — all running sessions use it on their next request (no restart). Your current account stays saved in the wallet.'))return;
-  toast('Switching all sessions to '+email+'…',4000);
-  var r={}; try{ r=await(await fetch('/api/claude-account/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})})).json(); }catch(e){}
-  if(r&&r.ok){ toast('✓ Now logged in as '+(r.email||email)+' across all sessions',6000); } else { toast('Switch failed: '+((r&&r.error)||'?'),5000); }
+  if(!confirm('Switch the Claude login for EVERY session to '+email+'?\n\nThis is live — all running sessions use it on their next request (no restart). It VERIFIES the new login can read /usage and auto-rolls-back if it can\'t. Your current account stays saved in the wallet.\n\nTakes ~10-20s (it reads the new login).'))return;
+  toast('Switching + verifying '+email+'… (~15s)',8000);
+  var r={}; try{ r=await(await fetch('/api/account-switch-verified',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:(label||email)})})).json(); }catch(e){}
+  if(r&&r.ok){ toast('✓ Now logged in as '+(r.email||email)+' — verified across all sessions',6000); }
+  else if(r&&r.rolled_back){ toast('✗ '+email+' failed verification — rolled back to '+(r.email||'your previous login')+'. ('+((r&&r.error)||'?')+')',9000); }
+  else { toast('Switch failed: '+((r&&r.error)||'?'),6000); }
   acctReload();
+}
+// one-click switch from the alert banner (target = recommended pick). Same verified path.
+async function awSwitchNow(target){ return acctSwitch(target,target); }
+async function awSetMode(mode){
+  var r={}; try{ r=await(await fetch('/api/account-autopilot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:mode})})).json(); }catch(e){}
+  if(r&&r.ok){ toast(mode==='off'?'Auto-switch + alerts OFF':(mode==='alert'?'✓ ALERT mode — you\'ll be told when to switch':'✓ AUTO mode — switches for you when idle + safe'),5000); }
+  else { toast((r&&r.locked)?('🔒 '+r.error):('Could not set mode: '+((r&&r.error)||'?')),8000); }
+  loadAcctWin();
 }
 async function acctRemove(label){
   if(!confirm('Remove "'+label+'" from the wallet? (the stored credential is deleted; the LIVE login is unchanged. You can re-save it while logged into it.)'))return;
@@ -19042,6 +19378,7 @@ if __name__ == "__main__":
     threading.Thread(target=_boot_housekeeping, daemon=True).start()
     if ACCOUNT_WALLET:
         threading.Thread(target=_acct_poll_loop, daemon=True).start()  # per-account /usage fuel gauges (token-isolated)
+        threading.Thread(target=_acct_autopilot_loop, daemon=True).start()  # USAGE: idle-gated auto-switch (no-op unless account_autopilot=auto AND the switch ledger is proven)
     threading.Thread(target=_autoapprove_loop, daemon=True).start()   # keep agents off the permission-prompt wall
     threading.Thread(target=_autocompact_loop, daemon=True).start()    # graceful auto-compact when a session's context fills past the threshold
     threading.Thread(target=_tg_outbound_loop, daemon=True).start()    # Telegram: ping the phone when a routed session finishes/blocks
@@ -19052,6 +19389,7 @@ if __name__ == "__main__":
     threading.Thread(target=_core_integrity_loop, daemon=True).start() # INTEGRITY: verify framework files vs the signed manifest; appliances self-heal drift from the signed dist
     threading.Thread(target=_acct_windows_loop, daemon=True).start()   # USAGE: keep the account fuel-gauge fresh (refresh the live login's 5h/weekly windows ~30m; shared-lock deduped across co-located instances)
     threading.Thread(target=_substack_loop, daemon=True).start()       # SUBSTACK: poll tracked publications' RSS into the read cache (no-op until publications are configured)
+    threading.Thread(target=_chief_watchdog, daemon=True).start()      # CHIEF WATCHDOG: keep the always-on Chief of Staff (the mesh comms endpoint) alive -- respawn if its claude exits
     threading.Thread(target=_license_activate_loop, daemon=True).start() # LICENSE: a sold box auto-activates from its configured activation server on boot if unlicensed
     threading.Thread(target=_fleet_converge_loop, daemon=True).start() # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     threading.Thread(target=_routines_loop, daemon=True).start()       # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts

@@ -6,10 +6,16 @@
   "icon": "GH",
   "summary": "Read repos, manage issues + PRs, and see CI status from inside ClaudeFather.",
   "description": "Gives agents access to GitHub -- search code, read files, open/triage issues and pull requests, check CI/Actions -- so they can answer 'what changed', 'what's failing', and 'open a PR for this fix' without leaving the control center. Uses GitHub's official MCP server (remote OAuth, or a local fine-grained-PAT server for headless).",
-  "provides": ["mcp:github"],
+  "provides": [
+    "mcp:github"
+  ],
   "requires": [
-    {"key": "GITHUB_AUTH", "label": "A GitHub account with access to the target repos (remote = browser OAuth; local/headless = a fine-grained PAT)"}
+    {
+      "key": "GITHUB_AUTH",
+      "label": "A GitHub account with access to the target repos (remote = browser OAuth; local/headless = a fine-grained PAT)"
+    }
   ],
   "setup_doc": "SETUP.md",
-  "setup_agent": true
+  "setup_agent": true,
+  "agent_doc": "AGENT.md"
 }

@@ -6,11 +6,21 @@
   "icon": "DB",
   "summary": "Let agents run (read-only by default) SQL against your project's Postgres / Supabase DB.",
   "description": "Query the live database to answer real questions (counts, revenue, recent signups, error rows) and inspect schema -- the truth about a project is in its data. Supabase ships an official MCP server (run with --read-only); plain Postgres has an official reference server. Read-only role is the load-bearing guardrail.",
-  "provides": ["mcp:supabase", "mcp:postgres"],
+  "provides": [
+    "mcp:supabase",
+    "mcp:postgres"
+  ],
   "requires": [
-    {"key": "SUPABASE_ACCESS_TOKEN", "label": "A Supabase access token (or a read-only Postgres connection string)"},
-    {"key": "SUPABASE_PROJECT_REF", "label": "Your Supabase project ref (for Supabase mode)"}
+    {
+      "key": "SUPABASE_ACCESS_TOKEN",
+      "label": "A Supabase access token (or a read-only Postgres connection string)"
+    },
+    {
+      "key": "SUPABASE_PROJECT_REF",
+      "label": "Your Supabase project ref (for Supabase mode)"
+    }
   ],
   "setup_doc": "SETUP.md",
-  "setup_agent": true
+  "setup_agent": true,
+  "agent_doc": "AGENT.md"
 }

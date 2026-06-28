@@ -6,10 +6,16 @@
   "icon": "IC",
   "summary": "A scoped agent that triages incidents across Sentry + PagerDuty + logs and proposes next steps.",
   "description": "Installs an agents/incident-commander/ charter + run.py that, on demand, pulls open Sentry issues, PagerDuty incidents + on-call, and local nightly/error logs, then produces ONE ranked 'what's on fire and what do I do' posture. The natural capstone agent for a control center -- turns several read-only integrations into a single answer. Degrades to logs-only if the integrations aren't installed.",
-  "provides": ["agent:incident-commander"],
+  "provides": [
+    "agent:incident-commander"
+  ],
   "requires": [
-    {"key": "deps", "label": "Best with the sentry and/or pagerduty extensions installed (works logs-only without them)"}
+    {
+      "key": "deps",
+      "label": "Best with the sentry and/or pagerduty extensions installed (works logs-only without them)"
+    }
   ],
   "setup_doc": "SETUP.md",
-  "setup_agent": false
+  "setup_agent": false,
+  "agent_doc": "AGENT.md"
 }
