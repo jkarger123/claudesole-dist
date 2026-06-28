@@ -3947,7 +3947,10 @@ def launch(target, name, cid=None, rel=None, extra_sys=None):
         seed = ""
         if rel and os.path.isdir(wd) and not os.path.isfile(os.path.join(wd, "CLAUDE.md")):
             seed = " " + _shlex.quote(_NEW_FOLDER_BRIEF)
+        cl2 = "export CC_SESSION=" + _shlex.quote(name) + "; " + cl2   # so the agent can self-identify (cc-hold / cc-handoff)
         sh([TMUX, "new-session", "-d", "-s", name, "-c", wd, cl2 + seed])
+        try: _smeta_set(name, subject=(subj or None), active_ts=time.time())   # topic tag for relevance matching
+        except Exception: pass
     else:
         sub = ""
         if cid:
@@ -8904,10 +8907,12 @@ def handoff_accept(hid, force_new=False):
         if not r.get("ok"): return {"ok": False, "error": "could not create home: " + str(r.get("error"))}
         to_rel = r["rel"]; pkt["to_scope"] = to_rel; created = True
     if not to_rel: return {"ok": False, "error": "no destination scope"}
-    existing = [] if (created or force_new) else _sessions_in_scope(to_rel)
-    if existing:                                       # RESUME: hand the packet to the home agent already there
-        target = existing[0]
+    # RESUME the RELEVANT conversation (topic match), not just any session in the folder -- else open a fresh one.
+    target = None if (created or force_new) else _best_session_in_scope(to_rel, pkt.get("to_subject", ""), pkt.get("goal", ""))
+    if target:
         try: _mesh_deliver(target, _handoff_message(pkt))
+        except Exception: pass
+        try: _smeta_set(target, goal=pkt.get("goal"), active_ts=time.time())   # refresh the conversation's topic
         except Exception: pass
         res = {"ok": True, "session": target, "resumed": True, "term": "/term?name=" + urllib.parse.quote(target)}
     else:                                              # else open a fresh session in the destination
@@ -8917,6 +8922,9 @@ def handoff_accept(hid, force_new=False):
                      "for everything relevant to this topic + fill in this folder's CLAUDE.md (title + one-line + what "
                      "you learned), THEN continue the goal above.")
         res = launch("studio", "ho-" + _slug(pkt["to_subject"]), rel=to_rel, extra_sys=extra)
+    try:                                               # tag a freshly-opened session's topic for future relevance matching
+        if res.get("session") and not target: _smeta_set(res.get("session"), subject=pkt.get("to_subject"), goal=pkt.get("goal"), active_ts=time.time())
+    except Exception: pass
     try: module_note(to_rel, _handoff_note(pkt))       # ANTI-TAINT: durable summary -> DESTINATION, never the origin
     except Exception: pass
     if pkt.get("from_session"):                        # GRACEFUL STAND-DOWN of the origin (never killed)
@@ -8940,17 +8948,153 @@ def handoffs_list(status=None):
     return {"ok": True, "handoffs": ([h for h in hs if h.get("status") == status] if status else hs),
             "proposed": len([h for h in hs if h.get("status") == "proposed"])}
 
+# ---- RECONCILIATION: many conversations per folder converge on the FOLDER's MEMORY (the office records) --------
+# Conversations are ephemeral meetings; a folder's CLAUDE.md + CC:NOTES are the durable records. Each meeting reads
+# the records (auto) and, when it ends/goes idle, HARVESTS its minutes back into them; a reconcile pass then RETIRES
+# (archives -- never deletes) idle, harvested meetings. So N parallel conversations become N contributors to ONE
+# coherent record instead of N islands. Aggressive idle = ~4h (config idle_archive_sec); always resumable.
+_SESS_META = os.path.join(STATE_DIR, "_session_meta.json")        # {name:{subject,goal,pin,hold_until,agent_hold,harvest_ts,active_ts}}
+_ARCHIVED  = os.path.join(STATE_DIR, "_archived_sessions.json")   # {sessions:[{name,scope,subject,goal,ts,reason}]}
+_IDLE_ARCHIVE_SEC = float(CC.get("idle_archive_sec") or 4 * 3600)
+
+def _smeta_load(): return load(_SESS_META, {})
+def _smeta(name): return _smeta_load().get(name, {})
+def _smeta_set(name, **kv):
+    d = _smeta_load(); m = d.setdefault(name, {})
+    m.update({k: v for k, v in kv.items() if v is not None}); save(_SESS_META, d); return m
+
+def _norm_toks(s):
+    return set(re.findall(r"[a-z0-9]{3,}", (s or "").lower().replace("_", " ").replace("-", " ")))
+
+def _sess_topic(name):
+    m = _smeta(name); return (str(m.get("subject") or "") + " " + str(m.get("goal") or "")).strip()
+
+def _best_session_in_scope(rel, subject="", goal=""):
+    """The live conversation in this scope whose TOPIC best matches the incoming task -- so a transfer joins the
+    RELEVANT conversation, not just any session in the folder. None if nothing fits (=> start a fresh one)."""
+    want = _norm_toks(str(subject) + " " + str(goal))
+    if not want: return None
+    best, bs = None, 0.0
+    for s in _sessions_in_scope(rel):
+        have = _norm_toks(_sess_topic(s))
+        ov = (len(want & have) / float(len(want))) if have else 0.0
+        if ov > bs: best, bs = s, ov
+    return best if (best and bs >= 0.34) else None
+
+def _session_idle_sec(name):
+    """Seconds since this session last had activity (tmux pane activity OR our browser-open heartbeat)."""
+    act = 0.0
+    code, o, _ = sh([TMUX, "display-message", "-p", "-t", name, "#{session_activity}"])
+    try: act = float(o.strip())
+    except Exception: pass
+    act = max(act, float(_smeta(name).get("active_ts") or 0))
+    return (time.time() - act) if act else 1e9
+
+def session_hold(name, mode="pin", days=2, by="operator"):
+    """Keep a conversation alive past the idle clock. pin=indefinite; hold=expiring window; agent_hold=the agent
+    itself signalling 'I'll continue this'; clear/unpin to release."""
+    name = re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:64]
+    if not name: return {"ok": False, "error": "no session"}
+    if mode == "pin": _smeta_set(name, pin=True)
+    elif mode == "unpin": _smeta_set(name, pin=False)
+    elif mode == "hold": _smeta_set(name, hold_until=time.time() + max(1, int(days)) * 86400)
+    elif mode == "agent_hold": _smeta_set(name, agent_hold=True)
+    elif mode in ("clear", "clear_hold"): _smeta_set(name, hold_until=0, agent_hold=False)
+    else: return {"ok": False, "error": "bad mode"}
+    return {"ok": True, "name": name, "meta": _smeta(name)}
+
+def sessions_active(names):
+    """Browser heartbeat: sessions the operator currently has OPEN in the workspace count as active, so an
+    on-screen-but-quiet conversation is never archived out from under them."""
+    d = _smeta_load(); now = time.time()
+    for n in (names or []):
+        n = re.sub(r"[^A-Za-z0-9_-]", "", str(n))[:64]
+        if n: d.setdefault(n, {})["active_ts"] = now
+    save(_SESS_META, d); return {"ok": True, "n": len(names or [])}
+
+def _harvest_pointer(rel, name, subject):
+    """Server SAFETY-NET harvest: file a pointer note into the folder's records so an idle/abandoned conversation's
+    existence + resumability is never lost. (The real semantic distill is the agent's own job via `cc-note`, briefed
+    at every launch; module_note dedups so an agent note + this pointer don't double up.)"""
+    try: module_note(rel, "Conversation on '%s' ran here (%s) -- archived + one-click resumable. (auto-filed)"
+                     % ((subject or name)[:80], time.strftime("%Y-%m-%d")))
+    except Exception: pass
+
+def _archive_session(name, reason="idle-auto"):
+    """Retire a conversation: harvest (safety net) -> save a resume record -> close the tmux session. NEVER a
+    delete: the folder records hold the minutes and the conversation is one-click resumable in its scope."""
+    rel = _session_scope(name); m = _smeta(name)
+    if rel is not None and not m.get("harvest_ts"):
+        _harvest_pointer(rel, name, m.get("subject") or "")
+    a = load(_ARCHIVED, {"sessions": []})
+    a.setdefault("sessions", []).insert(0, {"name": name, "scope": rel, "subject": m.get("subject"),
+        "goal": m.get("goal"), "ts": int(time.time()), "reason": reason})
+    a["sessions"] = a["sessions"][:200]; save(_ARCHIVED, a)
+    sh([TMUX, "kill-session", "-t", name])
+    d = _smeta_load(); d.pop(name, None); save(_SESS_META, d)
+    return {"ok": True, "archived": name, "scope": rel}
+
+def resume_archived(name):
+    a = load(_ARCHIVED, {"sessions": []})
+    rec = next((s for s in a.get("sessions", []) if s["name"] == name), None)
+    if not rec: return {"ok": False, "error": "not archived"}
+    res = launch("studio", "ho-" + _slug(rec.get("subject") or "resume"), rel=rec.get("scope") or "")
+    if res.get("ok"):
+        try: _smeta_set(res.get("session"), subject=rec.get("subject"), goal=rec.get("goal"))
+        except Exception: pass
+        a["sessions"] = [s for s in a.get("sessions", []) if s["name"] != name]; save(_ARCHIVED, a)
+    return res
+
+def _archive_eligible(name):
+    if name == CHIEF or name.startswith(("admin-", "chief", "ralph-")): return False   # protected
+    m = _smeta(name)
+    if m.get("pin") or m.get("agent_hold"): return False
+    if float(m.get("hold_until") or 0) > time.time(): return False
+    return _session_idle_sec(name) >= _IDLE_ARCHIVE_SEC
+
+def reconcile_once():
+    """One reconcile pass (called by housekeeping + on demand): archive every idle, harvested, un-held conversation
+    -- folders converge on their records, zombies are retired. Returns what it did."""
+    arch = []
+    for s in _live_sessions():
+        try:
+            if _archive_eligible(s): _archive_session(s, "idle-auto"); arch.append(s)
+        except Exception: pass
+    return {"ok": True, "archived": arch}
+
+def hygiene():
+    """Workspace hygiene: live conversations grouped by folder (idle/hold/eligible state) + the resumable archive.
+    Surfaces the offices that have MORE THAN ONE conversation so the operator can see + reconcile."""
+    by = {}
+    for s in _live_sessions():
+        if s == CHIEF or s.startswith(("admin-", "ralph-")): continue
+        rel = _session_scope(s)
+        if rel is None: continue
+        m = _smeta(s)
+        by.setdefault(rel, []).append({"name": s, "subject": m.get("subject") or _FRIENDLY.get(s) or s,
+            "idle": int(_session_idle_sec(s)), "pin": bool(m.get("pin")), "hold_until": int(m.get("hold_until") or 0),
+            "agent_hold": bool(m.get("agent_hold")), "eligible": _archive_eligible(s)})
+    folders = sorted(([{"scope": k, "count": len(v), "sessions": v} for k, v in by.items()]),
+                     key=lambda f: (-f["count"], f["scope"]))
+    arch = load(_ARCHIVED, {"sessions": []}).get("sessions", [])[:40]
+    return {"ok": True, "folders": folders, "multi": [f for f in folders if f["count"] > 1],
+            "archived": arch, "idle_archive_sec": _IDLE_ARCHIVE_SEC,
+            "on": CC.get("reconcile", True) is not False}
+
 def _handoff_authority(subject=None):
     """Give a scoped agent the AUTHORITY + the mechanism to warm-transfer when the conversation drifts out of its
     lane -- the 'good front desk' behavior. Obeys the `handoff` toggle."""
     if CC.get("handoff", True) is False: return ""
     return ("STAYING IN YOUR LANE (warm transfer): you are scoped to '%s'. If the conversation moves SUBSTANTIALLY "
             "outside this scope, do NOT muscle through (that taints this scope's memory). Prepare a warm transfer: "
-            "`cc-handoff propose --goal '<what they now need>' --summary '<where we are>' [--to <scope|new>]` (or POST "
-            "/api/handoff-propose with from_session) -- it routes to the right home (creating one if none fits) and "
-            "the operator confirms with one click; the next agent picks up with the packet in the RIGHT place. The "
-            "operator can always decline and keep going. Small digressions are fine -- transfer when the TOPIC has "
-            "genuinely changed." % (subject or "this scope"))
+            "`cc-handoff propose --goal '<what they now need>' --summary '<where we are>' [--to <scope|new>]` -- it "
+            "routes to the right home (creating one if none fits) and the operator confirms with one click; the next "
+            "agent picks up in the RIGHT place. Small digressions are fine -- transfer when the TOPIC has genuinely "
+            "changed. RECONCILE (keep this folder smart across conversations): when you finish a task or before going "
+            "idle, file durable decisions/learnings to THIS folder's records with `cc-note \"<one-line learning>\"` -- "
+            "many conversations in a folder converge on its CC:NOTES, so filing yours is what makes the next one "
+            "start informed. If you're mid-task and stepping away, `cc-hold` keeps this conversation from "
+            "auto-archiving (idle conversations are archived ~4h, always one-click resumable)." % (subject or "this scope"))
 
 def _cc_config_set(updates):
     """Persist toggle(s) into cc.config.json (0600) + update the live CC. Used by the Context tab controls."""
@@ -8975,6 +9119,8 @@ def context_settings():
             "doc": "Beyond the cited brief, a cheap index pass flags FRESH items relevant to what you're doing that you were NOT handed -- the email/file/call just out of view -- as pointers in the launch brief + the Scout panel. Solves 'the agent doesn't know what it doesn't know' without dumping the inbox. Off = only the explicit brief is injected."},
         "handoff": {"on": CC.get("handoff", True) is not False, "label": "Warm transfer (the front desk)",
             "doc": "Every scoped agent is told to STAY IN ITS LANE and, when a conversation drifts out of scope, prepare a warm transfer -- a structured packet (goal/state/pointers) routed to the right home (created if none fits); you confirm with one click in the Transfers tab. The Chief acts as the triage front door. Keeps each scope's memory clean instead of tainting the folder you happened to launch in. Off = no drift-detection or handoff prompts."},
+        "reconcile": {"on": CC.get("reconcile", True) is not False, "label": "Reconcile + auto-archive idle conversations",
+            "doc": "Many conversations in one folder converge on that folder's records: each meeting files its minutes (CC:NOTES), then idle + harvested + un-held conversations are auto-archived (~4h; always one-click resumable) so offices don't fill with zombies. Pin / Hold / agent self-hold keep one alive. See the Workspace hygiene panel in Transfers. Off = nothing auto-archives (you reconcile manually)."},
         "housekeeping": {"on": CC.get("housekeeping", True) is not False, "label": "Automatic housekeeping",
             "doc": "Hourly: regenerate the module map (CC:CHILDREN + CC:TREEMAP), run Doctor, and surface over-budget docs / drift -- the doc tree stays clean with zero manual upkeep."},
         "autocompact": {"on": _autocompact_on(), "pct": _autocompact_pct(), "label": "Graceful auto-compaction",
@@ -8989,6 +9135,14 @@ _HOUSEKEEP_LOG = os.path.join(STATE_DIR, "_housekeeping.log")
 _HOUSEKEEP_SEEN = {}
 def _housekeeping_once():
     try: regen_all_children()        # regenerates every folder's CC:CHILDREN + the root CC:TREEMAP (idempotent)
+    except Exception: pass
+    try:                             # RECONCILE: retire idle, harvested, un-held conversations (folders converge)
+        if CC.get("reconcile", True) is not False:
+            r = reconcile_once()
+            if r.get("archived"):
+                with open(_HOUSEKEEP_LOG, "a") as f:
+                    f.write(time.strftime("%Y-%m-%d %H:%M ") + "reconcile: archived %d idle conversation(s): %s\n"
+                            % (len(r["archived"]), ", ".join(r["archived"][:8])))
     except Exception: pass
     try: issues = (doctor() or {}).get("issues", [])
     except Exception: issues = []
@@ -12102,6 +12256,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(route((q.get("q", [""])[0]) or (q.get("subject", [""])[0]) or ""), default=str))
         if u.path == "/api/handoffs":   # the warm-transfer queue (proposed/delivered/declined)
             return self._s(200, json.dumps(handoffs_list((q.get("status", [""])[0]) or None), default=str))
+        if u.path == "/api/hygiene":    # workspace hygiene: conversations per folder + the resumable archive
+            return self._s(200, json.dumps(hygiene(), default=str))
         if u.path == "/api/system":  # self-describing capability map (runtime + surfaces) -- for UI gating + agents
             return self._s(200, json.dumps(system_info(), default=str))
         if u.path == "/api/browser/commands":  # the desktop browser polls for agent-queued commands (Browser v2)
@@ -12313,7 +12469,7 @@ class H(BaseHTTPRequestHandler):
                 CC["autocompact"] = on
                 if body.get("pct") is not None: CC["autocompact_pct"] = max(50.0, min(99.0, float(body.get("pct"))))
                 _cc_config_set({"autocompact": CC.get("autocompact", True), "autocompact_pct": _autocompact_pct()})
-            elif key in ("context_brief", "context_ingest", "housekeeping", "scout", "handoff"):
+            elif key in ("context_brief", "context_ingest", "housekeeping", "scout", "handoff", "reconcile"):
                 _cc_config_set({key: on})
             else:
                 return self._s(200, json.dumps({"ok": False, "error": "unknown setting"}))
@@ -12364,6 +12520,11 @@ class H(BaseHTTPRequestHandler):
                 hops=body.get("hops", 0)), default=str))
         if u.path == "/api/handoff-accept":    return self._s(200, json.dumps(handoff_accept(body.get("id", ""), bool(body.get("force_new"))), default=str))
         if u.path == "/api/handoff-decline":   return self._s(200, json.dumps(handoff_decline(body.get("id", ""), body.get("reason", "")), default=str))
+        if u.path == "/api/session-hold":      return self._s(200, json.dumps(session_hold(body.get("name", ""), body.get("mode", "pin"), body.get("days", 2), body.get("by", "operator")), default=str))
+        if u.path == "/api/session-active":    return self._s(200, json.dumps(sessions_active(body.get("sessions") or []), default=str))
+        if u.path == "/api/session-archive":   return self._s(200, json.dumps(_archive_session(body.get("name", ""), "manual"), default=str))
+        if u.path == "/api/session-resume":    return self._s(200, json.dumps(resume_archived(body.get("name", "")), default=str))
+        if u.path == "/api/reconcile":         return self._s(200, json.dumps(reconcile_once(), default=str))
         if u.path == "/api/module-remove": return self._s(200, json.dumps(module_remove(body.get("rel",""))))
         if u.path == "/api/module-combine":return self._s(200, json.dumps(module_combine(body.get("a",""), body.get("b",""))))
         if u.path == "/api/module-regen":  return self._s(200, json.dumps({"ok": True, "regenerated": regen_all_children()}))
@@ -18347,8 +18508,36 @@ async function loadHandoffs(){
   if(!proposed.length) h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="meta">No transfers awaiting. When a conversation needs to move homes, it shows up here for your one-click confirm.</div></div>';
   proposed.forEach(function(p){h+=hoCard(p,true);});
   if(done.length){h+='<div class="card" style="cursor:default;grid-column:1/-1"><b style="font-size:12.5px;color:var(--mut)">Recent</b>'+done.map(function(p){return '<div style="padding:6px 0;border-top:1px solid var(--line);font-size:12px"><span class="badge" style="background:#2a2a33;color:var(--dim)">'+esc(p.status)+'</span> '+e2(p.from_scope||'?')+' &rarr; '+e2(p.to_scope||p.to_subject||'?')+' &middot; <span class="sub">'+e2((p.goal||'').slice(0,60))+'</span></div>';}).join('')+'</div>';}
+  var hy={};try{hy=await(await fetch('/api/hygiene')).json();}catch(e){}
+  h+=hoHygieneCard(hy);
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
 }
+function hoDur(s){s=Math.max(0,s|0);return s<60?(s+'s'):s<3600?((s/60|0)+'m'):s<86400?((s/3600|0)+'h'):((s/86400|0)+'d');}
+function hoHygieneCard(hy){
+  if(!hy||!hy.ok)return '';
+  var folders=hy.folders||[],arch=hy.archived||[],multi=hy.multi||[];
+  var rows=folders.map(function(f){
+    var sess=f.sessions.map(function(s){
+      var tags=[];if(s.pin)tags.push('&#128204; pinned');if(s.hold_until>Date.now()/1000)tags.push('&#9208; held');if(s.agent_hold)tags.push('agent-hold');
+      tags.push(s.eligible?('<span style="color:#d29922">idle '+hoDur(s.idle)+' &mdash; archiving</span>'):('idle '+hoDur(s.idle)));
+      return '<div style="display:flex;gap:6px;align-items:center;padding:4px 0;font-size:12px;flex-wrap:wrap">'
+        +'<code>'+esc(s.name)+'</code> <span class="sub">'+e2(String(s.subject||'').slice(0,38))+'</span>'
+        +'<span class="sub" style="margin-left:auto">'+tags.join(' &middot; ')+'</span>'
+        +'<button class="mini" title="'+(s.pin?'unpin':'pin (never archive)')+'" onclick="hoHold(\''+esc(s.name)+'\',\''+(s.pin?'unpin':'pin')+'\')">'+(s.pin?'unpin':'&#128204;')+'</button>'
+        +'<button class="mini" title="hold 2 days" onclick="hoHold(\''+esc(s.name)+'\',\'hold\',2)">&#9208;2d</button>'
+        +'<button class="mini" title="archive now (resumable)" onclick="hoArchive(\''+esc(s.name)+'\')">archive</button></div>';
+    }).join('');
+    return '<div style="padding:7px 0;border-top:1px solid var(--line)"><div style="font-weight:600;font-size:12.5px">'+esc(f.scope||'(root)')+(f.count>1?(' <span style="color:#d29922">&middot; '+f.count+' conversations</span>'):'')+'</div>'+sess+'</div>';
+  }).join('');
+  var ar=arch.length?('<div style="margin-top:8px;border-top:1px dashed var(--line);padding-top:6px"><b style="font-size:12px;color:var(--mut)">Archived &mdash; resume in one click</b>'+arch.map(function(a){return '<div style="display:flex;gap:6px;align-items:center;padding:3px 0;font-size:12px"><span class="sub">'+esc(a.scope||'')+'</span> '+e2(String(a.subject||a.name).slice(0,40))+'<button class="mini go" style="margin-left:auto" onclick="hoResume(\''+esc(a.name)+'\')">resume</button></div>';}).join('')+'</div>'):'';
+  return '<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#129529; Workspace hygiene</b> <span class="sub">'+(multi.length?(multi.length+' folder(s) with multiple conversations'):'one conversation per folder')+'</span><div style="margin-left:auto"><button class="mini" onclick="hoReconcile()">Reconcile now</button></div></div>'
+    +'<div class="meta" style="margin:6px 0">Many conversations can share a folder; each files its minutes into the folder\'s records, then idle ones auto-archive (~'+Math.round((hy.idle_archive_sec||14400)/3600)+'h, always resumable). &#128204; Pin or &#9208; Hold one to keep it.</div>'
+    +(rows||'<div class="meta">No live conversations.</div>')+ar+'</div>';
+}
+async function hoHold(name,mode,days){try{await fetch('/api/session-hold',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,mode:mode,days:days||2})});toast(mode==='unpin'?'unpinned':(mode==='hold'?('held '+(days||2)+'d'):'pinned'),2200);}catch(e){}loadHandoffs();}
+async function hoArchive(name){try{await fetch('/api/session-archive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})});toast('Archived (resumable)',3000);}catch(e){}loadHandoffs();}
+async function hoResume(name){try{var r=await(await fetch('/api/session-resume',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})})).json();if(r.ok&&r.session){try{gotoLens('sessions');}catch(e){}setTimeout(function(){try{openInSessions(r.session);}catch(e){}},300);return;}else{toast('Resume failed',3000);}}catch(e){}loadHandoffs();}
+async function hoReconcile(){try{var r=await(await fetch('/api/reconcile',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();toast('Reconciled'+(r.archived&&r.archived.length?(' &mdash; archived '+r.archived.length):' &mdash; nothing idle'),4000);}catch(e){}loadHandoffs();}
 function hoCard(p,active){
   var ptr=(p.pointers||[]).slice(0,6).map(function(x){return '<li>['+esc(x.kind||'')+'] '+e2((x.title||'').slice(0,80))+(x.ref?(' <span class="sub">'+e2(String(x.ref).slice(0,50))+'</span>'):'')+'</li>';}).join('');
   var dest=p.needs_new_home?('<b style="color:var(--accent)">NEW home</b> under <code>'+esc(p.suggested_parent||'(root)')+'</code> &middot; &ldquo;'+e2(p.to_subject)+'&rdquo;'):('<code>'+esc(p.to_scope||'?')+'</code>'+(p.confidence?(' <span class="sub">('+Math.round(p.confidence*100)+'% match)</span>'):''));
@@ -18424,6 +18613,8 @@ function opDismiss(id){if(id)OP_ALERT_SEEN[id]=1;opHideAlert();}
 function opOpen(peer){opHideAlert();NOTES.peer=peer;LENS="notes";[].slice.call(document.querySelectorAll("#lens button")).forEach(function(b){b.classList.toggle("on",b.dataset.l==="notes");});var vt=document.getElementById("viewtitle");if(vt)vt.textContent="Notes";render();try{syncHash(true);}catch(e){}}
 setInterval(notesBadgePoll,6000);setTimeout(notesBadgePoll,2500);
 setInterval(hoBadgePoll,8000);setTimeout(hoBadgePoll,2000);
+// heartbeat: sessions OPEN in the workspace count as active so an on-screen-but-quiet one is never archived
+setInterval(function(){try{if(typeof PANES!=='undefined'&&PANES&&PANES.length)fetch('/api/session-active',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessions:PANES})});}catch(e){}},60000);
 // ===== BUILD lens: the custom-extension sandbox (developer-type) -- scaffold, approve, run programmatic exts =====
 async function loadBuild(){
   var box=document.getElementById("grid");if(!box)return;

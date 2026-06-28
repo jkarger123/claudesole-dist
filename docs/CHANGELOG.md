@@ -3,6 +3,26 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.21 -- 2026-06-28
+- RECONCILIATION -- many conversations per folder converge on the FOLDER's memory (the office-records model). The
+  fix for "Sarah opens 5 sessions in a folder and it's chaos": conversations are ephemeral meetings; a folder's
+  CLAUDE.md + CC:NOTES are the durable records; each meeting files its minutes there and idle ones retire.
+  - RELEVANT-CONVERSATION matching: a transfer/launch into a folder now resumes the conversation whose TOPIC
+    matches the task (`_best_session_in_scope`, topic tags in `_session_meta.json` set at launch/handoff) -- or
+    starts a fresh one if none fits. No more dumping a new task into an unrelated live conversation.
+  - HARVEST (both): agents file durable learnings to the folder records via `cc-note` (briefed at every launch);
+    a server safety-net pointer-harvest guarantees an abandoned conversation's existence + resumability is never
+    lost. The folder records are the single convergence point (you never merge transcripts).
+  - AUTO-ARCHIVE (~4h idle, configurable `idle_archive_sec`): idle + harvested + un-held conversations are retired
+    -- NEVER deleted: minutes are in the records and the conversation is one-click resumable in its scope. Keeps
+    offices clean automatically. Protected: Chief / admin / Ralph / pinned / held / on-screen.
+  - KEEP-ALIVE: Pin (indefinite), Hold +Nd (expiring), and agent self-hold (`cc-hold`) for "I'm coming back."
+    A browser heartbeat (`/api/session-active`) keeps on-screen sessions from being archived under you.
+  - WORKSPACE HYGIENE panel (Transfers lens): folders with multiple conversations, each with idle/hold state +
+    Pin / Hold / Archive, a "Reconcile now" button, and the resumable archive. `hygiene()` / `/api/hygiene`.
+  - APIs: `/api/session-hold|active|archive|resume`, `/api/reconcile`. Toggle `reconcile` (Context tab). CLIs
+    `cc-note` + `cc-hold` shipped; launch now exports `$CC_SESSION` so an agent can self-identify.
+
 ## 0.99.20 -- 2026-06-28
 - WARM-TRANSFER LIFECYCLE (the session topology, completing v0.99.19). When you confirm a transfer:
   - RESUME-DON'T-DUPLICATE: if a live session already owns the destination scope, the packet is delivered INTO

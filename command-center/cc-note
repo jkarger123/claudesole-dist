@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# cc-note "<durable learning/decision>"  -- file a learning into THIS folder's records (its CC:NOTES). Agents:
+# call this at the end of a task (or before going idle) so the folder's memory keeps what mattered. This is the
+# convergence point where the many conversations in one folder reconcile -- minutes filed into the office records.
+# Derives the folder from your current working directory. For agents AND humans.
+set -uo pipefail
+TEXT="$*"
+[ -z "${TEXT// }" ] && { echo "usage: cc-note \"the durable learning\""; exit 1; }
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
+[ -f "$CFG" ] || CFG="$HOME/hptuners-control/cc.config.json"
+PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
+TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
+ROOT="$(python3 -c "import json;print(json.load(open('$CFG')).get('project_root') or '')" 2>/dev/null || echo '')"
+REL="$(python3 -c "import os,sys;r=os.path.relpath(os.getcwd(),sys.argv[1]);print('' if r=='.' else r)" "$ROOT" 2>/dev/null || echo '')"
+case "$REL" in ..*) REL="";; esac
+BODY="$(python3 -c "import json,sys;print(json.dumps({'rel':sys.argv[1],'text':sys.argv[2]}))" "$REL" "$TEXT")"
+if curl -s -X POST "http://127.0.0.1:${PORT}/api/module-note" -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODY" >/dev/null 2>&1; then
+  echo "* filed to this folder's records (CC:NOTES): $TEXT"
+else
+  echo "could not reach the dashboard on port ${PORT}"
+fi

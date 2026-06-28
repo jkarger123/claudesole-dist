@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# cc-hold [days]  -- "I'm coming back to this conversation; don't auto-archive it." No arg = an agent self-hold
+# (exempt until cleared); a number = hold for that many days. Uses $CC_SESSION (set at launch) to identify the
+# conversation. The operator can also Pin/Hold from the Transfers > Workspace hygiene panel.
+set -uo pipefail
+DAYS="${1:-}"
+SESS="${CC_SESSION:-}"
+[ -z "$SESS" ] && { echo "cc-hold: no \$CC_SESSION set (can't identify this conversation)"; exit 1; }
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
+[ -f "$CFG" ] || CFG="$HOME/hptuners-control/cc.config.json"
+PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
+TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
+if [ -n "$DAYS" ]; then MODE="hold"; else MODE="agent_hold"; fi
+BODY="$(python3 -c "import json,sys;print(json.dumps({'name':sys.argv[1],'mode':sys.argv[2],'days':int(sys.argv[3] or 0),'by':'agent'}))" "$SESS" "$MODE" "${DAYS:-0}")"
+if curl -s -X POST "http://127.0.0.1:${PORT}/api/session-hold" -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODY" >/dev/null 2>&1; then
+  echo "* held this conversation (${MODE}${DAYS:+ ${DAYS}d}) -- it won't auto-archive."
+else
+  echo "could not reach the dashboard on port ${PORT}"
+fi
