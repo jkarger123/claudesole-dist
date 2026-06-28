@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# cc-handoff propose --goal "<what they now need>" --summary "<where we are>" [--to <scope|new>] [--next "<next step>"]
+# Prepare a WARM TRANSFER: when this conversation has drifted out of your scope, don't muscle through -- route it
+# to the right home and let the operator confirm. Lands in the Transfers tab for one-click approval (Assisted).
+# For agents AND humans. Resolves this node's port + token from its cc.config.json.
+set -uo pipefail
+SUB="${1:-}"; shift || true
+[ "$SUB" = "propose" ] || { echo "usage: cc-handoff propose --goal \"...\" --summary \"...\" [--to <scope|new>] [--next \"...\"] [--from-session NAME]"; exit 1; }
+GOAL=""; SUMMARY=""; TO=""; NEXT=""; SUBJECT=""; FROMS="${CC_SESSION:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --goal) GOAL="${2:-}"; shift 2;;
+    --summary) SUMMARY="${2:-}"; shift 2;;
+    --to) TO="${2:-}"; shift 2;;
+    --next) NEXT="${2:-}"; shift 2;;
+    --subject) SUBJECT="${2:-}"; shift 2;;
+    --from-session) FROMS="${2:-}"; shift 2;;
+    *) echo "unknown arg: $1"; exit 1;;
+  esac
+done
+[ -z "${GOAL// }" ] && { echo "cc-handoff: --goal is required (what does the conversation now need?)"; exit 1; }
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
+[ -f "$CFG" ] || CFG="$HOME/hptuners-control/cc.config.json"
+PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
+TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
+BODY="$(python3 -c "import json,sys;print(json.dumps({'goal':sys.argv[1],'summary':sys.argv[2],'to':(sys.argv[3] or None),'next':sys.argv[4],'subject':(sys.argv[5] or None),'from_session':(sys.argv[6] or None),'by':'agent'}))" "$GOAL" "$SUMMARY" "$TO" "$NEXT" "$SUBJECT" "$FROMS")"
+RES="$(curl -s -X POST "http://127.0.0.1:${PORT}/api/handoff-propose" -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODY" 2>/dev/null)"
+if [ -n "$RES" ]; then
+  python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+h=d.get('handoff') or {}
+if not d.get('ok'): print('cc-handoff:', d.get('error','could not propose')); sys.exit(0)
+dest = ('NEW home (\"%s\")' % h.get('to_subject')) if h.get('needs_new_home') else h.get('to_scope')
+print('* warm transfer proposed -> %s. The operator will confirm it in the Transfers tab.' % dest)
+" "$RES"
+else
+  echo "could not reach the dashboard on port ${PORT}"
+fi

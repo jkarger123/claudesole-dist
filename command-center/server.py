@@ -3917,9 +3917,11 @@ _NEW_FOLDER_BRIEF = (
     "becomes the folder's one-line description in the New-session picker and Projects lens. Add more sections "
     "below as useful. Then give me a one-line status and stand by.")
 
-def launch(target, name, cid=None, rel=None):
+def launch(target, name, cid=None, rel=None, extra_sys=None):
     """Create a tmux session ON THE STUDIO. studio target runs Claude locally in the pillar dir;
-       windows target wraps `ssh -t <alias> claude` so it's still a persistent, browser-attachable Studio session."""
+       windows target wraps `ssh -t <alias> claude` so it's still a persistent, browser-attachable Studio session.
+       extra_sys = an extra SYSTEM-level block appended to the launch context (used by the warm-transfer desk to
+       inject the handoff packet so the agent rides in already knowing where the prior conversation left off)."""
     name = _uniq_session("hp-" + (re.sub(r"[^A-Za-z0-9_-]", "-", name)[:36].strip("-") or "session"))
     machines = {m["id"]: m for m in load(MACHINES, {"machines": []}).get("machines", [])}
     m = machines.get(target)
@@ -3938,6 +3940,7 @@ def launch(target, name, cid=None, rel=None):
             subj = os.path.basename((rel or "").rstrip("/")) or (os.path.basename(comp_dir(cid)) if cid else "")
         except Exception: subj = ""
         sysctx = _launch_sys_context(subj)
+        if extra_sys: sysctx = (sysctx + "\n\n" + extra_sys) if sysctx else extra_sys
         cl2 = cl + (" --append-system-prompt " + _shlex.quote(sysctx) if sysctx else "")
         # if launching into a folder with NO CLAUDE.md, brief the agent to create one (purpose + the one-line
         # description our system previews) -> the system LEARNS this launch point. (Guarded by rel; root has one.)
@@ -8292,6 +8295,8 @@ def _launch_sys_context(subject=None):
     self-skips when empty. The brief obeys `context_brief`, the Scout obeys `scout` (Context tab); the awareness
     parts always go (tiny + safety)."""
     parts = [_files_brief(), _extend_brief()]
+    ha = _handoff_authority(subject)                  # warm-transfer authority: stay in lane, hand off on drift
+    if ha: parts.append(ha)
     if CC.get("context_brief", True) is not False:
         cb, ids = _launch_context_brief(subject, with_ids=True)
         if cb: parts.append(cb)
@@ -8391,6 +8396,17 @@ def _system_brief():
                 fs = (focus_now() or {}).get("subject")
                 sc = _scout_brief(fs) if fs else ""
                 if sc: base += "\n\n" + sc
+        except Exception: pass
+        # FRONT DOOR (triage): the Chief routes the operator to the right home before going deep -- the warm-transfer
+        # desk. Keeps each topic's work in its own scope instead of piling everything into this general session.
+        try:
+            if CC.get("handoff", True) is not False:
+                base += ("\n\nYOU ARE THE FRONT DOOR (triage / warm-transfer desk): when the operator raises a topic, "
+                         "route it to the right HOME before going deep -- GET /api/route?q=<topic> returns the best "
+                         "scope (or that a new home is needed). Prefer launching/continuing the right scoped agent "
+                         "THERE (or propose a warm transfer: cc-handoff propose --to <scope|new>) over handling "
+                         "everything in this general session; if a topic has no home, propose creating one. The point "
+                         "is that every piece of work lands in its proper place with its own clean memory.")
         except Exception: pass
         return base
     except Exception:
@@ -8690,6 +8706,196 @@ def scout_panel(subject=None):
     s["auto_subject"] = auto; s["on"] = on
     return s
 
+# ---- THE WARM TRANSFER DESK: route to the right scope, hand off with a packet, create a home if none fits ----
+# The orchestration layer over the substrate (context + scout + scoped CLAUDE.md memory + launch) -- a great
+# company's front desk. A scoped agent that drifts out of its lane does NOT muscle through (that taints the
+# scope): it PREPARES a structured handoff packet (goal/state/decisions/open/next/pointers -- never a transcript
+# dump) and PROPOSES a warm transfer; the operator confirms (Assisted); we launch a session in the right home
+# with the packet + that scope's CLAUDE.md + a fresh context slice, and write the durable summary to the
+# DESTINATION's memory (never the origin's -- the anti-taint rule). No home fits -> we create one (charter
+# CLAUDE.md + deep-dive brief). Routing is DETERMINISTIC-FIRST (lexical match over the module map + summaries)
+# with the agent's own judgment as the agentic fallback. Guardrails: hop limit + no-bounce-back + operator-visible.
+_HANDOFFS = os.path.join(STATE_DIR, "_handoffs.json")
+_HOP_LIMIT = 4
+_SCOPE_CACHE = {"ts": 0, "v": None}
+
+def _slug(s):
+    return (re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")[:40]) or "topic"
+def _hand_load(): return load(_HANDOFFS, {"handoffs": []})
+def _hand_save(d): save(_HANDOFFS, d)
+
+def _session_scope(sess):
+    """Best-effort: the project-relative folder a session is currently in (its 'home scope')."""
+    try:
+        cwd = _pane_cwd(sess) if sess else ""
+        if cwd and (cwd == PROJECT or cwd.startswith(PROJECT + "/")):
+            r = os.path.relpath(cwd, PROJECT); return "" if r == "." else r
+    except Exception: pass
+    return None
+
+def _scope_candidates(limit=500):
+    """The HOMES a conversation can be routed to: every meaningful module (folder with a hand-authored CLAUDE.md,
+    or a pillar, or a top-level folder) + its one-line summary. Cached 60s (walking a big tree isn't free)."""
+    if _SCOPE_CACHE["v"] is not None and (time.time() - _SCOPE_CACHE["ts"]) < 60:
+        return _SCOPE_CACHE["v"]
+    out = []
+    for ab, rel in iter_folders():
+        if not rel: continue
+        cm = os.path.join(ab, "CLAUDE.md")
+        if not ((rel in PILLARS) or ("/" not in rel) or _has_hand(cm)): continue
+        title, summ = (_msummary(cm) if os.path.isfile(cm) else ("", ""))
+        out.append({"rel": rel, "name": os.path.basename(rel), "summary": (summ or title or "")[:160]})
+        if len(out) >= limit: break
+    _SCOPE_CACHE["ts"] = time.time(); _SCOPE_CACHE["v"] = out
+    return out
+
+def route(text, exclude=None):
+    """DETERMINISTIC-FIRST router: map a topic -> the best home scope (folder), scoring each candidate by name
+    hit + keyword overlap of the topic against the folder name + its CLAUDE.md one-liner. Low confidence =>
+    needs_new_home + a suggested parent (the most-relevant shallow area to create under). The agent's own
+    judgment is the agentic fallback (it can hand off to an explicit scope or to 'new')."""
+    low = (text or "").strip().lower()
+    toks = set(re.findall(r"[a-z0-9]{3,}", low))
+    scored = []
+    for c in _scope_candidates():
+        if exclude and c["rel"] == exclude: continue
+        nm = c["name"].lower()
+        name_hit = len(nm) >= 3 and re.search(r"\b" + re.escape(nm) + r"\b", low) is not None
+        ctoks = set(re.findall(r"[a-z0-9]{3,}", (c["name"] + " " + c["summary"]).lower()))
+        score = (0.6 if name_hit else 0.0) + min(0.4, len(toks & ctoks) * 0.08)
+        if score > 0: scored.append((round(min(1.0, score), 2), c))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:5]; best = top[0] if top else None; conf = best[0] if best else 0.0
+    needs_new = conf < 0.35; parent = None
+    if needs_new:
+        shallow = [(s, c) for s, c in scored if (c["rel"] in PILLARS or "/" not in c["rel"])]
+        parent = (shallow[0][1]["rel"] if shallow else "")
+    return {"ok": True, "query": (text or "").strip(),
+            "destination": (None if needs_new else {"rel": best[1]["rel"], "name": best[1]["name"],
+                            "summary": best[1]["summary"], "confidence": conf}),
+            "alternatives": [{"rel": c["rel"], "name": c["name"], "confidence": s} for s, c in top],
+            "needs_new_home": needs_new, "suggested_parent": parent}
+
+def _handoff_pointers(subject, limit=6):
+    """Pointers (NOT bodies) for the packet: cited items + fresh scout items about the subject -> the next agent
+    pulls what it needs (just-in-time), it isn't handed a transcript."""
+    ptrs, seen = [], set()
+    for getter in (lambda: (context.assemble(subject=str(subject), budget_tokens=600).get("items") or []),
+                   lambda: (context.scout(subject=str(subject), limit=limit).get("items") or [])):
+        try:
+            for it in getter()[:limit]:
+                k = (it.get("kind"), (it.get("title") or "")[:60])
+                if k in seen: continue
+                seen.add(k)
+                ref = (it.get("refs") or {})
+                ptrs.append({"kind": it.get("kind"), "title": (it.get("title") or "")[:100],
+                             "ref": ref.get("url") or ref.get("link") or ref.get("rel") or "", "id": it.get("id")})
+        except Exception: pass
+    return ptrs[:10]
+
+def handoff_propose(from_session=None, to=None, goal="", summary="", decisions=None, open_q=None,
+                    next_step="", subject=None, by="agent", hops=0):
+    """An out-of-lane agent (or the operator) PREPARES a warm transfer: routes (unless `to` is explicit/'new'),
+    builds the packet (+ auto-attached pointers), stores it status=proposed, surfaces it for one-click confirm
+    (Assisted). Guardrails: no bounce-back to the current scope; hop limit flags for operator takeover."""
+    sess = re.sub(r"[^A-Za-z0-9_-]", "", from_session or "")[:64]
+    from_rel = _session_scope(sess); routed = None
+    if to in (None, "", "auto"):
+        routed = route(" ".join([goal, summary, subject or ""]), exclude=from_rel)
+        dest = routed.get("destination"); to_rel = dest["rel"] if dest else None
+        needs_new = routed.get("needs_new_home"); parent = routed.get("suggested_parent")
+    elif to == "new":
+        routed = route(" ".join([goal, summary]), exclude=from_rel)
+        to_rel = None; needs_new = True; parent = routed.get("suggested_parent")
+    else:
+        to_rel = to.strip("/"); needs_new = False; parent = None
+    subj = (subject or (os.path.basename(to_rel) if to_rel else _slug(goal or summary or "topic")))
+    if to_rel and from_rel and to_rel == from_rel:
+        return {"ok": False, "error": "that's the current scope -- no handoff needed"}
+    d = _hand_load()
+    pkt = {"id": "ho-%d-%d" % (int(time.time()), len(d.get("handoffs", []))), "ts": int(time.time()),
+           "from_session": sess or None, "from_scope": from_rel, "to_scope": to_rel, "to_subject": subj,
+           "needs_new_home": bool(needs_new), "suggested_parent": parent, "goal": (goal or "")[:500],
+           "state": (summary or "")[:1500], "decisions": [str(x)[:200] for x in (decisions or [])][:12],
+           "open": [str(x)[:200] for x in (open_q or [])][:12], "next": (next_step or "")[:500],
+           "pointers": _handoff_pointers(subj), "hops": int(hops or 0),
+           "confidence": (routed.get("destination") or {}).get("confidence") if routed else None,
+           "by": by, "status": "proposed", "alternatives": (routed or {}).get("alternatives", [])}
+    if pkt["hops"] >= _HOP_LIMIT:
+        pkt["status"] = "flagged"; pkt["flag"] = "hop limit reached -- operator should take over"
+    d.setdefault("handoffs", []).insert(0, pkt); d["handoffs"] = d["handoffs"][:200]; _hand_save(d)
+    try: notify_send("Warm transfer proposed: %s -> %s" % (from_rel or "?", to_rel or ("NEW: " + subj)))
+    except Exception: pass
+    return {"ok": True, "handoff": pkt, "routed": routed}
+
+def _handoff_sysblock(pkt):
+    """The packet as a SYSTEM block injected into the destination session -- warm transfer: the agent rides in
+    knowing exactly where the prior conversation left off, in ITS own clean scope."""
+    L = ["WARM TRANSFER -- you are picking up a conversation handed to you because it belongs in THIS scope.",
+         "Continue seamlessly; you have this scope's CLAUDE.md + a fresh context brief above.",
+         "GOAL: " + (pkt.get("goal") or "(unspecified)")]
+    if pkt.get("state"): L.append("WHERE IT LEFT OFF: " + pkt["state"])
+    if pkt.get("decisions"): L.append("DECISIONS SO FAR:\n" + "\n".join("- " + d for d in pkt["decisions"]))
+    if pkt.get("open"): L.append("OPEN QUESTIONS:\n" + "\n".join("- " + q for q in pkt["open"]))
+    if pkt.get("next"): L.append("SUGGESTED NEXT STEP: " + pkt["next"])
+    if pkt.get("pointers"):
+        L.append("POINTERS (pull what you need; don't assume):\n" + "\n".join(
+            "- [%s] %s%s" % (p.get("kind"), (p.get("title") or "")[:90], ("  -> " + p["ref"]) if p.get("ref") else "")
+            for p in pkt["pointers"][:8]))
+    return "\n".join(L)[:3500]
+
+def _handoff_note(pkt):
+    return "Handoff received (%s): %s%s" % (time.strftime("%Y-%m-%d"),
+            (pkt.get("goal") or pkt.get("to_subject") or "topic"), ("; next: " + pkt["next"]) if pkt.get("next") else "")
+
+def handoff_accept(hid):
+    """Operator confirms the warm transfer (Assisted): creates a home if needed, launches a session THERE with the
+    packet + scope CLAUDE.md + fresh slice, writes the durable summary to the DESTINATION's memory (never the
+    origin's -- anti-taint), marks delivered."""
+    d = _hand_load(); pkt = next((h for h in d.get("handoffs", []) if h["id"] == hid), None)
+    if not pkt: return {"ok": False, "error": "no such handoff"}
+    if pkt.get("status") == "delivered": return {"ok": True, "already": True, "session": pkt.get("to_session")}
+    to_rel = pkt.get("to_scope"); created = False
+    if pkt.get("needs_new_home") and not to_rel:
+        r = module_add(pkt.get("suggested_parent") or "", _slug(pkt["to_subject"]), pkt.get("goal") or pkt.get("to_subject"))
+        if not r.get("ok"): return {"ok": False, "error": "could not create home: " + str(r.get("error"))}
+        to_rel = r["rel"]; pkt["to_scope"] = to_rel; created = True
+    if not to_rel: return {"ok": False, "error": "no destination scope"}
+    extra = _handoff_sysblock(pkt)
+    if created:
+        extra = (_NEW_FOLDER_BRIEF + "\n\n" + extra + "\n\nThis is a BRAND-NEW home: FIRST deep-dive the project "
+                 "for everything relevant to this topic + fill in this folder's CLAUDE.md (title + one-line + what "
+                 "you learned), THEN continue the goal above.")
+    res = launch("studio", "ho-" + _slug(pkt["to_subject"]), rel=to_rel, extra_sys=extra)
+    try: module_note(to_rel, _handoff_note(pkt))     # ANTI-TAINT: durable summary -> DESTINATION, never the origin
+    except Exception: pass
+    pkt["status"] = "delivered"; pkt["to_session"] = res.get("session"); pkt["delivered_ts"] = int(time.time())
+    pkt["created_home"] = created; _hand_save(d)
+    return {"ok": True, "session": res.get("session"), "to_scope": to_rel, "created_home": created, "term": res.get("term")}
+
+def handoff_decline(hid, reason=""):
+    d = _hand_load(); pkt = next((h for h in d.get("handoffs", []) if h["id"] == hid), None)
+    if not pkt: return {"ok": False, "error": "no such handoff"}
+    pkt["status"] = "declined"; pkt["decline_reason"] = (reason or "")[:200]; _hand_save(d)
+    return {"ok": True}
+
+def handoffs_list(status=None):
+    hs = _hand_load().get("handoffs", [])
+    return {"ok": True, "handoffs": ([h for h in hs if h.get("status") == status] if status else hs),
+            "proposed": len([h for h in hs if h.get("status") == "proposed"])}
+
+def _handoff_authority(subject=None):
+    """Give a scoped agent the AUTHORITY + the mechanism to warm-transfer when the conversation drifts out of its
+    lane -- the 'good front desk' behavior. Obeys the `handoff` toggle."""
+    if CC.get("handoff", True) is False: return ""
+    return ("STAYING IN YOUR LANE (warm transfer): you are scoped to '%s'. If the conversation moves SUBSTANTIALLY "
+            "outside this scope, do NOT muscle through (that taints this scope's memory). Prepare a warm transfer: "
+            "`cc-handoff propose --goal '<what they now need>' --summary '<where we are>' [--to <scope|new>]` (or POST "
+            "/api/handoff-propose with from_session) -- it routes to the right home (creating one if none fits) and "
+            "the operator confirms with one click; the next agent picks up with the packet in the RIGHT place. The "
+            "operator can always decline and keep going. Small digressions are fine -- transfer when the TOPIC has "
+            "genuinely changed." % (subject or "this scope"))
+
 def _cc_config_set(updates):
     """Persist toggle(s) into cc.config.json (0600) + update the live CC. Used by the Context tab controls."""
     try:
@@ -8711,6 +8917,8 @@ def context_settings():
             "doc": "Pull our calls/email/calendar/clips/notes/tasks/actions + each extension's relevant intel into ONE provenance-stamped store the briefs draw from (idempotent, every 15 min). Off = the store stops updating."},
         "scout": {"on": CC.get("scout", True) is not False, "label": "The Scout (proactive surfacing)",
             "doc": "Beyond the cited brief, a cheap index pass flags FRESH items relevant to what you're doing that you were NOT handed -- the email/file/call just out of view -- as pointers in the launch brief + the Scout panel. Solves 'the agent doesn't know what it doesn't know' without dumping the inbox. Off = only the explicit brief is injected."},
+        "handoff": {"on": CC.get("handoff", True) is not False, "label": "Warm transfer (the front desk)",
+            "doc": "Every scoped agent is told to STAY IN ITS LANE and, when a conversation drifts out of scope, prepare a warm transfer -- a structured packet (goal/state/pointers) routed to the right home (created if none fits); you confirm with one click in the Transfers tab. The Chief acts as the triage front door. Keeps each scope's memory clean instead of tainting the folder you happened to launch in. Off = no drift-detection or handoff prompts."},
         "housekeeping": {"on": CC.get("housekeeping", True) is not False, "label": "Automatic housekeeping",
             "doc": "Hourly: regenerate the module map (CC:CHILDREN + CC:TREEMAP), run Doctor, and surface over-budget docs / drift -- the doc tree stays clean with zero manual upkeep."},
         "autocompact": {"on": _autocompact_on(), "pct": _autocompact_pct(), "label": "Graceful auto-compaction",
@@ -11834,6 +12042,10 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(context.search((q.get("q", [""])[0]) or "", int((q.get("limit", ["30"])[0]) or 30)), default=str))
         if u.path == "/api/scout":   # THE SCOUT: fresh, relevant pointers you weren't handed (subject= or current focus)
             return self._s(200, json.dumps(scout_panel((q.get("subject", [""])[0]) or None), default=str))
+        if u.path == "/api/route":   # WARM TRANSFER DESK: which home does this topic belong to?
+            return self._s(200, json.dumps(route((q.get("q", [""])[0]) or (q.get("subject", [""])[0]) or ""), default=str))
+        if u.path == "/api/handoffs":   # the warm-transfer queue (proposed/delivered/declined)
+            return self._s(200, json.dumps(handoffs_list((q.get("status", [""])[0]) or None), default=str))
         if u.path == "/api/system":  # self-describing capability map (runtime + surfaces) -- for UI gating + agents
             return self._s(200, json.dumps(system_info(), default=str))
         if u.path == "/api/browser/commands":  # the desktop browser polls for agent-queued commands (Browser v2)
@@ -12045,7 +12257,7 @@ class H(BaseHTTPRequestHandler):
                 CC["autocompact"] = on
                 if body.get("pct") is not None: CC["autocompact_pct"] = max(50.0, min(99.0, float(body.get("pct"))))
                 _cc_config_set({"autocompact": CC.get("autocompact", True), "autocompact_pct": _autocompact_pct()})
-            elif key in ("context_brief", "context_ingest", "housekeeping"):
+            elif key in ("context_brief", "context_ingest", "housekeeping", "scout", "handoff"):
                 _cc_config_set({key: on})
             else:
                 return self._s(200, json.dumps({"ok": False, "error": "unknown setting"}))
@@ -12088,6 +12300,14 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/module-launch": return self._s(200, json.dumps(launch("studio", body.get("name") or (body.get("rel","").split("/")[-1] or "session"), rel=body.get("rel",""))))
         if u.path == "/api/module-note":   return self._s(200, json.dumps(module_note(body.get("rel",""), body.get("text",""))))
         if u.path == "/api/module-add":    return self._s(200, json.dumps(module_add(body.get("parent",""), body.get("name",""), body.get("summary",""))))
+        if u.path == "/api/handoff-propose":   # WARM TRANSFER: an out-of-lane agent (or the UI) prepares a transfer
+            return self._s(200, json.dumps(handoff_propose(
+                from_session=body.get("from_session"), to=body.get("to"), goal=body.get("goal", ""),
+                summary=body.get("summary", ""), decisions=body.get("decisions"), open_q=body.get("open"),
+                next_step=body.get("next", ""), subject=body.get("subject"), by=(body.get("by") or "agent"),
+                hops=body.get("hops", 0)), default=str))
+        if u.path == "/api/handoff-accept":    return self._s(200, json.dumps(handoff_accept(body.get("id", "")), default=str))
+        if u.path == "/api/handoff-decline":   return self._s(200, json.dumps(handoff_decline(body.get("id", ""), body.get("reason", "")), default=str))
         if u.path == "/api/module-remove": return self._s(200, json.dumps(module_remove(body.get("rel",""))))
         if u.path == "/api/module-combine":return self._s(200, json.dumps(module_combine(body.get("a",""), body.get("b",""))))
         if u.path == "/api/module-regen":  return self._s(200, json.dumps({"ok": True, "regenerated": regen_all_children()}))
@@ -14154,6 +14374,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="capture"><i class="ph-light ph-scissors"></i>Capture</button>
 <button data-l="comms"><i class="ph-light ph-chats-circle"></i>Comms<span id="commsBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="notes"><i class="ph-light ph-note-pencil"></i>Notes<span id="notesBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
+<button data-l="handoffs"><i class="ph-light ph-arrows-left-right"></i>Transfers<span id="transfersBadge" style="display:none;margin-left:6px;background:var(--accent);color:#15120a;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="ccr"><i class="ph-light ph-git-pull-request"></i>Change Requests<span id="ccrBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="propose"><i class="ph-light ph-paper-plane-tilt"></i>Propose Change</button>
 <button data-l="ralph"><i class="ph-light ph-repeat"></i>Ralph Loops</button>
@@ -14262,6 +14483,7 @@ function render(){
   else if(LENS=="context"){loadContext();return;}
   else if(LENS=="comms"){loadComms();return;}
   else if(LENS=="notes"){loadNotes();return;}
+  else if(LENS=="handoffs"){loadHandoffs();return;}
   else if(LENS=="build"){loadBuild();return;}
   else if(LENS=="skills"){loadSkills();return;}
   else if(LENS=="teams"){loadTeams();return;}
@@ -18054,6 +18276,43 @@ async function loadComms(){
 // ===== NOTES lens: operator<->operator chat (human notes between node owners; NOT the chief mesh) =====
 var NOTES={peer:null,threads:[]};
 function notesTime(ts){if(!ts)return"";try{return new Date(ts*1000).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});}catch(e){return"";}}
+// ---- THE TRANSFERS lens: the warm-transfer desk (Assisted -- you confirm each proposed handoff) ----
+function hoAgo(ts){var s=Math.max(0,Math.floor(Date.now()/1000-(ts||0)));return s<60?(s+'s'):s<3600?(Math.floor(s/60)+'m'):s<86400?(Math.floor(s/3600)+'h'):(Math.floor(s/86400)+'d');}
+async function loadHandoffs(){
+  var d={};try{d=await(await fetch('/api/handoffs')).json();}catch(e){}
+  var hs=(d.handoffs||[]);
+  var proposed=hs.filter(function(h){return h.status==='proposed'||h.status==='flagged';});
+  var done=hs.filter(function(h){return h.status!=='proposed'&&h.status!=='flagged';}).slice(0,12);
+  hoSetBadge(proposed.length);
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128260; Transfers &mdash; the warm-transfer desk</b> <span class="sub">'+proposed.length+' awaiting you</span></div>'
+    +'<div class="meta" style="margin:6px 0">When an agent\'s conversation drifts out of its lane, it prepares a <b>warm transfer</b> &mdash; a packet (goal, where it left off, pointers) routed to the right home (created if none exists). You confirm; the next agent picks up in the right place with clean memory. You can always decline and keep going. Toggle it under <a href="#" onclick="event.preventDefault();gotoLens(\'context\')">Context engineering</a>.</div>'
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px"><input id="hoRouteQ" placeholder="try the router: type a topic&hellip;" style="'+COMMS_INP+';flex:1;min-width:200px" onkeydown="if(event.key===\'Enter\')hoRoute()"><button class="mini" onclick="hoRoute()">Where would this go?</button></div><div id="hoRouteOut" class="meta" style="margin-top:6px"></div></div>';
+  if(!proposed.length) h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="meta">No transfers awaiting. When a conversation needs to move homes, it shows up here for your one-click confirm.</div></div>';
+  proposed.forEach(function(p){h+=hoCard(p,true);});
+  if(done.length){h+='<div class="card" style="cursor:default;grid-column:1/-1"><b style="font-size:12.5px;color:var(--mut)">Recent</b>'+done.map(function(p){return '<div style="padding:6px 0;border-top:1px solid var(--line);font-size:12px"><span class="badge" style="background:#2a2a33;color:var(--dim)">'+esc(p.status)+'</span> '+e2(p.from_scope||'?')+' &rarr; '+e2(p.to_scope||p.to_subject||'?')+' &middot; <span class="sub">'+e2((p.goal||'').slice(0,60))+'</span></div>';}).join('')+'</div>';}
+  document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
+}
+function hoCard(p,active){
+  var ptr=(p.pointers||[]).slice(0,6).map(function(x){return '<li>['+esc(x.kind||'')+'] '+e2((x.title||'').slice(0,80))+(x.ref?(' <span class="sub">'+e2(String(x.ref).slice(0,50))+'</span>'):'')+'</li>';}).join('');
+  var dest=p.needs_new_home?('<b style="color:var(--accent)">NEW home</b> under <code>'+esc(p.suggested_parent||'(root)')+'</code> &middot; &ldquo;'+e2(p.to_subject)+'&rdquo;'):('<code>'+esc(p.to_scope||'?')+'</code>'+(p.confidence?(' <span class="sub">('+Math.round(p.confidence*100)+'% match)</span>'):''));
+  var flag=p.status==='flagged'?'<div class="meta" style="color:#f85149;margin-top:4px">&#9888; '+e2(p.flag||'needs your takeover')+'</div>':'';
+  return '<div class="card" style="cursor:default;grid-column:1/-1;border-left:3px solid var(--accent)">'
+    +'<div style="display:flex;align-items:center;gap:8px"><b>&#128229; '+e2((p.goal||'(transfer)').slice(0,90))+'</b><span class="sub" style="margin-left:auto">'+hoAgo(p.ts)+' ago</span></div>'
+    +'<div class="meta" style="margin-top:6px">From <code>'+esc(p.from_scope||'a session')+'</code> &rarr; '+dest+'</div>'
+    +(p.state?'<div class="meta" style="margin-top:6px"><b>Where it left off:</b> '+e2(p.state)+'</div>':'')
+    +((p.decisions&&p.decisions.length)?'<div class="meta" style="margin-top:4px"><b>Decisions:</b> '+e2(p.decisions.join('; '))+'</div>':'')
+    +((p.open&&p.open.length)?'<div class="meta" style="margin-top:4px"><b>Open:</b> '+e2(p.open.join('; '))+'</div>':'')
+    +(p.next?'<div class="meta" style="margin-top:4px"><b>Next:</b> '+e2(p.next)+'</div>':'')
+    +(ptr?'<div class="meta" style="margin-top:6px"><b>Pointers it&rsquo;ll carry:</b><ul style="margin:4px 0 0 16px">'+ptr+'</ul></div>':'')
+    +flag
+    +(active?'<div style="margin-top:10px;display:flex;gap:8px"><button class="mini go" onclick="hoAccept(\''+esc(p.id)+'\')">&#128260; Warm-transfer there</button><button class="mini" onclick="hoDecline(\''+esc(p.id)+'\')">Decline</button></div>':'')
+    +'</div>';
+}
+async function hoAccept(id){toast('Opening the right place&hellip;',3000);try{var r=await(await fetch('/api/handoff-accept',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})).json();if(r.ok){toast('Transferred &rarr; '+esc(r.to_scope)+(r.created_home?' (new home created)':''),5000);}else{toast('Accept failed: '+esc(r.error||''),4500);}}catch(e){toast('Accept failed',3500);}loadHandoffs();}
+async function hoDecline(id){try{await fetch('/api/handoff-decline',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});}catch(e){}toast('Declined',2000);loadHandoffs();}
+async function hoRoute(){var el=document.getElementById('hoRouteOut');var q=((document.getElementById('hoRouteQ')||{}).value||'').trim();if(!q){el.innerHTML='';return;}el.innerHTML='Routing&hellip;';try{var d=await(await fetch('/api/route?q='+encodeURIComponent(q))).json();if(d.needs_new_home){el.innerHTML='&rarr; <b style="color:var(--accent)">No home yet</b> &mdash; would create one under <code>'+esc(d.suggested_parent||'(root)')+'</code>.';}else{var dd=d.destination||{};el.innerHTML='&rarr; <code>'+esc(dd.rel)+'</code> <span class="sub">('+Math.round((dd.confidence||0)*100)+'% match)</span>'+((d.alternatives&&d.alternatives.length>1)?(' &middot; also: '+d.alternatives.slice(1,4).map(function(a){return '<code>'+esc(a.rel)+'</code>';}).join(', ')):'');}}catch(e){el.innerHTML='route failed';}}
+function hoSetBadge(n){var b=document.getElementById('transfersBadge');if(b){if(n>0){b.textContent=n>99?'99+':n;b.style.display='inline-block';}else{b.textContent='';b.style.display='none';}}try{paintNavNotif();}catch(e){}}
+async function hoBadgePoll(){try{var d=await(await fetch('/api/handoffs?status=proposed')).json();hoSetBadge(d.proposed||0);}catch(e){}}
 async function loadNotes(){
   var box=document.getElementById("grid");if(!box)return;
   var d={};try{d=await(await fetch("/api/opnotes")).json();}catch(e){box.innerHTML=empty("Couldn't load notes.");return;}
@@ -18107,6 +18366,7 @@ function opHideAlert(){var el=document.getElementById("opAlert");if(el)el.classL
 function opDismiss(id){if(id)OP_ALERT_SEEN[id]=1;opHideAlert();}
 function opOpen(peer){opHideAlert();NOTES.peer=peer;LENS="notes";[].slice.call(document.querySelectorAll("#lens button")).forEach(function(b){b.classList.toggle("on",b.dataset.l==="notes");});var vt=document.getElementById("viewtitle");if(vt)vt.textContent="Notes";render();try{syncHash(true);}catch(e){}}
 setInterval(notesBadgePoll,6000);setTimeout(notesBadgePoll,2500);
+setInterval(hoBadgePoll,8000);setTimeout(hoBadgePoll,2000);
 // ===== BUILD lens: the custom-extension sandbox (developer-type) -- scaffold, approve, run programmatic exts =====
 async function loadBuild(){
   var box=document.getElementById("grid");if(!box)return;
@@ -19768,6 +20028,7 @@ function applyPreset(){
   {var _ab=document.querySelector('#lens button[data-l="accounts"]');if(_ab)_ab.style.display=(window.CC&&window.CC.accountWallet)?'':'none';}  // Claude Accounts lens self-hides until the wallet is enabled on this node
   {var _tk=document.querySelector('#lens button[data-l="tasks"]');if(_tk)_tk.style.display='';}  // Tasks is a built-in feature -- always available, outside the preset lens list
   {var _nt=document.querySelector('#lens button[data-l="notes"]');if(_nt)_nt.style.display='';}  // Notes (operator<->operator) is a built-in -- always available
+  {var _hd=document.querySelector('#lens button[data-l="handoffs"]');if(_hd)_hd.style.display='';}  // Transfers (warm-transfer desk) is a built-in -- always available
   {var _bd=document.querySelector('#lens button[data-l="build"]');if(_bd)_bd.style.display=(window.CC&&window.CC.type==='developer')?'':'none';}  // Build lens = developer-type only (custom sandbox)
   if(!(window.CC&&window.CC.role==='org')){var _pb=document.querySelector('#lens button[data-l="portfolio"]');if(_pb)_pb.style.display='none';
     var _pj=document.querySelector('#lens button[data-l="projects"]');if(_pj)_pj.style.display='none';}  // Portfolio + Projects = ClaudeGrandfather (overseer) only
@@ -19840,7 +20101,7 @@ var NAV_PINNED=["portfolio","sessions","chief","comms","notes","tasks","files"];
 var NAV_CAT_ORDER=["Google","Workspace","Agency","Team","Integrations","System"];
 var NAV_CAT={
   gmail:"Google",calendar:"Google",drive:"Google",
-  modules:"Workspace",projects:"Workspace",context:"Workspace",capture:"Workspace",ideas:"Workspace",
+  modules:"Workspace",projects:"Workspace",context:"Workspace",capture:"Workspace",ideas:"Workspace",handoffs:"Workspace",
   pipeline:"Workspace",ralph:"Workspace",jobs:"Workspace",routines:"Workspace",tree:"Workspace",
   agency:"Agency",calls:"Agency",
   agents:"Team",skills:"Team",teams:"Team",audit:"Team",

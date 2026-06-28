@@ -3,6 +3,25 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.19 -- 2026-06-28
+- THE WARM TRANSFER DESK -- agent routing + handoff (the "good customer-service desk" for your agents). The
+  orchestration layer that finally USES the substrate (context + scout + scoped CLAUDE.md memory + launch):
+  - ROUTER (`route()` / `/api/route`): deterministic-first -- maps a topic to the best HOME scope by lexical match
+    over the module map + each folder's one-liner; low confidence => needs_new_home + a suggested parent. The
+    agent's own judgment is the agentic fallback.
+  - HANDOFF PACKET (`_handoffs.json`): structured (goal / where-it-left-off / decisions / open / next / POINTERS),
+    never a transcript dump; pointers auto-attached from assemble() citations + scout().
+  - PROPOSE -> ACCEPT (Assisted): an out-of-lane agent prepares a transfer (`cc-handoff propose ...` /
+    `/api/handoff-propose`); you confirm in the new **Transfers** lens (one click). Accept launches a session in
+    the destination with the packet + that scope's CLAUDE.md + a fresh context slice injected, and -- when no home
+    fits -- CREATES one (charter CLAUDE.md + deep-dive brief) under the suggested parent.
+  - ANTI-TAINT: the durable summary is written to the DESTINATION scope's memory (CC:NOTES), NEVER the origin's --
+    fixes "launch in folder A, drift to topic B, A's memory gets polluted." Each scope stays clean.
+  - GUARDRAILS: hop limit + no-bounce-back + every transfer operator-visible (notify on propose).
+  - AGENT AUTHORITY: every scoped launch brief now tells the agent to stay in its lane + how to hand off on drift;
+    the Chief brief makes it the triage FRONT DOOR (route before going deep). Toggle `handoff` (Context tab).
+  - The Transfers lens also has a live router demo ("where would this topic go?"). `cc-handoff` CLI shipped.
+
 ## 0.99.18 -- 2026-06-28
 - THE SCOUT -- proactive context surfacing (the answer to "an agent can't know what it doesn't know"). Beyond the
   cited brief (the obvious subject matches), a cheap index pass over the WHOLE substrate now flags the items --
