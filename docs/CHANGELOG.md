@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.53 -- 2026-06-29
+- Ralph lens: "🗄 Clear N done/stopped" button in the Active header bulk-moves every FINISHED loop
+  (done / halted / stopped, and not still alive) to Previous loops in one click, so the active list stops
+  stacking up. Running/paused/idle/blocked loops are left alone. Reversible (they stay readable under Previous).
+  New ralph_archive_finished() + POST /api/ralph-archive-finished; button only shows when there's something to clear.
 ## 0.99.52 -- 2026-06-29
 - Account recommender now keeps a ~10% EMERGENCY RESERVE on each weekly window (operator's "get lean" idea):
   an account at <=10% weekly free is parked as reserve (was a 5% hard floor), so it's no longer recommended for

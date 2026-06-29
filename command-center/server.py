@@ -7836,6 +7836,16 @@ def ralph_control(name, action):
     else: return {"ok": False, "error": "bad action"}
     return {"ok": True, "action": action}
 
+def ralph_archive_finished():
+    """Bulk-move every FINISHED loop (done / halted / stopped, and not still alive) to Previous loops, so the
+    active list doesn't stack up. Leaves running/paused/idle/blocked loops alone."""
+    FINISHED = {"done", "halted", "stopped", "complete", "finished"}
+    moved = []
+    for lp in ralph_list():
+        if lp.get("alive") or lp.get("state") not in FINISHED: continue
+        if ralph_control(lp["name"], "archive").get("ok"): moved.append(lp["name"])
+    return {"ok": True, "moved": moved, "count": len(moved)}
+
 def ralph_save(name, which, content):
     d = _rdir(name); fn = RFILES.get(which)
     if not d or not fn: return {"ok": False, "error": "bad target"}
@@ -13149,6 +13159,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/module-combine":return self._s(200, json.dumps(module_combine(body.get("a",""), body.get("b",""))))
         if u.path == "/api/module-regen":  return self._s(200, json.dumps({"ok": True, "regenerated": regen_all_children()}))
         if u.path == "/api/ralph-control":  return self._s(200, json.dumps(ralph_control(body.get("name", ""), body.get("action", ""))))
+        if u.path == "/api/ralph-archive-finished":  return self._s(200, json.dumps(ralph_archive_finished()))
         if u.path == "/api/ralph-save":  return self._s(200, json.dumps(ralph_save(body.get("name", ""), body.get("which", ""), body.get("content", ""))))
         if u.path == "/api/ralph-create":  return self._s(200, json.dumps(ralph_create(body)))
         if u.path == "/api/task-add":      return self._s(200, json.dumps(task_add(body.get("title", ""), detail=body.get("detail", ""), due=body.get("due"), client=body.get("client", ""), priority=body.get("priority", "normal"))))
@@ -15502,9 +15513,18 @@ async function loadRalph(){
   let L=[];try{L=await(await fetch("/api/ralph")).json();}catch(e){}
   const q=(document.getElementById("search")||{value:""}).value.toLowerCase();
   L=L.filter(r=>!q||(r.name+" "+(r.goal||"")).toLowerCase().includes(q));
-  const head='<div class="card" style="cursor:default;grid-column:1/-1">'+ralphToggle()+'<h3 style="justify-content:space-between"><span>🔁 Ralph loops</span><button class="mini go" onclick="newRalph()">+ New loop</button></h3>'
+  const fin=L.filter(r=>!r.alive&&['done','halted','stopped','complete','finished'].includes(r.state)).length;
+  const head='<div class="card" style="cursor:default;grid-column:1/-1">'+ralphToggle()+'<h3 style="justify-content:space-between"><span>🔁 Ralph loops</span><span style="display:flex;gap:6px;align-items:center">'
+    +(fin?'<button class="mini" onclick="ralphArchiveDone('+fin+')" title="Move all done/halted/stopped loops to Previous loops">🗄 Clear '+fin+' done/stopped</button>':'')
+    +'<button class="mini go" onclick="newRalph()">+ New loop</button></span></h3>'
     +'<div class="meta">File-driven autonomous agent loops. Launch runs one in its own terminal session — open it to watch live, edit its progress/notes, and interrupt. Several can run at once.</div></div>';
   document.getElementById("grid").innerHTML=head+(L.map(ralphCard).join("")||empty("No active loops — click + New loop."));
+}
+async function ralphArchiveDone(n){
+  if(n&&!confirm('Move '+n+' finished (done/halted/stopped) loop'+(n>1?'s':'')+' to Previous loops? Reversible — they stay readable under Previous.'))return;
+  try{var r=await(await fetch('/api/ralph-archive-finished',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+    toast((r.count||0)+' loop'+((r.count===1)?'':'s')+' moved to Previous loops',2600);}catch(e){toast('Archive failed',2600);}
+  loadRalph();
 }
 async function loadRalphPrev(){
   let L=[];try{L=await(await fetch("/api/ralph-previous")).json();}catch(e){}
