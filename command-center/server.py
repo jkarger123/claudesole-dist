@@ -12859,7 +12859,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/brief":
             return self._s(200, json.dumps(morning_brief.mb_state(), default=str)) if morning_brief else self._s(200, json.dumps({"ok": False, "error": "morning_brief not available"}))
         if u.path == "/api/note-list":
-            return self._s(200, json.dumps(notebook.nb_list(), default=str)) if notebook else self._s(200, json.dumps({"ok": False, "error": "notebook not available"}))
+            return self._s(200, json.dumps(notebook.nb_list(q.get("q", [""])[0] or None), default=str)) if notebook else self._s(200, json.dumps({"ok": False, "error": "notebook not available"}))
         if u.path == "/api/brief-audio":
             p = morning_brief.audio_path(q.get("f", [""])[0]) if morning_brief else None
             if not p: return self._s(404, "not found")
@@ -19278,25 +19278,30 @@ async function loadNotes(){
   var mc=document.getElementById("noteMsgs");if(mc)mc.scrollTop=mc.scrollHeight;
   clearInterval(window.NOTESTIMER);window.NOTESTIMER=setInterval(function(){if(LENS!=="notes"){clearInterval(window.NOTESTIMER);return;}notesRefresh();},5000);
 }
-var NB={notes:[],hasVoice:false,rec:null,chunks:[]};
+var NB={notes:[],hasVoice:false,rec:null,chunks:[],q:""};
+async function nbSearch(){var i=document.getElementById("nbSearch");NB.q=i?i.value:"";var f=i&&document.activeElement===i;var p=i?i.selectionStart:0;await loadNotebook();var i2=document.getElementById("nbSearch");if(i2&&f){i2.focus();try{i2.setSelectionRange(p,p);}catch(e){}}}
 async function loadNotebook(){
   var box=document.getElementById("grid");if(!box)return;
-  var d={};try{d=await(await fetch("/api/note-list")).json();}catch(e){box.innerHTML=empty("Couldn't load Notes.");return;}
+  var url="/api/note-list"+(NB.q?("?q="+encodeURIComponent(NB.q)):"");
+  var d={};try{d=await(await fetch(url)).json();}catch(e){box.innerHTML=empty("Couldn't load Notes.");return;}
   NB.notes=d.notes||[];NB.hasVoice=!!d.has_voice;
   var voice=NB.hasVoice?'<button id="nbRec" class="mini" onclick="nbToggleRec()">&#127908; Dictate</button>':'<span class="sub" title="Add DEEPGRAM_API_KEY in the Vault lens to enable voice">&#127908; voice off &mdash; add the Deepgram key</span>';
   var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128211; Notes</b> <span class="sub">write or speak a note &mdash; on save it becomes tasks and joins your brief &amp; context</span></div>'
     +'<textarea id="nbInput" rows="5" style="width:100%;box-sizing:border-box;'+COMMS_INP+';padding:11px;margin-top:9px;font:inherit;line-height:1.5;resize:vertical" placeholder="Type your note&hellip; or hit Dictate and just talk. When you Save, I pull out the tasks, decisions and follow-ups, file it into your context, and it shows up in your morning brief."></textarea>'
     +'<div style="display:flex;gap:9px;align-items:center;margin-top:9px;flex-wrap:wrap">'+voice+'<span id="nbRecStatus" class="sub"></span><button class="btn go" style="margin-left:auto" onclick="nbSave()">&#10003; Save note</button></div></div>';
-  if(!NB.notes.length)h+=empty("No notes yet &mdash; write or dictate one above.");
+  h+='<div class="card" style="cursor:default;grid-column:1/-1;padding:9px 12px"><div style="display:flex;align-items:center;gap:8px"><span>&#128269;</span><input id="nbSearch" value="'+esc(NB.q||"")+'" oninput="clearTimeout(window._nbst);window._nbst=setTimeout(nbSearch,250)" placeholder="Search your notes &mdash; title, text, tasks, decisions, tags&hellip;" style="flex:1;'+COMMS_INP+';padding:7px 10px;font:inherit">'+(NB.q?('<button class="mini" onclick="NB.q=\'\';loadNotebook()">clear</button> <span class="sub">'+(d.matched||0)+' of '+(d.total||0)+'</span>'):'<span class="sub">'+(d.total||0)+' note'+((d.total===1)?'':'s')+'</span>')+'</div></div>';
+  if(!NB.notes.length)h+=empty(NB.q?("No notes match “"+esc(NB.q)+"”."):"No notes yet &mdash; write or dictate one above.");
   NB.notes.forEach(function(n){
     var gsd={kind:'note',id:n.id,name:(n.title||'note')};
     var tasks=(n.tasks||[]).map(function(t){return '<div class="meta" style="margin-left:8px">&bull; '+e2(t.title||'')+(t.due?' <span class="sub">(due '+esc(t.due)+')</span>':'')+'</div>';}).join('');
+    var rems=(n.reminders||[]).map(function(r){return '<div class="meta" style="margin-left:8px">&#8986; '+e2(r.text||'')+(r.when?' <span class="sub">('+esc(r.when)+')</span>':'')+'</div>';}).join('');
+    var nAct=(n.tasks||[]).length+(n.reminders||[]).length;
     var decs=((n.decisions&&n.decisions.length)?'<div class="meta sub" style="margin-top:6px"><b>Decisions</b></div>'+n.decisions.map(function(x){return '<div class="meta" style="margin-left:8px">&bull; '+e2(x)+'</div>';}).join(''):'');
     var tags=((n.tags&&n.tags.length)?'<div class="sub" style="margin-top:7px">'+n.tags.map(function(t){return '<span style="background:rgba(var(--accent-rgb),.12);border-radius:10px;padding:1px 8px;margin-right:5px">'+esc(t)+'</span>';}).join('')+'</div>':'');
     h+='<div class="card" '+ssAttr(gsd)+' style="cursor:default;grid-column:1/-1;border-left:3px solid var(--accent)">'
       +'<div style="display:flex;align-items:center;gap:8px"><b>'+e2(n.title||'Note')+'</b> '+ssBtn(gsd)+'<span class="sub" style="margin-left:auto">'+esc(n.date||'')+'</span></div>'
       +(n.summary?'<div style="margin:5px 0">'+e2(n.summary)+'</div>':'')
-      +(tasks?('<div class="meta sub" style="margin-top:6px"><b>Action items</b></div>'+tasks+(n.applied?'<div class="sub" style="margin-top:5px;color:#3fb950">&#10003; added to Tasks</div>':'<button class="mini go" style="margin-top:7px" onclick="nbApply(\''+n.id+'\')">&#43; Add '+(n.tasks||[]).length+' to Tasks</button>')):'')
+      +((tasks||rems)?('<div class="meta sub" style="margin-top:6px"><b>Action items</b></div>'+tasks+rems+(n.applied?'<div class="sub" style="margin-top:5px;color:#3fb950">&#10003; added to Tasks</div>':'<button class="mini go" style="margin-top:7px" onclick="nbApply(\''+n.id+'\')">&#43; Add '+nAct+' to Tasks</button>')):'')
       +decs+tags
       +'<div style="margin-top:9px;display:flex;gap:6px"><button class="mini" onclick="nbRaw(this)">raw</button><button class="mini" onclick="nbDelete(\''+n.id+'\')">delete</button></div>'
       +'<div class="nbraw" style="display:none;white-space:pre-wrap;margin-top:7px;font-size:12px;color:var(--mut);border-top:1px solid var(--line);padding-top:7px">'+e2(n.text||'')+'</div></div>';

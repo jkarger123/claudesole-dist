@@ -54,9 +54,11 @@ def _connect():
     global _CONN
     if _CONN is not None: return _CONN
     if _DB_PATH is None: init()
-    _CONN = sqlite3.connect(_DB_PATH, check_same_thread=False)
+    _CONN = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=10)
     _CONN.row_factory = sqlite3.Row
     try: _CONN.execute("PRAGMA journal_mode=WAL"); _CONN.execute("PRAGMA synchronous=NORMAL")
+    except Exception: pass
+    try: _CONN.execute("PRAGMA busy_timeout=8000")   # wait up to 8s for a write lock instead of failing ("database is locked")
     except Exception: pass
     return _CONN
 
@@ -210,7 +212,7 @@ def _recent_ids(limit=40, kinds=None, subject=None):
     return [r["id"] for r in c.execute(sql, args).fetchall()]
 
 def _fetch(ids):
-    if not ids: return []
+    if not ids: return {}                  # dict, consistent with the populated case (search() calls rows.values())
     c = _connect()
     rows = c.execute("SELECT * FROM events WHERE id IN (%s)" % ",".join("?" * len(ids)), list(ids)).fetchall()
     return {r["id"]: dict(r) for r in rows}

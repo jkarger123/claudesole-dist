@@ -69,19 +69,38 @@ STRUCT_PROMPT = (
     "intends. Keep every list tight; omit (empty list) if there is nothing concrete. NOTE:\n%s\n")
 
 
+def _parse_json(out):
+    """Robustly pull a JSON object out of the summarizer's reply (tolerate code fences / trailing prose)."""
+    out = (out or "").strip()
+    out = re.sub(r"^```(?:json)?\s*|\s*```$", "", out, flags=re.S).strip()
+    m = re.search(r"\{.*\}", out, re.S)
+    if not m: return None
+    blob = m.group(0)
+    try: return json.loads(blob)
+    except Exception:
+        try: return json.loads(blob[:blob.rfind("}") + 1])   # trim trailing junk after the last brace
+        except Exception: return None
+
+
 def _structure(text):
+    """Ask a headless claude -p to turn the raw note into the strict {title,summary,tasks,reminders,decisions,
+    tags} contract. Retries once with a stricter preamble if the first reply doesn't parse, so the summary +
+    action items reliably come back in a shape the lens can route into Tasks."""
     inj = _CTX.get("extractor")
     if inj: return inj(text)
-    try:
-        r = subprocess.run(["claude", "--dangerously-skip-permissions", "-p", STRUCT_PROMPT % text[:16000]],
-                           capture_output=True, text=True, timeout=150,
-                           env={**os.environ, "PATH": os.environ.get("PATH", "") + ":" +
-                                os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin"})
-        out = (r.stdout or "").strip()
-        m = re.search(r"\{.*\}", out, re.S)
-        return json.loads(m.group(0)) if m else {}
-    except Exception as e:
-        return {"error": str(e)[:140]}
+    env = {**os.environ, "PATH": os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin"}
+    last_err = ""
+    for attempt in range(2):
+        pre = "" if attempt == 0 else "Your last reply was not valid JSON. Output ONLY the JSON object, nothing else.\n"
+        try:
+            r = subprocess.run(["claude", "--dangerously-skip-permissions", "-p", pre + (STRUCT_PROMPT % text[:16000])],
+                               capture_output=True, text=True, timeout=150, env=env)
+            d = _parse_json(r.stdout)
+            if isinstance(d, dict): return d
+            last_err = "unparseable summarizer output"
+        except Exception as e:
+            last_err = str(e)[:140]
+    return {"error": last_err or "could not structure the note"}
 
 
 def nb_save(text, structure=True):
@@ -101,9 +120,16 @@ def nb_save(text, structure=True):
     st["notes"].insert(0, note); st["notes"] = st["notes"][:300]; _save(st)
     ing = _CTX.get("context_ingest")
     if callable(ing):
-        try: ing("note", "notebook", note["title"], (note["summary"] or text)[:1500],
+        # index BOTH the structured summary AND the verbatim raw text (+ tags) so the note is searchable in the
+        # context layer by anything it contains -- not just the paraphrased summary (which can drop key words).
+        body = ((note["summary"] + "\n\n") if note["summary"] else "") + text
+        if note.get("tags"): body += "\n\ntags: " + " ".join(note["tags"])
+        try: ing("note", "notebook", note["title"], body[:4000],
                  ts=note["ts"], trust=3, ext_id=note["id"])
-        except Exception: pass
+        except Exception as e: note["ingest_error"] = str(e)[:200]
+    else:
+        note["ingest_error"] = "context_ingest not wired (callable=%s)" % (ing is not None)
+    _save(st)
     return {"ok": True, "note": note}
 
 
@@ -113,6 +139,7 @@ def nb_apply(note_id, picks=None):
     st = _load(); note = next((n for n in st.get("notes", []) if n["id"] == note_id), None)
     if not note: return {"ok": False, "error": "no such note"}
     add = _CTX.get("task_add"); added = 0
+    _datelike = re.compile(r"^\d{4}-\d\d-\d\d$")
     for i, t in enumerate(note.get("tasks", [])):
         if picks is not None and i not in picks: continue
         if callable(add):
@@ -121,6 +148,18 @@ def nb_apply(note_id, picks=None):
                     due=(t.get("due") or None), source="notebook", source_ref=note_id)
                 added += 1
             except Exception: pass
+    if picks is None:                                  # "add all" also routes follow-up reminders into Tasks
+        for r in note.get("reminders", []):
+            txt = (r.get("text") or "").strip()
+            if not txt: continue
+            when = str(r.get("when") or "")
+            if callable(add):
+                try:
+                    add("Follow up: " + txt, detail=("reminder from note: " + note.get("title", "")),
+                        due=(when if _datelike.match(when) else None), source="notebook",
+                        source_ref=note_id, kind="reminder")
+                    added += 1
+                except Exception: pass
     note["applied"] = True; _save(st)
     return {"ok": True, "added": added}
 
@@ -135,8 +174,22 @@ def nb_get(note_id):
     return next((n for n in _load().get("notes", []) if n["id"] == note_id), None)
 
 
-def nb_list():
-    return {"ok": True, "notes": _load().get("notes", [])[:120], "has_voice": bool(_secret("DEEPGRAM_API_KEY"))}
+def nb_list(q=None):
+    """List notes, newest first. With `q`, full-text search across title + summary + raw text + tags + the
+    extracted task/decision text (so a note is findable by anything it contains, not just its title)."""
+    notes = _load().get("notes", [])
+    total = len(notes)
+    if q and q.strip():
+        ql = q.strip().lower()
+        def hay(n):
+            parts = [n.get("title", ""), n.get("summary", ""), n.get("text", ""), " ".join(n.get("tags", []) or [])]
+            parts += [t.get("title", "") for t in (n.get("tasks", []) or [])]
+            parts += [str(x) for x in (n.get("decisions", []) or [])]
+            parts += [r.get("text", "") for r in (n.get("reminders", []) or [])]
+            return " ".join(parts).lower()
+        notes = [n for n in notes if ql in hay(n)]
+    return {"ok": True, "notes": notes[:150], "total": total, "matched": len(notes),
+            "has_voice": bool(_secret("DEEPGRAM_API_KEY"))}
 
 
 def recent_notes(limit=12):

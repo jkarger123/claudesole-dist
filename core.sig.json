@@ -38,7 +38,7 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "d254250ca7e74270e257a2ec921f12f6a87bfe064ee345b7a4a872c912cf06dd",
+      "claudesole.manifest.json": "753930c4dbdbff9d05e21c609f8cb2c050b87b37e3d553e85ed545fba4e01cff",
       "command-center/CLAUDE.md": "7a981018ce7512daf7c306f5bb6b6e1078cd7d993f73cb5f157b153c9c5f2ae1",
       "command-center/cc-brief": "566b5d91b27874cfbe6a55228d5021011df3fcb3ca6a084926e8b040a31e15ec",
       "command-center/cc-handoff": "9194f8a409f322c9835615cdb014dc9e626a469611ea127b1e9e7a6bf4db2532",
@@ -50,18 +50,18 @@
       "command-center/cc-session-watchdog.py": "6f8190b72caf3eca1fd2a60ae48765f81a10052b76be7209af68641112996b0a",
       "command-center/cc-task": "2cc1e34814177c8db4b924999c28ed68b260d35f4ebaee434f200e3659c864e1",
       "command-center/clips.py": "24eaca65a8dd372a27e605e8bc66c50602ecb872349048aee4a990a6480e5438",
-      "command-center/context.py": "ed814dbf660c49e43b50962e1072a61003b8004a138b1d10167d130be9d93231",
+      "command-center/context.py": "2870cc44461a3ad6d585c497aed2036dbc61f04b3807f1f8662c1b7fd83d529b",
       "command-center/focus.py": "9556fea4498d2119487350c36033c906339db918bf9569cc91e7eda13b9a1879",
       "command-center/git-backup.sh": "01c2b4d56022ac1b998b58f3d8d16508e25f337373160aa5a3750c3dce270c6a",
       "command-center/granola.py": "3f186b64b0f8861cdb134c77dd25369853d5fb09f8f8a4d80146dde2b770d657",
       "command-center/mesh_stop_hook.py": "d62d7c533b027579a2beba1a2ce4caa3e84bff6e027d9c488f6ef9428e0fbdb0",
       "command-center/morning_brief.py": "3da1208ed903f722b7eba0e52d3f995fe9f9864e40843ef5bb9195a887ee9a18",
-      "command-center/notebook.py": "cbf348816b4e072e76a850602d34ea45f410d92af7c2ce0ca3bd40b925084999",
+      "command-center/notebook.py": "add370e9972d9c36b9217b4406e441ab383b210e096b467eb1f819f9ce6c040c",
       "command-center/platform_map.json": "91b6a19c6b3804796887a3b66b51dfa2dcc17ff517088dd837f6699b595a22be",
       "command-center/preship.py": "7c9ea31cc06cd81d8e4bb875be9fb5784cbdd0272853b1248636efa4f2f5a9b7",
       "command-center/ralph_runner.py": "7d26a8d8bca83ba6f52c8ab45aae1c5643233e5cf94c6293b8f6f14b6c169f3b",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "78aeaea7ac5a632412c6eb96a8b4bbdf5203a2749c8bf71e890ba9c1ea4e4a6c",
+      "command-center/server.py": "b0fe092674c27adeefa0677f1c4e09b6fee44de8f68c6db032be3e90c3aeb98e",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/vault/CLAUDE.md": "76e4f6160e6c67968e49e7e89b8618e3d2130c0093f2b582080b7bccb33871c6",
@@ -76,7 +76,7 @@
       "docs/APPLIANCE_BRINGUP.md": "519525aafcce807331adce0d382f86da785395a68e65e2fe61dc5965f28ff3c1",
       "docs/ARCHITECTURE.md": "e61a69a2703c9ac9ba5e153855ddfd495ed5dbd0b5f49b190c4954b8f3c85989",
       "docs/CAPTURE.md": "c0833ca6871ba51a3991cfed1d24b8252280e5d004abdddbce99806a9dd1d071",
-      "docs/CHANGELOG.md": "bc151fd89a91b63ec9f6c7430f3d2faff4c5e229bf048d80327cfe9b07f66007",
+      "docs/CHANGELOG.md": "8056dfe32cb30be430dca58aedf13ae48c0c660b1696ddec6301ec49d3bdee8e",
       "docs/CLAUDE_CODE_REFERENCE.md": "d9acc94772b0a5b6b8dcf81962cea5f36cd050dd7797c6180c69c9b661450b2a",
       "docs/CONTEXT_ENGINEERING.md": "accc989214de542191bf7a678f0336087039e815eac7d0429deb671cf8277ddc",
       "docs/CONTROL_CENTER_BLUEPRINT.md": "3bf2fb328661e1cac513e8a9aacf6fb2bba7c5d9c361f069991c3915caa393e9",
@@ -158,9 +158,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1782741771,
+    "generated": 1782742969,
     "v": 1,
-    "version": "0.99.46"
+    "version": "0.99.47"
   },
-  "sig": "S24U5JWf84vicAYAthooKIpCN6F7KUBeaQ4XNd+2TH0eeGC3NzuY0ySPiUKHNzNZgPiPz7VvgYnL4Ujm8XWgAw=="
+  "sig": "NBTKbpcSbtE/G1/VoIflgHe210D+asS+AHObUoTHFFmCMsqFsgewA5HDx+aYjq6sBO2tUnr7UsWsGS5nGTOODA=="
 }

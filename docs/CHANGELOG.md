@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.47 -- 2026-06-29
+- Notes notebook: full searchability + summarizer hardening + ecosystem wiring fixes.
+  - Lens now has a search box (server-side full-text over title/summary/raw text/tasks/decisions/tags).
+  - Summarizer (_structure) parses robustly (strips fences, retries once if invalid) so summary + action
+    items reliably come back; nb_apply now routes BOTH tasks AND follow-up reminders into the Tasks list.
+  - Notes ingest the raw text (not just the paraphrased summary) into the context layer, so they're findable
+    by anything they contain in the global context search + assemble + brief.
+- CONTEXT LAYER fixes (pre-existing, fleet-wide): context.search() crashed on a no-match query (_fetch([])
+  returned a list, then .values()) -- now returns []; added PRAGMA busy_timeout=8000 so concurrent writes
+  wait for the lock instead of failing with "database is locked" (which was silently dropping ingests).
+
 ## 0.99.46 -- 2026-06-29
 - NEW: Notes notebook (core) + renamed the old Notes lens to "Messages".
   - "Notes" is a new core lens: write OR dictate a note naturally; on Save a headless claude -p structures it
