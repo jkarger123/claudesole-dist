@@ -6962,6 +6962,9 @@ def instance_provision(p, do_launch=False, dry=False):
     nt = (p.get("node_type") or "").lower()
     if nt in ("agency", "developer"):
         cmd += ["--node-type", nt]
+    ob = (p.get("onboard") or "").lower()           # queue Project Onboarding to auto-run on the new node's first boot
+    if ob in ("adopt", "scaffold"):
+        cmd += ["--onboard", ob]
     for flag, key in (("--name", "name"), ("--brand", "brand"), ("--preset", "preset"),
                       ("--port", "port"), ("--storage", "storage"), ("--agents", "agents"),
                       ("--project-root", "project_root"), ("--user", "user")):
@@ -7260,6 +7263,21 @@ def onboard_start(rel="", mode="adopt", name="", model=None):
     return {"ok": bool(res.get("ok")), "mode": mode, "structurer_model": (model or "best (node default)"),
             "reader_model": ONBOARD_READER_MODEL, "session": res.get("session"), "term": res.get("term"),
             "rel": rel, "error": res.get("error")}
+
+_ONBOARDED_MARK = os.path.join(STATE_DIR, "_onboarded")
+def _onboard_first_boot():
+    """If provisioning QUEUED onboarding for this node (cc.config onboard_pending = adopt|scaffold), run it ONCE on
+    first boot -- so adding a project automatically kicks off onboarding (best-model structurer + cheap readers)
+    which then hands to the Chief, instead of the operator having to know to run cc-onboard."""
+    mode = str(CC.get("onboard_pending") or "").lower()
+    if mode not in ("adopt", "scaffold") or os.path.exists(_ONBOARDED_MARK): return
+    def _go():
+        time.sleep(14)   # let the server + Chief come up first
+        try:
+            open(_ONBOARDED_MARK, "w").write(str(int(time.time())))   # mark BEFORE launch so a restart can't re-spawn it
+            onboard_start(rel="", mode=mode, name=PROJECT_NAME)
+        except Exception: pass
+    threading.Thread(target=_go, daemon=True).start()
 
 _REMOTE_SB = {"ts": 0, "v": [], "running": False}
 def _scrape_auth(url, timeout=2.5):
@@ -19577,12 +19595,13 @@ function cfAddWizard(){
    +cfSel('preset','Role',[['project','project — a single operation'],['overseer','overseer — oversees nodes']])
    +cfSel('node_type','Install type',[['agency','Agency — official tools only (locked, safe)'],['developer','Developer — can build custom tools (sandbox)']])
    +cfSel('integration','Tree shape',[['product','Product — a modules tree'],['agency','Agency — a clients + tools tree']])
+   +cfSel('onboard','Onboarding',[['','— none (set it up myself) —'],['adopt','Adopt — read + structure EXISTING code'],['scaffold','Scaffold — build a new shell']])
    +cfF('dest','Bundle folder','blank = /Volumes/Samsung990PRO/claudefather-<id>')
    +cfF('port','Port','blank = auto (≥ 8800)')
    +cfSel('storage','Storage',[['github','github'],['icloud','icloud'],['icloud+github','icloud+github']])
    +cfF('agents','Agents','blank = security,backup,usage,ideas,routines')
    +'</div>'
-   +'<div class="sub" style="margin:8px 0;line-height:1.5"><b>Install type</b> — <b>Agency</b>: runs only official, signed tools — locked &amp; safe, what a client/tenant gets. <b>Developer</b>: also lets you build + run your OWN custom tools in an operator-approved sandbox (your own installs). &nbsp;·&nbsp; <b>Tree shape</b> — <b>Product</b>: a modules tree. <b>Agency</b>: a clients + tools tree (like Sarah/AFP).</div>'
+   +'<div class="sub" style="margin:8px 0;line-height:1.5"><b>Install type</b> — <b>Agency</b>: runs only official, signed tools — locked &amp; safe, what a client/tenant gets. <b>Developer</b>: also lets you build + run your OWN custom tools in an operator-approved sandbox (your own installs). &nbsp;·&nbsp; <b>Tree shape</b> — <b>Product</b>: a modules tree. <b>Agency</b>: a clients + tools tree (like Sarah/AFP). &nbsp;·&nbsp; <b>Onboarding</b> — on first boot: <b>Adopt</b> reads + structures EXISTING code to spec (point Project-root at the code first), <b>Scaffold</b> builds a new shell, then hands to the Chief.</div>'
    +'<label class="cfpersist"><input type="checkbox" id="cf_persist" checked><span><b>Make it permanent &amp; join the mesh</b><br>On <b>Create &amp; start</b>, install it to survive reboots and add it to the fleet — no manual steps.</span></label>'
    +'<div class="cfacts"><button class="mini" onclick="cfPlan()" title="Show the plan only — writes nothing">👁 Preview</button>'
    +'<button class="mini go" onclick="cfProvision(false)" title="Build the folder, leave it off">📦 Create</button>'
@@ -19590,7 +19609,7 @@ function cfAddWizard(){
    +'<div class="cflegend">👁 <b>Preview</b> — plan only. &nbsp; 📦 <b>Create</b> — build it, leave it off. &nbsp; 🚀 <b>Create &amp; start</b> — build, start, finish setup, then open it and run its <b>Setup agent</b>.</div>'
    +'<pre id="cfout"></pre></div>');
 }
-function cfVals(){var g={};['id','name','brand','preset','node_type','integration','dest','port','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
+function cfVals(){var g={};['id','name','brand','preset','node_type','integration','onboard','dest','port','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
 async function cfPost(extra){
   var body=cfVals(); if(!body.id){toast('Enter an ID first.');return null;}
   Object.assign(body,extra||{});
@@ -21869,6 +21888,8 @@ if __name__ == "__main__":
     threading.Thread(target=_gc_sync_loop, daemon=True).start()         # same for Calendar/Drive (resilient cache)
     threading.Thread(target=_warm_default_views, daemon=True).start()   # boot-warm the UI's default views + prime the OAuth token (non-blocking)
     try: _vault_materialize_google()   # re-hydrate google_oauth.json + tokens/ from the vault for the external MCP server (vault stays source of truth)
+    except Exception: pass
+    try: _onboard_first_boot()         # if provisioning queued onboarding, run it once -> structures the project + hands to the CoS
     except Exception: pass
     threading.Thread(target=_context_backfill_loop, daemon=True).start()   # CONTEXT LAYER: ingest existing surfaces into the store (idempotent, every 15 min)
     threading.Thread(target=_housekeeping_loop, daemon=True).start()        # HOUSEKEEPING: regen module map + Doctor sweep + surface new issues (hourly, idempotent)

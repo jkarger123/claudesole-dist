@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.29 -- 2026-06-28
+- ONBOARDING wired into ADD (the gap: creating a project landed in the Chief, onboarding never fired). The "+ Add
+  a ClaudeFather" wizard now has an **Onboarding** choice (Adopt existing code / Scaffold new / none); it threads
+  wizard `onboard` -> `instance_provision --onboard` -> the new bundle's cc.config `onboard_pending`, and a
+  FIRST-BOOT hook (`_onboard_first_boot`, run-once marker) auto-launches Project Onboarding on the new node, which
+  structures the project then hands to the CoS. (`cc-onboard` is still the manual trigger for existing nodes.)
+
 ## 0.99.28 -- 2026-06-28
 - ONBOARDING model split (correction): the STRUCTURING is high-judgment, so the Onboarding agent now runs on the
   node's BEST model (Opus default) and itself writes the layout/CLAUDE.mds; only the high-volume READING is
