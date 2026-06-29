@@ -12277,11 +12277,13 @@ def _routine_last_fire(when, now):
     import datetime as _d
     hh = int(when.get("hour", 3)); mm = int(when.get("minute", 0))
     base = _d.datetime.fromtimestamp(now)
-    if "weekday" in when:
-        target_py = (int(when["weekday"]) + 6) % 7        # launchd Sun=0 -> python Mon=0..Sun=6
+    if "weekday" in when or "weekdays" in when:                # single weekday OR a list of weekdays (Sun=0)
+        raw = when.get("weekdays") if when.get("weekdays") is not None else [when.get("weekday", 0)]
+        if not isinstance(raw, (list, tuple)): raw = [raw]
+        targets = set((int(x) + 6) % 7 for x in raw)          # launchd Sun=0 -> python Mon=0..Sun=6
         for back in range(0, 8):
             cand = (base - _d.timedelta(days=back)).replace(hour=hh, minute=mm, second=0, microsecond=0)
-            if cand.weekday() == target_py and cand.timestamp() <= now:
+            if cand.weekday() in targets and cand.timestamp() <= now:
                 return cand.timestamp()
         return None
     cand = base.replace(hour=hh, minute=mm, second=0, microsecond=0)

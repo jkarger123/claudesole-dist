@@ -333,7 +333,7 @@ def schedule_when(cfg):
     h, mi = _parse_open(cfg.get("open_time"))
     total = (h * 60 + mi - int(cfg.get("lead_minutes", 60))) % (24 * 60)
     w = {"hour": total // 60, "minute": total % 60}
-    if cfg.get("days", "weekdays") == "weekdays": w["weekdays"] = [0, 1, 2, 3, 4]
+    if cfg.get("days", "weekdays") == "weekdays": w["weekdays"] = [1, 2, 3, 4, 5]   # launchd Sun=0 -> Mon..Fri
     return w
 
 

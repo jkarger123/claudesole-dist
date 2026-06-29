@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.45 -- 2026-06-29
+- Routine scheduler: `_routine_last_fire` now honors a `weekdays` LIST (was single `weekday` only) -- a
+  multi-day schedule like the Morning Brief's Mon-Fri silently fell through to DAILY (it would also fire on
+  weekends). Morning Brief now schedules Mon-Fri correctly (launchd Sun=0 convention).
+
 ## 0.99.44 -- 2026-06-29
 - Files preview: the slide-out "new file ready" card now opens the SAME full-format preview modal as the
   Files lens (was a limited image/PDF/text inline that showed "No inline preview for this type" on Office
