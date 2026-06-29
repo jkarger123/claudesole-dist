@@ -3137,17 +3137,26 @@ def _read_usage_session(token=None, label="cur"):
     # Claude Code takes a variable few seconds to be ready (TUI paint, MCP probes) and /usage adds a round-trip;
     # a fixed sleep races it and captures an empty pane. Instead: send /usage, then POLL the pane until the
     # windows actually render (re-sending once if the prompt wasn't ready). Robust against slow starts.
-    txt = ""; w = {}
+    txt = ""; w = {}; last_sig = None
     try:
         time.sleep(6)
-        for i in range(10):                                    # ~6s + up to 10*2.2s
-            if i == 0 or (i == 3 and not (w.get("session") or w.get("week"))):
+        for i in range(16):                                    # ~6s + up to 16*2.2s (~41s budget)
+            if i == 0 or (i == 4 and not (w.get("session") or w.get("week"))):
                 sh([TMUX, "send-keys", "-t", sess, "/usage"]); time.sleep(0.6)
                 sh([TMUX, "send-keys", "-t", sess, "Enter"])
             time.sleep(2.2)
             txt = sh([TMUX, "capture-pane", "-t", sess, "-J", "-p", "-S", "-160"])[1] or ""
             w = _parse_usage(txt)
-            if w.get("session") or w.get("week"): break
+            s = w.get("session") or {}; wk = w.get("week") or {}
+            # /usage fills the windows PROGRESSIVELY (it shows "Scanning local sessions…" and counts up), so a
+            # capture taken the instant `week` first appears catches the SESSION window mid-scan at a false 0%
+            # with no Resets line -- which then can't virtual-reset (no clock) and reads as a lying empty 5h.
+            # Only accept once BOTH windows are present, the session has rendered its Resets line, AND the reading
+            # is STABLE across two consecutive polls (the scan has settled). Falls through to best-effort if not.
+            sig = (s.get("pct"), s.get("resets"), wk.get("pct"))
+            settled = bool(s.get("pct") is not None and s.get("resets") and wk.get("pct") is not None and sig == last_sig)
+            last_sig = sig
+            if settled: break
     finally:
         sh([TMUX, "send-keys", "-t", sess, "C-c"]); sh([TMUX, "kill-session", "-t", sess])
     ok = bool(w.get("session") or w.get("week"))

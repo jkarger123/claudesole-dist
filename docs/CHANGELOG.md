@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.49 -- 2026-06-29
+- FIX the 5h/weekly fuel gauges reading a false 0%. The /usage scrape (_read_usage_session) broke its poll
+  loop as soon as session OR week parsed -- but `claude /usage` fills the windows PROGRESSIVELY ("Scanning
+  local sessions…"), so it captured the SESSION window mid-scan at 0% with no Resets line the instant `week`
+  appeared. Now it waits until both windows are present, the session has rendered its Resets line, AND the
+  reading is STABLE across two consecutive polls before accepting (proven: captures the true 3% + reset clock
+  instead of 0%/none). This also restores the reset timestamp the gauges need to VIRTUAL-RESET idle accounts.
+  Context: an account only burns tokens while it's the live login on a machine (~2 live max, one per macOS
+  user); accounts idle on both provably accrue zero, so _win_view carries their last reading forward and
+  rolls the reset clock virtually -- which only works once the live read captures an accurate pct + reset_ts.
 ## 0.99.48 -- 2026-06-29
 - Per-account usage attribution on single-account (account_wallet) nodes. Their usage was ALL falling to
   "(before tracking)" because the active-account log is only written on a SWITCH, and a wallet node never
