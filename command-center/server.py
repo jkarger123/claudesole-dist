@@ -1903,7 +1903,7 @@ def tmux_sessions():
                         "created": float(p[1] or 0), "activity": float(p[2] or 0),
                         "attached": p[3] != "0",
                         "protected": _protected(nm) or kind in ("chief", "service", "loop"),
-                        "chief": is_chief})
+                        "chief": is_chief, "is_admin": nm.startswith("admin-")})
     res.sort(key=lambda x: -x["activity"]); return res
 
 # ---- token usage + per-session remaining-context -----------------------------
@@ -4068,8 +4068,10 @@ def chief_open():
     prompt = ("You are my Chief of Staff, operating from the top level. %s, "
               "give me a one-line status of the operation, and stand by. "
               "For any command needing sudo or interactive input you cannot run it yourself (no TTY) -- "
-              "pre-type it into this project Admin shell (tmux send-keys, no Enter) and ask me to run it in "
-              "the Sessions tab; protocol: see docs/SESSIONS_AND_SUDO.md in the ClaudeFather framework. "
+              "stage it into this project's Admin shell via POST /api/admin-stage {\"text\":\"<cmd>\"} (it resolves "
+              "the canonical admin session, drops tmux copy-mode, and CONFIRMS the line landed -- do NOT hand-roll "
+              "`tmux send-keys` against a guessed session name), then ask me to run it in the Sessions tab; "
+              "protocol: see docs/SESSIONS_AND_SUDO.md in the ClaudeFather framework. "
               "When you (or an agent) create a file FOR me (a report/export/doc I asked for), save it to the "
               "relevant module folder's deliverables/ subdir -- that is THE way it reaches me: it then shows "
               "in that module's Files panel AND the top-level Files lens (newest first, open/download from any "
@@ -4366,11 +4368,42 @@ def admin_shell():
     commands. Agents have no TTY (can't type a sudo password), so an agent pre-types a command into this
     session via `tmux send-keys` (no Enter) and the operator runs it here in the Sessions tab. Named per
     project so it scopes into THIS console's Sessions tab; cwd = the project root."""
-    slug = re.sub(r"[^a-z0-9]+", "-", PROJECT_NAME.lower()).strip("-") or "main"
-    name = "admin-" + slug
+    name = _admin_session_name()
     if sh([TMUX, "has-session", "-t", name])[0] != 0:
         sh([TMUX, "new-session", "-d", "-s", name, "-c", PROJECT])
     return {"ok": True, "session": name, "term": "/term?name=" + urllib.parse.quote(name)}
+
+def _admin_session_name():
+    """The ONE canonical Admin-shell session name for this project. Agents must NOT derive this themselves
+    (the cc-/chief-/admin- slugs historically disagreed -- e.g. cc-homeassistant vs admin-home-assistant);
+    resolve it via admin_shell()/admin_stage() or cc.config 'admin_session' instead."""
+    return CC.get("admin_session") or ("admin-" + (re.sub(r"[^a-z0-9]+", "-", PROJECT_NAME.lower()).strip("-") or "main"))
+
+def admin_stage(text, run=False):
+    """Robustly stage a command into the canonical per-project Admin shell for the operator to run -- the
+    reliable replacement for an agent hand-rolling `tmux send-keys -t admin-<guessed-name>`. It:
+      1) resolves the CANONICAL admin session (creating it if needed) -- no name guessing;
+      2) drops tmux COPY-MODE first (`send-keys -X cancel`) so a scrolled/selected pane doesn't silently
+         swallow the keystrokes (the failure the operator hit);
+      3) sends the LITERAL text (no key interpretation), NO Enter unless run=True;
+      4) reads the pane back and CONFIRMS the staged line is actually present before returning.
+    Returns {ok, session, staged(bool: confirmed on the pane), term, pane_tail}."""
+    text = text or ""
+    info = admin_shell()                                   # canonical name + ensure the session exists
+    name = info["session"]
+    sh([TMUX, "send-keys", "-t", name, "-X", "cancel"])    # leave copy-mode if scrolled (harmless no-op if live)
+    sh([TMUX, "send-keys", "-t", name, "-l", text])        # -l = literal; never interpreted as key names
+    if run:
+        sh([TMUX, "send-keys", "-t", name, "Enter"])
+    time.sleep(0.35)
+    pane = sh([TMUX, "capture-pane", "-t", name, "-p"])[1] or ""
+    probe = " ".join(text.split())[-60:].strip()           # tail of the command, whitespace-normalized
+    flat = " ".join(pane.split())
+    staged = bool(probe) and probe in flat
+    return {"ok": True, "session": name, "staged": staged, "ran": bool(run),
+            "term": "/term?name=" + urllib.parse.quote(name),
+            "pane_tail": "\n".join(pane.splitlines()[-6:]),
+            "hint": ("" if staged else "could not confirm the text landed on the Admin pane -- it may be busy or mid-command; check the Sessions tab.")}
 
 # ---- agent-tools: each capability is a scoped agent (its own dir + CLAUDE.md + tools) you can open ----
 AGENTS_DIR = os.path.join(CC_HOME, "agents")
@@ -4390,8 +4423,9 @@ def agent_open(slug):
     cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
           "'You are the %s agent. Read CLAUDE.md in this folder -- it is your charter (your job, tools, and "
           "hard boundaries). Then give me a one-line status and stand by. "
-          "For sudo/interactive commands you can't run (no TTY): pre-type them into the project Admin "
-          "shell (tmux send-keys, no Enter) + ask the operator to run them in the Sessions tab -- see "
+          "For sudo/interactive commands you can't run (no TTY): stage them via POST /api/admin-stage "
+          "{\"text\":\"<cmd>\"} (resolves the canonical admin session, drops copy-mode, confirms it landed -- "
+          "don't hand-roll tmux send-keys) + ask the operator to run them in the Sessions tab -- see "
           "docs/SESSIONS_AND_SUDO.md in the ClaudeFather framework. "
           "%s %s %s'" % (slug, _files_brief(), _extend_brief(), roster_text()))
     sh([TMUX, "new-session", "-d", "-s", sess, "-c", d, cl])
@@ -13163,6 +13197,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/agent-open":    return self._s(200, json.dumps(agent_open(body.get("slug", ""))))
         if u.path == "/api/agent-run":     return self._s(200, json.dumps(agent_run(body.get("slug", ""))))
         if u.path == "/api/admin-shell":   return self._s(200, json.dumps(admin_shell()))
+        if u.path == "/api/admin-stage":   return self._s(200, json.dumps(admin_stage(body.get("text", ""), run=bool(body.get("run")))))
         if u.path == "/api/skill-create":  return self._s(200, json.dumps(skill_create(body.get("scope", "project"), body.get("name", ""), body.get("description", ""))))
         if u.path == "/api/skill-open":    return self._s(200, json.dumps(skill_open(body.get("scope", ""), body.get("name", ""))))
         if u.path == "/api/skill-delete":  return self._s(200, json.dumps(skill_delete(body.get("scope", ""), body.get("name", ""))))

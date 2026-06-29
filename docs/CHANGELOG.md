@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.38 -- 2026-06-29
+- ADMIN-SHELL staging made reliable (CCR from homeassistant, ccr-1782711953408). Staging a sudo/interactive
+  command for the operator via raw `tmux send-keys` failed silently for two reasons: (1) the admin session
+  slug didn't match the `cc-<node>` server slug (`admin-home-assistant` vs `admin-homeassistant`), so an agent
+  guessing the name staged into a session the operator wasn't viewing; (2) a pane in tmux copy-mode swallows
+  send-keys with no surfaced error.
+  - New **`POST /api/admin-stage {text[,run]}`** primitive + `admin_stage()`: resolves the CANONICAL admin
+    session (creating it if needed -- no guessing), drops copy-mode first (`send-keys -X cancel`), sends the
+    LITERAL text (no Enter unless run=true), then reads the pane back and returns `staged:true` only when the
+    line is CONFIRMED present.
+  - `_admin_session_name()` is the single canonical name (cc.config `admin_session` can override); `/api/sessions`
+    now flags the admin session with `is_admin:true`; `/api/admin-shell` returns the canonical name.
+  - Chief + agent launch briefs now tell agents to use `/api/admin-stage`, not hand-rolled send-keys.
+  - docs/SESSIONS_AND_SUDO.md rewritten around the primitive (with the why + discoverability fallbacks).
+
 ## 0.99.37 -- 2026-06-29
 - GRANOLA matcher PRECISION (ext v1.2.1) -- follow-up CCR from AFP (ccr-1782713093843). The v0.99.35 attendee
   fix made client-matching FIRE, which exposed that `match_client()` matched aliases as UNANCHORED SUBSTRINGS
