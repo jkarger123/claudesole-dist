@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.56 -- 2026-06-29
+- Chief brief: two routing/diagnosis rules baked into every node's Chief of Staff launch prompt.
+  (1) ESCALATION ROUTING -- operator-facing issues go UP to Mission Control (target 'mission-control'), never
+  to a sibling node (which can't act on them); operator<->operator relays use operator-notes (Messages), not
+  the agent mesh. Fixes AFP's chief sending Sarah's escalations to hptuners instead of MC.
+  (2) VAULT-AWARE secret diagnosis -- when checking if an API key is configured, the VAULT is ground truth
+  (keys resolve vault-first); a blank field in cc.config.json does NOT mean the key is unset. Fixes the false
+  "Granola api_key not set" alarm (the key was in the vault and authenticating fine; the chief only read cc.config).
 ## 0.99.55 -- 2026-06-29
 - Running Ralph loops now also appear in the bottom Sessions TASKBAR (dock), not just the Sessions list --
   session_bar() was filtering out kind=loop. Pairs with v0.99.54 so you can click a live loop tile and watch
