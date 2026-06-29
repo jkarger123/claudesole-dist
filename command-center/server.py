@@ -133,7 +133,19 @@ except Exception: pass
 # Authorize each Claude subscription account ONCE (claude setup-token -> ~1yr OAuth token), store it, and inject
 # it into session launches so headless/remote sessions never do the browser dance again. Switching accounts =
 # pick a stored one (one click). Gated per-node by cc.config "account_wallet" (off = legacy keychain login).
-ACCOUNT_WALLET = bool(CC.get("account_wallet"))
+def _account_wallet_default():
+    # Explicit cc.config account_wallet (true/false) always wins. Otherwise AUTO-ENABLE when this macOS USER
+    # already has saved Claude accounts with usage windows -- the per-account fuel gauges then have data to show.
+    # The account store lives at ~/.claude/_cc_acct_windows.json (shared PER USER, not per instance), so every
+    # co-located node sees the same accounts: auto-detect makes them CONSISTENT without per-node config, while a
+    # fresh user with no saved accounts stays off (no empty wallet).
+    v = CC.get("account_wallet")
+    if v is not None: return bool(v)
+    try:
+        with open(os.path.expanduser("~/.claude/_cc_acct_windows.json")) as _f:
+            return bool(json.load(_f))
+    except Exception: return False
+ACCOUNT_WALLET = _account_wallet_default()
 CLAUDE_TOKENS_DIR = os.path.join(CC_HOME, "secrets", "claude_tokens")        # one 0600 token file per account label (shared wallet)
 CLAUDE_WALLET_FILE = os.path.join(STATE_DIR, "_claude_wallet.json")          # {accounts:[{label,added,expires}], default}
 ACTIVE_TOKEN_FILE = os.path.join(STATE_DIR, "claude_active_token")           # the account THIS node launches with (per-instance, 0600)
@@ -3950,7 +3962,10 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
     # preserve-path that fresh installs lack). Only remote targets need a registered machine (for the ssh alias).
     if target != "studio" and not m: return {"ok": False, "error": "unknown target: " + str(target)}
     _mdl = (" --model " + _shlex.quote(model)) if model else ""   # cost tier (e.g. sonnet for cheap onboarding readers)
-    cl = 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions' + _mdl + ' ' + CC_TITLE_FLAG
+    # BASE (this command-center dir) on PATH so the cc-* CLIs (cc-secure/cc-note/cc-handoff/cc-task/cc-hold) resolve
+    # as BARE commands inside every session -- without it onboarding/agents report them "not reachable" and can't
+    # auto-vault secrets or file learnings (the briefs invoke them unqualified).
+    cl = 'export PATH=' + _shlex.quote(BASE) + ':"$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions' + _mdl + ' ' + CC_TITLE_FLAG
     if target == "studio":
         try: wd = projpath(rel) if rel else (comp_dir(cid) if cid else PROJECT)
         except Exception: wd = PROJECT
@@ -7251,9 +7266,10 @@ def _onboard_brief(mode, rel, name="", reader_model=None):
                 "4) SECRETS: for every key/token found, get it into the vault via `cc-secure request` (scoped to this "
                 "node); never leave it loose, never echo it.\n"
                 "5) Run the Doctor (GET /api/doctor) until clean (lean docs, map in sync)." % (proj, rm))
-    tail = ("\n\nFINISH: write a short ONBOARDING REPORT (what the project is, the layout you set, secrets vaulted, "
-            "anything you propose I review), then tell the Chief of Staff the project is onboarded + ready -- it takes "
-            "over the actual work. Give me a one-line status and stand by.")
+    tail = ("\n\nFINISH: write the ONBOARDING REPORT to EXACTLY this path + filename: `deliverables/ONBOARDING_REPORT.md` "
+            "(use that exact name -- it ALWAYS surfaces as a download in the Files lens; do not vary it). Cover what the "
+            "project is, the layout you set, secrets vaulted, and anything you propose I review. Then tell the Chief of "
+            "Staff the project is onboarded + ready -- it takes over the actual work. Give me a one-line status and stand by.")
     return common + body + tail
 
 def onboard_start(rel="", mode="adopt", name="", model=None):

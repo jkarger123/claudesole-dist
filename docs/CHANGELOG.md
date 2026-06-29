@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.31 -- 2026-06-28
+- CONSISTENCY (from the first real onboardings -- ATEM + Home Assistant):
+  - **cc-* CLIs now resolve as bare commands in every session.** The bundle's `command-center/` (BASE) is prepended
+    to each launched session's PATH, so `cc-secure` / `cc-note` / `cc-handoff` / `cc-task` / `cc-hold` work unqualified.
+    Before, onboarding/agents reported them "not reachable" and couldn't auto-vault secrets or file learnings (the
+    briefs invoke them bare). This was why HA's found secrets weren't vaulted.
+  - **Per-account fuel gauges (5h / weekly batteries) now AUTO-ENABLE.** `account_wallet` defaults on when this macOS
+    USER already has saved Claude accounts with usage windows (`~/.claude/_cc_acct_windows.json`, shared per user) --
+    explicit cc.config `account_wallet` still wins. Co-located appliance nodes (ATEM/HA) were silently `false`, so the
+    Sessions-tab batteries never rendered though the data existed. Fresh users with no accounts stay off (no empty wallet).
+  - **Onboarding report has a fixed name + path.** The agent now writes EXACTLY `deliverables/ONBOARDING_REPORT.md`
+    (HA wrote `ONBOARDING_REPORT.md`, ATEM `ONBOARDING-REPORT.md` -- inconsistent surfacing). Always a clean download.
+
 ## 0.99.30 -- 2026-06-28
 - FIX: a launched agent's kickoff turn (onboarding) was TYPED into the fresh session but not always SENT -- the
   post-launch send-keys raced claude's boot (splash / MCP-auth / trust), leaving the message unsubmitted. Now the
