@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.44 -- 2026-06-29
+- Files preview: the slide-out "new file ready" card now opens the SAME full-format preview modal as the
+  Files lens (was a limited image/PDF/text inline that showed "No inline preview for this type" on Office
+  docs). Both entry points now handle every supported format.
+
 ## 0.99.43 -- 2026-06-29
 - FILES PREVIEW for common formats (was images-only). A "Preview" button on every file opens an in-dashboard
   modal: images / PDF / audio / video / HTML / text+markdown+code render natively; Office docs convert

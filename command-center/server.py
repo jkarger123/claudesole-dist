@@ -16020,8 +16020,8 @@ function isPvHtml(n){return /\.html?$/i.test(n||'');}
 function isPvTxt(n){return /\.(md|markdown|txt|log|json|ya?ml|csv|tsv|js|ts|py|sh|bash|css|scss|xml|c|h|cpp|java|go|rb|rs|php|sql|ini|conf|cfg|toml|env|diff|patch)$/i.test(n||'');}
 function isPvOffice(n){return /\.(docx?|rtf|odt|xlsx?|pptx?|key|pages|numbers|odp|ods)$/i.test(n||'');}
 function canPreview(n){return isPvImg(n)||isPvPdf(n)||isPvAud(n)||isPvVid(n)||isPvHtml(n)||isPvTxt(n)||isPvOffice(n);}
-function previewFile(btn){
-  var b64=btn.getAttribute('data-pvr'), name=btn.getAttribute('data-pvn')||'file';
+function previewFile(btn){ previewModal(btn.getAttribute('data-pvr'), btn.getAttribute('data-pvn')||'file'); }
+function previewModal(b64,name){
   var url='/api/file-get?inline=1&b64='+b64, dl='/api/file-get?b64='+b64, inner;
   if(isPvImg(name))inner='<img src="'+url+'" style="max-width:100%;max-height:82vh;display:block;margin:auto">';
   else if(isPvPdf(name))inner='<iframe src="'+url+'" style="width:86vw;height:84vh;border:0;background:#fff"></iframe>';
@@ -21885,17 +21885,8 @@ setInterval(()=>{fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;if(LENS=="
     btns.appendChild(dl);
 
     var pv=document.createElement('button'); pv.innerHTML='\u{1F441} Preview';
-    pv.onclick=function(){
-      if(prevBox){ if(prevBox.parentNode)prevBox.parentNode.removeChild(prevBox); prevBox=null; return; }
-      prevBox=document.createElement('div'); prevBox.className='cfd-prev';
-      var url='/api/file-get?inline=1&b64='+b64u(f.rel);
-      if(isImg(f.name)){ var im=document.createElement('img'); im.src=url; im.alt=f.name; prevBox.appendChild(im); }
-      else if(isPdf(f.name)){ var ifr=document.createElement('iframe'); ifr.src=url; prevBox.appendChild(ifr); }
-      else if(isTxt(f.name)){ var pre=document.createElement('pre'); pre.textContent='Loading…'; prevBox.appendChild(pre);
-        fetch(url,{cache:'no-store'}).then(function(r){return r.text();}).then(function(t){ pre.textContent=(t||'').slice(0,8000); }).catch(function(){ pre.textContent='(could not load preview)'; }); }
-      else { var p2=document.createElement('pre'); p2.textContent='No inline preview for this type — use Download.'; prevBox.appendChild(p2); }
-      card.appendChild(prevBox);
-    };
+    pv.onclick=function(){ if(typeof previewModal==='function'){ previewModal(b64u(f.rel), f.name); return; }
+      window.open('/api/file-get?inline=1&b64='+b64u(f.rel),'_blank'); };
     btns.appendChild(pv);
 
     if(window.CC&&window.CC.google){
