@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.43 -- 2026-06-29
+- FILES PREVIEW for common formats (was images-only). A "Preview" button on every file opens an in-dashboard
+  modal: images / PDF / audio / video / HTML / text+markdown+code render natively; Office docs convert
+  SERVER-SIDE via macOS built-ins (no new deps) -- Word/RTF/ODT -> HTML (`textutil`), and
+  xlsx/pptx/keynote/pages/numbers/etc -> a Quick Look PNG (`qlmanage`). New `/api/file-preview` endpoint +
+  `file_preview()`; honors the same secret guard as file-get. Audio preview means a Morning Brief mp3 plays
+  right in the Files lens.
+
 ## 0.99.42 -- 2026-06-29
 - Morning Brief robustness + UX: each source is now isolated in try/except (one bad source can't kill the
   whole brief -- a calendar event with a string `start` was crashing generation); the brief is marked
