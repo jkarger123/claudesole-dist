@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.50 -- 2026-06-29
+- Account fuel gauges: show each window's reset by its own % (5h reset next to the 5h %, weekly reset next to
+  the weekly %) instead of a single combined "soonest reset"; and mark which readings are LIVE vs VIRTUAL.
+  An account idle on every machine accrues nothing, so its gauge is its last live reading carried forward with
+  the reset clock advanced virtually -- now labelled "idle · est" (compact strip) and "est." with a hatched
+  track (detail cards), so a confidently-correct idle 0% no longer looks like broken/no-data. The live login on
+  each machine reads for real (per v0.99.49's settle fix).
 ## 0.99.49 -- 2026-06-29
 - FIX the 5h/weekly fuel gauges reading a false 0%. The /usage scrape (_read_usage_session) broke its poll
   loop as soon as session OR week parsed -- but `claude /usage` fills the windows PROGRESSIVELY ("Scanning

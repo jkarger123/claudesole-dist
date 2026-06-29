@@ -13983,6 +13983,8 @@ body.wk-dragging .wkdrop{display:flex;pointer-events:auto}
 .awtrack{flex:1;min-width:70px;height:11px;border-radius:6px;background:#0008;overflow:hidden;box-shadow:inset 0 0 0 1px #ffffff0a}
 .awfill{height:100%;border-radius:6px;transition:width .45s ease}
 .awsub{flex:0 0 auto;font-size:11.5px;color:#9aa0ad;white-space:nowrap}
+.awtag{font-size:10px;color:#8b949e;border:1px solid #ffffff14;border-radius:7px;padding:0 5px;margin-left:5px;cursor:help;letter-spacing:.2px}
+.awtrack.awest{background:repeating-linear-gradient(45deg,#0008,#0008 5px,#ffffff06 5px,#ffffff06 10px)}
 .awbadge{font-size:10.5px;font-weight:700;border-radius:8px;padding:2px 9px;letter-spacing:.2px;white-space:nowrap}
 .awtog{font-size:11.5px;color:#9aa0ad;display:inline-flex;align-items:center;gap:5px;cursor:pointer;user-select:none}
 @media(max-width:680px){.awrow{flex-wrap:wrap}.awlbl{flex-basis:100%}.awsub{flex-basis:100%}}
@@ -15773,12 +15775,12 @@ function fleetFuel(){
     // LIVE marker (green ● — which user is logged into this account) is distinct from the gold ▶ "use next" recommendation
     var live=a.active?'<span class="us-live on" title="you are logged into this account on THIS machine">● live</span>'
       :(ls?'<span class="us-live" title="logged in on '+e2(ls)+'">● '+e2(ls)+'</span>'
-          :'<span class="us-live off" title="not logged in anywhere — showing last-known usage + resets">○ idle</span>');
+          :'<span class="us-live off" title="not logged in anywhere — provably accruing nothing while idle, so this is its last live reading carried forward with the reset clock advanced virtually">○ idle · est</span>');
     var rec=a.use_next?'<span class="us-st" title="recommended account to use NEXT (most headroom, resets soonest)">▶</span>':'';
-    var ttrs=[];if(s&&s.ttr!=null)ttrs.push(s.ttr);if(wk&&wk.ttr!=null)ttrs.push(wk.ttr);
-    var rs=ttrs.length?(' <span class="x">· ↻'+awDur(Math.min.apply(null,ttrs))+'</span>'):'';
+    var r5=(s&&s.ttr!=null)?(' <span class="x" title="5-hour window resets">↻'+awDur(s.ttr)+'</span>'):'';
+    var rwk=(wk&&wk.ttr!=null)?(' <span class="x" title="weekly window resets">↻'+awDur(wk.ttr)+'</span>'):'';
     return '<div class="us-fl"><span class="us-nm" title="'+e2(a.email)+'">'+e2(nm)+' '+live+rec+'</span>'
-      +'<span class="us-nums"><span class="x">5h</span> <b>'+(s?s.pct:'—')+'%</b> <span class="x">· wk</span> <b>'+(wk?wk.pct:'—')+'%</b>'+((wk&&wk.pct>=98)?' <span style="color:#c99a2e">maxed</span>':'')+rs+'</span></div>';}).join('');
+      +'<span class="us-nums"><span class="x">5h</span> <b>'+(s?s.pct:'—')+'%</b>'+r5+' <span class="x">· wk</span> <b>'+(wk?wk.pct:'—')+'%</b>'+rwk+((wk&&wk.pct>=98)?' <span style="color:#c99a2e">maxed</span>':'')+'</span></div>';}).join('');
   return '<div class="us-vr"></div><div class="us-sec us-fuel">'
     +row('5-hr','session')+row('weekly','week')
     +'<div class="us-flabels"><span class="us-fsp"></span><div class="us-flrow">'+labels+'</div></div></div>';
@@ -15848,12 +15850,17 @@ async function loadAcctWin(){ try{ ACCTWIN=await(await fetch('/api/account-windo
       fetch('/api/account-windows/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(function(){loadAcctWin();}).catch(function(){}); } }catch(e){}
 }
 function awDur(s){ if(s==null)return '?'; s=Math.max(0,s); return s<3600?Math.round(s/60)+'m':s<86400?(s/3600).toFixed(1)+'h':(s/86400).toFixed(1)+'d'; }
-function awBar(w,label){ if(!w) return '<div class="awrow"><div class="awlbl">'+label+'</div><div class="awtrack"></div><div class="awsub" style="opacity:.45">no data</div></div>';
+function awBar(w,label,live){ if(!w) return '<div class="awrow"><div class="awlbl">'+label+'</div><div class="awtrack"></div><div class="awsub" style="opacity:.45">no data</div></div>';
   var p=Math.max(0,Math.min(100,w.pct||0)), col=p>=85?'#f85149':p>=60?'#d29922':'#3fb950';
   var rt=(w.ttr!=null)?(' · resets in '+awDur(w.ttr)):(w.resets?(' · resets '+e2(w.resets)):'');
+  // live = read directly while this account is the live login somewhere; otherwise the % is its last reading
+  // carried forward (it accrues nothing while idle) and the reset clock is advanced virtually -> mark it "est."
+  var tag = live ? '' : (w.expired
+      ? ' <span class="awtag" title="this window reset while the account was idle — shown at 0%, will confirm on next live read">↻ reset · est.</span>'
+      : ' <span class="awtag" title="idle account — not readable live right now; this is its last live reading carried forward, reset clock advanced virtually">est.</span>');
   return '<div class="awrow"><div class="awlbl">'+label+'</div>'
-    +'<div class="awtrack"><div class="awfill" style="width:'+p+'%;background:'+col+'"></div></div>'
-    +'<div class="awsub"><b style="color:#e8e8ea">'+p+'%</b> used · '+(100-p)+'% free'+rt+'</div></div>'; }
+    +'<div class="awtrack'+(live?'':' awest')+'"><div class="awfill" style="width:'+p+'%;background:'+col+(live?'':';opacity:.62')+'"></div></div>'
+    +'<div class="awsub"><b style="color:#e8e8ea">'+p+'%</b> used · '+(100-p)+'% free'+rt+tag+'</div></div>'; }
 function awBadge(st){ var M={use_next:['▶ USE NEXT','#1a1606','#e8c547',1],ready:['ready','#3fb95022','#3fb950',0],cooling:['cooling','#58a6ff22','#58a6ff',0],resting:['resting','#6b6b7822','#9aa0ad',0],elsewhere:['🔒 in use by another node','#8957e522','#a371f7',0],tracked:['not in rotation','#6b6b7814','#8b949e',0],need_token:['enable polling','#d2992222','#d29922',0],no_data:['no data','#6b6b7814','#8b949e',0]};
   var m=M[st]||M.no_data; return '<span class="awbadge" style="background:'+m[1]+';color:'+m[2]+(m[3]?';border:1px solid #e8c547':'')+'">'+m[0]+'</span>'; }
 function acctFuelSection(){
@@ -15915,7 +15922,7 @@ function acctFuelCard(a){
    +'</div>';
   if(a.ok){
     h+='<div style="margin-top:11px;display:flex;flex-direction:column;gap:9px">'
-      +awBar(w.session,'5-hour session')+awBar(w.week,'Weekly · all')+awBar(w.week_sonnet,'Weekly · Sonnet')+'</div>';
+      +awBar(w.session,'5-hour session',liveSides.length)+awBar(w.week,'Weekly · all',liveSides.length)+awBar(w.week_sonnet,'Weekly · Sonnet',liveSides.length)+'</div>';
     if(a.why) h+='<div class="ucsub" style="margin-top:9px;color:'+(a.use_next?'#f0d05a':'#9aa0ad')+'">'+e2(a.why)+'</div>';
   } else { h+='<div class="ucsub" style="margin-top:10px">No reading yet — log into this account on a machine (it becomes readable only while it\'s the live login) and it\'ll report in.</div>'; }
   h+=awModel(a);
