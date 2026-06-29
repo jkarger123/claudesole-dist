@@ -16,7 +16,7 @@ if [ -n "$RES" ]; then
   python3 -c "
 import json,sys
 d=json.loads(sys.argv[1])
-if d.get('ok'): print('* onboarding (%s) launched on %s -> session %s. It will ask you a few questions, then map + structure the project and hand it to the Chief.' % (d.get('mode'), d.get('model'), d.get('session')))
+if d.get('ok'): print('* onboarding (%s) launched -> session %s. Structuring on %s; reading delegated to cheap %s subagents. It will ask a few questions, map + structure the project, then hand to the Chief.' % (d.get('mode'), d.get('session'), d.get('structurer_model'), d.get('reader_model')))
 else: print('cc-onboard:', d.get('error','could not start'))
 " "$RES"
 else

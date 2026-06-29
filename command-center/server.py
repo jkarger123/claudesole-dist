@@ -7207,53 +7207,59 @@ def _pane_busy(name):
 # ---- PROJECT ONBOARDING: bring a just-added project up to ClaudeFather spec, then hand to the Chief of Staff.
 # ADOPT (brownfield) = point at an existing codebase, fan out cheap readers, structure + document it to spec.
 # SCAFFOLD (greenfield) = build a lean starter shell. Runs on a cheap model (Sonnet); the CoS (Opus) does the work.
-ONBOARD_MODEL = CC.get("onboard_model") or "claude-sonnet-4-6"
-def _onboard_brief(mode, rel, name=""):
+ONBOARD_READER_MODEL = CC.get("onboard_reader_model") or "claude-sonnet-4-6"   # CHEAP read/summarize subagents; the STRUCTURER runs on the node's BEST model
+def _onboard_brief(mode, rel, name="", reader_model=None):
+    rm = reader_model or ONBOARD_READER_MODEL
     proj = rel or "this project root"
-    common = ("You are the ONBOARDING agent for a project just added to ClaudeFather. Goal: bring it up to our "
-              "STANDARD LAYOUT, then HAND OFF to the Chief of Staff. Be thorough but efficient (you're on a cheap "
-              "model -- use SUBAGENTS for breadth).\nOUR STANDARD (see docs/NODE_ARCHITECTURE.md + the module system): "
-              "a LEAN root CLAUDE.md that is an INDEX, not a dump (<200 authored lines: identity + where-things-live + "
-              "hard rules + pointers); EVERY meaningful folder has its own CLAUDE.md whose line 1 is '# Title' and the "
-              "next non-blank line is ONE plain sentence of what it is (that becomes its one-liner); the Command Center "
-              "auto-stamps the CC:CHILDREN/CC:TREEMAP module map from those; SECRETS live ONLY in the vault "
-              "(`cc-secure request \"<label>\" vault:<KEY>` -- NEVER a key in a file or in chat); file durable learnings "
-              "with `cc-note`.")
+    common = ("You are the ONBOARDING agent for a project just added to ClaudeFather. You run on the BEST model -- "
+              "structuring is high-judgment, so YOU do the structure + the docs yourself. READING the codebase is cheap "
+              "+ high-volume, so DELEGATE it: spawn reading SUBAGENTS on the CHEAP model `" + rm + "` (pass that model to "
+              "the Task tool) that only READ + SUMMARIZE their area and report back; you synthesize. NEVER do the "
+              "structure/restructure or write the CLAUDE.mds on the cheap model -- that judgment is yours.\n"
+              "GOAL: bring the project up to our STANDARD LAYOUT, then HAND OFF to the Chief of Staff.\n"
+              "OUR STANDARD (docs/NODE_ARCHITECTURE.md + the module system): a LEAN root CLAUDE.md that is an INDEX, not "
+              "a dump (<200 authored lines: identity + where-things-live + hard rules + pointers); EVERY meaningful "
+              "folder has its own CLAUDE.md whose line 1 is '# Title' and the next non-blank line is ONE plain sentence "
+              "of what it is (becomes its one-liner); the Command Center auto-stamps the CC:CHILDREN/CC:TREEMAP map from "
+              "those; SECRETS live ONLY in the vault (`cc-secure request \"<label>\" vault:<KEY>` -- NEVER a key in a "
+              "file or in chat); file durable learnings with `cc-note`.")
     if mode == "scaffold":
         body = ("\n\nMODE = SCAFFOLD (brand-new product, little or no code yet):\n"
                 "1) Ask me: what is this product, its MVP scope, and the first 1-3 things to build (a sentence each).\n"
                 "2) Scaffold a lean root CLAUDE.md (identity + scope + where things live + hard rules) and a sensible "
-                "starter folder structure, each folder with its CLAUDE.md.\n"
+                "starter folder structure, each folder with its CLAUDE.md. (Little to read here -- mostly your design.)\n"
                 "3) Capture the first goals as Tasks. Run the Doctor (GET /api/doctor) and fix what it flags.")
     else:
         body = ("\n\nMODE = ADOPT (an EXISTING codebase at %s):\n"
                 "1) Ask me the few things only I know: what this project is, its main entry points, where any "
                 "secrets/keys live, and what I want from it. Keep it short.\n"
-                "2) MAP THE CODEBASE: spin up SUBAGENTS (the Task tool) to read the tree IN PARALLEL -- each reports its "
-                "area's purpose, the modules/pillars, entry points, deps, and any secrets it finds. Do NOT read it all "
-                "serially yourself.\n"
-                "3) STRUCTURE TO SPEC: decide the module layout; WRITE a lean root CLAUDE.md (index) + a CLAUDE.md in "
-                "every meaningful folder (title + one-liner + a CC:NOTES region). This is ADDITIVE + safe. The Command "
-                "Center regenerates the CC:CHILDREN/CC:TREEMAP map from them. Do NOT move/rename existing code -- if a "
-                "reorg would help, PROPOSE it to me, never do it silently.\n"
+                "2) MAP THE CODEBASE (cheap): spin up reading SUBAGENTS on `%s` via the Task tool to read the tree IN "
+                "PARALLEL -- each just reports its area's purpose, the modules/pillars, entry points, deps, and any "
+                "secrets it finds. Do NOT read it all serially yourself, and do NOT structure on those subagents.\n"
+                "3) STRUCTURE TO SPEC (you, best model): from their summaries, decide the module layout; WRITE a lean "
+                "root CLAUDE.md (index) + a CLAUDE.md in every meaningful folder (title + one-liner + a CC:NOTES "
+                "region). This is ADDITIVE + safe. The Command Center regenerates the CC:CHILDREN/CC:TREEMAP map from "
+                "them. Do NOT move/rename existing code -- if a reorg would help, PROPOSE it to me, never do it silently.\n"
                 "4) SECRETS: for every key/token found, get it into the vault via `cc-secure request` (scoped to this "
                 "node); never leave it loose, never echo it.\n"
-                "5) Run the Doctor (GET /api/doctor) until clean (lean docs, map in sync)." % proj)
+                "5) Run the Doctor (GET /api/doctor) until clean (lean docs, map in sync)." % (proj, rm))
     tail = ("\n\nFINISH: write a short ONBOARDING REPORT (what the project is, the layout you set, secrets vaulted, "
             "anything you propose I review), then tell the Chief of Staff the project is onboarded + ready -- it takes "
             "over the actual work. Give me a one-line status and stand by.")
     return common + body + tail
 
 def onboard_start(rel="", mode="adopt", name="", model=None):
-    """Launch the Onboarding agent in the project on the cheap model with the playbook; then nudge it to begin."""
+    """Launch the Onboarding agent (the STRUCTURER) in the project on the node's BEST model (model=None -> default);
+    its brief tells it to delegate the bulk READING to cheap subagents. Then nudge it to begin."""
     mode = "scaffold" if str(mode).lower() == "scaffold" else "adopt"
     res = launch("studio", "onboard-" + _slug(name or os.path.basename((rel or "project").rstrip("/")) or "project"),
-                 rel=(rel or None), extra_sys=_onboard_brief(mode, rel, name), model=(model or ONBOARD_MODEL))
+                 rel=(rel or None), extra_sys=_onboard_brief(mode, rel, name), model=model)   # model None = best (structuring); readers spawned cheap per the brief
     if res.get("ok") and res.get("session"):
-        try: _mesh_deliver(res["session"], "You are the Onboarding agent -- your full playbook is in your system context. Begin now: ask me the short intake questions for this project, then map + structure it to spec.")
+        try: _mesh_deliver(res["session"], "You are the Onboarding agent -- your full playbook is in your system context. Begin now: ask me the short intake questions, then DELEGATE the reading to cheap subagents and do the structuring yourself.")
         except Exception: pass
-    return {"ok": bool(res.get("ok")), "mode": mode, "model": (model or ONBOARD_MODEL),
-            "session": res.get("session"), "term": res.get("term"), "rel": rel, "error": res.get("error")}
+    return {"ok": bool(res.get("ok")), "mode": mode, "structurer_model": (model or "best (node default)"),
+            "reader_model": ONBOARD_READER_MODEL, "session": res.get("session"), "term": res.get("term"),
+            "rel": rel, "error": res.get("error")}
 
 _REMOTE_SB = {"ts": 0, "v": [], "running": False}
 def _scrape_auth(url, timeout=2.5):

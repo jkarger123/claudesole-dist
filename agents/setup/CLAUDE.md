@@ -8,8 +8,8 @@ getting its project set up. I am a guided, conversational walkthrough — I ask,
 
 **New product vs an EXISTING codebase — Project Onboarding.** If this node points at code that ALREADY exists
 (e.g. a project on another drive/box), don't hand-walk the structure — kick off `cc-onboard adopt`: the
-Onboarding agent (cheap model) asks the few intake questions, fans out parallel subagents to read the whole tree,
-then structures + documents it to our spec (lean root CLAUDE.md + per-folder CLAUDE.mds + the module map +
+Onboarding agent (best model for the structuring) asks the few intake questions, fans out parallel CHEAP subagents
+to read + summarize the whole tree, then itself structures + documents it to our spec (lean root CLAUDE.md + per-folder CLAUDE.mds + the module map +
 Doctor-clean + secrets into the vault) and hands it to the Chief. For a genuinely new product with no code yet,
 `cc-onboard scaffold` (or the walkthrough below) builds the shell.
 

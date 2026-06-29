@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.28 -- 2026-06-28
+- ONBOARDING model split (correction): the STRUCTURING is high-judgment, so the Onboarding agent now runs on the
+  node's BEST model (Opus default) and itself writes the layout/CLAUDE.mds; only the high-volume READING is
+  delegated to CHEAP `claude-sonnet-4-6` subagents (config `onboard_reader_model`) that read + summarize and
+  report back. (Was: whole agent on Sonnet.) `_onboard_brief` instructs the agent to pass the cheap model to the
+  Task tool for readers and never structure on them; `onboard_start` launches with model=None (best). Verified.
+
 ## 0.99.27 -- 2026-06-28
 - PROJECT ONBOARDING -- bring a just-added project up to ClaudeFather spec automatically, then hand to the Chief.
   Two modes: ADOPT (point at an EXISTING codebase -> the Onboarding agent fans out parallel SUBAGENTS to read the
