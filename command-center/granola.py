@@ -129,16 +129,37 @@ def list_meetings(limit=25):
         return [{"error": "granola cache: " + str(e)[:160]}]
 
 
-def get_transcript(meeting_id):
-    """Return the transcript as 'Speaker: text' lines, from API or cache."""
+def _detail_attendees(d):
+    """[{name,email}] from a note-DETAIL dict: attendees[].email + calendar_event.invitees[].email. The sparse
+    /notes LIST endpoint omits these, so client-matching can't fire on the API source without them."""
+    out = []
+    for a in (d.get("attendees") or []):
+        if isinstance(a, dict) and (a.get("email") or a.get("name")):
+            out.append({"name": a.get("name") or "", "email": a.get("email") or ""})
+    ce = d.get("calendar_event") or {}
+    for inv in (ce.get("invitees") or []):
+        if isinstance(inv, dict) and (inv.get("email") or inv.get("name")):
+            out.append({"name": inv.get("name") or "", "email": inv.get("email") or ""})
+    return out
+
+
+def get_detail(meeting_id):
+    """Return (transcript_str, attendees). The API DETAIL endpoint (/notes/{id}?include=transcript) carries BOTH
+    the transcript AND attendees/invitees, while the LIST endpoint omits attendees -- so fetching detail once
+    gives the emails client-matching needs (no extra request: the transcript already required this call)."""
     if _source() == "api":
         d = _api_get("/notes/" + meeting_id + "?include=transcript")
         segs = d.get("transcript") or (d.get("note") or {}).get("transcript") or []
-        return _fmt_segments(segs)
+        return _fmt_segments(segs), _detail_attendees(d)
     c = _load_cache()
     tx = (c.get("state", {}) or {}).get("transcripts") or c.get("transcripts") or {}
     segs = tx.get(meeting_id) or []
-    return _fmt_segments(segs)
+    return _fmt_segments(segs), []   # cache: attendees already populated by list_meetings()
+
+
+def get_transcript(meeting_id):
+    """Transcript as 'Speaker: text' lines (back-compat wrapper; also used by the drag-to-session sendable)."""
+    return get_detail(meeting_id)[0]
 
 
 def _fmt_segments(segs):
@@ -220,23 +241,45 @@ def _claude_extract(title, transcript):
 
 # ---- sync: ingest new meetings -> proposals ------------------------------------------------------------
 def gr_sync(limit=15):
-    """Pull recent meetings, skip already-seen, match + extract each, store as PENDING proposals."""
+    """Pull recent meetings, skip already-seen, match + extract each, store as PENDING proposals.
+    - Client-matching runs AFTER fetching each note's DETAIL, so attendee emails are available (the LIST
+      endpoint omits them) and cc.config client_map domains match out of the box.
+    - State persists INCREMENTALLY (per proposal) + exposes sync_progress, so a long multi-call run shows
+      progress instead of looking hung.
+    - last_sync_status/last_sync_error are recorded into state on EVERY return path, so a caller that discards
+      our return value (the daemon-thread /api/granola-sync) still surfaces auth/E2E failures."""
     cfg = _cfg()
-    if not cfg:
-        return {"ok": False, "error": "granola not configured (cc.config 'granola')"}
     st = _load_state()
+
+    def _finish(res):
+        st["last_sync_status"] = "ok" if res.get("ok") else "error"
+        st["last_sync_error"] = "" if res.get("ok") else (res.get("error") or "")
+        if isinstance(st.get("sync_progress"), dict): st["sync_progress"]["running"] = False
+        try: _save_state(st)
+        except Exception: pass
+        return res
+
+    if not cfg:
+        return _finish({"ok": False, "error": "granola not configured (cc.config 'granola')"})
     seen = set(st.get("seen", []))
     meetings = list_meetings(limit)
     if meetings and meetings[0].get("error"):
-        return {"ok": False, "error": meetings[0]["error"]}
+        return _finish({"ok": False, "error": meetings[0]["error"]})
+    pending_ids = [m.get("id") for m in meetings if m.get("id") and m.get("id") not in seen]
+    st["sync_progress"] = {"processed": 0, "total": len(pending_ids), "running": True, "started": int(time.time())}
+    _save_state(st)
     added = 0
     for m in meetings:
         mid = m.get("id")
         if not mid or mid in seen: continue
-        client, cpath = match_client(m)
+        # DETAIL first: gives transcript AND attendees -> match_client can use attendee email domains
         tx = ""
-        try: tx = get_transcript(mid)
-        except Exception as e: tx = ""
+        try:
+            tx, det_att = get_detail(mid)
+            if det_att: m["attendees"] = (m.get("attendees") or []) + det_att
+        except Exception:
+            tx = ""
+        client, cpath = match_client(m)
         ext = _claude_extract(m.get("title", ""), tx) if tx else {}
         prop = {"id": "g-%d-%d" % (int(time.time() * 1000), added), "meeting_id": mid,
                 "title": m.get("title", ""), "date": m.get("date", ""), "ts": int(time.time()),
@@ -246,9 +289,12 @@ def gr_sync(limit=15):
                 "decisions": ext.get("decisions", []), "status": "pending", "error": ext.get("error")}
         st["proposals"].insert(0, prop)
         seen.add(mid); added += 1
-    st["seen"] = list(seen)[-500:]; st["last_sync"] = int(time.time())
-    _save_state(st)
-    return {"ok": True, "added": added, "pending": len([p for p in st["proposals"] if p["status"] == "pending"])}
+        st["seen"] = list(seen)[-500:]
+        st["last_sync"] = int(time.time())
+        if isinstance(st.get("sync_progress"), dict): st["sync_progress"]["processed"] = added
+        _save_state(st)            # incremental: each proposal persists immediately
+    return _finish({"ok": True, "added": added,
+                    "pending": len([p for p in st["proposals"] if p["status"] == "pending"])})
 
 
 def _gr_ready():
@@ -272,6 +318,8 @@ def gr_proposals():
     return {"ok": True, "proposals": st.get("proposals", [])[:80], "last_sync": st.get("last_sync", 0),
             "configured": bool(_cfg()), "ready": ready, "hint": hint, "source": _source(),
             "has_key": bool(_api_key()),
+            "last_sync_status": st.get("last_sync_status", ""), "last_sync_error": st.get("last_sync_error", ""),
+            "sync_progress": st.get("sync_progress"),
             "clients": [nm for nm, _ in _client_dirs()], "destinations": _cfg().get("destinations") or ["cc"]}
 
 

@@ -16018,6 +16018,8 @@ async function loadCalls(){
   const status=d.ready?('source: '+esc(d.source)+' · '+pend.length+' to review · dest: '+esc((d.destinations||['cc']).join(', '))):(d.configured?'⚠ needs setup':'not configured');
   let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>📞 Calls</b> <span class="sub">'+status+'</span> <button class="mini go" onclick="callsSync()">⟳ Sync Granola calls</button></div>';
   if(!d.ready)h+='<div class="meta" style="margin-top:8px;color:#d29922">'+esc(d.hint||'Set "granola" in this deployment\'s cc.config.json. See extensions/granola/SETUP.md.')+'</div>';
+  if(d.sync_progress&&d.sync_progress.running)h+='<div class="meta" style="margin-top:8px;color:#58a6ff">syncing… '+(d.sync_progress.processed||0)+'/'+(d.sync_progress.total||0)+' calls</div>';
+  if(d.last_sync_error)h+='<div class="meta" style="margin-top:8px;color:#f85149">⚠ last sync failed: '+esc(d.last_sync_error)+'</div>';
   h+='</div>';
   if(!pend.length)h+=empty(d.ready?"No calls awaiting review. Hit ⟳ Sync to pull recent Granola calls.":"Finish Granola setup above, then Sync.");
   pend.forEach(function(p){

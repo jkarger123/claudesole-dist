@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.35 -- 2026-06-29
+- GRANOLA CALLS (ext v1.2.0) -- 3 fixes from AFP's first live API sync (CCR ccr-1782711514956):
+  - **Client-matching now works out of the box on the API source.** `list_meetings()` reads the sparse
+    `/v1/notes` LIST (no attendees), so `match_client()` had no emails and `client_map` domains never matched.
+    New `get_detail()` pulls `attendees[].email` + `calendar_event.invitees[]` from the DETAIL endpoint
+    (already fetched for the transcript -- no extra request), and `gr_sync` matches AFTER fetching detail.
+  - **Sync no longer looks hung.** `gr_sync` persists state INCREMENTALLY per proposal + exposes
+    `sync_progress {processed,total,running}` (was: one save after the whole multi-call loop).
+  - **Sync errors are visible.** `gr_sync` records `last_sync_status`/`last_sync_error` into state on every
+    return, surfaced by `gr_proposals()` + the Calls lens -- so a bad key / E2E-on failure shows instead of a
+    silent empty list (the daemon-thread `/api/granola-sync` that discarded the return no longer hides it).
+  - `get_transcript()` kept as a back-compat wrapper (used by the drag-a-call-to-session sendable).
+
 ## 0.99.34 -- 2026-06-29
 - CHIEF DURABILITY (fleet resilience): the Chief of Staff is now hard to leave detached.
   - **Length-safe `chief_open`**: the launch prompt (instruction block + system brief + full roster) is now
