@@ -3,6 +3,10 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.41 -- 2026-06-29
+- Morning Brief: completed the official extension authoring -- added the required SETUP.md + AGENT.md +
+  CLAUDE.md (extension.json declared them; only extension.json existed). No code change.
+
 ## 0.99.40 -- 2026-06-29
 - Morning Brief: its config now UPSERTS the run routine (creates it if missing) so the brief owns its own
   schedule regardless of a node's extension_routine_host gate -- needed so it runs on tenant nodes (AFP).

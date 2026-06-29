@@ -38,7 +38,7 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "c81c310ba62ebe945cfca5784898299eb7a0f355c592beeb9a8c788cc56bbc04",
+      "claudesole.manifest.json": "ef61b0bdc66e940f50629446931cbeff5f1149c984b658cfd54a01e363e8dd91",
       "command-center/CLAUDE.md": "7a981018ce7512daf7c306f5bb6b6e1078cd7d993f73cb5f157b153c9c5f2ae1",
       "command-center/cc-brief": "566b5d91b27874cfbe6a55228d5021011df3fcb3ca6a084926e8b040a31e15ec",
       "command-center/cc-handoff": "9194f8a409f322c9835615cdb014dc9e626a469611ea127b1e9e7a6bf4db2532",
@@ -75,7 +75,7 @@
       "docs/APPLIANCE_BRINGUP.md": "519525aafcce807331adce0d382f86da785395a68e65e2fe61dc5965f28ff3c1",
       "docs/ARCHITECTURE.md": "e61a69a2703c9ac9ba5e153855ddfd495ed5dbd0b5f49b190c4954b8f3c85989",
       "docs/CAPTURE.md": "c0833ca6871ba51a3991cfed1d24b8252280e5d004abdddbce99806a9dd1d071",
-      "docs/CHANGELOG.md": "6b11777d85fc502f2bf63b98d179a041df1cffc7e263b2c35d542976896e0052",
+      "docs/CHANGELOG.md": "b57a2eb90d4062254029f53510c80875b20ea7f65941d672d26761941754aba7",
       "docs/CLAUDE_CODE_REFERENCE.md": "d9acc94772b0a5b6b8dcf81962cea5f36cd050dd7797c6180c69c9b661450b2a",
       "docs/CONTEXT_ENGINEERING.md": "accc989214de542191bf7a678f0336087039e815eac7d0429deb671cf8277ddc",
       "docs/CONTROL_CENTER_BLUEPRINT.md": "3bf2fb328661e1cac513e8a9aacf6fb2bba7c5d9c361f069991c3915caa393e9",
@@ -157,9 +157,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1782715871,
+    "generated": 1782716123,
     "v": 1,
-    "version": "0.99.40"
+    "version": "0.99.41"
   },
-  "sig": "SdSr0BvP1NeuVip3kI44qh9sP9le0q0Fk+WVcdlf5AOH03YsaL4QU9SUEC3F/OxpVsX/3KhAq1dN9u+6N9OLCw=="
+  "sig": "+Pnr2H071+3oPjd3xvQbPvYZfKxetOV9SHyIDE6LcQFFCp4vWpsV7M5C0V9mREAbQsDDzDaSRXe0BcNNFrnvBg=="
 }
