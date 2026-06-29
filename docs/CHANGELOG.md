@@ -3,6 +3,10 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.40 -- 2026-06-29
+- Morning Brief: its config now UPSERTS the run routine (creates it if missing) so the brief owns its own
+  schedule regardless of a node's extension_routine_host gate -- needed so it runs on tenant nodes (AFP).
+
 ## 0.99.39 -- 2026-06-29
 - NEW EXTENSION: **Morning Brief** (`morning-brief`, lens:brief). A scheduled, voice-read brief of your day +
   what's coming, synthesized from your real data.

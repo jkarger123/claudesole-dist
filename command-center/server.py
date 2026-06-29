@@ -4420,12 +4420,19 @@ def brief_config_save(patch):
         tmp = _CC_CONFIG + ".tmp"; json.dump(cfg, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, _CC_CONFIG)
         CC["morning_brief"] = mb            # live -> next generate uses it without a restart
     except Exception as e: return {"ok": False, "error": str(e)[:120]}
-    try:                                    # re-derive the routine schedule from the new start time
-        when = morning_brief.schedule_when(mb)
-        reg = load(ROUTINES, {"routines": []}); changed = False
-        for r in reg.get("routines", []):
-            if r.get("name") == "Morning Brief": r["when"] = when; changed = True
-        if changed: save(ROUTINES, reg)
+    try:                                    # UPSERT the Morning Brief routine (own its own schedule, regardless
+        when = morning_brief.schedule_when(mb)   # of the extension_routine_host gate -- the brief runs where its operator is)
+        reg = load(ROUTINES, {"routines": []}); rs = reg.get("routines", []); found = False
+        for r in rs:
+            if r.get("name") == "Morning Brief":
+                r["when"] = when; r["cmd"] = r.get("cmd") or "python3 command-center/cc-brief"
+                r["cwd"] = r.get("cwd") or CC_HOME; found = True
+        if not found:
+            rs.append({"name": "Morning Brief", "desc": "Assemble + synthesize + voice the daily brief.",
+                       "cmd": "python3 command-center/cc-brief", "cwd": CC_HOME, "when": when,
+                       "timeout_sec": 600, "alert": {"channel": "telegram"}, "status": "active",
+                       "enabled": True, "ext": "morning-brief"})
+        reg["routines"] = rs; save(ROUTINES, reg)
     except Exception: pass
     return {"ok": True, "config": mb, "schedule": morning_brief._next_run_hint(mb)}
 
