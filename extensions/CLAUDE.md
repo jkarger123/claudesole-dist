@@ -5,6 +5,7 @@
 - `google-workspace/` -- A ClaudeFather integration extension (extension.json id google-workspace). It does two things:
 - `granola/` -- Turn Granola call transcripts into REVIEWED updates to the agency tree: a dated note in the matched
 - `incident-commander/payload/` -- I am the Incident Commander for this ClaudeFather. Scoped agent-tool: my own dir, this charter, tools/,
+- `morning-brief/` -- Turn the operator's own data into a short spoken brief of their day, ready before they start and played in
 - `skimlinks-merchant-sync/payload/` -- I am the Skimlinks sync tool. I keep a tenant's full Skimlinks affiliate-merchant catalog mirrored into their
 <!-- /CC:CHILDREN -->
 

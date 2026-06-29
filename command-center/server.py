@@ -4436,6 +4436,37 @@ def brief_config_save(patch):
     except Exception: pass
     return {"ok": True, "config": mb, "schedule": morning_brief._next_run_hint(mb)}
 
+def file_preview(rel):
+    """Render a previewable form of a file the BROWSER can't show natively (Office docs, etc.) using macOS
+    built-ins -- NO new deps: `textutil` (Word/RTF/ODT -> clean HTML) and `qlmanage` Quick Look (xlsx/pptx/
+    keynote/pages/numbers/... -> a PNG of the first page). Returns (bytes, content_type) or (None, None) so
+    the client falls back to download. Honors the same secret guard as file-get; never converts a secret."""
+    try: ab = projpath(rel)
+    except Exception: return (None, None)
+    if _path_has_secret(ab): return (None, None)
+    real = os.path.realpath(ab)
+    if not os.path.isfile(real): return (None, None)
+    ext = os.path.splitext(real)[1].lower()
+    if ext in (".doc", ".docx", ".rtf", ".odt", ".wordml", ".webarchive"):     # rich text -> HTML
+        try:
+            r = subprocess.run(["textutil", "-convert", "html", "-stdout", real], capture_output=True, timeout=25)
+            if r.returncode == 0 and r.stdout: return (r.stdout, "text/html; charset=utf-8")
+        except Exception: pass
+    if ext in (".xlsx", ".xls", ".pptx", ".ppt", ".key", ".pages", ".numbers", ".docx", ".doc",
+               ".odp", ".ods", ".csv", ".tsv"):                                # anything Quick Look renders -> PNG
+        try:
+            import tempfile
+            td = tempfile.mkdtemp(prefix="cfprev-")
+            subprocess.run(["qlmanage", "-t", "-s", "1600", "-o", td, real], capture_output=True, timeout=30)
+            pngs = [f for f in os.listdir(td) if f.lower().endswith(".png")]
+            if pngs:
+                data = open(os.path.join(td, pngs[0]), "rb").read()
+                try: import shutil; shutil.rmtree(td, ignore_errors=True)
+                except Exception: pass
+                return (data, "image/png")
+        except Exception: pass
+    return (None, None)
+
 # ---- agent-tools: each capability is a scoped agent (its own dir + CLAUDE.md + tools) you can open ----
 AGENTS_DIR = os.path.join(CC_HOME, "agents")
 TEAMS_DIR = os.path.join(CC_HOME, "teams")  # rung-4 coordinating rosters
@@ -12866,6 +12897,16 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type", ct)
             self.send_header("Cache-Control", "private, max-age=3600")
             self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
+        if u.path == "/api/file-preview":     # server-side conversion preview (Office docs -> HTML/PNG)
+            rel = q.get("path", [""])[0]; _b = q.get("b64", [""])[0]
+            if _b:
+                try:
+                    import base64 as _b64m
+                    rel = _b64m.urlsafe_b64decode(_b + "=" * (-len(_b) % 4)).decode("utf-8")
+                except Exception: return self._s(400, "bad path")
+            data, ct = file_preview(rel)
+            if data is None: return self._s(415, "no server preview for this type")
+            return self._s(200, data, ct)
         if u.path == "/api/file-get":
             # Accept the rel path EITHER as ?b64=<base64url> (clean ASCII -- proxies/tunnels choke on a raw
             # path full of %20/%28/%29 from filenames with spaces+parens, which shows as "site wasn't
@@ -15319,7 +15360,7 @@ async function loadModules(rel){
     let MODFILES=[]; try{MODFILES=await(await fetch("/api/module-files?rel="+encodeURIComponent(MODREL))).json();}catch(e){MODFILES=[];}
     if(MODFILES.length){
       const TIER={icloud:['&#9729; iCloud','#58a6ff','recent -- synced to your Apple devices, opens in iCloud'],ssd:['&#128452; SSD','#c9a227','archived (>90d) on the SSD, off iCloud -- still opens from here'],local:['',''," "]};
-      const frow=f=>{const t=TIER[f.tier]||['',''];const url='/api/file-get?b64='+b64u(f.rel);return '<div class="sess"><span class="lbl" title="tap to view/download"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600">📄 '+esc(f.name)+'</a>'+(t[0]?(' <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'):'')+' <span class="sub">· '+fmtBytes(f.size)+' · '+new Date(f.mtime*1000).toLocaleString()+(f.sub?(' · '+esc(f.sub)):'')+'</span></span>'
+      const frow=f=>{const t=TIER[f.tier]||['',''];const url='/api/file-get?b64='+b64u(f.rel);return '<div class="sess"><span class="lbl" title="tap to view/download"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600">📄 '+esc(f.name)+'</a>'+pvBtn(f.rel,f.name)+(t[0]?(' <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'):'')+' <span class="sub">· '+fmtBytes(f.size)+' · '+new Date(f.mtime*1000).toLocaleString()+(f.sub?(' · '+esc(f.sub)):'')+'</span></span>'
         +'<button class="mini go" title="download to THIS device" onclick="dlFile(\''+esc(f.rel)+'\',\''+esc(f.name)+'\')">&#8595; Download</button></div>';};
       h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>&#128193; Files made for you in this folder <span class="sub">('+MODFILES.length+')</span></span></h3>'
         +'<div class="convscroll">'+MODFILES.map(frow).join("")+'</div>'
@@ -15971,6 +16012,38 @@ function renderUsage(){if(!USAGE)return;const u=USAGE,t=u.totals,cur=uRange(),se
 // ---- Files lens: one organized place for every agent-OUTPUT file across the deployment ----
 let FILES=null, FILESMODE=localStorage.getItem('hpcc_filesmode')||'outputs', BROWSE=null, BROWSEREL='';
 function setFilesMode(m){FILESMODE=m;localStorage.setItem('hpcc_filesmode',m);loadFiles();}
+function isPvImg(n){return /\.(png|jpe?g|gif|webp|svg|bmp|heic)$/i.test(n||'');}
+function isPvPdf(n){return /\.pdf$/i.test(n||'');}
+function isPvAud(n){return /\.(mp3|wav|m4a|aac|aiff?|ogg|oga|flac)$/i.test(n||'');}
+function isPvVid(n){return /\.(mp4|mov|webm|m4v|ogv)$/i.test(n||'');}
+function isPvHtml(n){return /\.html?$/i.test(n||'');}
+function isPvTxt(n){return /\.(md|markdown|txt|log|json|ya?ml|csv|tsv|js|ts|py|sh|bash|css|scss|xml|c|h|cpp|java|go|rb|rs|php|sql|ini|conf|cfg|toml|env|diff|patch)$/i.test(n||'');}
+function isPvOffice(n){return /\.(docx?|rtf|odt|xlsx?|pptx?|key|pages|numbers|odp|ods)$/i.test(n||'');}
+function canPreview(n){return isPvImg(n)||isPvPdf(n)||isPvAud(n)||isPvVid(n)||isPvHtml(n)||isPvTxt(n)||isPvOffice(n);}
+function previewFile(btn){
+  var b64=btn.getAttribute('data-pvr'), name=btn.getAttribute('data-pvn')||'file';
+  var url='/api/file-get?inline=1&b64='+b64, dl='/api/file-get?b64='+b64, inner;
+  if(isPvImg(name))inner='<img src="'+url+'" style="max-width:100%;max-height:82vh;display:block;margin:auto">';
+  else if(isPvPdf(name))inner='<iframe src="'+url+'" style="width:86vw;height:84vh;border:0;background:#fff"></iframe>';
+  else if(isPvAud(name))inner='<div style="padding:46px"><audio src="'+url+'" controls autoplay style="width:520px;max-width:80vw"></audio></div>';
+  else if(isPvVid(name))inner='<video src="'+url+'" controls autoplay style="max-width:86vw;max-height:84vh"></video>';
+  else if(isPvHtml(name))inner='<iframe src="'+url+'" sandbox="allow-same-origin" style="width:86vw;height:84vh;border:0;background:#fff"></iframe>';
+  else if(isPvTxt(name))inner='<pre id="pvBody" style="white-space:pre-wrap;max-width:86vw;max-height:84vh;overflow:auto;padding:16px;margin:0;color:#c9d1d9;text-align:left">Loading…</pre>';
+  else if(isPvOffice(name))inner='<div id="pvBody" style="max-width:88vw;max-height:84vh;overflow:auto">Loading preview…</div>';
+  else inner='<div style="padding:36px;color:#c9d1d9">No inline preview for this type.</div>';
+  var ov=document.createElement('div');ov.id='pvOverlay';
+  ov.style.cssText='position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;padding:18px';
+  ov.onclick=function(e){if(e.target===ov)ov.remove();};
+  ov.innerHTML='<div style="background:#0d1117;border:1px solid #30363d;border-radius:10px;max-width:95vw;max-height:93vh;overflow:hidden;display:flex;flex-direction:column">'
+   +'<div style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid #30363d"><b style="flex:1;color:#c9d1d9;font-size:13px">'+(name||'').replace(/[<>&]/g,'')+'</b>'
+   +'<a href="'+dl+'" download style="color:#58a6ff;text-decoration:none;font-weight:600;margin-right:12px">&#8595; Download</a>'
+   +'<span onclick="var o=document.getElementById(\'pvOverlay\');if(o)o.remove()" style="cursor:pointer;color:#8b949e;font-size:22px;line-height:1">&times;</span></div>'
+   +'<div style="display:flex;align-items:center;justify-content:center;min-height:120px">'+inner+'</div></div>';
+  document.body.appendChild(ov);
+  if(isPvTxt(name))fetch(url,{cache:'no-store'}).then(function(r){return r.text();}).then(function(t){var e=document.getElementById('pvBody');if(e)e.textContent=(t||'').slice(0,300000);}).catch(function(){var e=document.getElementById('pvBody');if(e)e.textContent='(could not load)';});
+  if(isPvOffice(name))fetch('/api/file-preview?b64='+b64,{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;var ct=r.headers.get('content-type')||'';return r.blob().then(function(bl){return{ct:ct,bl:bl};});}).then(function(o){var e=document.getElementById('pvBody');if(!e)return;if(o.ct.indexOf('image')>=0){e.innerHTML='<img src="'+URL.createObjectURL(o.bl)+'" style="max-width:100%;display:block;margin:auto">';}else{o.bl.text().then(function(htm){e.innerHTML='<div style="background:#fff;color:#111;padding:22px;border-radius:6px">'+htm+'</div>';});}}).catch(function(){var e=document.getElementById('pvBody');if(e)e.innerHTML='<div style="padding:30px;color:#c9d1d9">No preview available for this type — use Download.</div>';});
+}
+function pvBtn(rel,name){return canPreview(name)?(' <button class="mini" data-pvr="'+b64u(rel)+'" data-pvn="'+esc(name)+'" onclick="previewFile(this)" title="Preview">\u{1F441} Preview</button>'):'';}
 async function loadFiles(){document.getElementById("grid").innerHTML=empty("Loading files…");clearInterval(window.FILESTIMER);
   if(FILESMODE=='browse'){return loadBrowse(BROWSEREL);}
   try{FILES=await(await fetch('/api/files')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load files.");return;}
@@ -15997,7 +16070,7 @@ function renderFiles(){
     fs.forEach(f=>{const g=fileGroup(f.mtime);if(g!==lastG){h+='<div class="card" style="cursor:default;grid-column:1/-1;background:transparent;border:none;padding:8px 2px 0"><b style="font-size:14px;color:#e8c547">'+g+'</b></div>';lastG=g;}
       const t=TIER[f.tier]||TIER.local;
       h+='<div class="card" '+ssAttr({kind:'deliverable',id:f.rel,name:f.name})+' style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
-        +'<span style="flex:1;min-width:220px"><a href="/api/file-get?b64='+b64u(f.rel)+'" target="_blank" rel="noopener" style="color:inherit;font-weight:700" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'
+        +'<span style="flex:1;min-width:220px"><a href="/api/file-get?b64='+b64u(f.rel)+'" target="_blank" rel="noopener" style="color:inherit;font-weight:700" title="tap to view/download">&#128196; '+esc(f.name)+'</a>'+pvBtn(f.rel,f.name)+' <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'
         +'<div class="sub" style="margin-top:2px">'+(f.module?('&#128194; '+esc(f.module)+' &middot; '):'')+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</div></span>'
         +ssBtn()
         +'<button class="mini go" title="download to THIS device (works on your phone)" onclick="dlFile(\''+esc(f.rel)+'\',\''+esc(f.name)+'\')">&#8595; Download</button>'
@@ -16012,7 +16085,7 @@ function renderBrowse(){const b=BROWSE||{};
   if(!b.ok){h+=empty('Could not browse: '+esc(b.error||'?'));document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';return;}
   if(BROWSEREL!==''){h+='<div class="card" style="cursor:pointer;grid-column:1/-1" onclick="loadBrowse(\''+esc(b.parent||'')+'\')"><b>&#11014; ..</b> <span class="sub">up a level</span></div>';}
   (b.dirs||[]).forEach(d=>{h+='<div class="card" style="cursor:pointer;grid-column:1/-1" onclick="loadBrowse(\''+esc(d.rel)+'\')"><b>&#128193; '+esc(d.name)+'</b> <span class="sub">folder</span></div>';});
-  (b.files||[]).forEach(f=>{const url='/api/file-get?b64='+b64u(f.rel);h+='<div class="card" '+ssAttr({kind:'deliverable',id:f.rel,name:f.name})+' style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="flex:1;min-width:200px"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600" title="tap to view/download">&#128196; '+esc(f.name)+'</a> <span class="sub">&middot; '+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</span></span>'
+  (b.files||[]).forEach(f=>{const url='/api/file-get?b64='+b64u(f.rel);h+='<div class="card" '+ssAttr({kind:'deliverable',id:f.rel,name:f.name})+' style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="flex:1;min-width:200px"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600" title="tap to view/download">&#128196; '+esc(f.name)+'</a>'+pvBtn(f.rel,f.name)+' <span class="sub">&middot; '+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</span></span>'
     +ssBtn()
     +'<button class="mini go" title="download to THIS device" onclick="dlFile(\''+esc(f.rel)+'\',\''+esc(f.name)+'\')">&#8595; Download</button>'
     +'</div></div>';});
