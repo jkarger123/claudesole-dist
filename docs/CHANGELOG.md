@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.48 -- 2026-06-29
+- Per-account usage attribution on single-account (account_wallet) nodes. Their usage was ALL falling to
+  "(before tracking)" because the active-account log is only written on a SWITCH, and a wallet node never
+  switches (and the keychain baseline doesn't fire under headless/token auth). Boot now falls back to
+  _current_email() (~/.claude.json) and, on a wallet node with an empty log, seeds it BACKDATED so ALL of the
+  node's usage attributes to its one account. Fixes e.g. AFP's usage showing under "(before tracking)" instead
+  of Sarah's account (so per-account usage now moves).
+
 ## 0.99.47 -- 2026-06-29
 - Notes notebook: full searchability + summarizer hardening + ecosystem wiring fixes.
   - Lens now has a search box (server-side full-text over title/summary/raw text/tasks/decisions/tags).

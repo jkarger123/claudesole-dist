@@ -22219,7 +22219,20 @@ if __name__ == "__main__":
     # minutes -- which printed the banner but never reached serve_forever(), so the server "came up" yet
     # accepted no connections (this took AFP down). Run it all in a daemon thread; serve immediately.
     def _boot_housekeeping():
-        try: _acct_log_active(((_kc_read() or {}).get("account") or {}).get("emailAddress"))  # baseline the active account
+        try:  # baseline the active account so usage attributes to it (not "(before tracking)")
+            _bem = (((_kc_read() or {}).get("account") or {}).get("emailAddress")) or _current_email()
+            if _bem:
+                _blog = _acct_log_load()
+                if ACCOUNT_WALLET and not _blog:
+                    # single-account node (account_wallet -> never switches): the keychain baseline above never
+                    # fires (headless / token auth), so usage all falls to "(before tracking)". Seed the log
+                    # BACKDATED (ts=1) so ALL of this node's usage attributes to its one account, not just future.
+                    try:
+                        _tmp = _ACCT_LOG + ".tmp"; json.dump([{"ts": 1, "email": _bem}], open(_tmp, "w"))
+                        os.chmod(_tmp, 0o600); os.replace(_tmp, _ACCT_LOG)
+                    except Exception: pass
+                else:
+                    _acct_log_active(_bem)
         except Exception: pass
         try: regen_treemap(force=True)   # stamp the whole-tree module map into the root CLAUDE.md
         except Exception: pass
