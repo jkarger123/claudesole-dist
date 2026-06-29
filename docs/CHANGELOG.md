@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.54 -- 2026-06-29
+- Running Ralph loops now appear in the Sessions taskbar of the node that owns them, so you can open the
+  terminal and watch one live. They were scoped out because a loop's tmux session runs with cwd = the engine
+  dir (not under the project root), so it failed the "in this project" test. Now a ralph-<name> session counts
+  as this console's when its loop dir is in this node's RALPHDIR. Labelled "Ralph: <name>", kind=loop, protected
+  (can't be casually closed). Co-located instances (one shared tmux server) can watch each other's; a separate
+  machine has its own tmux server and won't see them. Only running loops show (stopped/archived have no session).
 ## 0.99.53 -- 2026-06-29
 - Ralph lens: "🗄 Clear N done/stopped" button in the Active header bulk-moves every FINISHED loop
   (done / halted / stopped, and not still alive) to Previous loops in one click, so the active list stops

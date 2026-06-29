@@ -1895,6 +1895,9 @@ def tmux_sessions():
             cwd = cwds.get(nm, "")
             is_chief = (nm == globals().get("CHIEF"))
             mine = is_chief or _session_in_project(cwd)     # belongs to THIS console (its chief + its project work)
+            if not mine and nm.startswith("ralph-"):        # a Ralph loop THIS node owns (its dir is in our RALPHDIR)
+                _ln = _rname(nm[len("ralph-"):])            # -> show it in Sessions so you can watch it live, even
+                mine = bool(_ln and os.path.isdir(os.path.join(RALPHDIR, _ln)))   # though its cwd is the engine dir
             if SCOPE_SESSIONS and not mine: continue        # a scoped node never shows another project's sessions
             kind = _session_kind(nm)
             lbl = _session_label(nm); node = ""
