@@ -2,7 +2,7 @@
   "id": "granola",
   "name": "Granola Calls",
   "category": "agency",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "icon": "PH",
   "summary": "Turn Granola call transcripts into REVIEWED updates to client CLAUDE.md, tasks, and reminders.",
   "description": "For agency tenants. Ingests your Granola meeting transcripts (official Granola API, or the local desktop cache as a no-key fallback), matches each call to a client folder, and uses an LLM (headless claude) to extract a summary, client-facing notes, action-item tasks, follow-up reminders, and decisions. Each call becomes a PROPOSAL in the Calls lens: you approve/edit/skip before anything is written. On approve it appends a dated note to the matched client's CLAUDE.md (a managed CC:CALLS region) and creates the tasks + reminders in your chosen destination(s): Command Center (per-client TODO, default), Google Calendar/Tasks, Apple Reminders, or a Slack digest. Drag any call straight into a Claude session to hand the agent its full transcript.",

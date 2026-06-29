@@ -190,23 +190,69 @@ def _client_dirs():
     return out
 
 
+# free-mail providers don't identify a client -- never match a client folder by these domains
+_FREE_MAIL = {"gmail.com", "googlemail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com",
+              "me.com", "mac.com", "aol.com", "proton.me", "protonmail.com", "live.com", "msn.com"}
+_TLDISH = {"com", "net", "org", "io", "co", "ai", "app", "dev", "www", "us", "uk", "gov", "edu", "biz"}
+
+
+def _meeting_domains(meeting):
+    """Lower-cased attendee/invitee email domains, minus free-mail providers (they don't identify a client)."""
+    doms = set()
+    for a in meeting.get("attendees", []) or []:
+        if not isinstance(a, dict): continue
+        em = (a.get("email") or "").strip().lower()
+        if "@" in em:
+            dom = em.rsplit("@", 1)[1].strip()
+            if dom and dom not in _FREE_MAIL:
+                doms.add(dom)
+    return doms
+
+
+def _word_in(alias, text):
+    """True if `alias` is a whole word/phrase in `text` (case-insensitive, alnum boundaries) -- so 'omm' does
+    NOT match inside 'communications' and 'aldo' not inside 'ronaldo'."""
+    a = (alias or "").strip().lower()
+    if not a: return False
+    return re.search(r"(?<![a-z0-9])" + re.escape(a) + r"(?![a-z0-9])", (text or "").lower()) is not None
+
+
+def _alias_matches(alias, title, domains):
+    """Precise alias match (never an unanchored substring):
+    - a DOMAIN-shaped alias (has a dot, no space) matches the attendee email domains STRUCTURALLY (equal or
+      subdomain, e.g. 'acme.com' matches 'mail.acme.com');
+    - a bare NAME/brand alias matches the TITLE by word boundary, OR an exact email-domain LABEL (so 'acme'
+      matches '@acme.com' but 'omm' does NOT match 'vlivcommunications.com')."""
+    a = (alias or "").strip().lower().lstrip("@")
+    if not a: return False
+    if "." in a and " " not in a:
+        return any(d == a or d.endswith("." + a) for d in domains)
+    if _word_in(a, title):
+        return True
+    labels = {lab for d in domains for lab in d.split(".") if lab and lab not in _TLDISH}
+    return a in labels
+
+
 def match_client(meeting):
-    """Best client folder for a meeting via cc.config client_map (domains/aliases) then fuzzy title/name.
+    """Best client folder for a meeting. PRECISE matching -- no unanchored substrings (which caused false
+    positives like alias 'OMM' inside 'vlivcommunications.com' or 'aldo' inside 'ronaldo'):
+      1) cc.config client_map: a DOMAIN alias matches attendee email domains structurally; a NAME alias
+         matches the TITLE by word boundary or an exact email-domain label.
+      2) fallback: the de-slugged client folder name as a whole word in the title.
     Returns (client_name, abs_path) or (None, None)."""
     cmap = _cfg().get("client_map") or {}
     dirs = _client_dirs()
     by_slug = {nm.lower(): (nm, p) for nm, p in dirs}
-    emails = " ".join((a.get("email") or "") for a in meeting.get("attendees", []) if isinstance(a, dict)).lower()
-    hay = (meeting.get("title", "") + " " + emails).lower()
-    # explicit map wins
+    title = meeting.get("title", "") or ""
+    domains = _meeting_domains(meeting)
     for slug, aliases in cmap.items():
+        if slug.lower() not in by_slug: continue
         for a in ([slug] + list(aliases or [])):
-            if a and a.lower() in hay and slug.lower() in by_slug:
+            if _alias_matches(a, title, domains):
                 return by_slug[slug.lower()]
-    # fuzzy: a client folder name (de-slugged) appears in the title
-    for nm, p in dirs:
-        words = re.sub(r"[-_]+", " ", nm).lower()
-        if words and words in meeting.get("title", "").lower():
+    for nm, p in dirs:                          # fuzzy fallback: folder name as a whole word in the title
+        words = re.sub(r"[-_]+", " ", nm).strip()
+        if words and _word_in(words, title):
             return (nm, p)
     return (None, None)
 

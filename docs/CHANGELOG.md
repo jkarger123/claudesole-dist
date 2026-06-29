@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.37 -- 2026-06-29
+- GRANOLA matcher PRECISION (ext v1.2.1) -- follow-up CCR from AFP (ccr-1782713093843). The v0.99.35 attendee
+  fix made client-matching FIRE, which exposed that `match_client()` matched aliases as UNANCHORED SUBSTRINGS
+  against title+emails -> false positives (alias 'OMM' matched inside 'vlivcommunications.com'; bare slug
+  'aldo' inside 'ronaldo'). Now precise: a DOMAIN alias matches attendee email domains STRUCTURALLY (equal or
+  subdomain); a NAME/brand alias matches the TITLE by word boundary OR an exact email-domain label ('acme' ->
+  @acme.com, not @acmecorp.com); free-mail domains (gmail/outlook/...) are ignored; the slug fallback is
+  word-boundary anchored. 10 matcher cases tested (good matches kept, false positives killed).
+
 ## 0.99.36 -- 2026-06-29
 - RESILIENCE hardening (post-DoS, items 2+3 of the fleet resilience plan):
   - **Doctor SSD / Full-Disk-Access read-probe (detect, never act).** `doctor()` now probes a node's external
