@@ -3538,6 +3538,11 @@ def _acct_recommend(accounts, now):
     scrapes) -- fresher than the last /usage scrape -- used for the free%.
     Returns {email: {...}} plus the single pick email."""
     WK_LEN_H = 7 * 24.0; S_LEN_H = 5.0
+    # Keep an EMERGENCY RESERVE on every account: stop burning a weekly window once it's down to ~this much free,
+    # so if we accidentally max everything out there's a sliver on each login to "get lean" and limp along until
+    # one resets. Below this an account is parked as reserve (resting) -- only spent in a genuine all-drained
+    # emergency (handled after the ready loop), soonest-resetting reserve first.
+    WK_RESERVE_PCT = 10
     info = {}
     for a in accounts:
         em = a["email"]; w = a.get("windows") or {}; s = w.get("session"); wk = w.get("week") or {}
@@ -3566,10 +3571,10 @@ def _acct_recommend(accounts, now):
         modeled = bool((mdl.get("week") or {}).get("pred_pct") is not None
                        or (mdl.get("session") or {}).get("pred_pct") is not None)
         tag = " (modeled)" if modeled else ""
-        if wk_free <= 5:
+        if wk_free <= WK_RESERVE_PCT:
             st, score = "resting", -1.0
-            why = ("weekly drained (%d%% used) — resets in %s; keep resting%s" %
-                   (100 - wk_free, _acct_dur(wk_ttr), tag))
+            why = ("weekly down to %d%% free — holding as emergency reserve; resets in %s%s" %
+                   (wk_free, _acct_dur(wk_ttr), tag))
         elif s_free <= 8:
             st, score = "cooling", 0.0
             why = ("5h throttle full (%d%% used) — switch away; frees in %s · weekly %d%% free%s" %
@@ -3597,6 +3602,17 @@ def _acct_recommend(accounts, now):
         else:
             pw["why"] = ("the only login with headroom right now — your other accounts are maxed or reserved · "
                          "%d%% free · resets in %s" % (_wf, _rd))
+    else:
+        # EMERGENCY "get lean": no login has headroom above its reserve -> spend the reserve of the one whose
+        # weekly resets SOONEST (it refreshes first) to limp along; keep the others' reserves as backup. Accounts
+        # reserved on another node stay off-limits (they're not in the resting pool).
+        resting = [(em, d) for em, d in info.items() if d["status"] == "resting"]
+        if resting:
+            pick = min(resting, key=lambda kv: kv[1].get("wk_resets_h") or 1e9)[0]
+            pw = info[pick]; pw["status"] = "use_next"; pw["use_next"] = True; pw["emergency"] = True
+            pw["why"] = ("⚠ emergency — every login is down to its reserve; burning this one's %d%% (resets soonest, "
+                         "in %s) to hold over, keeping the rest as backup"
+                         % (int(pw.get("wk_free") or 0), _acct_dur(round((pw.get("wk_resets_h") or 0) * 3600))))
     return info, pick
 
 def account_windows_store():

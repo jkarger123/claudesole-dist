@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.52 -- 2026-06-29
+- Account recommender now keeps a ~10% EMERGENCY RESERVE on each weekly window (operator's "get lean" idea):
+  an account at <=10% weekly free is parked as reserve (was a 5% hard floor), so it's no longer recommended for
+  burning. This (a) fixes the thrash where, right after switching to a fresh account, it flipped back to a
+  near-maxed one over its last ~7% (a sliver that risks a hard weekly lock + a wasteful switch round-trip), and
+  (b) leaves a backup sliver on every login. NEW emergency path: if EVERY usable login is down to its reserve,
+  it spends the reserve of the one whose weekly resets SOONEST (refreshes first) to limp along, keeping the
+  others as backup -- flagged "⚠ emergency". The model-vs-raw 95/93% flip across the old 5% line is moot now.
 ## 0.99.51 -- 2026-06-29
 - Account recommendation "why" now states the REAL reason instead of a hardcoded "weekly resets soonest" on
   every pick. The score still prefers the soonest-resetting account, but only among READY ones -- the truly
