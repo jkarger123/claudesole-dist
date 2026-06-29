@@ -4,7 +4,11 @@
 #
 #   cc-secure request "<label>" vault:<KEY> [scope]   # ask the user for a secret -> stored straight in the VAULT
 #                                                       # (a box pops up for them; the value never reaches you/chat).
-#                                                       # Then read <KEY> via the normal secret resolver to use it.
+#                                                       # Then USE it with `cc-secure get <KEY>` (below).
+#   cc-secure get <KEY>                                # resolve a stored vault key to USE it (probe/call an API).
+#                                                       # CAPTURE it, never run bare:  K="$(cc-secure get <KEY>)"
+#                                                       # then  curl -H "Authorization: Bearer $K" …  -- the value
+#                                                       # stays in the shell var, never printed to chat.
 #   cc-secure ask "<label>"                            # ask the user for a one-time value RETURNED to you once
 #                                                       # (printed here only, never via chat). For transient use.
 #   cc-secure reveal "<label>" <file>                  # SHOW the user a secret you put in a 0600 <file> (the file
@@ -44,5 +48,13 @@ case "$CMD" in
     BODY="$(python3 -c "import json,sys;print(json.dumps({'label':sys.argv[1],'file':sys.argv[2]}))" "$LABEL" "$ARG")"
     R="$(post /api/secure-reveal "$BODY")"
     python3 -c "import json,sys;d=json.load(sys.stdin);print('Shown to the user in a secure box (not in chat).' if d.get('ok') else 'reveal failed: '+str(d))" <<<"$R" ;;
-  *) echo "usage: cc-secure {request \"<label>\" vault:<KEY> [scope] | ask \"<label>\" | reveal \"<label>\" <file>}"; exit 1 ;;
+  get)
+    # LABEL ($2) is the KEY here. Resolve it to its value (vault-first) for USE -- capture it, don't run bare.
+    [ -n "$LABEL" ] || { echo "usage: cc-secure get <KEY>   (capture it: K=\"\$(cc-secure get <KEY>)\"; never run bare)" >&2; exit 1; }
+    R="$(curl -s "$API/api/secret-resolve?key=$LABEL" -H "X-CC-Token: $TOK")"
+    python3 -c "import json,sys
+d=json.load(sys.stdin)
+if d.get('ok'): sys.stdout.write(d.get('value',''))
+else: sys.stderr.write('cc-secure get: '+str(d.get('error','not found'))+'\n'); sys.exit(1)" <<<"$R" ;;
+  *) echo "usage: cc-secure {request \"<label>\" vault:<KEY> [scope] | get <KEY> | ask \"<label>\" | reveal \"<label>\" <file>}"; exit 1 ;;
 esac

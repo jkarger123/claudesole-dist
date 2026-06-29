@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.57 -- 2026-06-29
+- ENTERPRISE secret UX: agents no longer have to re-learn the vault each session.
+  (1) cc-* CLIs now resolve on EVERY launched session's PATH (chief, agents, teams, ralph, resume, audits) --
+  one _CC_PATH constant (includes BASE) replaces 10 inline PATH exports where only the main launch had BASE,
+  which is why agents hit "command not found: cc-secure" and hand-located it.
+  (2) NEW `cc-secure get <KEY>` + localhost-only, token-gated /api/secret-resolve -- the missing "USE a stored
+  key" primitive (resolve vault-first for a probe: K="$(cc-secure get <KEY>)"). No more hand-decrypting the vault.
+  (3) The brief's SECRETS contract now points at `cc-secure get` for using a key and notes the cc-* CLIs are on PATH.
 ## 0.99.56 -- 2026-06-29
 - Chief brief: two routing/diagnosis rules baked into every node's Chief of Staff launch prompt.
   (1) ESCALATION ROUTING -- operator-facing issues go UP to Mission Control (target 'mission-control'), never

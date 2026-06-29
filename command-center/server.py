@@ -1798,6 +1798,11 @@ _SESSLABEL = {}
 # "7th ave 2 / 7th ave 3". Persisted so it survives a CC restart. The instruction is appended to every
 # launched session's system prompt (CC_TITLE_FLAG) so EVERY session can self-name.
 import shlex as _shlex
+# ONE PATH prefix for EVERY launched session (chief, agents, teams, ralph, resume, …) so the cc-* CLIs
+# (cc-secure / cc-task / cc-note / cc-handoff / cc-hold / cc-onboard) ALWAYS resolve -- BASE (this
+# command-center dir) holds them. Previously only the main launch() put BASE on PATH, so agents hit
+# "command not found: cc-secure" and had to hand-locate it. Use _CC_PATH everywhere instead of an inline export.
+_CC_PATH = 'export PATH=' + _shlex.quote(BASE) + ':"$HOME/.local/bin:/opt/homebrew/bin:$PATH"; '
 _AGENT_TITLES_FILE = os.path.join(STATE_DIR, "_session_titles.json")
 def _load_agent_titles():
     try: return json.load(open(_AGENT_TITLES_FILE))
@@ -3134,7 +3139,7 @@ def _read_usage_session(token=None, label="cur"):
     sess = "cc-uw-" + re.sub(r"[^A-Za-z0-9]", "", (INSTANCE_ID or "x"))[:10] + "-" + re.sub(r"[^A-Za-z0-9]", "", (label or "cur"))[:20]
     sh([TMUX, "kill-session", "-t", sess])
     env = ("export CLAUDE_CODE_OAUTH_TOKEN=%s; " % shlex.quote(token)) if token else ""
-    cl = 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + env + 'claude'
+    cl = _CC_PATH + env + 'claude'
     if sh([TMUX, "new-session", "-d", "-s", sess, "-x", "200", "-y", "50", cl])[0] != 0:
         return {"ok": False, "error": "could not start session"}
     # Claude Code takes a variable few seconds to be ready (TUI paint, MCP probes) and /usage adds a round-trip;
@@ -4152,7 +4157,7 @@ def chief_open():
     try:
         with open(prompt_file, "w") as f: f.write(prompt)
     except Exception: pass
-    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'export MESH_CC="http://localhost:%d"; '
+    cl = (_CC_PATH + _CC_ENVP + 'export MESH_CC="http://localhost:%d"; '
           'claude --dangerously-skip-permissions %s --settings %s "$(cat %s)"'
           % (PORT, CC_TITLE_FLAG, shlex.quote(settings_file), shlex.quote(prompt_file)))
     wd = PROJECT if os.path.isdir(PROJECT) else CC_HOME          # SSD-gone fallback: chief stays up, only file ops degrade
@@ -4530,7 +4535,7 @@ def agent_open(slug):
     sess = "agt-" + slug
     if sh([TMUX, "has-session", "-t", sess])[0] == 0:
         return {"ok": True, "term": "/term?name=" + sess, "note": "resumed"}
-    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+    cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
           "'You are the %s agent. Read CLAUDE.md in this folder -- it is your charter (your job, tools, and "
           "hard boundaries). Then give me a one-line status and stand by. "
           "For sudo/interactive commands you can't run (no TTY): stage them via POST /api/admin-stage "
@@ -5930,7 +5935,7 @@ def extension_setup(eid):
     sess = "ext-" + eid
     if sh([TMUX, "has-session", "-t", sess])[0] == 0:
         return {"ok": True, "term": "/term?name=" + sess, "note": "resumed"}
-    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+    cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
           "'You are the SETUP GUIDE for the %s ClaudeFather extension. Read SETUP.md in this folder -- it is "
           "your script. Walk me through setup ONE step at a time, wait at each step, help me create any "
           "accounts/API keys, store secrets ONLY in the gitignored deployment env (never echo or commit "
@@ -6490,7 +6495,7 @@ def skill_open(scope, slug):
     if not base or not os.path.isdir(d): return {"ok": False, "error": "no such skill"}
     sess = "skill-" + re.sub(r"[^a-z0-9]+", "-", (PROJECT_NAME + "-" + slug).lower()).strip("-")
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
               "'You are authoring the Agent Skill in this folder (SKILL.md). Read it, then help me write/improve "
               "it per the best practices in the ClaudeFather docs/MEMORY_SKILLS_AGENTS.md (esp: the description "
               "is the trigger; keep it lean; lock side-effect skills to manual). One-line status, then stand by.'")
@@ -6725,7 +6730,7 @@ def team_run(slug):
     try: os.makedirs(TEAM_RUNS_DIR, exist_ok=True)
     except Exception: pass
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
               "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
     return {"ok": True, "slug": real, "name": t.get("name") or real, "session": sess,
@@ -6803,7 +6808,7 @@ def team_session(members, assignment=""):
     )).strip().replace("'", "")   # single-quote-free: the brief is wrapped in '...' in the shell launcher
     sess = ("team-" + re.sub(r"[^a-z0-9]+", "-", (PROJECT_NAME + "-" + "-".join(p["slug"] for p in picked)).lower()).strip("-"))[:60]
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' ' + "'" + brief + "'")
+        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' ' + "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
         def _trust():
             for _ in range(10):
@@ -7114,7 +7119,7 @@ def audit_run(block, slug):
     try: os.makedirs(AUDIT_RUNS_DIR, exist_ok=True)
     except Exception: pass
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
               "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
     return {"ok": True, "block": block, "name": real, "session": sess,
@@ -7730,7 +7735,7 @@ def resume_session(machine, sid, cwd, fork=False, label=""):
     if machine == "studio":
         wd = cwd if (cwd and os.path.isdir(cwd)) else PROJECT
         sh([TMUX, "new-session", "-d", "-s", name, "-c", wd,
-            'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --resume %s%s --dangerously-skip-permissions %s' % (sid, fk, CC_TITLE_FLAG)])
+            _CC_PATH + _CC_ENVP + 'claude --resume %s%s --dangerously-skip-permissions %s' % (sid, fk, CC_TITLE_FLAG)])
     else:
         alias = mm.get("alias") or mm["ssh"]
         wd = cwd if (cwd and re.match(r"^[A-Za-z]:[\\/][\w\\/ .:-]*$", cwd)) else "C:\\hptuners"
@@ -8828,7 +8833,9 @@ def _system_brief():
                  "confidential value into the chat, and never print one in your replies. Use the secure-field "
                  "channel so it never enters the transcript: to GET a secret, run `cc-secure request \"<label>\" "
                  "vault:<KEY>` (a box pops up for the user; the value goes straight to the encrypted VAULT, never "
-                 "to you/chat) then read it via the vault when you need it; for a one-time value you need in-hand, "
+                 "to you/chat) then to USE it run `cc-secure get <KEY>` -- CAPTURE it into a shell var, never bare: "
+                 "K=\"$(cc-secure get <KEY>)\"; curl -H \"Authorization: Bearer $K\" … (the cc-* CLIs are always on "
+                 "your PATH). For a one-time value you need in-hand, "
                  "use `cc-secure ask \"<label>\"` (returned to you once, not via chat). To SHOW the user a secret, "
                  "write it to a 0600 temp file and run `cc-secure reveal \"<label>\" <file>` (a box shows them; "
                  "nothing hits the chat). Credentials live ONLY in the per-install vault -- read them with the "
@@ -11609,7 +11616,7 @@ def task_launch(tid):
                   "figure out which client/project this belongs to and note it.")
     brief += " Do NOT send anything externally without asking me first."
     name = _uniq_session("hp-task-" + (re.sub(r"[^A-Za-z0-9]+", "-", t.get("title", ""))[:24].strip("-").lower() or "task"))
-    cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP
+    cl = (_CC_PATH + _CC_ENVP
           + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' ' + _shlex.quote(brief))
     if sh([TMUX, "new-session", "-d", "-s", name, "-c", wd, cl])[0] != 0:
         return {"ok": False, "error": "could not start session"}
@@ -12835,6 +12842,17 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/vault":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps({**vault_list(), "audit": vault_audit_tail(40)}))
+        if u.path == "/api/secret-resolve":
+            # Resolve a vault KEY to its VALUE for an on-box agent to USE (probe/call an API). LOCALHOST-ONLY +
+            # token-gated: the value goes to the agent's own shell (capture into a var), never the dashboard or
+            # tailnet. Backs `cc-secure get <KEY>` so agents don't have to hand-decrypt the vault file.
+            if (self.client_address or ["?"])[0] not in ("127.0.0.1", "::1", "localhost"):
+                return self._s(403, json.dumps({"ok": False, "error": "localhost only"}))
+            _k = (q.get("key", [""])[0] or "").strip()
+            if not _k: return self._s(400, json.dumps({"ok": False, "error": "key required"}))
+            _val = _deploy_env(_k)
+            return self._s(200, json.dumps({"ok": _val is not None, "value": (_val if _val is not None else ""),
+                                            "error": (None if _val is not None else "not set in this node's vault")}))
         if u.path == "/api/entitlements":  return self._s(200, json.dumps(entitlements_status()))
         if u.path == "/api/routines":      return self._s(200, json.dumps(routines_list()))
         if u.path == "/api/ext-data":      return self._s(200, json.dumps(ext_data((q.get("ext") or [""])[0], (q.get("resource") or [""])[0], q)))
