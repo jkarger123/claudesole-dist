@@ -28,6 +28,7 @@ slack   = _opt_import("slack")     # Slack -> context layer (read-only ingest, t
 zoom    = _opt_import("zoom")      # Zoom transcript intake -> the granola proposal pipeline
 clips   = _opt_import("clips")     # CAPTURE SPINE: Capture -> Triage -> Apply (review-first)
 substack = _opt_import("substack") # Substack -> READ (RSS track) + DRAFT (headless-claude co-writer); no publish API
+morning_brief = _opt_import("morning_brief")  # MORNING BRIEF: scheduled, voice-read daily brief from your sources
 try:   # Ed25519 for asymmetric superadmin (public-key). Optional: nodes without it fall back to HMAC + a doctor warning.
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
     from cryptography.hazmat.primitives import serialization as _crypto_ser
@@ -4405,6 +4406,29 @@ def admin_stage(text, run=False):
             "pane_tail": "\n".join(pane.splitlines()[-6:]),
             "hint": ("" if staged else "could not confirm the text landed on the Admin pane -- it may be busy or mid-command; check the Sessions tab.")}
 
+def brief_config_save(patch):
+    """Update this node's cc.config `morning_brief` (live, no restart) + re-derive the Morning Brief routine's
+    schedule from open_time - lead_minutes, so changing the start time in the Brief lens reschedules the run."""
+    if not morning_brief: return {"ok": False, "error": "morning_brief not available"}
+    try: cfg = json.load(open(_CC_CONFIG)) if os.path.isfile(_CC_CONFIG) else {}
+    except Exception: cfg = {}
+    mb = dict(cfg.get("morning_brief") or {})
+    for k in ("open_time", "lead_minutes", "days", "horizon_days", "length", "tone", "sources", "voice", "enabled"):
+        if k in patch: mb[k] = patch[k]
+    cfg["morning_brief"] = mb
+    try:
+        tmp = _CC_CONFIG + ".tmp"; json.dump(cfg, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, _CC_CONFIG)
+        CC["morning_brief"] = mb            # live -> next generate uses it without a restart
+    except Exception as e: return {"ok": False, "error": str(e)[:120]}
+    try:                                    # re-derive the routine schedule from the new start time
+        when = morning_brief.schedule_when(mb)
+        reg = load(ROUTINES, {"routines": []}); changed = False
+        for r in reg.get("routines", []):
+            if r.get("name") == "Morning Brief": r["when"] = when; changed = True
+        if changed: save(ROUTINES, reg)
+    except Exception: pass
+    return {"ok": True, "config": mb, "schedule": morning_brief._next_run_hint(mb)}
+
 # ---- agent-tools: each capability is a scoped agent (its own dir + CLAUDE.md + tools) you can open ----
 AGENTS_DIR = os.path.join(CC_HOME, "agents")
 TEAMS_DIR = os.path.join(CC_HOME, "teams")  # rung-4 coordinating rosters
@@ -8401,6 +8425,14 @@ try: slack.init({"CC": CC, "STATE_DIR": STATE_DIR, "CC_HOME": CC_HOME, "EXT_DIR"
 except Exception as _e: print("[slack] init failed:", _e)
 try: zoom.init({"CC": CC, "PROJECT": PROJECT, "STATE_DIR": STATE_DIR, "secret": _deploy_env})
 except Exception as _e: print("[zoom] init failed:", _e)
+try:
+    morning_brief.init({"CC": CC, "PROJECT": PROJECT, "STATE_DIR": STATE_DIR, "secret": _deploy_env,
+                        "calendar_events": calendar_events, "gmail_list": gmail_list,
+                        "context_assemble": (context.assemble if context else None),
+                        # lambda: voice_profile_get is defined LATER in the file than this init call site,
+                        # so reference it lazily (resolved at generate-time, not module-exec time).
+                        "voice_profile": (lambda: voice_profile_get())})   # write the brief in the owner's VoiceMatch style
+except Exception as _e: print("[morning_brief] init failed:", _e)
 try: substack.init({"CC": CC, "STATE_DIR": STATE_DIR})
 except Exception as _e: print("[substack] init failed:", _e)
 def _substack_dir():
@@ -12764,6 +12796,15 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/account-windows": return self._s(200, json.dumps(account_windows_all()))
         if u.path == "/api/account-tod": return self._s(200, json.dumps(_acct_tod_report()))
         if u.path == "/api/account-switch-health": return self._s(200, json.dumps(switch_health()))
+        if u.path == "/api/brief":
+            return self._s(200, json.dumps(morning_brief.mb_state(), default=str)) if morning_brief else self._s(200, json.dumps({"ok": False, "error": "morning_brief not available"}))
+        if u.path == "/api/brief-audio":
+            p = morning_brief.audio_path(q.get("f", [""])[0]) if morning_brief else None
+            if not p: return self._s(404, "not found")
+            ct = "audio/mpeg" if p.endswith(".mp3") else ("audio/aiff" if p.endswith(".aiff") else "application/octet-stream")
+            try:
+                with open(p, "rb") as _af: return self._s(200, _af.read(), ct)
+            except Exception: return self._s(404, "not found")
         if u.path == "/api/google/gmail-thread":  return self._s(200, json.dumps(gmail_thread(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-att":
             b, err = gmail_attachment_bytes(q.get("id", [""])[0], q.get("att", [""])[0])
@@ -13144,6 +13185,12 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/granola-sync":  # extraction is slow (headless claude per call) -> background
             threading.Thread(target=lambda: granola.gr_sync(int(body.get("limit") or 15)), daemon=True).start()
             return self._s(200, json.dumps({"ok": True, "started": True}))
+        if u.path == "/api/brief-generate":  # synthesis + TTS are slow -> background; result lands in /api/brief
+            if not morning_brief: return self._s(200, json.dumps({"ok": False, "error": "morning_brief not available"}))
+            threading.Thread(target=morning_brief.mb_generate, daemon=True).start()
+            return self._s(200, json.dumps({"ok": True, "started": True}))
+        if u.path == "/api/brief-config":
+            return self._s(200, json.dumps(brief_config_save(body)))
         if u.path == "/api/granola-apply": return self._s(200, json.dumps(granola.gr_apply(body.get("id", ""), body.get("edited"))))
         if u.path == "/api/granola-skip":  return self._s(200, json.dumps(granola.gr_skip(body.get("id", ""))))
         if u.path == "/api/substack-sync":  # RSS fetch across publications -> background (network)
@@ -15154,6 +15201,7 @@ function render(){
   else if(LENS=="files"){loadFiles();return;}
   else if(LENS=="gmail"){loadGmail();return;}
   else if(LENS=="calendar"){loadCalendar();return;}
+  else if(LENS=="brief"){loadBrief();return;}
   else if(LENS=="drive"){loadDrive();return;}
   else if(LENS=="ralph"){loadRalph();return;}
   else if(LENS=="pipeline"){loadPipeline();return;}
@@ -16066,6 +16114,39 @@ async function callsApply(pid){const sel=document.getElementById('cl-'+pid);cons
   setTimeout(loadCalls,500);}
 async function callsSkip(pid){try{await fetch('/api/granola-skip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:pid})});}catch(e){}loadCalls();}
 function callsItems(label,arr,fmt){if(!arr||!arr.length)return'';return '<div class="meta sub" style="margin-top:6px"><b>'+label+'</b></div>'+arr.map(function(x){return '<div class="meta" style="margin-left:8px">• '+e2(fmt(x))+'</div>';}).join('');}
+var BRIEF=null;
+async function briefGen(){toast("Generating your brief… (synthesizing + voicing in the background)");try{await fetch('/api/brief-generate',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});}catch(e){}setTimeout(loadBrief,2500);setTimeout(loadBrief,9000);setTimeout(loadBrief,20000);}
+async function briefCfg(patch){try{await fetch('/api/brief-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});}catch(e){}loadBrief();}
+function briefToggleSrc(name,on){let cur=(BRIEF&&BRIEF.config&&BRIEF.config.sources)||[];cur=on?Array.from(new Set(cur.concat([name]))):cur.filter(function(s){return s!=name;});briefCfg({sources:cur});}
+function briefVoice(patch){briefCfg({voice:Object.assign({},((BRIEF&&BRIEF.config&&BRIEF.config.voice)||{}),patch)});}
+async function loadBrief(){
+  let d={};try{d=await(await fetch('/api/brief')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load the Brief.");return;}
+  BRIEF=d;const c=d.config||{};const v=c.voice||{};const t=d.today;
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>☀️ Morning Brief</b> <span class="sub">runs '+esc(d.next_run_hint||'—')+' · '+(t?('today '+esc(t.date)):'no brief yet')+'</span> <button class="mini go" onclick="briefGen()">⟳ Generate now</button></div>';
+  if(d.last_status=='error'&&d.last_error)h+='<div class="meta" style="margin-top:8px;color:#f85149">⚠ last run: '+esc(d.last_error)+'</div>';
+  h+='</div>';
+  if(t){
+    h+='<div class="card" style="cursor:default;grid-column:1/-1">';
+    if(t.audio){
+      h+='<audio id="briefAudio" controls '+(v.autoplay?'autoplay':'')+' style="width:100%;margin-bottom:6px" src="/api/brief-audio?f='+encodeURIComponent(t.audio)+'"></audio>';
+      h+='<div class="meta sub" style="margin-bottom:8px">▶ Tap play if it doesn\'t start on its own (your browser blocks audio autoplay until you click). Voice: '+esc(t.voice_provider||'')+'</div>';
+    }else if(t.voice_note){h+='<div class="meta" style="margin-bottom:8px;color:#d29922">voice: '+esc(t.voice_note)+'</div>';}
+    h+='<div style="font-size:15px;line-height:1.6;white-space:pre-wrap">'+e2(t.text||'')+'</div>';
+    h+='<div class="meta sub" style="margin-top:8px">sources: '+esc((t.sources_used||[]).map(function(s){return s.source+'('+s.count+')';}).join(', '))+'</div></div>';
+  }else{h+=empty("No brief yet — hit ⟳ Generate now (it also runs automatically "+esc(d.next_run_hint||'each morning')+").");}
+  var src=(d.sources||[]);
+  h+='<div class="card" style="cursor:default;grid-column:1/-1"><b>Settings</b><div class="meta sub" style="margin:6px 0">Start time '
+    +'<input id="bfOpen" value="'+esc(c.open_time||'9:00am')+'" style="'+COMMS_INP+';width:88px;padding:2px 6px"> · lead '
+    +'<input id="bfLead" value="'+(c.lead_minutes||60)+'" style="'+COMMS_INP+';width:48px;padding:2px 6px"> min · horizon '
+    +'<input id="bfHor" value="'+(c.horizon_days||14)+'" style="'+COMMS_INP+';width:44px;padding:2px 6px"> days '
+    +'<button class="mini" onclick="briefCfg({open_time:document.getElementById(\'bfOpen\').value,lead_minutes:+document.getElementById(\'bfLead\').value,horizon_days:+document.getElementById(\'bfHor\').value})">save</button></div>';
+  h+='<div class="meta sub" style="margin:6px 0">Sources: '+src.map(function(s){return '<label style="margin-right:10px"><input type="checkbox" '+(s.enabled?'checked':'')+' onchange="briefToggleSrc(\''+s.name+'\',this.checked)"> '+esc(s.label)+'</label>';}).join('')+'</div>';
+  h+='<div class="meta sub" style="margin:6px 0">Voice: <label><input type="checkbox" '+(v.enabled?'checked':'')+' onchange="briefVoice({enabled:this.checked})"> on</label> · '
+    +'<select onchange="briefVoice({provider:this.value})" style="'+COMMS_INP+';padding:2px 6px">'+['elevenlabs','openai','say'].map(function(p){return '<option value="'+p+'"'+(v.provider==p?' selected':'')+'>'+p+'</option>';}).join('')+'</select>'
+    +' <label><input type="checkbox" '+(v.autoplay?'checked':'')+' onchange="briefVoice({autoplay:this.checked})"> autoplay</label></div></div>';
+  if((d.history||[]).length){h+='<div class="card" style="cursor:default;grid-column:1/-1"><b>Past briefs</b>'+(d.history||[]).map(function(b){return '<div class="meta" style="margin-top:6px;border-top:1px solid #222;padding-top:6px"><b>'+esc(b.date)+'</b>'+(b.audio?' <a href="/api/brief-audio?f='+encodeURIComponent(b.audio)+'" target="_blank">♪</a>':'')+' — '+e2((b.text||'').slice(0,140))+'…</div>';}).join('')+'</div>';}
+  document.getElementById("grid").innerHTML=h;
+}
 async function loadCalls(){
   let d={};try{d=await(await fetch('/api/granola')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load Calls.");return;}
   const props=d.proposals||[];const clients=d.clients||[];

@@ -1,0 +1,44 @@
+{
+  "id": "morning-brief",
+  "name": "Morning Brief",
+  "category": "agency",
+  "version": "1.0.0",
+  "icon": "SR",
+  "summary": "A scheduled, voice-read brief of your day + what's coming, synthesized from your calendar, inbox, calls, tasks and Slack.",
+  "description": "Every morning, ~an hour before you start (configurable), this assembles a CITED slice of your real data from the sources you pick -- calendar, gmail, tasks, granola calls, slack (an extensible set; more as extensions are added) -- and has Claude (on your subscription, no metered key) write 2-3 spoken paragraphs: the shape of today, what's coming over the next week or two, and any prep/watch-outs. It can read the brief aloud in a natural voice (ElevenLabs or OpenAI, vault key) and auto-play it in the Brief lens as you sit down. Per project: each console briefs its own day. Everything is configurable in the Brief lens -- start time, lead time, horizon, which sources feed it, voice, and tone.",
+  "provides": [
+    "lens:brief"
+  ],
+  "lens": {
+    "id": "brief",
+    "label": "Brief",
+    "icon": "SR"
+  },
+  "default_category": "Agency",
+  "requires": [
+    {
+      "key": "ELEVENLABS_API_KEY",
+      "label": "OPTIONAL -- an ElevenLabs API key for the most natural voice (elevenlabs.io -> Profile -> API key). If unset, the brief uses OpenAI TTS (OPENAI_API_KEY in the vault) and falls back to the built-in macOS voice. Voice can also be turned off entirely."
+    }
+  ],
+  "config_key": "morning_brief",
+  "routine": {
+    "name": "Morning Brief",
+    "desc": "Assemble + synthesize + voice the daily brief, ~1h before start time (configurable in the Brief lens).",
+    "cmd": "python3 command-center/cc-brief",
+    "cwd": "",
+    "when": {
+      "hour": 8,
+      "minute": 0,
+      "weekdays": [0, 1, 2, 3, 4]
+    },
+    "timeout_sec": 600,
+    "alert": {
+      "channel": "telegram"
+    }
+  },
+  "setup_doc": "SETUP.md",
+  "setup_agent": true,
+  "agent_doc": "AGENT.md",
+  "publisher": "ClaudeFather"
+}

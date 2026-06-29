@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""cc-brief -- trigger this node's Morning Brief generation (the scheduled routine calls this).
+Resolves port + auth from cc.config (or $CC_CONFIG) and POSTs /api/brief-generate so generation runs
+IN the server process (which has the Google/Granola/context accessors + Full Disk Access). Stdlib only.
+"""
+import json, os, sys, urllib.request
+
+cfgp = os.environ.get("CC_CONFIG") or os.path.join(
+    os.environ.get("CC_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cc.config.json")
+try:
+    c = json.load(open(cfgp))
+except Exception as e:
+    print("cc-brief: cannot read cc.config (%s): %s" % (cfgp, e)); sys.exit(1)
+port = c.get("port") or int(os.environ.get("HPCC_PORT") or 8799)
+tok = c.get("auth_token") or ""
+req = urllib.request.Request("http://127.0.0.1:%s/api/brief-generate" % port, data=b"{}",
+                             headers={"Content-Type": "application/json",
+                                      **({"Cookie": "cc_auth=" + tok} if tok else {})}, method="POST")
+try:
+    with urllib.request.urlopen(req, timeout=240) as r:
+        print(r.read().decode())
+except Exception as e:
+    print("cc-brief: generate failed: %s" % e); sys.exit(1)

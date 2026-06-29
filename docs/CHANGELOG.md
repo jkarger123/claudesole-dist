@@ -3,6 +3,25 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.39 -- 2026-06-29
+- NEW EXTENSION: **Morning Brief** (`morning-brief`, lens:brief). A scheduled, voice-read brief of your day +
+  what's coming, synthesized from your real data.
+  - Runs ~an hour before your start (configurable: open_time - lead_minutes -> the routine's schedule).
+    Per-project (each console briefs its own day).
+  - **Extensible SOURCE registry** (`morning_brief.py`): calendar + gmail + tasks + granola + slack today;
+    add a source = add a function. Built on the existing context layer + live Google/Granola accessors. Each
+    item stays cited.
+  - Synthesis via headless `claude -p` (Max sub, no metered key) -> 2-3 spoken paragraphs (today's shape /
+    coming up / prep). Written in the owner's **VoiceMatch style** (their smart-reply writing profile) so it
+    sounds like them.
+  - **Natural voice (browser playback, never the server's speakers):** the server renders an mp3 (ElevenLabs
+    or **OpenAI tts-1-hd** -- vault key, female voices like nova; macOS `say` only as a last-resort
+    file-writer) and the Brief lens plays it in an `<audio>` element on the operator's OWN device, with
+    best-effort autoplay (browsers need one click for audio). TTS fallback reason is surfaced when it can't
+    use the preferred voice.
+  - Brief lens: today's brief + play + history + config (start time, lead, horizon, sources, voice, autoplay);
+    `/api/brief`, `/api/brief-generate`, `/api/brief-config`, `/api/brief-audio`; `cc-brief` CLI for the routine.
+
 ## 0.99.38 -- 2026-06-29
 - ADMIN-SHELL staging made reliable (CCR from homeassistant, ccr-1782711953408). Staging a sudo/interactive
   command for the operator via raw `tmux send-keys` failed silently for two reasons: (1) the admin session

@@ -38,8 +38,9 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "9e191019c9618091fb704602b9214e99e6ae096ab52f17f18bf9cf8016407486",
+      "claudesole.manifest.json": "64407b75a913e97441947dd3e568627d34db70ff32edd35b58068b6e7b3ccf5a",
       "command-center/CLAUDE.md": "7a981018ce7512daf7c306f5bb6b6e1078cd7d993f73cb5f157b153c9c5f2ae1",
+      "command-center/cc-brief": "566b5d91b27874cfbe6a55228d5021011df3fcb3ca6a084926e8b040a31e15ec",
       "command-center/cc-handoff": "9194f8a409f322c9835615cdb014dc9e626a469611ea127b1e9e7a6bf4db2532",
       "command-center/cc-hold": "a756f97be0fef2e0b764324f6830c1c63859347e009f04e8e4a6b8e5ccf9a3fc",
       "command-center/cc-instance-supervise.sh": "e0521eae7f276255afc604e872f9edf5aedc657b86dc55edca4340382d61c342",
@@ -54,11 +55,12 @@
       "command-center/git-backup.sh": "01c2b4d56022ac1b998b58f3d8d16508e25f337373160aa5a3750c3dce270c6a",
       "command-center/granola.py": "3f186b64b0f8861cdb134c77dd25369853d5fb09f8f8a4d80146dde2b770d657",
       "command-center/mesh_stop_hook.py": "d62d7c533b027579a2beba1a2ce4caa3e84bff6e027d9c488f6ef9428e0fbdb0",
+      "command-center/morning_brief.py": "69e518fd455ef03f92bc2bf3a5f389387f2cb8b0bc3d1701c3cccd9c3b510d86",
       "command-center/platform_map.json": "91b6a19c6b3804796887a3b66b51dfa2dcc17ff517088dd837f6699b595a22be",
       "command-center/preship.py": "7c9ea31cc06cd81d8e4bb875be9fb5784cbdd0272853b1248636efa4f2f5a9b7",
       "command-center/ralph_runner.py": "7d26a8d8bca83ba6f52c8ab45aae1c5643233e5cf94c6293b8f6f14b6c169f3b",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "6f38511424fa3b7e24ccb997ba28109a5132b7e3a47dd1486d907da6aaae04a8",
+      "command-center/server.py": "a037ebc8e8128335bafcb8ee0b1e7e16e1e176801c305a92f3a3268706990bbf",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/vault/CLAUDE.md": "76e4f6160e6c67968e49e7e89b8618e3d2130c0093f2b582080b7bccb33871c6",
@@ -73,7 +75,7 @@
       "docs/APPLIANCE_BRINGUP.md": "519525aafcce807331adce0d382f86da785395a68e65e2fe61dc5965f28ff3c1",
       "docs/ARCHITECTURE.md": "e61a69a2703c9ac9ba5e153855ddfd495ed5dbd0b5f49b190c4954b8f3c85989",
       "docs/CAPTURE.md": "c0833ca6871ba51a3991cfed1d24b8252280e5d004abdddbce99806a9dd1d071",
-      "docs/CHANGELOG.md": "a3b12076098336309cc03a07f9fd7387e2c4d6b5982085bff0f9cf42dc0c7163",
+      "docs/CHANGELOG.md": "6b11777d85fc502f2bf63b98d179a041df1cffc7e263b2c35d542976896e0052",
       "docs/CLAUDE_CODE_REFERENCE.md": "d9acc94772b0a5b6b8dcf81962cea5f36cd050dd7797c6180c69c9b661450b2a",
       "docs/CONTEXT_ENGINEERING.md": "accc989214de542191bf7a678f0336087039e815eac7d0429deb671cf8277ddc",
       "docs/CONTROL_CENTER_BLUEPRINT.md": "3bf2fb328661e1cac513e8a9aacf6fb2bba7c5d9c361f069991c3915caa393e9",
@@ -124,6 +126,7 @@
       "extensions/incident-commander/payload/tools/run.py": "1b550eaaa7d29b687a470d0ea7d5d4d71152c2070ee5f64cfada8143f054419a",
       "extensions/linear/extension.json": "2b7b17ba176b2be671c55f4e1f761bb5584a65e415fee96ae72715eb963fa580",
       "extensions/linear/mcp.json": "1bafbf3a3d5c75212904f8b8722471efe0da3aeef7bdc9cccca267ae4af79538",
+      "extensions/morning-brief/extension.json": "8a459267c1cd7a688234c6c3f8c81f6f4e98e6da74f07b9a7968cd58ffdfcdb3",
       "extensions/notion/extension.json": "4b26f8ee2472c8785dfb4c987a3f4ec788284c97348e73db5906ab8550ce87f0",
       "extensions/notion/mcp.json": "3d8ee07c66704a042f855761ee87a6e440b436f9f41ba7df583208326c82d99b",
       "extensions/pagerduty/extension.json": "954032d35fdbe03109a7b178d180c260b4c597c8c64ea80e6f245053af29b490",
@@ -154,9 +157,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1782713782,
+    "generated": 1782715720,
     "v": 1,
-    "version": "0.99.38"
+    "version": "0.99.39"
   },
-  "sig": "ZkydQyC1JpdL10DcYZ5+w84kvYEV2RXlyYrAyxStDqQ7xXFP16WGCs9fydtMa30Qu5JWA6kIAc+6VTrMFghVCw=="
+  "sig": "zieVlUrAmvQrxiidQkyXDjfglaZkHdFW4JZC6tt+4gp/Ld5hJHMcF1LOIRCkZA9MBa/wVodUylAP9wHu79RlBg=="
 }
