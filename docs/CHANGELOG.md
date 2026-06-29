@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.36 -- 2026-06-29
+- RESILIENCE hardening (post-DoS, items 2+3 of the fleet resilience plan):
+  - **Doctor SSD / Full-Disk-Access read-probe (detect, never act).** `doctor()` now probes a node's external
+    (`/Volumes/...`) project/deliverables path and classifies: readable (ok) / present-but-EPERM (FDA grant on
+    the tmux binary lapsed -- e.g. after a `brew upgrade tmux` changes its signature -> `sev:err` with the
+    re-grant steps) / not-mounted (`sev:warn`). This is the early-warning for the exact "Operation not
+    permitted" SSD failure that wedged the fleet -- it ALERTS, and explicitly does NOT restart/kill (a restart
+    re-attaches the same un-granted binary and hides the cause).
+  - **Pre-ship `kill-server` footgun gate.** `preship.py` now FAILS the ship if `tmux kill-server` appears in
+    any shipped `.sh` (it nukes the shared brain tmux server -> every node + chief + the operator's terminals
+    at once; the 2026-06-28 self-DoS was a one-shot kill-server script under launchd KeepAlive). Allowed only
+    with an explicit `# preship-allow: kill-server` marker on an interactive break-glass tool.
+  - Removed the disabled incident artifact `/tmp/cf-storage-recovery.sh.DISABLED` (its contents are preserved
+    in the post-mortem deliverable).
+
 ## 0.99.35 -- 2026-06-29
 - GRANOLA CALLS (ext v1.2.0) -- 3 fixes from AFP's first live API sync (CCR ccr-1782711514956):
   - **Client-matching now works out of the box on the API source.** `list_meetings()` reads the sparse

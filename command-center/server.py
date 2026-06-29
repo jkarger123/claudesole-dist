@@ -7997,6 +7997,26 @@ def doctor():
             issues.append({"sev": "warn", "path": "storage", "msg": "the project lives on the INTERNAL boot volume -- the enterprise standard is one dedicated SSD per node (project on the SSD, internal drive kept empty). See docs/STORAGE_ARCHITECTURE.md."})
     except Exception:
         pass
+    # SSD / FULL-DISK-ACCESS read-probe: a path on an external volume can silently become UNREADABLE if the
+    # TCC Full-Disk-Access grant on the tmux binary lapses (e.g. `brew upgrade tmux` changes its code
+    # signature/cdhash) -- the exact "Operation not permitted" failure that has wedged this fleet. DETECT +
+    # ALERT ONLY: never restart/kill on this (a restart re-attaches the same un-granted binary and masks it).
+    for _lbl, _p in (("project", PROJECT), ("deliverables", globals().get("DELIV_LOCAL_ROOT"))):
+        _pp = str(_p or "")
+        if not _pp.startswith("/Volumes/"):   # only external mounts are TCC-gated; internal disk never EPERMs
+            continue
+        _mount = "/Volumes/" + _pp.split("/Volumes/", 1)[1].split("/", 1)[0]
+        try:
+            os.listdir(_pp if os.path.isdir(_pp) else _mount)
+            break                              # readable -> healthy, stop probing
+        except PermissionError:
+            issues.append({"sev": "err", "path": "storage", "msg": "SSD path %s is present but UNREADABLE (Operation not permitted) -- Full Disk Access on the tmux binary has likely lapsed (a `brew upgrade tmux` changes its signature and silently voids the grant). Re-grant: System Settings -> Privacy & Security -> Full Disk Access -> add /opt/homebrew/bin/tmux (or `brew pin tmux` to prevent it). Do NOT restart the server to 'fix' this -- it re-attaches the same un-granted binary and hides the cause." % _pp})
+            break
+        except FileNotFoundError:
+            issues.append({"sev": "warn", "path": "storage", "msg": "the external volume %s (holds this node's %s) is NOT mounted -- SSD-backed lenses will be empty until it remounts; the Chief + sessions fall back to CC_HOME so the node stays up." % (_mount, _lbl)})
+            break
+        except Exception:
+            pass
     try:                                   # SECRETS OUTSIDE THE VAULT (the vault should be the single store)
         loose = _loose_secrets_scan()
         if loose:

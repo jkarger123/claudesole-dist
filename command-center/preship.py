@@ -27,5 +27,29 @@ if missing:
     print("PRESHIP FAIL: local modules imported by server.py but MISSING from framework_paths -> remote nodes "
           "would crash-loop on cc-update:", missing)
     sys.exit(1)
-print("PRESHIP OK: all %d local engine modules imported by server.py are in framework_paths (%s)"
-      % (len(local), ", ".join(local)))
+
+# Footgun gate (the 2026-06-28 self-DoS class): `tmux kill-server` nukes the SHARED brain tmux server -> every
+# node + every chief + the operator's live terminals die at once. It must NEVER live in a shipped/automatable
+# script (the incident was a one-shot kill-server script registered with launchd KeepAlive -> infinite kill
+# loop). Restart a SINGLE node session instead. Allowed ONLY with an explicit '# preship-allow: kill-server'
+# marker on a clearly interactive, operator-confirmed break-glass tool.
+import glob
+ksp = []
+for shp in glob.glob(os.path.join(ROOT, "**", "*.sh"), recursive=True):
+    if any(seg in shp for seg in ("/_archive/", "/data/", "/scratch/", "/.git/", "/node_modules/")):
+        continue
+    try:
+        body = open(shp, errors="ignore").read()
+    except Exception:
+        continue
+    if "kill-server" in body and "preship-allow: kill-server" not in body:
+        ksp.append(os.path.relpath(shp, ROOT))
+if ksp:
+    print("PRESHIP FAIL: `tmux kill-server` found in shipped script(s) -- it nukes the SHARED brain tmux "
+          "server (every node + every chief + the operator's terminals at once). Restart a SINGLE node "
+          "session instead; if it is a deliberate interactive break-glass tool, mark it "
+          "'# preship-allow: kill-server'. Offending:", ksp)
+    sys.exit(1)
+
+print("PRESHIP OK: all %d local engine modules imported by server.py are in framework_paths (%s); no "
+      "kill-server footgun in shipped scripts" % (len(local), ", ".join(local)))
