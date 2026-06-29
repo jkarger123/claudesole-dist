@@ -4029,26 +4029,36 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
 CHIEF = CC.get("chief_session") or ("chief-" + (re.sub(r"[^a-z0-9]+", "-", PROJECT_NAME.lower()).strip("-") or "main"))
 _FRIENDLY[CHIEF] = "Chief of Staff"
 _CHIEF_WD = {"respawns": 0, "last": 0}
+# Each node's chief_open() drops a launch descriptor here so the OUT-OF-PROCESS launchd watchdog
+# (cc-session-watchdog.py) can revive a dead chief even when THIS server process is down -- the
+# in-process _chief_watchdog dies with the server, so it can't cover a crash/restart/reboot itself.
+CHIEF_LAUNCH_DIR = "/tmp/cf-chief-launch"
 def _chief_watchdog():
     """Keep the Chief of Staff (the always-on inter-chief MESH comms endpoint) alive. It's a protected singleton
     started on demand; if its claude process exits, nothing else respawns it -> the node goes silent on the mesh
     (this is why AFP's CoS went dead). This loop re-opens it when missing. Gated by cc.config chief_supervise
     (default on); a generous interval + a thrash guard so a chief that keeps dying doesn't burn tokens."""
-    time.sleep(75)                                   # let boot + the normal on-boot open settle first
+    time.sleep(15)                                   # let boot + the normal on-boot open settle first
+    first = True
     while True:
         try:
-            if CC.get("chief_supervise", True) and sh([TMUX, "has-session", "-t", CHIEF])[0] != 0:
-                now = time.time()
-                if now - _CHIEF_WD["last"] > 540:    # don't respawn more than ~once/9min (anti-thrash)
-                    chief_open(); _CHIEF_WD["respawns"] += 1; _CHIEF_WD["last"] = now
-                    try: notify_send("Chief of Staff (%s) had exited -- watchdog respawned it (mesh comms restored)." % CHIEF)
-                    except Exception: pass
+            if CC.get("chief_supervise", True):
+                alive = sh([TMUX, "has-session", "-t", CHIEF])[0] == 0
+                if not alive:
+                    now = time.time()
+                    if now - _CHIEF_WD["last"] > 120:    # bound respawns to ~once/2min (anti-thrash, was 9min)
+                        r = chief_open(); _CHIEF_WD["respawns"] += 1; _CHIEF_WD["last"] = now
+                        if isinstance(r, dict) and r.get("ok"):
+                            try: notify_send("Chief of Staff (%s) had exited -- watchdog respawned it (mesh comms restored)." % CHIEF)
+                            except Exception: pass
+                elif first:
+                    chief_open()                         # already up: write/refresh its launch descriptor once
         except Exception: pass
-        time.sleep(300)                              # check every ~5 min
+        first = False
+        time.sleep(60)                                   # check every ~60s (was 5 min)
 def chief_open():
-    """Resume the persistent chief session if alive, else start it at the top level (briefed)."""
-    if sh([TMUX, "has-session", "-t", CHIEF])[0] == 0:
-        return {"ok": True, "session": CHIEF, "term": "/term?name=" + CHIEF, "note": "resumed"}
+    """Always (re)write the launch descriptor first -- so the out-of-process watchdog can revive this chief
+    even if it's currently alive and the server later dies -- then resume the session if alive, else start it."""
     import shlex
     brief = CC.get("chief_brief") or "Read CHIEF_OF_STAFF.md then CLAUDE.md"
     # Stop hook -> a settings FILE (no inline-JSON shell quoting); the hook forwards mesh replies instantly.
@@ -4082,12 +4092,35 @@ def chief_open():
               "Mission Control's call is FINAL; do not re-litigate or loop. Never state your own version or "
               "timestamps from memory; the mesh stamps those -- read the envelope. %s %s"
               % (brief, _system_brief(), roster_text()))
+    # The prompt (instruction block + system brief + full roster) is LARGE and grows with the roster. Inlining
+    # it as a tmux command argument overflows tmux's command buffer ("command too long") past ~16KB, which
+    # silently prevents the chief from starting -- the bug that left chief-hptuners dead. Write it to a file and
+    # reference it via "$(cat ...)" so the shell tmux spawns expands it INSIDE the pane: the tmux arg stays a few
+    # hundred bytes no matter how big the roster gets.
+    prompt_file = os.path.join(STATE_DIR, "_chief_prompt.txt")
+    try:
+        with open(prompt_file, "w") as f: f.write(prompt)
+    except Exception: pass
     cl = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'export MESH_CC="http://localhost:%d"; '
-          "claude --dangerously-skip-permissions %s --settings %s %s"
-          % (PORT, CC_TITLE_FLAG, shlex.quote(settings_file), shlex.quote(prompt)))
-    rc = sh([TMUX, "new-session", "-d", "-s", CHIEF, "-c", PROJECT, cl])[0]
+          'claude --dangerously-skip-permissions %s --settings %s "$(cat %s)"'
+          % (PORT, CC_TITLE_FLAG, shlex.quote(settings_file), shlex.quote(prompt_file)))
+    wd = PROJECT if os.path.isdir(PROJECT) else CC_HOME          # SSD-gone fallback: chief stays up, only file ops degrade
+    # Persist a launch descriptor so the out-of-process launchd watchdog can revive this chief if THIS server dies.
+    try:
+        os.makedirs(CHIEF_LAUNCH_DIR, exist_ok=True)
+        save(os.path.join(CHIEF_LAUNCH_DIR, CHIEF + ".json"),
+             {"session": CHIEF, "cwd": wd, "cl": cl, "port": PORT, "updated": int(time.time())})
+    except Exception: pass
+    if sh([TMUX, "has-session", "-t", CHIEF])[0] == 0:           # already up -> descriptor refreshed above, done
+        return {"ok": True, "session": CHIEF, "term": "/term?name=" + CHIEF, "note": "resumed"}
+    rc, _o, err = sh([TMUX, "new-session", "-d", "-s", CHIEF, "-c", wd, cl])
     if rc != 0 and sh([TMUX, "has-session", "-t", CHIEF])[0] == 0:
         return {"ok": True, "session": CHIEF, "term": "/term?name=" + CHIEF, "note": "already-running (singleton)"}
+    if rc != 0:                                                  # surface the REAL reason instead of blaming auth
+        reason = ("tmux rejected the launch command as too long (prompt is now file-backed -- should not recur)"
+                  if "too long" in (err or "").lower() else "tmux could not create the session")
+        return {"ok": False, "session": CHIEF, "error": reason + ".",
+                "detail": ("new-session stderr: " + (err or "").strip())[-300:]}
     def _trust():
         for _ in range(10):
             time.sleep(1.5)
@@ -4099,10 +4132,9 @@ def chief_open():
     # exits instantly (first-run/auth issue) leaves the terminal attaching to a ghost ("can't find session").
     time.sleep(1.3)
     if sh([TMUX, "has-session", "-t", CHIEF])[0] != 0:
-        pane = sh([TMUX, "capture-pane", "-t", CHIEF, "-p"])[1] if sh([TMUX, "has-session", "-t", CHIEF])[0] == 0 else ""
         return {"ok": False, "session": CHIEF,
-                "error": "the Chief of Staff session exited right after launch (claude did not stay up -- check this node's claude auth/login). Try again, or open a session in the Sessions tab to see the error.",
-                "detail": pane[-300:]}
+                "error": "the Chief of Staff session exited right after launch -- most likely this node's claude auth/login. Open the Sessions tab to see the error.",
+                "detail": ("new-session stderr: " + (err or "").strip())[-300:]}
     return {"ok": True, "session": CHIEF, "term": "/term?name=" + CHIEF, "note": "started"}
 
 def _mesh_envelope(sender, sent_at, from_version, msg_id):

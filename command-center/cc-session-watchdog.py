@@ -28,6 +28,9 @@ STATE_FILE = os.path.expanduser("~/.cc-watchdog.json")
 LOG = "/tmp/cc-watchdog.log"
 COOLDOWN = 150            # seconds between nudges to the same session
 NUDGE = "Please continue where you left off -- an API error interrupted you; resume the task."
+# Out-of-process chief revival: each node server drops a launch descriptor here (see chief_open in server.py).
+CHIEF_LAUNCH_DIR = "/tmp/cf-chief-launch"
+CHIEF_REVIVE_COOLDOWN = 120   # seconds between revive attempts for the same chief (anti-thrash)
 
 # A line is an ERROR line only if it is *predominantly* an API/transport error near the start of the line
 # (optionally prefixed by Claude Code's box/glyph chars). This is what distinguishes a real stall from
@@ -98,9 +101,32 @@ def nudge(s):
     sh([TMUX, "send-keys", "-t", s, "Enter"]); time.sleep(0.6)
     sh([TMUX, "send-keys", "-t", s, "Enter"])             # second Enter flushes a message left queued behind a rate-limit backoff
 
+def revive_chiefs(d, live, dry=False):
+    """Recreate any chief whose tmux session is gone, from the launch descriptor its server left in
+    CHIEF_LAUNCH_DIR. This runs in the launchd watchdog -- INDEPENDENT of any node server.py -- so a chief is
+    revived even when its server is down/crash-looping (the server's own in-process watchdog dies with it).
+    Cooldown-guarded so a chief that keeps dying can't be respawned in a tight loop."""
+    import glob
+    cs = d.setdefault("chief_revive", {}); now = time.time(); acted = []
+    for f in sorted(glob.glob(os.path.join(CHIEF_LAUNCH_DIR, "*.json"))):
+        try: desc = json.load(open(f))
+        except Exception: continue
+        sess = desc.get("session"); cl = desc.get("cl"); cwd = desc.get("cwd") or os.path.expanduser("~")
+        if not sess or not cl or sess in live: continue            # missing data or already alive
+        if now - cs.get(sess, 0) < CHIEF_REVIVE_COOLDOWN: continue  # cooldown
+        if dry: acted.append("WOULD-REVIVE " + sess); continue
+        r = sh([TMUX, "new-session", "-d", "-s", sess, "-c", cwd, cl]); cs[sess] = now
+        ok = bool(r) and r.returncode == 0
+        acted.append("revived " + sess + ("" if ok else " (FAILED)"))
+        logline("out-of-process revive of chief %s%s" % (sess, "" if ok else " FAILED"))
+    for s in list(cs):                                             # forget chiefs whose descriptor is gone
+        if not os.path.isfile(os.path.join(CHIEF_LAUNCH_DIR, s + ".json")): del cs[s]
+    return acted
+
 def cmd_run(watch_all=False, dry=False):
     d = load(); st = d.setdefault("state", {}); watch = set(d.get("watch", []))
     live = tmux_sessions()
+    chief_acted = revive_chiefs(d, live, dry=dry)
     targets = [s for s in live if is_claude(pane(s))] if watch_all else [s for s in watch if s in live]
     now = time.time(); acted = []
     for s in targets:
@@ -122,8 +148,10 @@ def cmd_run(watch_all=False, dry=False):
     for s in list(st):                          # prune sessions that vanished
         if s not in live: del st[s]
     if not dry: save(d)
-    if acted: logline("; ".join(acted))
-    print("watchdog: targets=%d %s" % (len(targets), ("[dry] " if dry else "") + ("; ".join(acted) if acted else "nothing to nudge")))
+    all_acted = chief_acted + acted
+    if all_acted: logline("; ".join(all_acted))
+    print("watchdog: targets=%d chiefs=%s %s" % (len(targets), (len(chief_acted) or "ok"),
+          ("[dry] " if dry else "") + ("; ".join(all_acted) if all_acted else "nothing to do")))
 
 def cmd_watch(names, add=True):
     d = load(); w = set(d.get("watch", []))

@@ -3,6 +3,24 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.34 -- 2026-06-29
+- CHIEF DURABILITY (fleet resilience): the Chief of Staff is now hard to leave detached.
+  - **Length-safe `chief_open`**: the launch prompt (instruction block + system brief + full roster) is now
+    written to a file and passed via `"$(cat ...)"` instead of inlined as a tmux command argument. Inlining
+    overflowed tmux's command buffer ("command too long", rc=1) once a node's roster grew past ~16KB, which
+    silently prevented the chief from ever starting and surfaced as a MISLEADING "check claude auth/login"
+    error. The biggest-roster node (Mission Control) hit this first; it was a scaling time-bomb for all nodes.
+  - **Real error surfacing**: `chief_open` now branches on the actual `new-session` stderr (e.g. "too long")
+    instead of always blaming auth.
+  - **Out-of-process revival**: each node writes a launch descriptor to `/tmp/cf-chief-launch/<chief>.json`;
+    the launchd `cc-session-watchdog.py` (45s) now RECREATES a dead chief from that descriptor -- so a chief
+    is revived even when its own server is down/crash-looping (the in-process watchdog dies with the server).
+    Descriptor is (re)written on every `chief_open` incl. the resumed path + a boot-time ensure, so a
+    continuously-alive chief is still revivable.
+  - **Tightened in-process watchdog**: 15s boot settle / 60s poll / 120s thrash-bound (was 75 / 300 / 540).
+  - **SSD-gone fallback**: chief/session `cwd` falls back to `CC_HOME` when the SSD project path is missing,
+    so the chief (the mesh comms endpoint) stays up even if `/Volumes/Samsung990PRO` is unmounted.
+
 ## 0.99.33 -- 2026-06-28
 - SELF-CONTAINED NODE LAYOUT is now the enforced standard (fixes the ATEM "console shell vs codebase split").
   A node's project lives INSIDE its bundle at `<bundle>/project/` (project_root in-bundle), so each node is ONE
