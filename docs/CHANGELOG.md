@@ -3,6 +3,10 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.55 -- 2026-06-29
+- Running Ralph loops now also appear in the bottom Sessions TASKBAR (dock), not just the Sessions list --
+  session_bar() was filtering out kind=loop. Pairs with v0.99.54 so you can click a live loop tile and watch
+  it. Only running loops show (no session = no tile); services + web-server processes stay hidden.
 ## 0.99.54 -- 2026-06-29
 - Running Ralph loops now appear in the Sessions taskbar of the node that owns them, so you can open the
   terminal and watch one live. They were scoped out because a loop's tmux session runs with cwd = the engine

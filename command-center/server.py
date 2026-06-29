@@ -7529,7 +7529,7 @@ def session_bar():
     """Lightweight feed for the global desktop sessions taskbar: every project session + its live busy state
     (busy = Claude is mid-turn). The frontend watches for busy->idle transitions to flash a tile gold ('done').
     Busy is computed in parallel so a dozen sessions don't serialize a dozen capture-pane calls."""
-    sess = [s for s in tmux_sessions() if s.get("kind") not in ("service", "loop")]   # taskbar = WORK + CHIEFS only (services/loops live in their own lenses; servers already hidden)
+    sess = [s for s in tmux_sessions() if s.get("kind") != "service"]   # taskbar = WORK + CHIEFS + running Ralph loops (so you can watch a loop live); services + servers stay hidden
     busy = {}
     def chk(n):
         try: busy[n] = _pane_busy(n)
