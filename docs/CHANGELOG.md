@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.32 -- 2026-06-28
+- ONBOARDING BRIEF -- folded back the JUDGMENT learnings from the first real runs (so future installs don't
+  depend on the model being clever that day):
+  - **Secrets nuance:** vault LOOSE/hardcoded keys, but NEVER delete/relocate a secret the app itself reads as
+    its config mechanism (HA `secrets.yaml`, a runtime `.env`) or that is the node's OWN access path (a token
+    that, if removed, cuts access) -- leave those in place (mirror to the vault if useful), and don't move
+    individually-deployed config files. HA's agent had to override the old "vault everything" brief by hand; now
+    it's the instruction. When unsure -> propose, don't act.
+  - **Orientation:** the agent runs INSIDE the codebase (cwd); the ClaudeFather node is a SEPARATE bundle whose
+    command-center holds the cc-* CLIs (on PATH) and serves the Doctor at the node's local port. Both first-run
+    agents wasted effort untangling node-vs-codebase -- now stated up front.
+
 ## 0.99.31 -- 2026-06-28
 - CONSISTENCY (from the first real onboardings -- ATEM + Home Assistant):
   - **cc-* CLIs now resolve as bare commands in every session.** The bundle's `command-center/` (BASE) is prepended
