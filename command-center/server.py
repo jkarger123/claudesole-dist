@@ -3937,7 +3937,7 @@ _NEW_FOLDER_BRIEF = (
     "becomes the folder's one-line description in the New-session picker and Projects lens. Add more sections "
     "below as useful. Then give me a one-line status and stand by.")
 
-def launch(target, name, cid=None, rel=None, extra_sys=None, model=None):
+def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=None):
     """Create a tmux session ON THE STUDIO. studio target runs Claude locally in the pillar dir;
        windows target wraps `ssh -t <alias> claude` so it's still a persistent, browser-attachable Studio session.
        extra_sys = an extra SYSTEM-level block appended to the launch context (used by the warm-transfer desk to
@@ -3965,11 +3965,16 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None):
         cl2 = cl + (" --append-system-prompt " + _shlex.quote(sysctx) if sysctx else "")
         # if launching into a folder with NO CLAUDE.md, brief the agent to create one (purpose + the one-line
         # description our system previews) -> the system LEARNS this launch point. (Guarded by rel; root has one.)
-        seed = ""
-        if rel and os.path.isdir(wd) and not os.path.isfile(os.path.join(wd, "CLAUDE.md")):
-            seed = " " + _shlex.quote(_NEW_FOLDER_BRIEF)
+        # SEED = a first-turn prompt passed as claude's positional arg, so it RUNS reliably once the session boots
+        # (no racy post-launch send-keys that can land before claude is ready). Explicit seed wins; else a folder
+        # with no CLAUDE.md gets the new-folder brief.
+        seed_s = ""
+        if seed:
+            seed_s = " " + _shlex.quote(seed)
+        elif rel and os.path.isdir(wd) and not os.path.isfile(os.path.join(wd, "CLAUDE.md")):
+            seed_s = " " + _shlex.quote(_NEW_FOLDER_BRIEF)
         cl2 = "export CC_SESSION=" + _shlex.quote(name) + "; " + cl2   # so the agent can self-identify (cc-hold / cc-handoff)
-        sh([TMUX, "new-session", "-d", "-s", name, "-c", wd, cl2 + seed])
+        sh([TMUX, "new-session", "-d", "-s", name, "-c", wd, cl2 + seed_s])
         try: _smeta_set(name, subject=(subj or None), active_ts=time.time())   # topic tag for relevance matching
         except Exception: pass
     else:
@@ -7255,11 +7260,11 @@ def onboard_start(rel="", mode="adopt", name="", model=None):
     """Launch the Onboarding agent (the STRUCTURER) in the project on the node's BEST model (model=None -> default);
     its brief tells it to delegate the bulk READING to cheap subagents. Then nudge it to begin."""
     mode = "scaffold" if str(mode).lower() == "scaffold" else "adopt"
+    kickoff = ("You are the Onboarding agent -- your full playbook is in your system context. Begin now: ask me the "
+               "short intake questions, then DELEGATE the reading to cheap subagents and do the structuring yourself.")
     res = launch("studio", "onboard-" + _slug(name or os.path.basename((rel or "project").rstrip("/")) or "project"),
-                 rel=(rel or None), extra_sys=_onboard_brief(mode, rel, name), model=model)   # model None = best (structuring); readers spawned cheap per the brief
-    if res.get("ok") and res.get("session"):
-        try: _mesh_deliver(res["session"], "You are the Onboarding agent -- your full playbook is in your system context. Begin now: ask me the short intake questions, then DELEGATE the reading to cheap subagents and do the structuring yourself.")
-        except Exception: pass
+                 rel=(rel or None), extra_sys=_onboard_brief(mode, rel, name), model=model,   # model None = best (structuring)
+                 seed=kickoff)   # seed = a first-turn prompt claude auto-runs on boot (reliable; no racy send-keys)
     return {"ok": bool(res.get("ok")), "mode": mode, "structurer_model": (model or "best (node default)"),
             "reader_model": ONBOARD_READER_MODEL, "session": res.get("session"), "term": res.get("term"),
             "rel": rel, "error": res.get("error")}

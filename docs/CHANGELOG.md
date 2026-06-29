@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.30 -- 2026-06-28
+- FIX: a launched agent's kickoff turn (onboarding) was TYPED into the fresh session but not always SENT -- the
+  post-launch send-keys raced claude's boot (splash / MCP-auth / trust), leaving the message unsubmitted. Now the
+  kickoff is passed as claude's positional SEED prompt (`launch(seed=...)`), which claude runs reliably once
+  booted -- same mechanism as the new-folder brief. No more "message sitting unsent."
+
 ## 0.99.29 -- 2026-06-28
 - ONBOARDING wired into ADD (the gap: creating a project landed in the Chief, onboarding never fired). The "+ Add
   a ClaudeFather" wizard now has an **Onboarding** choice (Adopt existing code / Scaffold new / none); it threads
