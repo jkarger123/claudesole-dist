@@ -79,7 +79,9 @@ def _src_calendar(cfg):
     if isinstance(ev, dict): ev = ev.get("events") or ev.get("items") or []
     for e in (ev or [])[:40]:
         if not isinstance(e, dict): continue
-        st = (e.get("start") or {}); when = st.get("dateTime") or st.get("date") or e.get("start_str") or ""
+        st = e.get("start")
+        when = ((st.get("dateTime") or st.get("date")) if isinstance(st, dict)
+                else st if isinstance(st, str) else "") or e.get("start_str") or e.get("date") or ""
         title = e.get("summary") or e.get("title") or "(busy)"
         who = ", ".join(a.get("email", "") for a in (e.get("attendees") or []) if isinstance(a, dict))[:160]
         out.append({"label": title, "text": ("%s%s" % (title, (" -- with " + who) if who else "")),
@@ -259,9 +261,12 @@ def mb_generate():
     st = _load_state()
     st["last_run"] = int(time.time())
     sel = [s for s in (cfg.get("sources") or []) if s in SOURCES]
-    blocks, used = [], []
+    blocks, used, src_errors = [], [], []
     for name in sel:
-        items = SOURCES[name]["fn"](cfg) or []
+        try:
+            items = SOURCES[name]["fn"](cfg) or []           # one bad source must NEVER kill the whole brief
+        except Exception as e:
+            src_errors.append("%s: %s" % (name, str(e)[:80])); continue
         if not items: continue
         used.append({"source": name, "count": len(items)})
         lines = "\n".join("- " + (i.get("text") or "") for i in items[:25])
@@ -275,7 +280,8 @@ def mb_generate():
              "date": time.strftime("%Y-%m-%d"), "text": text, "sources_used": used,
              "audio": audio_fn, "voice_provider": prov if audio_fn else None,
              "voice_note": (None if audio_fn else prov),
-             "voice_fallback": _LAST_TTS_FALLBACK or None}
+             "voice_fallback": _LAST_TTS_FALLBACK or None,
+             "src_errors": src_errors or None, "unread": True}   # unread -> the dashboard surfaces it on open
     st["briefs"].insert(0, brief); st["briefs"] = st["briefs"][:60]
     st["last_status"] = "ok"; st["last_error"] = ""
     _save_state(st)
@@ -287,10 +293,20 @@ def mb_state():
     st = _load_state(); cfg = _cfg()
     briefs = st.get("briefs", [])
     today = briefs[0] if briefs else None
+    is_today = bool(today and today.get("date") == time.strftime("%Y-%m-%d"))
     return {"ok": True, "today": today, "history": briefs[1:30], "config": cfg,
             "sources": available_sources(), "last_run": st.get("last_run", 0),
             "last_status": st.get("last_status", ""), "last_error": st.get("last_error", ""),
-            "next_run_hint": _next_run_hint(cfg)}
+            "next_run_hint": _next_run_hint(cfg),
+            # the dashboard polls this: surface a ready, unread brief FOR TODAY (pop up if open / be there on open)
+            "unread_today": bool(is_today and today.get("unread"))}
+
+
+def mb_mark_seen():
+    """Mark today's brief as seen, so the dashboard stops surfacing the pop-up once she's opened it."""
+    st = _load_state(); briefs = st.get("briefs", [])
+    if briefs: briefs[0]["unread"] = False; _save_state(st)
+    return {"ok": True}
 
 
 def audio_path(fn):

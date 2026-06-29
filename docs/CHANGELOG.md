@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.42 -- 2026-06-29
+- Morning Brief robustness + UX: each source is now isolated in try/except (one bad source can't kill the
+  whole brief -- a calendar event with a string `start` was crashing generation); the brief is marked
+  `unread` and the dashboard SURFACES it as a top banner on open (pop up if already open / there when she
+  opens), tap to open+play, then it's marked seen (`/api/brief-seen`). Source errors are surfaced too.
+
 ## 0.99.41 -- 2026-06-29
 - Morning Brief: completed the official extension authoring -- added the required SETUP.md + AGENT.md +
   CLAUDE.md (extension.json declared them; only extension.json existed). No code change.

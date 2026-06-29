@@ -13198,6 +13198,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"ok": True, "started": True}))
         if u.path == "/api/brief-config":
             return self._s(200, json.dumps(brief_config_save(body)))
+        if u.path == "/api/brief-seen":
+            return self._s(200, json.dumps(morning_brief.mb_mark_seen())) if morning_brief else self._s(200, json.dumps({"ok": False}))
         if u.path == "/api/granola-apply": return self._s(200, json.dumps(granola.gr_apply(body.get("id", ""), body.get("edited"))))
         if u.path == "/api/granola-skip":  return self._s(200, json.dumps(granola.gr_skip(body.get("id", ""))))
         if u.path == "/api/substack-sync":  # RSS fetch across publications -> background (network)
@@ -16495,6 +16497,17 @@ async function commsRefresh(){const ta=document.getElementById('commsMsg');const
 function commsSetBadge(n){const b=document.getElementById('commsBadge');if(!b)return;if(n>0){b.textContent=n>99?'99+':n;b.style.display='inline-block';}else{b.textContent='';b.style.display='none';}try{paintNavNotif();}catch(e){}}
 async function commsBadgePoll(){try{const d=await(await fetch('/api/mesh')).json();const seen=parseInt(localStorage.getItem('comms_seen')||'0');const unread=(d.messages||[]).filter(function(m){return m.dir==='in'&&(m.ts||0)>seen;}).length;const drops=((d.overdue||[]).length)+((d.unanswered||[]).length);if(LENS!=='comms')commsSetBadge(unread+drops);}catch(e){}}  // badge also shows OVERDUE/UNANSWERED (persists until resolved) so a dropped ball surfaces without watching
 setInterval(commsBadgePoll,15000);setTimeout(commsBadgePoll,1500);
+async function briefSurfacePoll(){
+  let d;try{d=await(await fetch('/api/brief')).json();}catch(e){return;}
+  var bn=document.getElementById('briefBanner');
+  if(d&&d.unread_today&&d.today){
+    if(!bn){bn=document.createElement('div');bn.id='briefBanner';bn.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;background:linear-gradient(90deg,#1f6feb,#388bfd);color:#fff;padding:11px 16px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 12px rgba(0,0,0,.45);cursor:pointer;font-size:14px';document.body.appendChild(bn);}
+    bn.innerHTML='<span style="font-size:18px">☀️</span><b>Your morning brief is ready.</b><span style="opacity:.9">Tap to open and play it.</span><span style="margin-left:auto;opacity:.85;padding:0 6px" onclick="event.stopPropagation();briefDismiss()">✕</span>';
+    bn.onclick=function(){LENS='brief';render();try{fetch('/api/brief-seen',{method:'POST'});}catch(e){}bn.remove();};
+  }else if(bn){bn.remove();}
+}
+function briefDismiss(){try{fetch('/api/brief-seen',{method:'POST'});}catch(e){}var bn=document.getElementById('briefBanner');if(bn)bn.remove();}
+setInterval(briefSurfacePoll,30000);setTimeout(briefSurfacePoll,2500);
 // ============ GOOGLE WORKSPACE LENSES (live Gmail / Calendar / Drive, server-side OAuth) ============
 function gVal(id){var e=document.getElementById(id);return e?e.value:'';}
 function gFrom(s){s=s||'';var m=s.match(/^(.*?)</);var nm=m?m[1].replace(/"/g,'').trim():s;return nm||s;}
