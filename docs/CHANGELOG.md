@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.33 -- 2026-06-28
+- SELF-CONTAINED NODE LAYOUT is now the enforced standard (fixes the ATEM "console shell vs codebase split").
+  A node's project lives INSIDE its bundle at `<bundle>/project/` (project_root in-bundle), so each node is ONE
+  tidy, portable folder -- never an external path with a leftover stub + a chief stranded in it.
+  - **New `--adopt-source <path>` in `cc-newinstance.sh`** + `adopt_source` through `instance_provision` + an
+    **"Adopt from" field** in the Add-a-ClaudeFather wizard: adopting EXISTING code now COPIES it INTO the
+    bundle's project/ at provision time (project_root stays in-bundle). Onboarding then structures it in place and
+    the Chief launches there -- no repoint, no stub, no stale chief. Previously "adopt" forced you to point
+    project_root externally, which created exactly that split (ATEM: chief stranded in the stub `/project`,
+    reading "self-contained bundle" while the real code sat at a sibling path).
+  - Converted the live nodes to the standard: ATEM + Home Assistant code moved into `<bundle>/project/`, chiefs
+    relaunched in the right cwd, external dirs removed, HA secrets re-locked to 0600. shopos already conformed.
+
 ## 0.99.32 -- 2026-06-28
 - ONBOARDING BRIEF -- folded back the JUDGMENT learnings from the first real runs (so future installs don't
   depend on the model being clever that day):

@@ -6985,6 +6985,9 @@ def instance_provision(p, do_launch=False, dry=False):
     ob = (p.get("onboard") or "").lower()           # queue Project Onboarding to auto-run on the new node's first boot
     if ob in ("adopt", "scaffold"):
         cmd += ["--onboard", ob]
+    asrc = (p.get("adopt_source") or "").strip()    # existing code to INGEST into the bundle's project/ (self-contained;
+    if asrc:                                          # keeps project_root in-bundle so there's never an external split/stale chief)
+        cmd += ["--adopt-source", asrc]
     for flag, key in (("--name", "name"), ("--brand", "brand"), ("--preset", "preset"),
                       ("--port", "port"), ("--storage", "storage"), ("--agents", "agents"),
                       ("--project-root", "project_root"), ("--user", "user")):
@@ -19626,12 +19629,13 @@ function cfAddWizard(){
    +cfSel('node_type','Install type',[['agency','Agency — official tools only (locked, safe)'],['developer','Developer — can build custom tools (sandbox)']])
    +cfSel('integration','Tree shape',[['product','Product — a modules tree'],['agency','Agency — a clients + tools tree']])
    +cfSel('onboard','Onboarding',[['','— none (set it up myself) —'],['adopt','Adopt — read + structure EXISTING code'],['scaffold','Scaffold — build a new shell']])
+   +cfF('adopt_source','Adopt from','Adopt only: path to EXISTING code — copied INTO the bundle so the node owns it')
    +cfF('dest','Bundle folder','blank = /Volumes/Samsung990PRO/claudefather-<id>')
    +cfF('port','Port','blank = auto (≥ 8800)')
    +cfSel('storage','Storage',[['github','github'],['icloud','icloud'],['icloud+github','icloud+github']])
    +cfF('agents','Agents','blank = security,backup,usage,ideas,routines')
    +'</div>'
-   +'<div class="sub" style="margin:8px 0;line-height:1.5"><b>Install type</b> — <b>Agency</b>: runs only official, signed tools — locked &amp; safe, what a client/tenant gets. <b>Developer</b>: also lets you build + run your OWN custom tools in an operator-approved sandbox (your own installs). &nbsp;·&nbsp; <b>Tree shape</b> — <b>Product</b>: a modules tree. <b>Agency</b>: a clients + tools tree (like Sarah/AFP). &nbsp;·&nbsp; <b>Onboarding</b> — on first boot: <b>Adopt</b> reads + structures EXISTING code to spec (point Project-root at the code first), <b>Scaffold</b> builds a new shell, then hands to the Chief.</div>'
+   +'<div class="sub" style="margin:8px 0;line-height:1.5"><b>Install type</b> — <b>Agency</b>: runs only official, signed tools — locked &amp; safe, what a client/tenant gets. <b>Developer</b>: also lets you build + run your OWN custom tools in an operator-approved sandbox (your own installs). &nbsp;·&nbsp; <b>Tree shape</b> — <b>Product</b>: a modules tree. <b>Agency</b>: a clients + tools tree (like Sarah/AFP). &nbsp;·&nbsp; <b>Onboarding</b> — on first boot: <b>Adopt</b> COPIES the code in <b>Adopt from</b> INTO the bundle&rsquo;s project/ (self-contained — the node owns its code, no external split), then reads + structures it to spec; <b>Scaffold</b> builds a new shell; then hands to the Chief.</div>'
    +'<label class="cfpersist"><input type="checkbox" id="cf_persist" checked><span><b>Make it permanent &amp; join the mesh</b><br>On <b>Create &amp; start</b>, install it to survive reboots and add it to the fleet — no manual steps.</span></label>'
    +'<div class="cfacts"><button class="mini" onclick="cfPlan()" title="Show the plan only — writes nothing">👁 Preview</button>'
    +'<button class="mini go" onclick="cfProvision(false)" title="Build the folder, leave it off">📦 Create</button>'
@@ -19639,7 +19643,7 @@ function cfAddWizard(){
    +'<div class="cflegend">👁 <b>Preview</b> — plan only. &nbsp; 📦 <b>Create</b> — build it, leave it off. &nbsp; 🚀 <b>Create &amp; start</b> — build, start, finish setup, then open it and run its <b>Setup agent</b>.</div>'
    +'<pre id="cfout"></pre></div>');
 }
-function cfVals(){var g={};['id','name','brand','preset','node_type','integration','onboard','dest','port','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
+function cfVals(){var g={};['id','name','brand','preset','node_type','integration','onboard','adopt_source','dest','port','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
 async function cfPost(extra){
   var body=cfVals(); if(!body.id){toast('Enter an ID first.');return null;}
   Object.assign(body,extra||{});

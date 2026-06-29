@@ -27,7 +27,7 @@
 set -uo pipefail
 SRC="${CC_HOME:-$HOME/hptuners-control}"          # the dev/master copy we provision FROM
 ID="" DEST="" NAME="" BRAND="" PRESET="project" PORT="" STORAGE="github"
-AGENTS="security,backup,usage,ideas,routines" PROOT="" RUNUSER="$(whoami)" DRY="" JSON="" REGINTO="" INTEGRATION="" NODETYPE="" ONBOARD=""
+AGENTS="security,backup,usage,ideas,routines" PROOT="" RUNUSER="$(whoami)" DRY="" JSON="" REGINTO="" INTEGRATION="" NODETYPE="" ONBOARD="" ADOPTSRC=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -45,6 +45,7 @@ while [ $# -gt 0 ]; do
     --integration) INTEGRATION="$2"; shift 2;;
     --node-type) NODETYPE="$2"; shift 2;;   # agency (official-only, locked) | developer (custom-extension sandbox)
     --onboard) ONBOARD="$2"; shift 2;;      # adopt (structure an existing codebase) | scaffold (new shell) -> runs on first boot
+    --adopt-source) ADOPTSRC="$2"; shift 2;; # existing code to INGEST into the bundle's project/ (self-contained; keeps project_root in-bundle, never an external split)
     --json) JSON=1; shift;;
     --dry-run) DRY=1; shift;;
     *) echo "unknown option: $1" >&2; exit 2;;
@@ -114,7 +115,17 @@ done
 python3 -c "import json;print(json.load(open('$SRC/claudesole.manifest.json'))['version'])" > "$DEST/VERSION"
 mkdir -p "$DEST/data" "$DEST/bin" "$DEST/deliverables" "$DEST/launchd" "$PROOT"
 
-# ---- 2) starter project CLAUDE.md
+# ---- 1b) ADOPT existing code INTO the bundle's project/ (self-contained standard: the code lives under the
+#          node, project_root stays in-bundle -- never an external split with a stale stub/chief). Copy contents
+#          (incl. dotfiles) so the node OWNS its project; onboarding then structures it in place.
+if [ -n "$ADOPTSRC" ]; then
+  ADOPTSRC="${ADOPTSRC/#\~/$HOME}"
+  [ -d "$ADOPTSRC" ] || die "--adopt-source not a directory: $ADOPTSRC"
+  echo "  ingesting existing code: $ADOPTSRC -> $PROOT"
+  cp -R "$ADOPTSRC"/. "$PROOT"/ || die "failed to copy adopt-source into $PROOT"
+fi
+
+# ---- 2) starter project CLAUDE.md (skipped when the adopted code already has one; onboarding writes the real index)
 if [ ! -f "$PROOT/CLAUDE.md" ]; then
   cat > "$PROOT/CLAUDE.md" <<EOF
 # $NAME
