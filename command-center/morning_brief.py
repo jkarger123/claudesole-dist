@@ -145,6 +145,19 @@ def _src_granola(cfg): return _from_context(["call"], cfg, "granola")
 def _src_slack(cfg): return _from_context(["slack", "message", "chat"], cfg, "slack")
 
 
+@source("notes", "Notes")
+def _src_notes(cfg):
+    fn = _CTX.get("notes_recent")
+    if not callable(fn): return []
+    try:
+        out = []
+        for it in (fn() or []):
+            out.append({"label": it.get("label", ""), "text": it.get("text", ""), "ts": it.get("ts", ""), "ref": "notes"})
+        return out
+    except Exception:
+        return []
+
+
 def available_sources():
     """[{name,label,enabled}] -- what the lens shows; reflects which sources are wired on this node."""
     sel = set(_cfg().get("sources") or [])

@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.46 -- 2026-06-29
+- NEW: Notes notebook (core) + renamed the old Notes lens to "Messages".
+  - "Notes" is a new core lens: write OR dictate a note naturally; on Save a headless claude -p structures it
+    into {title, summary, tasks, decisions, reminders, tags}. Review-first: tasks are added to the Tasks list
+    on approval; the note is ingested as a context event (kind: note) so it feeds retrieval AND the Morning
+    Brief (new "notes" brief source); notes are draggable into any session.
+  - Voice: the browser records mic audio and uploads it; the server transcribes via Deepgram (key VAULT-FIRST,
+    DEEPGRAM_API_KEY) -- so it works from any device the user opens the dashboard on, key never exposed to the
+    browser. Shows "voice off" until the key is added.
+  - `notebook.py` engine + /api/note-{list,save,apply,delete,transcribe}; the "note" sendable.
+  - The previous operator<->operator Notes lens is now labelled "Messages" (id unchanged) and its layout bug is
+    fixed (it lacked grid-column:1/-1 so it rendered narrow + overlapping inside the card grid).
+
 ## 0.99.45 -- 2026-06-29
 - Routine scheduler: `_routine_last_fire` now honors a `weekdays` LIST (was single `weekday` only) -- a
   multi-day schedule like the Morning Brief's Mon-Fri silently fell through to DAILY (it would also fire on

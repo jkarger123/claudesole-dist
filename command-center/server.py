@@ -29,6 +29,7 @@ zoom    = _opt_import("zoom")      # Zoom transcript intake -> the granola propo
 clips   = _opt_import("clips")     # CAPTURE SPINE: Capture -> Triage -> Apply (review-first)
 substack = _opt_import("substack") # Substack -> READ (RSS track) + DRAFT (headless-claude co-writer); no publish API
 morning_brief = _opt_import("morning_brief")  # MORNING BRIEF: scheduled, voice-read daily brief from your sources
+notebook = _opt_import("notebook")            # NOTEBOOK: speak/write a note -> structured tasks + context event
 try:   # Ed25519 for asymmetric superadmin (public-key). Optional: nodes without it fall back to HMAC + a doctor warning.
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
     from cryptography.hazmat.primitives import serialization as _crypto_ser
@@ -8469,8 +8470,14 @@ try:
                         "context_assemble": (context.assemble if context else None),
                         # lambda: voice_profile_get is defined LATER in the file than this init call site,
                         # so reference it lazily (resolved at generate-time, not module-exec time).
-                        "voice_profile": (lambda: voice_profile_get())})   # write the brief in the owner's VoiceMatch style
+                        "voice_profile": (lambda: voice_profile_get()),   # write the brief in the owner's VoiceMatch style
+                        "notes_recent": (lambda: notebook.recent_notes() if notebook else [])})  # notebook -> brief source
 except Exception as _e: print("[morning_brief] init failed:", _e)
+try:
+    notebook.init({"CC": CC, "STATE_DIR": STATE_DIR, "secret": _deploy_env,
+                   "context_ingest": (context.ingest_event if context else None),
+                   "task_add": (lambda *a, **k: task_add(*a, **k))})    # task_add is defined later -> lazy
+except Exception as _e: print("[notebook] init failed:", _e)
 try: substack.init({"CC": CC, "STATE_DIR": STATE_DIR})
 except Exception as _e: print("[substack] init failed:", _e)
 def _substack_dir():
@@ -10519,6 +10526,19 @@ register_sendable("deliverable", _send_deliverable)
 register_sendable("drive", _send_drive)
 register_sendable("gmail", _send_gmail)
 register_sendable("calendar", _send_calendar)
+def _send_note(d):
+    """A notebook note dragged onto a session -- inject it as markdown (title + summary + tasks + raw text)."""
+    if not notebook: return {"error": "notebook not available"}
+    n = notebook.nb_get(d.get("id") or "")
+    if not n: return {"error": "no such note"}
+    md = ["# " + (n.get("title") or "Note"), ""]
+    if n.get("summary"): md += [n["summary"], ""]
+    if n.get("tasks"): md += ["## Tasks"] + ["- " + (t.get("title", "") or "") + ((" (due %s)" % t["due"]) if t.get("due") else "") for t in n["tasks"]] + [""]
+    if n.get("decisions"): md += ["## Decisions"] + ["- " + str(x) for x in n["decisions"]] + [""]
+    if n.get("text"): md += ["## Raw note", n["text"]]
+    return {"ok": True, "filename": "note-" + re.sub(r"[^a-zA-Z0-9_-]", "", (d.get("id") or "note"))[:30] + ".md",
+            "mime": "text/markdown", "data": "\n".join(md)}
+register_sendable("note", _send_note)
 register_sendable("granola", _send_granola)
 def _send_upload(d):
     """A file the user dropped INTO the basket from their computer -- already saved under the uploads dir by
@@ -12838,6 +12858,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/account-switch-health": return self._s(200, json.dumps(switch_health()))
         if u.path == "/api/brief":
             return self._s(200, json.dumps(morning_brief.mb_state(), default=str)) if morning_brief else self._s(200, json.dumps({"ok": False, "error": "morning_brief not available"}))
+        if u.path == "/api/note-list":
+            return self._s(200, json.dumps(notebook.nb_list(), default=str)) if notebook else self._s(200, json.dumps({"ok": False, "error": "notebook not available"}))
         if u.path == "/api/brief-audio":
             p = morning_brief.audio_path(q.get("f", [""])[0]) if morning_brief else None
             if not p: return self._s(404, "not found")
@@ -13243,6 +13265,18 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(brief_config_save(body)))
         if u.path == "/api/brief-seen":
             return self._s(200, json.dumps(morning_brief.mb_mark_seen())) if morning_brief else self._s(200, json.dumps({"ok": False}))
+        if u.path == "/api/note-save":     # structuring is slow (claude -p) -> do it inline but bounded; small payload
+            if not notebook: return self._s(200, json.dumps({"ok": False, "error": "notebook not available"}))
+            return self._s(200, json.dumps(notebook.nb_save(body.get("text", ""), structure=body.get("structure", True)), default=str))
+        if u.path == "/api/note-apply":
+            if not notebook: return self._s(200, json.dumps({"ok": False}))
+            return self._s(200, json.dumps(notebook.nb_apply(body.get("id", ""), body.get("picks"))))
+        if u.path == "/api/note-delete":
+            if not notebook: return self._s(200, json.dumps({"ok": False}))
+            return self._s(200, json.dumps(notebook.nb_delete(body.get("id", ""))))
+        if u.path == "/api/note-transcribe":
+            if not notebook: return self._s(200, json.dumps({"ok": False, "error": "notebook not available"}))
+            return self._s(200, json.dumps(notebook.nb_transcribe(body.get("audio", ""), body.get("mime", "audio/webm"))))
         if u.path == "/api/granola-apply": return self._s(200, json.dumps(granola.gr_apply(body.get("id", ""), body.get("edited"))))
         if u.path == "/api/granola-skip":  return self._s(200, json.dumps(granola.gr_skip(body.get("id", ""))))
         if u.path == "/api/substack-sync":  # RSS fetch across publications -> background (network)
@@ -14017,7 +14051,7 @@ body.wk-dragging .wkdrop{display:flex;pointer-events:auto}
 body.ss-dragging .basketwrap{box-shadow:0 0 0 2px rgba(var(--accent-rgb),.35) inset;border-radius:8px}
 @media(max-width:980px){.basketwrap{display:none}}
 /* NOTES lens: operator<->operator chat (messaging-app layout: peer rail + conversation + composer) */
-.noteswrap{display:flex;gap:0;height:calc(100vh - 210px);min-height:420px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card,rgba(255,255,255,.02))}
+.noteswrap{grid-column:1/-1;display:flex;gap:0;height:calc(100vh - 210px);min-height:420px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card,rgba(255,255,255,.02))}
 .note-rail{flex:0 0 230px;border-right:1px solid var(--line);overflow:auto;background:rgba(0,0,0,.12)}
 .note-peer{display:flex;gap:9px;align-items:center;padding:11px 12px;cursor:pointer;border-bottom:1px solid var(--line)}
 .note-peer:hover{background:var(--card)}
@@ -15164,7 +15198,8 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="calls"><i class="ph-light ph-phone-call"></i>Calls</button>
 <button data-l="capture"><i class="ph-light ph-scissors"></i>Capture</button>
 <button data-l="comms"><i class="ph-light ph-chats-circle"></i>Comms<span id="commsBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
-<button data-l="notes"><i class="ph-light ph-note-pencil"></i>Notes<span id="notesBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
+<button data-l="notes"><i class="ph-light ph-chat-circle-text"></i>Messages<span id="notesBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
+<button data-l="notebook"><i class="ph-light ph-notebook"></i>Notes</button>
 <button data-l="handoffs"><i class="ph-light ph-arrows-left-right"></i>Transfers<span id="transfersBadge" style="display:none;margin-left:6px;background:var(--accent);color:#15120a;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="ccr"><i class="ph-light ph-git-pull-request"></i>Change Requests<span id="ccrBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="propose"><i class="ph-light ph-paper-plane-tilt"></i>Propose Change</button>
@@ -15275,6 +15310,7 @@ function render(){
   else if(LENS=="context"){loadContext();return;}
   else if(LENS=="comms"){loadComms();return;}
   else if(LENS=="notes"){loadNotes();return;}
+  else if(LENS=="notebook"){loadNotebook();return;}
   else if(LENS=="handoffs"){loadHandoffs();return;}
   else if(LENS=="build"){loadBuild();return;}
   else if(LENS=="skills"){loadSkills();return;}
@@ -19242,6 +19278,52 @@ async function loadNotes(){
   var mc=document.getElementById("noteMsgs");if(mc)mc.scrollTop=mc.scrollHeight;
   clearInterval(window.NOTESTIMER);window.NOTESTIMER=setInterval(function(){if(LENS!=="notes"){clearInterval(window.NOTESTIMER);return;}notesRefresh();},5000);
 }
+var NB={notes:[],hasVoice:false,rec:null,chunks:[]};
+async function loadNotebook(){
+  var box=document.getElementById("grid");if(!box)return;
+  var d={};try{d=await(await fetch("/api/note-list")).json();}catch(e){box.innerHTML=empty("Couldn't load Notes.");return;}
+  NB.notes=d.notes||[];NB.hasVoice=!!d.has_voice;
+  var voice=NB.hasVoice?'<button id="nbRec" class="mini" onclick="nbToggleRec()">&#127908; Dictate</button>':'<span class="sub" title="Add DEEPGRAM_API_KEY in the Vault lens to enable voice">&#127908; voice off &mdash; add the Deepgram key</span>';
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128211; Notes</b> <span class="sub">write or speak a note &mdash; on save it becomes tasks and joins your brief &amp; context</span></div>'
+    +'<textarea id="nbInput" rows="5" style="width:100%;box-sizing:border-box;'+COMMS_INP+';padding:11px;margin-top:9px;font:inherit;line-height:1.5;resize:vertical" placeholder="Type your note&hellip; or hit Dictate and just talk. When you Save, I pull out the tasks, decisions and follow-ups, file it into your context, and it shows up in your morning brief."></textarea>'
+    +'<div style="display:flex;gap:9px;align-items:center;margin-top:9px;flex-wrap:wrap">'+voice+'<span id="nbRecStatus" class="sub"></span><button class="btn go" style="margin-left:auto" onclick="nbSave()">&#10003; Save note</button></div></div>';
+  if(!NB.notes.length)h+=empty("No notes yet &mdash; write or dictate one above.");
+  NB.notes.forEach(function(n){
+    var gsd={kind:'note',id:n.id,name:(n.title||'note')};
+    var tasks=(n.tasks||[]).map(function(t){return '<div class="meta" style="margin-left:8px">&bull; '+e2(t.title||'')+(t.due?' <span class="sub">(due '+esc(t.due)+')</span>':'')+'</div>';}).join('');
+    var decs=((n.decisions&&n.decisions.length)?'<div class="meta sub" style="margin-top:6px"><b>Decisions</b></div>'+n.decisions.map(function(x){return '<div class="meta" style="margin-left:8px">&bull; '+e2(x)+'</div>';}).join(''):'');
+    var tags=((n.tags&&n.tags.length)?'<div class="sub" style="margin-top:7px">'+n.tags.map(function(t){return '<span style="background:rgba(var(--accent-rgb),.12);border-radius:10px;padding:1px 8px;margin-right:5px">'+esc(t)+'</span>';}).join('')+'</div>':'');
+    h+='<div class="card" '+ssAttr(gsd)+' style="cursor:default;grid-column:1/-1;border-left:3px solid var(--accent)">'
+      +'<div style="display:flex;align-items:center;gap:8px"><b>'+e2(n.title||'Note')+'</b> '+ssBtn(gsd)+'<span class="sub" style="margin-left:auto">'+esc(n.date||'')+'</span></div>'
+      +(n.summary?'<div style="margin:5px 0">'+e2(n.summary)+'</div>':'')
+      +(tasks?('<div class="meta sub" style="margin-top:6px"><b>Action items</b></div>'+tasks+(n.applied?'<div class="sub" style="margin-top:5px;color:#3fb950">&#10003; added to Tasks</div>':'<button class="mini go" style="margin-top:7px" onclick="nbApply(\''+n.id+'\')">&#43; Add '+(n.tasks||[]).length+' to Tasks</button>')):'')
+      +decs+tags
+      +'<div style="margin-top:9px;display:flex;gap:6px"><button class="mini" onclick="nbRaw(this)">raw</button><button class="mini" onclick="nbDelete(\''+n.id+'\')">delete</button></div>'
+      +'<div class="nbraw" style="display:none;white-space:pre-wrap;margin-top:7px;font-size:12px;color:var(--mut);border-top:1px solid var(--line);padding-top:7px">'+e2(n.text||'')+'</div></div>';
+  });
+  box.innerHTML=h;
+}
+async function nbSave(){var ta=document.getElementById("nbInput");if(!ta||!ta.value.trim()){toast("Write or dictate something first.",2500);return;}var v=ta.value;ta.value="";toast("Saving &mdash; pulling out the actions&hellip;",3500);try{await fetch("/api/note-save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:v})});}catch(e){}setTimeout(loadNotebook,1600);}
+async function nbApply(id){try{var r=await(await fetch("/api/note-apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:id})})).json();toast(r.ok?("Added "+r.added+" to your Tasks (review there)"):"Failed",3500);}catch(e){}loadNotebook();}
+async function nbDelete(id){try{await fetch("/api/note-delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:id})});}catch(e){}loadNotebook();}
+function nbRaw(btn){var c=btn.closest('.card');var r=c&&c.querySelector('.nbraw');if(r)r.style.display=r.style.display==='none'?'block':'none';}
+async function nbToggleRec(){
+  var btn=document.getElementById("nbRec"),st=document.getElementById("nbRecStatus");
+  if(NB.rec&&NB.rec.state==="recording"){NB.rec.stop();return;}
+  var stream;try{stream=await navigator.mediaDevices.getUserMedia({audio:true});}catch(e){toast("Microphone permission needed.",3500);return;}
+  NB.chunks=[];var mr;try{mr=new MediaRecorder(stream);}catch(e){toast("Recording not supported in this browser.",3500);return;}
+  NB.rec=mr;mr.ondataavailable=function(e){if(e.data&&e.data.size)NB.chunks.push(e.data);};
+  mr.onstop=async function(){
+    if(btn)btn.innerHTML="&#127908; Dictate";if(st)st.textContent="transcribing&hellip;";
+    try{stream.getTracks().forEach(function(t){t.stop();});}catch(e){}
+    var blob=new Blob(NB.chunks,{type:mr.mimeType||"audio/webm"});
+    var b64=await new Promise(function(res){var fr=new FileReader();fr.onloadend=function(){res((String(fr.result||"").split(",")[1])||"");};fr.readAsDataURL(blob);});
+    try{var r=await(await fetch("/api/note-transcribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({audio:b64,mime:(mr.mimeType||"audio/webm").split(";")[0]})})).json();
+      if(r.ok){var ta=document.getElementById("nbInput");if(ta)ta.value=(ta.value?ta.value.trim()+" ":"")+(r.text||"");if(st)st.textContent="";}
+      else{if(st)st.textContent="";toast("Transcribe failed: "+(r.error||"?"),4500);}}catch(e){if(st)st.textContent="";toast("Transcribe failed",3000);}
+  };
+  mr.start();if(btn)btn.innerHTML="&#9209; Stop";if(st)st.textContent="recording&hellip; tap Stop when done";
+}
 function notesPick(p){NOTES.peer=p;loadNotes();}
 async function notesSend(){var ta=document.getElementById("noteInput");if(!ta)return;var v=ta.value.trim();if(!v)return;ta.value="";
   try{var r=await(await fetch("/api/opnote-send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({peer:NOTES.peer,text:v})})).json();if(!r||!r.ok){toast("Send failed: "+((r||{}).error||"?"),5000);ta.value=v;return;}}catch(e){toast("Send failed.",4000);ta.value=v;return;}
@@ -19266,7 +19348,7 @@ function opShowAlert(n){var el=document.getElementById("opAlert");
 }
 function opHideAlert(){var el=document.getElementById("opAlert");if(el)el.classList.remove("show");}
 function opDismiss(id){if(id)OP_ALERT_SEEN[id]=1;opHideAlert();}
-function opOpen(peer){opHideAlert();NOTES.peer=peer;LENS="notes";[].slice.call(document.querySelectorAll("#lens button")).forEach(function(b){b.classList.toggle("on",b.dataset.l==="notes");});var vt=document.getElementById("viewtitle");if(vt)vt.textContent="Notes";render();try{syncHash(true);}catch(e){}}
+function opOpen(peer){opHideAlert();NOTES.peer=peer;LENS="notes";[].slice.call(document.querySelectorAll("#lens button")).forEach(function(b){b.classList.toggle("on",b.dataset.l==="notes");});var vt=document.getElementById("viewtitle");if(vt)vt.textContent="Messages";render();try{syncHash(true);}catch(e){}}
 setInterval(notesBadgePoll,6000);setTimeout(notesBadgePoll,2500);
 setInterval(hoBadgePoll,8000);setTimeout(hoBadgePoll,2000);
 // heartbeat: sessions OPEN in the workspace count as active so an on-screen-but-quiet one is never archived
@@ -20494,7 +20576,7 @@ async function treeResume(id,cwd,fork){const _c=CONVOMAP[id]||{};toast((fork?"Fo
   const r=await(await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({machine:"studio",id:id,cwd:cwd,fork:!!fork,label:_c.label||""})})).json();
   if(!r||!r.ok){toast("Failed: "+((r||{}).error||"?"),5000);return;}
   closeInfo();_openTerm(r);}
-const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',build:'Build (custom extensions)',vault:'Credential Vault',agency:'Agency',calls:'Calls',capture:'Capture',comms:'Comms',notes:'Notes',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Accounts / Usage',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Accounts / Usage'};
+const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',build:'Build (custom extensions)',vault:'Credential Vault',agency:'Agency',calls:'Calls',capture:'Capture',comms:'Comms',notes:'Messages',notebook:'Notes',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Accounts / Usage',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Accounts / Usage'};
 // ---- Chief of Staff: your office (top-level command + a direct line to me) ----
 function gotoLens(l){const b=document.querySelector('#lens button[data-l="'+l+'"]');if(b)b.click();}
 async function talkChief(){toast("Opening your Chief of Staff…");
@@ -20935,7 +21017,8 @@ function applyPreset(){
   ['gmail','calendar','drive'].forEach(function(l){var _gb=document.querySelector('#lens button[data-l="'+l+'"]');if(_gb)_gb.style.display=(window.CC&&window.CC.google)?'':'none';});
   {var _ab=document.querySelector('#lens button[data-l="accounts"]');if(_ab)_ab.style.display=(window.CC&&window.CC.accountWallet)?'':'none';}  // Claude Accounts lens self-hides until the wallet is enabled on this node
   {var _tk=document.querySelector('#lens button[data-l="tasks"]');if(_tk)_tk.style.display='';}  // Tasks is a built-in feature -- always available, outside the preset lens list
-  {var _nt=document.querySelector('#lens button[data-l="notes"]');if(_nt)_nt.style.display='';}  // Notes (operator<->operator) is a built-in -- always available
+  {var _nt=document.querySelector('#lens button[data-l="notes"]');if(_nt)_nt.style.display='';}  // Messages (operator<->operator) is a built-in -- always available
+  {var _nb=document.querySelector('#lens button[data-l="notebook"]');if(_nb)_nb.style.display='';}  // Notes (notebook) is a core built-in -- always available
   {var _hd=document.querySelector('#lens button[data-l="handoffs"]');if(_hd)_hd.style.display='';}  // Transfers (warm-transfer desk) is a built-in -- always available
   {var _bd=document.querySelector('#lens button[data-l="build"]');if(_bd)_bd.style.display=(window.CC&&window.CC.type==='developer')?'':'none';}  // Build lens = developer-type only (custom sandbox)
   if(!(window.CC&&window.CC.role==='org')){var _pb=document.querySelector('#lens button[data-l="portfolio"]');if(_pb)_pb.style.display='none';
@@ -21005,7 +21088,7 @@ function treeRemoveLens(tree,l){for(var i=tree.length-1;i>=0;i--){var n=tree[i];
 // ---- DEFAULT CATEGORIES: out of the box the nav is grouped into collapsed categories (declutter), seeded once.
 // Users can still drag/rename/add/delete + "flatten" to the old most-used list. Built-ins map here; extension
 // lenses carry their own category (extension.json default_category -> extLenses[].category). "reset" re-seeds this.
-var NAV_PINNED=["portfolio","sessions","chief","comms","notes","tasks","files"];   // stay top-level (daily drivers)
+var NAV_PINNED=["portfolio","sessions","chief","comms","notebook","notes","tasks","files"];   // stay top-level (daily drivers)
 var NAV_CAT_ORDER=["Google","Workspace","Agency","Team","Integrations","System"];
 var NAV_CAT={
   gmail:"Google",calendar:"Google",drive:"Google",
