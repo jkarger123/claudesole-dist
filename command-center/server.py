@@ -3579,14 +3579,24 @@ def _acct_recommend(accounts, now):
             # soonest weekly reset wins (its capacity is the cheapest to spend — refreshes first).
             # headroom is only a faint tie-breaker so two near-equal resets prefer the fuller one.
             score = (WK_LEN_H / wk_ttr_h) + (wk_free / 10000.0)
-            why = ("weekly resets soonest in %s · %d%% free%s" % (_acct_dur(wk_ttr), wk_free, tag))
+            why = ("ready · weekly %d%% free · resets in %s%s" % (wk_free, _acct_dur(wk_ttr), tag))
         info[em] = {"status": st, "why": why, "score": round(score, 4), "use_next": False,
                     "usable": round(min(s_free, wk_free), 1), "wk_resets_h": round(wk_ttr_h, 1),
                     "s_free": round(s_free, 1), "wk_free": round(wk_free, 1)}
     ready = [(em, d) for em, d in info.items() if d["status"] == "ready"]
     pick = max(ready, key=lambda kv: kv[1]["score"])[0] if ready else None
     if pick:
-        info[pick]["status"] = "use_next"; info[pick]["use_next"] = True
+        pw = info[pick]; pw["status"] = "use_next"; pw["use_next"] = True
+        # HONEST 'why': the score prefers the soonest-resetting account, BUT only among READY ones -- the truly
+        # soonest-resetting accounts may be excluded (maxed -> resting, or live elsewhere -> reserved). So only
+        # claim "soonest" when the pick actually beat OTHER available logins; otherwise say it won by elimination.
+        _rd = _acct_dur(round((pw.get("wk_resets_h") or 0) * 3600)); _wf = int(pw.get("wk_free") or 0)
+        if len(ready) >= 2:
+            pw["why"] = ("weekly resets soonest of your %d available logins — in %s · %d%% free (cheapest to spend)"
+                         % (len(ready), _rd, _wf))
+        else:
+            pw["why"] = ("the only login with headroom right now — your other accounts are maxed or reserved · "
+                         "%d%% free · resets in %s" % (_wf, _rd))
     return info, pick
 
 def account_windows_store():
@@ -15776,7 +15786,7 @@ function fleetFuel(){
     var live=a.active?'<span class="us-live on" title="you are logged into this account on THIS machine">● live</span>'
       :(ls?'<span class="us-live" title="logged in on '+e2(ls)+'">● '+e2(ls)+'</span>'
           :'<span class="us-live off" title="not logged in anywhere — provably accruing nothing while idle, so this is its last live reading carried forward with the reset clock advanced virtually">○ idle · est</span>');
-    var rec=a.use_next?'<span class="us-st" title="recommended account to use NEXT (most headroom, resets soonest)">▶</span>':'';
+    var rec=a.use_next?'<span class="us-st" title="recommended account to use NEXT — '+e2(a.why||'most headroom available here')+'">▶</span>':'';
     var r5=(s&&s.ttr!=null)?(' <span class="x" title="5-hour window resets">↻'+awDur(s.ttr)+'</span>'):'';
     var rwk=(wk&&wk.ttr!=null)?(' <span class="x" title="weekly window resets">↻'+awDur(wk.ttr)+'</span>'):'';
     return '<div class="us-fl"><span class="us-nm" title="'+e2(a.email)+'">'+e2(nm)+' '+live+rec+'</span>'

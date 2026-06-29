@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.51 -- 2026-06-29
+- Account recommendation "why" now states the REAL reason instead of a hardcoded "weekly resets soonest" on
+  every pick. The score still prefers the soonest-resetting account, but only among READY ones -- the truly
+  soonest-resetting accounts are often excluded (maxed -> resting, or live on another node -> reserved). So:
+  with 2+ usable logins it says "resets soonest of your N available logins"; when the pick won by elimination
+  it says "the only login with headroom right now -- your others are maxed or reserved". (Fixes the misleading
+  case where the recommended account actually resets LAST.) Compact-strip ▶ tooltip now shows the real why too.
 ## 0.99.50 -- 2026-06-29
 - Account fuel gauges: show each window's reset by its own % (5h reset next to the 5h %, weekly reset next to
   the weekly %) instead of a single combined "soonest reset"; and mark which readings are LIVE vs VIRTUAL.
