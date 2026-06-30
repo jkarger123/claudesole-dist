@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.75 -- 2026-06-30
+- PRE-ARCHIVE HEADS-UP: idle conversations are no longer tidied up silently. When one first becomes eligible, a
+  calm corner popup shows what'll happen + why, with a live COUNTDOWN (30-min grace window) and Keep it open /
+  Snooze 2h / Let it go now. A separate 10-min reconcile loop makes the countdown honest; it only retires after
+  the grace window AND only if still idle/un-held. (reconcile_once grace; pending_archives + /api/pending-archives;
+  session_hold gains an hours snooze + cancels the pending; #arAlert popup + countdown. Manual "Reconcile now"
+  stays immediate.)
+- FIX 1 -- decluttered the Transfers desk: housekeeping digest shows a "docs tidied" chip + only 3 sample doc
+  issues (not a dump); the archived list collapses behind a count.
+- FIX 2 -- auto-tidy over-managed docs: housekeeping strips the redundant system-primer (CC:BEGIN block) from
+  deep sub-tool CLAUDE.md files (an ancestor already delivers it) -- clearing the "carries a managed CC block"
+  Doctor warnings (178 of them on AFP) and the context bloat. Hand content untouched; idempotent. Proven.
+
 ## 0.99.74 -- 2026-06-30
 - "Review the move" is now a FOCUSED POPUP, not the whole admin desk. The gentle drift prompt's "Review the move"
   opens a clean modal for THAT one transfer: what drifted, where it'd go (from -> to box), a plain "why we move

@@ -9564,15 +9564,18 @@ def _session_idle_sec(name):
     act = max(act, float(_smeta(name).get("active_ts") or 0))
     return (time.time() - act) if act else 1e9
 
-def session_hold(name, mode="pin", days=2, by="operator"):
-    """Keep a conversation alive past the idle clock. pin=indefinite; hold=expiring window; agent_hold=the agent
-    itself signalling 'I'll continue this'; clear/unpin to release."""
+def session_hold(name, mode="pin", days=2, by="operator", hours=0):
+    """Keep a conversation alive past the idle clock. pin=indefinite; hold=expiring window (days or hours, e.g. a
+    'snooze 2h'); agent_hold=the agent itself signalling 'I'll continue this'; clear/unpin to release. Any hold/pin
+    also CANCELS a pending auto-archive (the heads-up countdown) -- the operator chose to keep it."""
     name = re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:64]
     if not name: return {"ok": False, "error": "no session"}
-    if mode == "pin": _smeta_set(name, pin=True)
+    if mode == "pin": _smeta_set(name, pin=True, archive_pending_at=0)
     elif mode == "unpin": _smeta_set(name, pin=False)
-    elif mode == "hold": _smeta_set(name, hold_until=time.time() + max(1, int(days)) * 86400)
-    elif mode == "agent_hold": _smeta_set(name, agent_hold=True)
+    elif mode == "hold":
+        dur = (float(hours) * 3600.0) if hours else (max(1, int(days)) * 86400)
+        _smeta_set(name, hold_until=time.time() + dur, archive_pending_at=0)
+    elif mode == "agent_hold": _smeta_set(name, agent_hold=True, archive_pending_at=0)
     elif mode in ("clear", "clear_hold"): _smeta_set(name, hold_until=0, agent_hold=False)
     else: return {"ok": False, "error": "bad mode"}
     return {"ok": True, "name": name, "meta": _smeta(name)}
@@ -9665,19 +9668,55 @@ def _archive_eligible(name):
     if float(m.get("hold_until") or 0) > time.time(): return False
     return _session_idle_sec(name) >= float(CC.get("idle_archive_sec") or _IDLE_ARCHIVE_SEC)   # live-adjustable dial
 
-def reconcile_once():
-    """One reconcile pass (called by housekeeping + on demand): archive every idle, harvested, un-held conversation
-    -- folders converge on their records, zombies are retired. Returns what it did."""
-    arch = []
+_ARCHIVE_GRACE = 1800     # heads-up window: when a conversation first becomes archive-eligible, WARN the operator
+                          # and wait this long before retiring it -- a countdown + snooze, never a silent surprise.
+def reconcile_once(grace=True):
+    """One reconcile pass. With grace (the automatic path): a newly-eligible conversation is first marked PENDING
+    (a heads-up + countdown shows; archived only after _ARCHIVE_GRACE, and only if still idle/un-held). With
+    grace=False (operator hit 'Reconcile now'): retire eligible ones immediately. Folders converge on their records;
+    zombies retired; NEVER a delete -- everything is one-click resumable."""
+    arch = []; now = time.time()
     for s in _live_sessions():
         try:
-            # OWNERSHIP: only retire sessions in THIS node's project tree. Co-located nodes share one tmux server, so
-            # _live_sessions() includes OTHER nodes' sessions -- _session_scope is None for those (cwd not under our
-            # PROJECT), so we leave them to the node that owns them. (Drift sweep is gated the same way.)
-            if _session_scope(s) is not None and _archive_eligible(s):
-                _archive_session(s, "idle-auto"); arch.append(s)
+            # OWNERSHIP: only this node's own sessions (co-located nodes share one tmux server; others -> scope None).
+            owned = _session_scope(s) is not None
+            elig = owned and _archive_eligible(s)
+            if not elig:
+                if _smeta(s).get("archive_pending_at"): _smeta_set(s, archive_pending_at=0)   # came back / held -> cancel
+                continue
+            if not grace:
+                _archive_session(s, "idle-auto"); arch.append(s); continue
+            pa = float(_smeta(s).get("archive_pending_at") or 0)
+            if not pa:
+                _smeta_set(s, archive_pending_at=now + _ARCHIVE_GRACE)     # WARN now; archive on a later pass
+            elif now >= pa:
+                _archive_session(s, "idle-auto"); arch.append(s)           # grace elapsed, still idle -> retire
         except Exception: pass
     return {"ok": True, "archived": arch}
+
+def pending_archives():
+    """Conversations this node is ABOUT to auto-archive (eligible + in the grace window) -- drives the heads-up
+    popup + countdown so the operator can keep/snooze before anything is tidied up."""
+    out = []; now = time.time()
+    for s in _live_sessions():
+        try:
+            m = _smeta(s); pa = float(m.get("archive_pending_at") or 0)
+            if pa > now and _session_scope(s) is not None:
+                out.append({"name": s, "scope": _session_scope(s), "subject": m.get("subject") or _FRIENDLY.get(s) or s,
+                            "at": int(pa), "idle": int(_session_idle_sec(s))})
+        except Exception: pass
+    out.sort(key=lambda x: x["at"])
+    return {"ok": True, "pending": out}
+
+def _reconcile_loop():
+    """Lightweight, FREQUENT reconcile (every 10 min) so the heads-up countdown is honest and idle conversations are
+    retired promptly after their grace window -- separate from the heavy hourly housekeeping. Project nodes only."""
+    time.sleep(200)
+    while True:
+        try:
+            if ROLE != "org" and CC.get("reconcile", True) is not False: reconcile_once(grace=True)
+        except Exception: pass
+        time.sleep(600)
 
 def hygiene():
     """Workspace hygiene: live conversations grouped by folder (idle/hold/eligible state) + the resumable archive.
@@ -9893,9 +9932,33 @@ def _curate_notes_once(max_folders=4):
         except Exception: pass
     return {"curated": out}
 
+def _strip_overmanaged_docs(max_files=80):
+    """Auto-fix the Doctor 'sub-tool doc carries a managed CC block' warnings. A DEEP module's CLAUDE.md (depth>=2)
+    should be HAND content only -- the system primer is delivered by an ancestor (Claude Code auto-loads root->cwd),
+    so a copy in every sub-folder is redundant bloat that inflates context. Strip the CC:BEGIN..CC:END block from
+    those docs (leaves CC:CHILDREN, which is legitimately per-folder). Idempotent."""
+    fixed = []
+    for ab, rel in iter_folders():
+        if len(fixed) >= max_files: break
+        if not rel or "/" not in rel: continue          # depth>=2 only (a sub-tool of a top-level module)
+        cm = os.path.join(ab, "CLAUDE.md")
+        if not os.path.isfile(cm): continue
+        try: t = _read(cm)
+        except Exception: continue
+        if "CC:BEGIN" not in t: continue
+        nt = re.sub(r"\n{3,}", "\n\n", _strip_cc(t)).strip() + "\n"
+        if nt != t:
+            try:
+                with MOD_LOCK: open(cm, "w", encoding="utf-8").write(nt)
+                fixed.append(rel)
+            except Exception: pass
+    return fixed
+
 def _housekeeping_once():
-    archived = []; drift = {"checked": 0, "proposed": []}; curated = []
+    archived = []; drift = {"checked": 0, "proposed": []}; curated = []; docs_tidied = []
     try: regen_all_children()        # regenerates every folder's CC:CHILDREN + the root CC:TREEMAP (idempotent)
+    except Exception: pass
+    try: docs_tidied = _strip_overmanaged_docs()             # DOC TIDY: strip redundant primer blocks from sub-tool docs
     except Exception: pass
     try: _refresh_topics()           # keep live conversations' topics current (relevance-match + drift detection)
     except Exception: pass
@@ -9939,10 +10002,11 @@ def _housekeeping_once():
     try:
         _housekeeping_digest_write({"ts": int(time.time()), "map_regen": True,
             "drift_checked": drift.get("checked", 0), "transfers_proposed": drift.get("proposed", []),
-            "archived": archived, "notes_curated": curated, "doc_issues_total": len(issues), "doc_issues_new": len(fresh),
-            "fresh_issues": [{"sev": i.get("sev"), "path": i.get("path"), "msg": (i.get("msg") or "")[:160]} for i in fresh[:8]]})
+            "archived": archived, "notes_curated": curated, "docs_tidied": len(docs_tidied),
+            "doc_issues_total": len(issues), "doc_issues_new": len(fresh),
+            "fresh_issues": [{"sev": i.get("sev"), "path": i.get("path"), "msg": (i.get("msg") or "")[:120]} for i in fresh[:3]]})
     except Exception: pass
-    return {"issues": len(issues), "fresh": len(fresh), "drift": drift, "archived": archived, "curated": curated}
+    return {"issues": len(issues), "fresh": len(fresh), "drift": drift, "archived": archived, "curated": curated, "docs_tidied": docs_tidied}
 def _housekeeping_loop():
     time.sleep(150)                  # let boot + the first treemap/integrity passes settle
     while True:
@@ -13073,6 +13137,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(hygiene(), default=str))
         if u.path == "/api/housekeeping-digest":   # the visible record of what automatic housekeeping has been doing
             return self._s(200, json.dumps(housekeeping_digest(), default=str))
+        if u.path == "/api/pending-archives":      # conversations about to be auto-archived (heads-up + countdown)
+            return self._s(200, json.dumps(pending_archives(), default=str))
         if u.path == "/api/system":  # self-describing capability map (runtime + surfaces) -- for UI gating + agents
             return self._s(200, json.dumps(system_info(), default=str))
         if u.path == "/api/browser/commands":  # the desktop browser polls for agent-queued commands (Browser v2)
@@ -13363,7 +13429,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/session-active":    return self._s(200, json.dumps(sessions_active(body.get("sessions") or []), default=str))
         if u.path == "/api/session-archive":   return self._s(200, json.dumps(_archive_session(body.get("name", ""), "manual"), default=str))
         if u.path == "/api/session-resume":    return self._s(200, json.dumps(resume_archived(body.get("name", "")), default=str))
-        if u.path == "/api/reconcile":         return self._s(200, json.dumps(reconcile_once(), default=str))
+        if u.path == "/api/reconcile":         return self._s(200, json.dumps(reconcile_once(grace=False), default=str))   # operator chose -> immediate
         if u.path == "/api/housekeeping-run":  return self._s(200, json.dumps({"ok": True, "result": _housekeeping_once(), "digest": housekeeping_digest().get("last")}, default=str))
         if u.path == "/api/module-remove": return self._s(200, json.dumps(module_remove(body.get("rel",""))))
         if u.path == "/api/module-combine":return self._s(200, json.dumps(module_combine(body.get("a",""), body.get("b",""))))
@@ -14371,6 +14437,16 @@ body.ss-dragging .basketwrap{box-shadow:0 0 0 2px rgba(var(--accent-rgb),.35) in
 #hoAlert .opa-x{cursor:pointer;color:var(--dim);font-size:18px;line-height:1;flex:0 0 auto}#hoAlert .opa-x:hover{color:#fff}
 #hoAlert .opa-body{font-size:12.5px;color:#e8e8ef;margin:8px 0 11px;line-height:1.45;word-break:break-word}
 #hoAlert .opa-act{display:flex;gap:7px;justify-content:flex-end}
+/* pre-archive heads-up (calm/neutral -- "I'm about to tidy this up, here's a countdown + snooze") */
+#arAlert{position:fixed;right:18px;bottom:54px;z-index:99996;width:346px;max-width:calc(100vw - 36px);background:#15151c;border:1.5px solid #3d444d;border-radius:14px;box-shadow:0 14px 50px rgba(0,0,0,.6);padding:13px 15px;transform:translateY(28px) scale(.96);opacity:0;pointer-events:none;transition:all .28s cubic-bezier(.2,.8,.25,1)}
+#arAlert.show{transform:none;opacity:1;pointer-events:auto}
+#arAlert .opa-h{display:flex;align-items:center;gap:8px;font-size:13px;color:#fff}
+#arAlert .opa-h b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#arAlert .opa-dot{width:9px;height:9px;border-radius:50%;background:#8a8a99;flex:0 0 auto}
+#arAlert .opa-x{cursor:pointer;color:var(--dim);font-size:18px;line-height:1;flex:0 0 auto}#arAlert .opa-x:hover{color:#fff}
+#arAlert .opa-body{font-size:12.5px;color:#e8e8ef;margin:8px 0 11px;line-height:1.45;word-break:break-word}
+#arAlert .opa-act{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
+#arAlert .ar-cd{color:var(--accent);font-weight:700}
 #main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .topbar{display:flex;align-items:center;gap:12px;padding:15px 24px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 .topbar h2{margin:0;font-size:19px;font-weight:800;flex:0 0 auto;letter-spacing:.2px}
@@ -19611,6 +19687,7 @@ function hoDigestCard(dg){
     +'<span class="cc-chip"><b>'+((L.transfers_proposed||[]).length)+'</b> transfers proposed</span>'
     +'<span class="cc-chip"><b>'+((L.archived||[]).length)+'</b> idle retired</span>'
     +'<span class="cc-chip"><b>'+((L.notes_curated||[]).length)+'</b> records tightened</span>'
+    +((L.docs_tidied||0)?('<span class="cc-chip"><b>'+L.docs_tidied+'</b> docs tidied</span>'):'')
     +'<span class="cc-chip"><b>'+(L.doc_issues_new||0)+'</b> new doc issues</span>'
     +'<span class="cc-chip">module map regenerated</span></div>';
   var det='';
@@ -19640,7 +19717,8 @@ function hoHygieneCard(hy){
     }).join('');
     return '<div style="padding:7px 0;border-top:1px solid var(--line)"><div style="font-weight:600;font-size:12.5px">'+esc(f.scope||'(root)')+(f.count>1?(' <span style="color:#d29922">&middot; '+f.count+' conversations</span>'):'')+'</div>'+sess+'</div>';
   }).join('');
-  var ar=arch.length?('<div style="margin-top:8px;border-top:1px dashed var(--line);padding-top:6px"><b style="font-size:12px;color:var(--mut)">Archived &mdash; resume in one click</b>'+arch.map(function(a){return '<div style="display:flex;gap:6px;align-items:center;padding:3px 0;font-size:12px"><span class="sub">'+esc(a.scope||'')+'</span> '+e2(String(a.subject||a.name).slice(0,40))+'<button class="mini go" style="margin-left:auto" onclick="hoResume(\''+esc(a.name)+'\')">resume</button></div>';}).join('')+'</div>'):'';
+  var arShown=arch.slice(0,6);
+  var ar=arch.length?('<details style="margin-top:8px;border-top:1px dashed var(--line);padding-top:6px"><summary style="cursor:pointer;font-size:12px;color:var(--mut)"><b>Archived</b> &mdash; '+arch.length+' resumable in one click</summary>'+arShown.map(function(a){return '<div style="display:flex;gap:6px;align-items:center;padding:3px 0;font-size:12px"><span class="sub">'+esc(a.scope||'')+'</span> '+e2(String(a.subject||a.name).slice(0,40))+'<button class="mini go" style="margin-left:auto" onclick="hoResume(\''+esc(a.name)+'\')">resume</button></div>';}).join('')+(arch.length>6?('<div class="sub" style="padding:4px 0">+ '+(arch.length-6)+' more</div>'):'')+'</details>'):'';
   var ih=Math.round((hy.idle_archive_sec||14400)/3600*10)/10;
   return '<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#129529; Workspace hygiene</b> <span class="sub">'+(multi.length?(multi.length+' folder(s) with multiple conversations'):'one conversation per folder')+'</span><div style="margin-left:auto;display:flex;gap:5px;align-items:center"><span class="sub">archive idle after</span><button class="mini" onclick="hoIdle(-1)">&minus;</button><span style="font-size:12px;min-width:30px;text-align:center">'+ih+'h</span><button class="mini" onclick="hoIdle(1)">+</button><button class="mini" onclick="hoReconcile()" style="margin-left:6px">Reconcile now</button></div></div>'
     +'<div class="meta" style="margin:6px 0">Many conversations can share a folder; each files its minutes into the folder\'s records, then idle ones auto-archive (always resumable). &#128204; Pin or &#9208; Hold one to keep it; &#9888; off-scope flags a conversation that has drifted &mdash; consider a warm transfer.</div>'
@@ -19713,6 +19791,28 @@ function hoReview(p){
 }
 function hoReviewAccept(id){closeM();hoAccept(id);}
 function hoReviewDecline(id){closeM();hoDecline(id);}
+// ---- PRE-ARCHIVE heads-up: a conversation is about to be tidied up -> show what/why + a countdown + snooze ----
+var AR_PKT=null, AR_TICK=null;
+function arFmt(sec){sec=Math.max(0,sec|0);var m=(sec/60)|0,s=sec%60;return m>0?(m+'m '+(s<10?'0':'')+s+'s'):(s+'s');}
+async function arPoll(){try{var d=await(await fetch('/api/pending-archives')).json();var p=(d.pending||[])[0];
+  if(p){ if(!AR_PKT||AR_PKT.name!==p.name){AR_PKT=p;arShow(p);} else {AR_PKT.at=p.at;arUpdateCd();} }
+  else { AR_PKT=null; arHide(); }
+}catch(e){}}
+function arShow(p){var el=document.getElementById('arAlert');
+  if(!el){el=document.createElement('div');el.id='arAlert';document.body.appendChild(el);}
+  var hrs=Math.round((p.idle||0)/3600*10)/10;
+  el.innerHTML='<div class="opa-h"><span class="opa-dot"></span><b>Tidying up soon</b><span class="opa-x" title="dismiss" onclick="arHide()">&times;</span></div>'
+    +'<div class="opa-body">The conversation <code>'+e2(String(p.subject||p.name||'').slice(0,40))+'</code> in <code>'+e2(p.scope||'?')+'</code> has been idle '+(hrs>=1?('~'+hrs+'h'):'a while')+' and looks finished. I&rsquo;ll save its learnings to the folder and close it (resumable anytime) in <span class="ar-cd" id="arCd">'+arFmt(p.at-Math.floor(Date.now()/1000))+'</span>.</div>'
+    +'<div class="opa-act"><button class="mini" onclick="arLetGo()">Let it go now</button><button class="mini" onclick="arSnooze()">Snooze 2h</button><button class="mini go" onclick="arKeep()">Keep it open</button></div>';
+  el.classList.add('show');
+  if(AR_TICK)clearInterval(AR_TICK); AR_TICK=setInterval(arUpdateCd,1000);
+}
+function arUpdateCd(){var c=document.getElementById('arCd');if(c&&AR_PKT){var left=AR_PKT.at-Math.floor(Date.now()/1000);c.textContent=left>0?arFmt(left):'a moment';}}
+function arHide(){var el=document.getElementById('arAlert');if(el)el.classList.remove('show');if(AR_TICK){clearInterval(AR_TICK);AR_TICK=null;}}
+async function arKeep(){var n=AR_PKT&&AR_PKT.name;arHide();AR_PKT=null;if(n){try{await fetch('/api/session-hold',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,mode:'pin'})});toast('Kept open &mdash; pinned (won\'t auto-archive)',3000);}catch(e){}}}
+async function arSnooze(){var n=AR_PKT&&AR_PKT.name;arHide();AR_PKT=null;if(n){try{await fetch('/api/session-hold',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,mode:'hold',hours:2})});toast('Snoozed 2 hours',3000);}catch(e){}}}
+async function arLetGo(){var n=AR_PKT&&AR_PKT.name;arHide();AR_PKT=null;if(n){try{await fetch('/api/session-archive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n})});toast('Tidied up &mdash; resumable in one click',3000);}catch(e){}}}
+setInterval(arPoll,30000);setTimeout(arPoll,5000);
 async function loadNotes(){
   var box=document.getElementById("grid");if(!box)return;
   var d={};try{d=await(await fetch("/api/opnotes")).json();}catch(e){box.innerHTML=empty("Couldn't load notes.");return;}
@@ -22776,6 +22876,7 @@ if __name__ == "__main__":
     except Exception: pass
     threading.Thread(target=_context_backfill_loop, daemon=True).start()   # CONTEXT LAYER: ingest existing surfaces into the store (idempotent, every 15 min)
     threading.Thread(target=_housekeeping_loop, daemon=True).start()        # HOUSEKEEPING: regen module map + Doctor sweep + surface new issues (hourly, idempotent)
+    threading.Thread(target=_reconcile_loop, daemon=True).start()           # RECONCILE: heads-up + retire idle conversations after their grace window (every 10 min)
     threading.Thread(target=_clips_eod_loop, daemon=True).start()           # CAPTURE SPINE: opt-in end-of-day triage proposals (review-first; off unless clips_eod_process)
     # Bind host: default 0.0.0.0 (existing nodes unchanged). Provisioned standalone bundles set bind_host
     # "127.0.0.1" so the ONLY tailnet-visible surface is the TLS `tailscale serve` URL -- no raw plain-HTTP
