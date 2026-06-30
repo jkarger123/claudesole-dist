@@ -15379,7 +15379,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <div id="basketwrap" class="basketwrap"></div>
 </aside>
 <main id="main">
-<div class="topbar"><h2 id="viewtitle">Sessions</h2><button class="btn" id="refreshBtn" title="Refresh" onclick="location.reload()" style="padding:7px 11px">⟳</button><button class="btn" id="helpBtn" title="How this works" onclick="ccHelp(LENS)" style="padding:7px 11px">?</button><button class="btn cf-srbtn" id="searchTog" title="Search" onclick="cfTopSearch()" style="padding:7px 11px">🔍</button><input id="search" placeholder="Search…"><span id="lensTools" class="lenstools"></span><button class="btn" id="agentBtn" style="display:none" onclick="openAgent(LENS)">🤖 Agent</button><button class="btn" id="addBtn" onclick="openAdd()">＋ Add</button><button class="btn go" id="newSessBtn" onclick="openLaunch()">▶ New session</button><button class="btn go" id="cfTopBtn" style="display:none" onclick="cfAddWizard()">➕ Add a ClaudeFather</button></div>
+<div class="topbar"><h2 id="viewtitle">Sessions</h2><button class="btn" id="refreshBtn" title="Refresh" onclick="location.reload()" style="padding:7px 11px">⟳</button><button class="btn" id="helpBtn" title="How this works" onclick="ccHelp(LENS)" style="padding:7px 11px">?</button><button class="btn cf-srbtn" id="searchTog" title="Search" onclick="cfTopSearch()" style="padding:7px 11px">🔍</button><input id="search" placeholder="Search…"><span id="lensTools" class="lenstools"></span><button class="btn" id="agentBtn" style="display:none" onclick="openAgent(LENS)">Agent</button><button class="btn" id="addBtn" onclick="openAdd()">＋ Add</button><button class="btn go" id="newSessBtn" onclick="openLaunch()">▶ New session</button><button class="btn go" id="cfTopBtn" style="display:none" onclick="cfAddWizard()">Add a ClaudeFather</button></div>
 <div class="wrap" id="grid"></div>
 </main>
 </div>
@@ -15517,13 +15517,13 @@ async function loadModules(rel){
   const q=(document.getElementById("search")||{value:""}).value.toLowerCase();
   const kids=(node.children||[]).filter(c=>!q||(c.name+" "+(c.summary||"")).toLowerCase().includes(q));
   let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav">'
-    +(MODREL?'<button class="mini" onclick="loadModules(\''+esc(parent)+'\')" title="Up one level (Backspace)">⬆ Up</button><button class="mini" onclick="loadModules(\'\')" title="Top level (Esc)">🏠 Top</button>':'')
+    +(MODREL?'<button class="mini" onclick="loadModules(\''+esc(parent)+'\')" title="Up one level (Backspace)">Up</button><button class="mini" onclick="loadModules(\'\')" title="Top level (Esc)">Top</button>':'')
     +'<div class="crumbs">'+crumb+'</div></div>'
-    +'<div class="meta" style="margin-top:7px">Click a card to drill in · <b>⬆ Up</b> / <b>🏠 Top</b> (or Backspace / Esc) to go back · clicking <b>Modules</b> in the sidebar returns to top.</div>'
+    +'<div class="meta" style="margin-top:7px">Click a card to drill in · <b>Up</b> / <b>Top</b> (or Backspace / Esc) to go back · clicking <b>Modules</b> in the sidebar returns to top.</div>'
     +'<div class="btns" style="margin-top:9px">'
     +(MODREL?'<button class="mini go" onclick="modLaunch(\''+esc(MODREL)+'\')">▶ launch here</button>':'')
     +'<button class="mini" onclick="modAdd(\''+esc(MODREL)+'\')">+ add sub-tool</button>'
-    +(kids.length>1?'<button class="mini" onclick="modCombine(\''+esc(MODREL)+'\')">⛙ combine two</button>':'')
+    +(kids.length>1?'<button class="mini" onclick="modCombine(\''+esc(MODREL)+'\')">combine two</button>':'')
     +'</div></div>';
   if(MODREL){
     try{MODCONVOS=await(await fetch("/api/module-convos?rel="+encodeURIComponent(MODREL))).json();}catch(e){MODCONVOS=[];}
@@ -15619,7 +15619,7 @@ async function loadRalph(){
   L=L.filter(r=>!q||(r.name+" "+(r.goal||"")).toLowerCase().includes(q));
   const fin=L.filter(r=>!r.alive&&['done','halted','stopped','complete','finished'].includes(r.state)).length;
   const head='<div class="card" style="cursor:default;grid-column:1/-1">'+ralphToggle()+'<h3 style="justify-content:space-between"><span>🔁 Ralph loops</span><span style="display:flex;gap:6px;align-items:center">'
-    +(fin?'<button class="mini" onclick="ralphArchiveDone('+fin+')" title="Move all done/halted/stopped loops to Previous loops">🗄 Clear '+fin+' done/stopped</button>':'')
+    +(fin?'<button class="mini" onclick="ralphArchiveDone('+fin+')" title="Move all done/halted/stopped loops to Previous loops">Clear '+fin+' done/stopped</button>':'')
     +'<button class="mini go" onclick="newRalph()">+ New loop</button></span></h3>'
     +'<div class="meta">File-driven autonomous agent loops. Launch runs one in its own terminal session — open it to watch live, edit its progress/notes, and interrupt. Several can run at once.</div></div>';
   document.getElementById("grid").innerHTML=head+(L.map(ralphCard).join("")||empty("No active loops — click + New loop."));
@@ -15652,12 +15652,12 @@ function ralphCard(r){
   const col=RCOL[r.state]||"#a0a0b0";
   const bar='<div style="height:6px;background:#22222e;border-radius:3px;overflow:hidden;margin:7px 0"><div style="height:100%;width:'+pct+'%;background:'+col+'"></div></div>';
   let btns='';
-  if(r.state=="running") btns='<button class="mini" onclick="ralphAct(\''+esc(r.name)+'\',\'pause\')">⏸ pause</button><button class="mini" style="color:#f85149" onclick="ralphAct(\''+esc(r.name)+'\',\'halt\')">⏹ halt</button>';
-  else if(r.state=="paused") btns='<button class="mini go" onclick="ralphAct(\''+esc(r.name)+'\',\'resume\')">▶ resume</button><button class="mini" style="color:#f85149" onclick="ralphAct(\''+esc(r.name)+'\',\'halt\')">⏹ halt</button>';
+  if(r.state=="running") btns='<button class="mini" onclick="ralphAct(\''+esc(r.name)+'\',\'pause\')">pause</button><button class="mini" style="color:#f85149" onclick="ralphAct(\''+esc(r.name)+'\',\'halt\')">halt</button>';
+  else if(r.state=="paused") btns='<button class="mini go" onclick="ralphAct(\''+esc(r.name)+'\',\'resume\')">▶ resume</button><button class="mini" style="color:#f85149" onclick="ralphAct(\''+esc(r.name)+'\',\'halt\')">halt</button>';
   else { const ran=(r.state=="done"||r.state=="halted"||r.state=="stopped");
     btns='<button class="mini go" onclick="ralphLaunch(\''+esc(r.name)+'\')">▶ '+(ran?'relaunch':'launch')+'</button>'
         +'<button class="mini" title="move to Previous (completed)" onclick="ralphAct(\''+esc(r.name)+'\',\'archive\')">✓ complete</button>'
-        +'<button class="mini" style="color:#f85149" title="delete (reversible: moves to _trash)" onclick="ralphDel(\''+esc(r.name)+'\')">🗑 delete</button>'; }
+        +'<button class="mini" style="color:#f85149" title="delete (reversible: moves to _trash)" onclick="ralphDel(\''+esc(r.name)+'\')">delete</button>'; }
   return '<div class="card" onclick="openRalph(\''+esc(r.name)+'\')" style="cursor:pointer"><h3><span>🔁 '+esc(r.name)+'</span><span class="badge" style="background:'+col+'22;color:'+col+'">'+r.state+(r.alive?"":"")+'</span></h3>'
     +'<div class="meta">'+esc(r.goal||"(no goal set)")+'</div>'+bar
     +'<div class="meta">'+ck+'/'+tot+' done ('+pct+'%)'+(p.phase?' · '+esc(p.phase):'')+(r.state=="running"&&r.iteration?' · iter '+r.iteration:'')+'</div>'
@@ -15687,7 +15687,7 @@ function openComp(id){const c=D.components.find(x=>x.id==id);
   h+='<div class="meta" style="margin-top:8px">Path: <code>'+PROJ()+'/'+(c.path||"")+'</code></div>'
    +'<div class="btns" style="margin-top:14px"><button class="btn go" onclick="openLaunch(\'studio\',\''+id+'\')">▶ Claude — Studio</button>'
    +'<button class="btn" onclick="openLaunch(\'t490\',\''+id+'\')">▶ Claude — T490</button>'
-   +'<button class="btn" onclick="reveal(\''+(c.path||"")+'\')">📂 Reveal</button></div>'
+   +'<button class="btn" onclick="reveal(\''+(c.path||"")+'\')">Reveal</button></div>'
    +'<div class="row" id="compfiles" style="margin-top:10px"></div>'
    +'<div class="btns"><button class="btn" onclick="closeM()">Close</button></div>';
   showM(h);
@@ -15945,7 +15945,7 @@ var ACMP={on:true,pct:95};
 function acmpBtn(){
   var on=ACMP.on!==false, p=Math.round(ACMP.pct||95);
   return '<button class="mini'+(on?' go':'')+'" id="acmpbtn" title="Auto-compact: when any session\'s context fills past '+p+'%, it automatically writes a full handoff, runs /compact, then re-reads the handoff — so a long session never blows its context window. Click to toggle; Shift-click to set the %." '
-    +'onclick="toggleAutocompact(event)">♻ Auto-compact '+(on?('on · '+p+'%'):'off')+'</button>';
+    +'onclick="toggleAutocompact(event)">Auto-compact '+(on?('on · '+p+'%'):'off')+'</button>';
 }
 function toggleAutocompact(ev){
   if(ev&&ev.shiftKey){
@@ -15960,7 +15960,7 @@ function sessToolsHTML(count){
   // Workspace model (no focus/grid/list): drag sessions up from the taskbar into resizable split panes.
   var live=(count!=null)?('<span class="sesslive" title="'+count+' live session'+(count==1?'':'s')+'">🟢 '+count+'</span>'):'<span class="sesslive"></span>';
   var hint='<span class="sub" style="font-size:11px;color:var(--dim)" title="Drag a session up from the taskbar into the workspace to split the screen; drag the bar between panes to resize; ⏷ pushes a pane back down.">drag from the taskbar ↓ to split</span>';
-  return live+hint+acmpBtn()+'<button class="mini" title="Admin shell — a plain shell in this project for sudo / interactive commands (type your password here)" onclick="openAdminShell()">🔑 Admin</button>';
+  return live+hint+acmpBtn()+'<button class="mini" title="Admin shell — a plain shell in this project for sudo / interactive commands (type your password here)" onclick="openAdminShell()">Admin</button>';
 }
 function paintSessTools(count){var el=document.getElementById('lensTools');if(el)el.innerHTML=(LENS=='sessions')?sessToolsHTML(count):'';}
 function setSessView(v){SESSVIEW=v;localStorage.setItem('hpcc_sessview',v);loadSessions(true);syncHash();}
@@ -15970,9 +15970,9 @@ function sessHint(){return SESSVIEW=='focus'?'One big working terminal. Switch w
 const VNCURL='/static/novnc/vnc.html?path=wsvnc&resize=scale&reconnect=true&autoconnect=true&show_dot=true&bell=off';
 function vncOpen(){window.open(VNCURL,'_blank');}
 function loadDesktop(){
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🪟 Remote Desktop</b> <span class="sub">live control of the Mac Studio</span>'
-    +'<div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap"><button class="mini go" onclick="vncOpen()">⛶ Open fullscreen</button><button class="mini" onclick="loadDesktop()">↻ reconnect</button></div></div>'
-    +'<div class="meta" style="margin-top:6px">Full mouse + keyboard + screen of the Studio, proxied over Tailscale &mdash; the VNC port stays on localhost and the firewall stays up. On a phone, tap <b>⛶ Open fullscreen</b> for touch + the on-screen keyboard. The first connection asks for the VNC password (saved after that). If it says it can&#39;t connect, macOS Screen Sharing isn&#39;t enabled yet.</div></div>';
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Remote Desktop</b> <span class="sub">live control of the Mac Studio</span>'
+    +'<div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap"><button class="mini go" onclick="vncOpen()">Open fullscreen</button><button class="mini" onclick="loadDesktop()">↻ reconnect</button></div></div>'
+    +'<div class="meta" style="margin-top:6px">Full mouse + keyboard + screen of the Studio, proxied over Tailscale &mdash; the VNC port stays on localhost and the firewall stays up. On a phone, tap <b>Open fullscreen</b> for touch + the on-screen keyboard. The first connection asks for the VNC password (saved after that). If it says it can&#39;t connect, macOS Screen Sharing isn&#39;t enabled yet.</div></div>';
   h+='<div style="grid-column:1/-1;height:calc(100vh - 212px);min-height:440px;border:1px solid var(--accent);border-radius:12px;overflow:hidden;box-shadow:var(--glow);background:#000">'
     +'<iframe src="'+VNCURL+'" style="width:100%;height:100%;border:0;display:block" allow="clipboard-read; clipboard-write; fullscreen"></iframe></div>';
   document.getElementById("grid").innerHTML=h;
@@ -16015,10 +16015,10 @@ function awBadge(st){ var M={use_next:['▶ USE NEXT','#1a1606','#e8c547',1],rea
   var m=M[st]||M.no_data; return '<span class="awbadge" style="background:'+m[1]+';color:'+m[2]+(m[3]?';border:1px solid #e8c547':'')+'">'+m[0]+'</span>'; }
 function acctFuelSection(){
   var d=ACCTWIN;
-  if(!d) return '<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🔋 Account fuel</b> <span class="sub"><span class="spin"></span> reading account limits…</span></div></div>';
+  if(!d) return '<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Account fuel</b> <span class="sub"><span class="spin"></span> reading account limits…</span></div></div>';
   var accts=d.accounts||[], sides=d.sides||[];
   var h='<div class="card" style="cursor:default;grid-column:1/-1;background:linear-gradient(135deg,#16140c,#0d0f17);border-color:#e8c54744;box-shadow:0 0 22px #e8c54712">'
-   +'<div class="modnav"><b>🔋 Account fuel — which login to burn next</b> <span class="sub">subscription rate limits · the live account on each machine auto-refreshes every '+Math.round((d.poll_ttl||1800)/60)+'m · others show last-known</span> <button class="mini" onclick="awRefreshAll(this)">↻ read live now</button></div>';
+   +'<div class="modnav"><b>Account fuel — which login to burn next</b> <span class="sub">subscription rate limits · the live account on each machine auto-refreshes every '+Math.round((d.poll_ttl||1800)/60)+'m · others show last-known</span> <button class="mini" onclick="awRefreshAll(this)">↻ read live now</button></div>';
   // ---- opt-in: how THIS node acts on the recommendation (only meaningful with >1 subscription account) ----
   if(d.multi_account){
     var mode=d.autopilot||'off', sh=d.switch_health||{}, proven=!!sh.auto_proven;
@@ -16052,7 +16052,7 @@ function acctFuelSection(){
   if(sides.length){ h+='<div class="ucsub" style="margin-top:11px">Logged in now: '+sides.map(function(s){
       var idle=(s.idle_secs!=null)?(s.idle_secs<120?'<span style="color:#3fb950">● active</span>':'<span style="opacity:.6">idle '+awDur(s.idle_secs)+'</span>'):'';
       return '<b style="color:#e8e8ea">'+e2(s.side)+'</b> → '+(s.live?e2(s.live):'<span style="opacity:.55">—</span>')+(idle?(' '+idle):'');
-    }).join(' &nbsp;·&nbsp; ')+' &nbsp;<button class="mini" onclick="acctSnapshot()" title="save / refresh THIS machine\'s current login in the wallet">📸 snapshot this login</button></div>'; }
+    }).join(' &nbsp;·&nbsp; ')+' &nbsp;<button class="mini" onclick="acctSnapshot()" title="save / refresh THIS machine\'s current login in the wallet">snapshot this login</button></div>'; }
   h+='</div>';
   accts.forEach(function(a){ h+=acctFuelCard(a); });
   return h;
@@ -16153,7 +16153,7 @@ function heroBanner(cur){const u=USAGE,t=u.totals,nd=u.node||{},cw=(t[cur.tot]||
   sub=nd.sub_monthly||0,monthAll=((t.month||{}).cost)||0,lev=sub>0?monthAll/sub:0,
   selfC=((cw.self||{}).cost)||0,allC=cw.cost||0,pace=allC*(2592000/cur.span);
   return '<div class="card" style="cursor:default;background:linear-gradient(135deg,#1d180a,#13130c);border-color:#e8c54755;box-shadow:0 0 24px #e8c54718">'
-    +'<div class="modnav"><b>💰 Metered API value</b> <span class="sub">what this usage would cost on the pay-as-you-go API, priced per model — your subscription actual is $0</span></div>'
+    +'<div class="modnav"><b>Metered API value</b> <span class="sub">what this usage would cost on the pay-as-you-go API, priced per model — your subscription actual is $0</span></div>'
     +'<div style="display:flex;flex-wrap:wrap;gap:30px;align-items:flex-end;margin-top:8px">'
     +'<div><div style="font-size:46px;font-weight:800;color:#f0d05a;line-height:1;letter-spacing:-1px">'+fmtUSD(allC)+'</div><div class="ucsub">all projects · '+cur.desc+'</div></div>'
     +'<div><div style="font-size:30px;font-weight:700;color:#e8c547;line-height:1.15">'+fmtUSD(selfC)+'</div><div class="ucsub">▸ this node ('+esc(nd.name||'?')+')</div></div>'
@@ -16165,9 +16165,9 @@ function heroBanner(cur){const u=USAGE,t=u.totals,nd=u.node||{},cw=(t[cur.tot]||
 async function loadFleet(){ try{ window.FLEET=await(await fetch('/api/usage-fleet')).json(); }catch(e){ window.FLEET=null; } if(LENS==='usage') renderUsage(); }
 function fleetCard(){
   var f=window.FLEET;
-  if(!f) return '<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🌐 Fleet usage</b> <span class="sub"><span class="spin"></span> gathering from every node…</span></div></div>';
+  if(!f) return '<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Fleet usage</b> <span class="sub"><span class="spin"></span> gathering from every node…</span></div></div>';
   var h='<div class="card" style="cursor:default;grid-column:1/-1;background:linear-gradient(135deg,#11131d,#0d0f17);border-color:#58a6ff44;box-shadow:0 0 22px #58a6ff14">'
-   +'<div class="modnav"><b>🌐 Fleet usage</b> <span class="sub">everything under ClaudeGrandfather · '+(f.stores||0)+' store(s) · 30-day metered</span></div>'
+   +'<div class="modnav"><b>Fleet usage</b> <span class="sub">everything under ClaudeGrandfather · '+(f.stores||0)+' store(s) · 30-day metered</span></div>'
    +'<div style="font-size:36px;font-weight:800;color:#7cc4ff;line-height:1;margin-top:8px;letter-spacing:-1px">'+fmtUSD(f.overall_cost)+'</div>'
    +'<div class="ucsub">'+fmtTok(f.overall)+' tokens total across the whole fleet</div>';
   var smax=Math.max(1,...(f.sides||[]).map(s=>s.total),1);
@@ -16190,7 +16190,7 @@ function renderUsage(){if(!USAGE)return;const u=USAGE,t=u.totals,cur=uRange(),se
   const n=ser.length||1,bdur=span/n,peak=Math.max(0,...ser.map(b=>b.tok||0)),rate=tw.total/Math.max(1/60,span/3600);
   // TOP: per-account fuel gauges (rate-limit windows) when the wallet is on, then fleet rollup + metered hero.
   let h=((window.CC&&window.CC.accountWallet)?acctFuelSection():'')+fleetCard()+heroBanner(cur);
-  h+='<div class="card" style="cursor:default"><div class="modnav"><b>🪙 Metered value by window</b> <span class="sub">live · every window at a glance · click one to drive the charts below</span></div>'
+  h+='<div class="card" style="cursor:default"><div class="modnav"><b>Metered value by window</b> <span class="sub">live · every window at a glance · click one to drive the charts below</span></div>'
     +'<div class="tokrow">'+URANGES.map(tokCard).join('')+'</div>'
     +'<div class="ucsub" style="margin-top:10px"><b style="color:#e8c547">'+cur.lbl+'</b> detail: <b>'+fmtTok(tw.total)+'</b> processed · <b>'+fmtTok(tw.bill||0)+'</b> billable · <b>'+fmtTok(tw.output)+'</b> out · <b>'+fmtTok(rate)+'/hr</b> · peak '+udur(bdur)+' bucket <b>'+fmtTok(peak)+'</b> · this node <b style="color:#e8c547">'+fmtUSD((tw.self||{}).cost||0)+'</b> of '+fmtUSD(tw.cost)+'</div></div>';
   h+='<div class="card" style="cursor:default"><h3><span>Metered cost over time</span> <span class="sub">~'+fmtUSD(ser.reduce((a,b)=>a+(b.cost||0),0))+' across '+cur.desc+'</span></h3>'+uBarChart(ser,'cost',span)+'<div class="uaxis"><span>'+udur(span)+' ago</span><span>now</span></div></div>';
@@ -16317,7 +16317,7 @@ function renderPipeline(){if(!PIPE)return;const p=PIPE;
     +'.pbanner.red{background:#f8514920;border-color:#f85149;animation:pbflash 1.25s ease-in-out infinite}'
     +'.pbanner.amber{background:#d2992220;border-color:#d29922}'
     +'@keyframes pbflash{0%,100%{box-shadow:0 0 0 0 rgba(248,81,73,0)}50%{box-shadow:0 0 24px 3px rgba(248,81,73,.5)}}</style>';
-  if(!p.present){document.getElementById("grid").innerHTML='<div class="modstack"><div class="card" style="cursor:default"><div class="modnav"><b>🚦 Pipeline Live-View</b></div>'
+  if(!p.present){document.getElementById("grid").innerHTML='<div class="modstack"><div class="card" style="cursor:default"><div class="modnav"><b>Pipeline Live-View</b></div>'
     +'<div class="meta" style="margin-top:6px">No pipeline declared on this node yet. A live run-map appears here once a pipeline drops a <code>manifest.json</code> into its pipeline dir. The contract (manifest + heartbeat + events) is in <code>docs/PIPELINE_LIVEVIEW.md</code> — instrument to it and this lights up automatically, zero per-node code.</div></div></div>';return;}
   const now=p.now,run=p.run||{};const rs=PSTATE[run.state]||{c:'#8b949e',l:run.state||'idle'};
   const overall=run.started_ts?(run.state=='running'?now-run.started_ts:(run.ended_ts?run.ended_ts-run.started_ts:null)):null;
@@ -16325,7 +16325,7 @@ function renderPipeline(){if(!PIPE)return;const p=PIPE;
   if(p.alarm){const red=p.alarm.level=='red';const lv=red?'#f85149':'#d29922';
     const sub='run '+esc(run.run_id||'—')+(p.expect_by?' · expected done by '+esc(p.expect_by):'')+(run.updated_ts?' · last heartbeat '+pdur(now-run.updated_ts)+' ago':'');
     h+='<div class="pbanner '+(red?'red':'amber')+'"><span class="pbic">'+(red?'🚨':'⏰')+'</span><div class="pbtx"><div class="pbtt" style="color:'+lv+'">'+esc(p.alarm.msg)+'</div><div class="pbsub">'+sub+'</div></div></div>';}
-  h+='<div class="card" style="cursor:default"><div class="modnav"><b>🚦 '+esc(p.label)+'</b> <span class="sub">live run map · refreshes every 4s'+(p.schedule?' · sched '+esc(p.schedule):'')+(p.expect_by?' · expect by '+esc(p.expect_by):'')+'</span></div>'
+  h+='<div class="card" style="cursor:default"><div class="modnav"><b>'+esc(p.label)+'</b> <span class="sub">live run map · refreshes every 4s'+(p.schedule?' · sched '+esc(p.schedule):'')+(p.expect_by?' · expect by '+esc(p.expect_by):'')+'</span></div>'
     +'<div class="ucsub" style="margin-top:5px">run <b>'+esc(run.run_id||'—')+'</b> · <b style="color:'+rs.c+'">'+esc(rs.l)+'</b>'+(overall!=null?' · '+(run.state=='running'?'elapsed ':'took ')+'<b>'+pdur(overall)+'</b>':'')+(run.updated_ts?' · last update '+pdur(now-run.updated_ts)+' ago':'')+'</div></div>';
   const done=p.steps.filter(s=>s.state=='done').length;
   h+='<div class="card" style="cursor:default"><h3><span>Run map</span> <span class="sub">'+done+' / '+p.steps.length+' steps done</span></h3>';
@@ -16379,7 +16379,7 @@ function clientCard(cl){return '<div class="card" onclick="modLaunch(\''+esc(cl.
   +'<div class="meta">'+e2(cl.summary||'')+'</div>'
   +((cl.tools||[]).length?'<div style="margin-top:7px;display:flex;gap:4px;flex-wrap:wrap">'+cl.tools.map(function(x){return '<span class="badge" style="background:#c9a22722;color:var(--accent)">'+esc(x)+'</span>';}).join('')+'</div>':'<div class="meta sub" style="margin-top:6px">no tools applied yet</div>')
   +'<div class="meta sub" style="margin-top:6px">'+(cl.artifacts||0)+' artifact folder(s)</div>'
-  +((window.CC&&window.CC.google)?('<div class="btns" style="margin-top:8px" onclick="event.stopPropagation()"><button class="mini" onclick="mlClientMail(\''+esc(cl.rel)+'\',\''+esc(cl.name)+'\')">📬 Mail</button></div>'):'')
+  +((window.CC&&window.CC.google)?('<div class="btns" style="margin-top:8px" onclick="event.stopPropagation()"><button class="mini" onclick="mlClientMail(\''+esc(cl.rel)+'\',\''+esc(cl.name)+'\')">Mail</button></div>'):'')
   +'</div>';}
 // open a client's correspondence in a modal (Agency drill-in surface for the Mail tab)
 function mlClientMail(rel,name){
@@ -16408,7 +16408,7 @@ function briefVoice(patch){briefCfg({voice:Object.assign({},((BRIEF&&BRIEF.confi
 async function loadBrief(){
   let d={};try{d=await(await fetch('/api/brief')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load the Brief.");return;}
   BRIEF=d;const c=d.config||{};const v=c.voice||{};const t=d.today;
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>☀️ Morning Brief</b> <span class="sub">runs '+esc(d.next_run_hint||'—')+' · '+(t?('today '+esc(t.date)):'no brief yet')+'</span> <button class="mini go" onclick="briefGen()">⟳ Generate now</button></div>';
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Morning Brief</b> <span class="sub">runs '+esc(d.next_run_hint||'—')+' · '+(t?('today '+esc(t.date)):'no brief yet')+'</span> <button class="mini go" onclick="briefGen()">⟳ Generate now</button></div>';
   if(d.last_status=='error'&&d.last_error)h+='<div class="meta" style="margin-top:8px;color:#f85149">⚠ last run: '+esc(d.last_error)+'</div>';
   h+='</div>';
   if(t){
@@ -16438,7 +16438,7 @@ async function loadCalls(){
   const props=d.proposals||[];const clients=d.clients||[];
   const pend=props.filter(function(p){return p.status==='pending';});const done=props.filter(function(p){return p.status!=='pending';});
   const status=d.ready?('source: '+esc(d.source)+' · '+pend.length+' to review · dest: '+esc((d.destinations||['cc']).join(', '))):(d.configured?'⚠ needs setup':'not configured');
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>📞 Calls</b> <span class="sub">'+status+'</span> <button class="mini go" onclick="callsSync()">⟳ Sync Granola calls</button></div>';
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Calls</b> <span class="sub">'+status+'</span> <button class="mini go" onclick="callsSync()">⟳ Sync Granola calls</button></div>';
   if(!d.ready)h+='<div class="meta" style="margin-top:8px;color:#d29922">'+esc(d.hint||'Set "granola" in this deployment\'s cc.config.json. See extensions/granola/SETUP.md.')+'</div>';
   if(d.sync_progress&&d.sync_progress.running)h+='<div class="meta" style="margin-top:8px;color:#58a6ff">syncing… '+(d.sync_progress.processed||0)+'/'+(d.sync_progress.total||0)+' calls</div>';
   if(d.last_sync_error)h+='<div class="meta" style="margin-top:8px;color:#f85149">⚠ last sync failed: '+esc(d.last_sync_error)+'</div>';
@@ -16650,15 +16650,15 @@ async function loadFocus(){
   // Only show the "enable the macOS reader" prompt when the dial is OFF *and* the browser isn't reporting.
   // A fresh browser report (this device) drives the row regardless of the macOS trust dial.
   if(f.capture==='off' && f.source!=='browser'){
-    el.innerHTML='<div class="xr-focus"><b>🎯 Focus detection</b><span class="dim">off — when on, ClaudeFather notices what you\'re working on and lines up the right context automatically.</span>'
+    el.innerHTML='<div class="xr-focus"><b>Focus detection</b><span class="dim">off — when on, ClaudeFather notices what you\'re working on and lines up the right context automatically.</span>'
       +'<span style="margin-left:auto;display:flex;gap:6px"><button class="mini go" onclick="focusSet(\'app\')">Enable (app only)</button><button class="mini" onclick="focusSet(\'context\')" title="also read window title + active browser URL (needs a one-time macOS Accessibility grant)">Enable (full)</button></span></div>';
     return;
   }
   var sigbits=[]; var s=f.signal||{};
   if(s.app)sigbits.push(esc(s.app)); if(s.title)sigbits.push(esc((s.title||'').slice(0,50))); if(s.url)sigbits.push(esc((s.url||'').replace(/^https?:\/\//,'').slice(0,40)));
   if(f.source==='browser'&&f.lens&&!sigbits.length)sigbits.push(esc(f.lens)+' lens');   // in-app signal: which lens you're on
-  var subj=f.subject?('<b>🎯 You\'re on: '+e2(f.subject)+'</b> <span class="dim">('+Math.round((f.confidence||0)*100)+'% · from '+(sigbits.join(' · ')||(f.source==='browser'?'this device':'signal'))+')</span>')
-    : '<b>🎯 Focus on</b> <span class="dim">'+(sigbits.join(' · ')||'(reading…)')+' — no matching subject in your context yet</span>';
+  var subj=f.subject?('<b>You\'re on: '+e2(f.subject)+'</b> <span class="dim">('+Math.round((f.confidence||0)*100)+'% · from '+(sigbits.join(' · ')||(f.source==='browser'?'this device':'signal'))+')</span>')
+    : '<b>Focus on</b> <span class="dim">'+(sigbits.join(' · ')||'(reading…)')+' — no matching subject in your context yet</span>';
   var warn=(f.source!=='browser'&&f.capture==='context'&&f.grant_ok===false)?' <span class="dim" style="color:#f0a35e">⚠ grant Accessibility to read window/URL</span>':'';
   el.innerHTML='<div class="xr-focus">'+subj+warn
     +'<span style="margin-left:auto;display:flex;gap:6px">'+(f.subject?'<button class="mini go" onclick="ctxFocusBrief(\''+esc(f.subject)+'\')">Brief a session on this</button>':'')+(f.capture!=='off'?'<button class="mini" onclick="focusSet(\'off\')">turn off</button>':'<button class="mini" onclick="focusSet(\'context\')" title="Also read this Mac\'s frontmost app/window/URL (when you\'re working at the server itself; needs a one-time macOS Accessibility grant)">+ device capture</button>')+'</span></div>';
@@ -16693,7 +16693,7 @@ async function loadHoming(){
       +(r.ok?'':' <span style="opacity:.6">'+esc((r.error||'no context yet').slice(0,60))+'</span>')
       +' <span style="opacity:.55">'+tago(r.ts)+'</span></div>';
   }).join('');
-  el.innerHTML='<div class="xr-focus"><b>🧭 Homing</b> <span class="dim">'+(on?'on — switch to a subject and your open session is auto-briefed with its cited context.':'off — turn on to let context follow you: switching subjects auto-briefs your open session.')+'</span>'
+  el.innerHTML='<div class="xr-focus"><b>Homing</b> <span class="dim">'+(on?'on — switch to a subject and your open session is auto-briefed with its cited context.':'off — turn on to let context follow you: switching subjects auto-briefs your open session.')+'</span>'
     +'<span style="margin-left:auto"><button class="mini '+(on?'':'go')+'" onclick="homingSet('+(on?'false':'true')+')">'+(on?'turn off':'turn on')+'</button></span></div>'+(log||'');
 }
 async function homingSet(on){ try{ await fetch('/api/focus-set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({homing:!!on})}); }catch(e){} toast(on?'Homing on — context will follow you':'Homing off',3500); loadHoming(); }
@@ -17380,7 +17380,7 @@ function gmListShell(){
         +'<span id="gmSync" class="gm-sync" title="how fresh this list is — the node keeps it synced in the background"></span>'
         +'<span class="gm-spacer"></span>'
         +'<button class="gm-act cf-srbtn" onclick="cfReveal(\'.gm-list\',\'gmSearch\')" title="Search mail">🔍</button>'
-        +'<button class="gm-act go" onclick="gmCompose()" title="Compose (c)">✎ Compose</button>'
+        +'<button class="gm-act go" onclick="gmCompose()" title="Compose (c)">Compose</button>'
         +'<button class="gm-act" onclick="gmFetchList(true,true)" title="Refresh now (live pull)">↻</button></div>'
       +'<input class="gm-search" id="gmSearch" placeholder="Search all mail…  (/ to focus)" '
         +'onkeydown="if(event.key===\'Enter\'){GM.text=this.value;gmFetchList(true);}else if(event.key===\'Escape\'){this.blur();}">'
@@ -17525,9 +17525,9 @@ function gmRenderRead(){
       +(fxOn()?'<button class="gm-act fx-hist" onclick="fxSenderHistory()" title="What you know about this sender">\u{1F50E} Sender history</button>':'')
       +'<button class="gm-act" onclick="gmActCur(\'archive\')" title="Archive (e)">\u{1F5C4} Archive</button>'
       +'<button class="gm-act" onclick="gmActCur(\'trash\')" title="Trash (#)">\u{1F5D1} Trash</button>'
-      +'<button class="gm-act" onclick="gmSnoozeMenu()" title="Snooze (h)">⏰ Snooze</button>'
-      +'<button class="gm-act" onclick="gmActCur(\'unread\');gmCloseRead()" title="Mark unread (u)">✉ Unread</button>'
-      +'<button class="gm-act" onclick="ssPickThread()" title="Send this whole thread to a session (drag a list row to send a single message)">➔ To session</button>'
+      +'<button class="gm-act" onclick="gmSnoozeMenu()" title="Snooze (h)">Snooze</button>'
+      +'<button class="gm-act" onclick="gmActCur(\'unread\');gmCloseRead()" title="Mark unread (u)">Unread</button>'
+      +'<button class="gm-act" onclick="ssPickThread()" title="Send this whole thread to a session (drag a list row to send a single message)">To session</button>'
     +'</div>'
     +mlReaderChip()
   +'</div>';
@@ -17572,7 +17572,7 @@ function gmRenderRead(){
   var replybar='<div class="gm-replybar">'
     +'<button class="gm-act go" onclick="gmReply(false)" title="Reply (r)">↩ Reply</button>'
     +'<button class="gm-act" onclick="gmReply(true)" title="Reply all (a)">↪ Reply all</button>'
-    +'<button class="gm-act" onclick="gmForward()" title="Forward (f)">➤ Forward</button></div>';
+    +'<button class="gm-act" onclick="gmForward()" title="Forward (f)">Forward</button></div>';
   read.innerHTML=head+'<div class="gm-thread">'+cards.join('')+replybar+'</div>';
   gmMountBodies(read, msgs);
 }
@@ -17649,11 +17649,11 @@ async function mlRenderChip(){
   if(sug.length){
     var top=sug[0];
     box.innerHTML='<span style="color:var(--mut);font-size:12px">Link to</span> '
-      +'<button class="ml-chip" onclick="mlAssign(\''+esc(top.rel)+'\',\''+e2(top.name).replace(/"/g,"&quot;")+'\',true)">📂 '+e2(top.name)+'?</button>'
+      +'<button class="ml-chip" onclick="mlAssign(\''+esc(top.rel)+'\',\''+e2(top.name).replace(/"/g,"&quot;")+'\',true)">'+e2(top.name)+'?</button>'
       +'<span class="ml-reason">'+e2((top.reasons||[]).join(', '))+'</span>'
       +' <button class="mini" onclick="mlShowPicker()">other…</button>';
   } else {
-    box.innerHTML='<button class="mini" onclick="mlShowPicker()">📂 Link to folder…</button>';
+    box.innerHTML='<button class="mini" onclick="mlShowPicker()">Link to folder…</button>';
   }
 }
 async function mlShowPicker(){
@@ -17699,7 +17699,7 @@ function mlRowChip(m){
 // ---- attachment "Save to <folder>" (called from gmAttStrip) ----
 function mlAttSaveBtn(mid,ai){
   if(!mlOn()) return '';
-  return '<button onclick="mlSaveAtt(\''+mid+'\','+ai+')" title="Save to a project folder">💾 Save to…</button>';
+  return '<button onclick="mlSaveAtt(\''+mid+'\','+ai+')" title="Save to a project folder">Save to…</button>';
 }
 async function mlSaveAtt(mid,ai){
   var ctx=gmQLAtt(mid,ai); if(!ctx){toast('Attachment not found');return;}
@@ -17911,11 +17911,11 @@ function gmcShellHTML(pre, showCc, initial){
     +'<div class="gmc-atts" id="gmcAtts" style="display:none"></div>'
     +'<div class="gmc-foot">'
       +'<button class="gmc-send" onclick="gmcSend()">Send <span class="gmc-sendk">⌘↵</span></button>'
-      +((fxOn()&&pre.threadId)?'<button class="gmc-tool gmc-voice" onclick="fxComposeDraft(\''+e2(pre.threadId)+'\')" title="Draft this reply in your voice from the full client context (uses the recipients above -- reply vs reply-all)">✨ Draft in my voice</button>':'')
+      +((fxOn()&&pre.threadId)?'<button class="gmc-tool gmc-voice" onclick="fxComposeDraft(\''+e2(pre.threadId)+'\')" title="Draft this reply in your voice from the full client context (uses the recipients above -- reply vs reply-all)">Draft in my voice</button>':'')
       +'<button class="gmc-tool" onclick="document.getElementById(\'gmcFile\').click()" title="Attach files">📎</button>'
       +'<button class="gmc-tool" onclick="document.getElementById(\'gmcImg\').click()" title="Insert inline image">🖼</button>'
       +'<span class="gmc-spacer"></span>'
-      +'<button class="gmc-tool" onclick="gmcEditSignature()" title="Edit signature">✍ Signature</button>'
+      +'<button class="gmc-tool" onclick="gmcEditSignature()" title="Edit signature">Signature</button>'
       +'<button class="gmc-tool" onclick="gmcDiscard()">Discard</button>'
       +'<input type="file" id="gmcFile" multiple style="display:none" onchange="gmcAddFiles(this.files);this.value=\'\'">'
       +'<input type="file" id="gmcImg" accept="image/*" multiple style="display:none" onchange="gmcInsertImages(this.files);this.value=\'\'">'
@@ -19049,7 +19049,7 @@ function drRender(){
       +'<button class="dr-bb" onclick="drBatch(\'star\')">★ Star</button>'
       +'<button class="dr-bb" onclick="drBatch(\'unstar\')">☆ Unstar</button>'
       +'<button class="dr-bb" onclick="drBatchDownload()">↓ Download</button>'
-      +'<button class="dr-bb danger" onclick="drBatch(\'trash\')">🗑 Trash</button>'
+      +'<button class="dr-bb danger" onclick="drBatch(\'trash\')">Trash</button>'
       +'<span style="flex:1"></span><button class="dr-bb" onclick="drClearSel()">Clear</button></div>';
   }
   h+='<div class="dr-body">';
@@ -19316,7 +19316,7 @@ async function loadComms(){
   // thread filter (with peer-health dots)
   const dot=function(h){return '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:'+(COMMS_HEALTH[h]||COMMS_HEALTH.unknown)+';margin-right:4px"></span>';};
   const filt='<button class="mini'+(COMMS_TGT===""?" go":"")+'" onclick="commsFilter(\'\')">All</button> '+peers.map(function(p){return '<button class="mini'+(COMMS_TGT===p.id?" go":"")+'" onclick="commsFilter(\''+esc(p.id)+'\')" title="'+esc(p.health||'unknown')+'">'+dot(p.health)+esc(p.id)+'</button>';}).join(' ');
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>📡 Comms</b> <span class="sub">'+esc(me)+' &middot; '+all.length+' messages &middot; '+peers.length+' peers &middot; durable mesh</span> <button class="mini" onclick="commsRefresh()">⟳</button> <button class="mini" onclick="commsClear()">clear</button></div><div style="margin-top:8px;display:flex;gap:5px;flex-wrap:wrap">'+filt+'</div></div>';
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Comms</b> <span class="sub">'+esc(me)+' &middot; '+all.length+' messages &middot; '+peers.length+' peers &middot; durable mesh</span> <button class="mini" onclick="commsRefresh()">⟳</button> <button class="mini" onclick="commsClear()">clear</button></div><div style="margin-top:8px;display:flex;gap:5px;flex-wrap:wrap">'+filt+'</div></div>';
   // "No silent drops" health: open threads we are owed a reply on + inbound requests we owe a reply on.
   const aw=d.awaiting||[],ov=d.overdue||[],un=d.unanswered||[];
   if(aw.length||un.length){const bad=ov.length||un.length;
@@ -19452,7 +19452,7 @@ async function loadNotebook(){
   var d={};try{d=await(await fetch(url)).json();}catch(e){box.innerHTML=empty("Couldn't load Notes.");return;}
   NB.notes=d.notes||[];NB.hasVoice=!!d.has_voice;
   var voice=NB.hasVoice?'<button id="nbRec" class="mini" onclick="nbToggleRec()">&#127908; Dictate</button>':'<span class="sub" title="Add DEEPGRAM_API_KEY in the Vault lens to enable voice">&#127908; voice off &mdash; add the Deepgram key</span>';
-  var h='<div class="cc-head"><span class="cc-h-ic">&#128211;</span><span class="cc-h-t">Notes</span><span class="cc-h-sub">write or speak a note &mdash; on save it becomes tasks and joins your brief &amp; context</span></div>';
+  var h='<div class="cc-head"><span class="cc-h-t">Notes</span><span class="cc-h-sub">write or speak a note &mdash; on save it becomes tasks and joins your brief &amp; context</span></div>';
   h+='<div class="cc-compose">'
     +'<textarea id="nbInput" rows="4" style="width:100%;box-sizing:border-box;'+COMMS_INP+';padding:11px;font:inherit;line-height:1.5;resize:vertical" placeholder="Type your note&hellip; or hit Dictate and just talk. When you Save, I pull out the tasks, decisions and follow-ups, file it into your context, and it shows up in your morning brief."></textarea>'
     +'<div class="cc-c-row">'+voice+'<span id="nbRecStatus" class="sub"></span><button class="btn go" style="margin-left:auto" onclick="nbSave()">&#10003; Save note</button></div></div>';
@@ -19644,7 +19644,7 @@ async function loadMarketplace(){document.getElementById("grid").innerHTML=empty
   let d={};try{d=await(await fetch('/api/extensions')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load the marketplace.");return;}
   const ex=d.extensions||[];const q=(document.getElementById("search").value||"").toLowerCase();
   const nInst=ex.filter(e=>e.installed).length;
-  const hdr='<div class="cc-head"><span class="cc-h-ic">🏛</span><span class="cc-h-t">Marketplace</span>'
+  const hdr='<div class="cc-head"><span class="cc-h-t">Marketplace</span>'
     +'<span class="cc-chip"><b>'+nInst+'</b> installed</span><span class="cc-chip"><b>'+ex.length+'</b> available</span>'
     +'<span class="cc-h-sub">'+esc(((window.CC&&window.CC.product)||"ClaudeFather").replace(/^the /i,""))+' v'+(d.version||'?')+'</span>'
     +'<span class="cc-h-act"><button class="mini" onclick="checkUpdates()">⟳ Check for updates</button></span></div>';
@@ -19655,8 +19655,8 @@ async function loadMarketplace(){document.getElementById("grid").innerHTML=empty
     if(e.paid){ tags+='<span class="cc-tag paid" title="Paid extension'+(e.publisher?(' · by '+esc(e.publisher)):'')+'">💳 Paid'+(price?(' '+esc(price)):'')+'</span>';
       tags+=e.entitled?'<span class="cc-tag ok" title="This node holds a valid signed entitlement">✓ Licensed</span>':'<span class="cc-tag lock" title="Locked — needs a Mission-Control-signed entitlement">🔒 Locked</span>'; }
     if(e.installed) tags+='<span class="cc-tag ok">✓ Installed</span>';
-    var foot=e.installed?('<button class="mini" onclick="extSetup(\''+esc(e.id)+'\')">🧭 Set up</button><button class="mini" style="color:#f85149" onclick="extUninstall(\''+esc(e.id)+'\')">remove</button>')
-      :(e.locked?('<button class="mini" title="Requires a paid entitlement signed by Mission Control" onclick="extRequest(\''+esc(e.id)+'\','+JSON.stringify(price||'').replace(/"/g,"&quot;")+')">🔒 Request access</button>')
+    var foot=e.installed?('<button class="mini" onclick="extSetup(\''+esc(e.id)+'\')">Set up</button><button class="mini" style="color:#f85149" onclick="extUninstall(\''+esc(e.id)+'\')">remove</button>')
+      :(e.locked?('<button class="mini" title="Requires a paid entitlement signed by Mission Control" onclick="extRequest(\''+esc(e.id)+'\','+JSON.stringify(price||'').replace(/"/g,"&quot;")+')">Request access</button>')
                 :'<button class="mini go" onclick="extInstall(\''+esc(e.id)+'\')">＋ Install</button>');
     return '<div class="cc-tile'+(e.installed?' on':'')+'">'
       +'<div class="cc-t-h"><span class="cc-t-ic">'+esc(e.icon||'•')+'</span><span class="cc-t-nm">'+esc(e.name||e.id)+'</span></div>'
@@ -19798,7 +19798,7 @@ async function loadSubstack(){
         +'<label>Tone (optional)</label><input id="subtone" placeholder="punchy, analytical, friendly…">'
         +'<label>Length (optional)</label><input id="sublen" placeholder="~800 words">'
         +'<label>Source material (optional — notes, an outline, a transcript)</label><textarea id="subsrc" placeholder="Paste any source the draft should be grounded in…"></textarea>'
-        +'<button class="mini go" style="margin-top:11px;width:100%" onclick="subDraft()">✍️ Generate draft</button>'
+        +'<button class="mini go" style="margin-top:11px;width:100%" onclick="subDraft()">Generate draft</button>'
         +'<div class="meta" style="margin-top:8px;font-size:11px">Runs a headless Claude (your Max subscription). The draft appears below + in Files in ~30–60s — review it, then paste into Substack and publish yourself.</div>'
         +'</div><h3 style="border-top:1px solid var(--line)"><span>Drafts</span></h3><div class="aff-scroll" style="max-height:34vh">'+dr+'</div></div>'
     +'</div></div>';
@@ -19818,8 +19818,8 @@ function loadAisearch(){
   var g=document.getElementById('grid');
   g.innerHTML=affCss()+'<div class="aff-wrap"><div class="aff-head"><b style="font-size:16px">🔎 AI Visibility</b><span class="sub">AISearch Pro — brand visibility across AI engines (BYOK)</span>'
     +'<span style="margin-left:auto;display:flex;gap:6px">'
-      +'<button class="mini'+(AIS.tab==='search'?' go':'')+'" onclick="AIS.tab=\'search\';loadAisearch()">🔎 Search</button>'
-      +'<button class="mini'+(AIS.tab==='analytics'?' go':'')+'" onclick="AIS.tab=\'analytics\';loadAisearch()">📊 Analytics</button>'
+      +'<button class="mini'+(AIS.tab==='search'?' go':'')+'" onclick="AIS.tab=\'search\';loadAisearch()">Search</button>'
+      +'<button class="mini'+(AIS.tab==='analytics'?' go':'')+'" onclick="AIS.tab=\'analytics\';loadAisearch()">Analytics</button>'
     +'</span></div><div id="aisbody"></div></div>';
   if(AIS.tab==='analytics') aisAnalytics(); else aisSearchView();
 }
@@ -19928,7 +19928,7 @@ async function checkUpdates(){
 async function loadAgents(){document.getElementById("grid").innerHTML=empty("Loading agents…");
   let d={};try{d=await(await fetch('/api/agents')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load agents.");return;}
   const ags=d.agents||[];
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🤖 Agents</b> <span class="sub">'+ags.length+' agent-tool(s) — each a scoped charter + tools/. Drop a dir under <code>agents/</code> and it appears here.</span><div style="margin-left:auto"><button class="mini go" onclick="newAgent()">＋ New agent-tool</button></div></div></div>';
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Agents</b> <span class="sub">'+ags.length+' agent-tool(s) — each a scoped charter + tools/. Drop a dir under <code>agents/</code> and it appears here.</span><div style="margin-left:auto"><button class="mini go" onclick="newAgent()">＋ New agent-tool</button></div></div></div>';
   if(!ags.length){h+=empty("No agent-tools found.");}
   ags.forEach(a=>{const ov=a.overall||'unknown',c=a.counts||{};
     h+='<div class="card" style="cursor:default"><h3><span>'+esc(a.title||a.slug)+'</span>'+secPill(ov)+'</h3>'
@@ -19936,8 +19936,8 @@ async function loadAgents(){document.getElementById("grid").innerHTML=empty("Loa
       +'<div class="sub" style="margin-top:7px;min-height:18px">'+e2(a.summary||'')+'</div>'
       +'<div class="btns" style="margin-top:10px">'
       +(a.has_run?'<button class="mini go" onclick="agentRun(\''+a.slug+'\')">▶ Run</button>':'')
-      +'<button class="mini" onclick="agentReport(\''+a.slug+'\')">🔍 Details</button>'
-      +'<button class="mini" onclick="openAgent(\''+a.slug+'\')">💬 Talk</button>'
+      +'<button class="mini" onclick="agentReport(\''+a.slug+'\')">Details</button>'
+      +'<button class="mini" onclick="openAgent(\''+a.slug+'\')">Talk</button>'
       +'<button class="mini" style="color:#f85149" onclick="delAgent(\''+a.slug+'\')" title="archive this agent-tool (reversible)">🗑</button></div>'
       +'<div id="agrep-'+a.slug+'" style="margin-top:9px"></div></div>';});
   h+=await subagentsSection();
@@ -19948,7 +19948,7 @@ async function subagentsSection(){
   // a capability that rots, sec 5). One role, two surfaces: agent-tools above, delegation defs here.
   let d={};try{d=await(await fetch('/api/subagents')).json();}catch(e){return '';}
   const subs=d.subagents||[];
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🧬 Subagent defs &amp; team builder</b> <span class="sub">'+subs.length+' subagent def(s) (<code>.claude/agents/*.md</code>) — what the orchestrator delegates to; the <b>description</b> is the selection trigger.</span>'
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Subagent defs &amp; team builder</b> <span class="sub">'+subs.length+' subagent def(s) (<code>.claude/agents/*.md</code>) — what the orchestrator delegates to; the <b>description</b> is the selection trigger.</span>'
     +'<div style="margin-left:auto"><button class="mini go" onclick="teamSession()">▶ Open team session (<span id="teamn">0</span>)</button></div></div>'
     +'<div class="meta" style="margin-top:6px">Build a team: tick the teammates you want below, then <b>Open team session</b> — a lead opens pre-briefed with exactly that team (it delegates to them via the Agent tool) and you give it the assignment in the session.</div></div>';
   if(!subs.length){return h+empty("No subagent defs found under .claude/agents/.");}
@@ -19989,7 +19989,7 @@ async function delAgent(slug){if(!confirm('Archive agent-tool "'+slug+'"?\\n\\nI
 async function loadSkills(){document.getElementById("grid").innerHTML=empty("Loading skills…");
   let d={};try{d=await(await fetch('/api/skills')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load skills.");return;}
   const sk=d.skills||[],dirs=d.dirs||{};
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🧪 Skills</b> <span class="sub">'+sk.length+' skill(s) — on-demand procedures/knowledge Claude pulls in when the description matches. <code>'+esc(dirs.user||'~/.claude/skills')+'</code> (user) + <code>'+esc(dirs.project||'')+'</code> (project)</span>'
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Skills</b> <span class="sub">'+sk.length+' skill(s) — on-demand procedures/knowledge Claude pulls in when the description matches. <code>'+esc(dirs.user||'~/.claude/skills')+'</code> (user) + <code>'+esc(dirs.project||'')+'</code> (project)</span>'
     +'<div style="margin-left:auto"><button class="mini go" onclick="skillNew()">＋ New skill</button></div></div>'
     +'<div class="meta" style="margin-top:6px">A skill = a folder with <code>SKILL.md</code>. The <b>description</b> is what makes Claude reach for it — say what it does + when to use it. See <code>docs/MEMORY_SKILLS_AGENTS.md</code>.</div></div>';
   if(!sk.length){h+=empty("No skills yet. Click ＋ New skill to add one (e.g. a deploy or backup ritual you keep re-explaining).");document.getElementById("grid").innerHTML=h;return;}
@@ -20002,9 +20002,9 @@ async function loadSkills(){document.getElementById("grid").innerHTML=empty("Loa
       +((s.lint&&s.lint.length)?'<div class="meta" style="margin-top:4px;color:#f85149">⚠ lint: '+esc(s.lint.join(", "))+'</div>':'')
       +(s.when_to_use?'<div class="meta" style="margin-top:4px">when: '+e2(s.when_to_use)+'</div>':'')
       +'<div class="meta" style="margin-top:4px"><code>'+esc(s.command)+'</code>'+(s.allowed_tools&&s.allowed_tools!='None'&&s.allowed_tools!=''?(' · tools: '+esc(s.allowed_tools).slice(0,60)):'')+'</div>'
-      +'<div class="btns" style="margin-top:10px"><button class="mini" onclick="skillView(\''+s.scope+'\',\''+esc(s.slug)+'\')">🔍 View</button>'
-      +'<button class="mini" onclick="skillOpen(\''+s.scope+'\',\''+esc(s.slug)+'\')">✎ Edit</button>'
-      +'<button class="mini" onclick="skillDelete(\''+s.scope+'\',\''+esc(s.slug)+'\')" title="Archive this skill (reversible)">🗑 Delete</button></div>'
+      +'<div class="btns" style="margin-top:10px"><button class="mini" onclick="skillView(\''+s.scope+'\',\''+esc(s.slug)+'\')">View</button>'
+      +'<button class="mini" onclick="skillOpen(\''+s.scope+'\',\''+esc(s.slug)+'\')">Edit</button>'
+      +'<button class="mini" onclick="skillDelete(\''+s.scope+'\',\''+esc(s.slug)+'\')" title="Archive this skill (reversible)">Delete</button></div>'
       +'<div id="skv-'+s.scope+'-'+esc(s.slug)+'" style="margin-top:9px"></div></div>';});
   document.getElementById("grid").innerHTML=h;}
 async function skillView(scope,name){const el=document.getElementById('skv-'+scope+'-'+name);if(!el)return;
@@ -20030,7 +20030,7 @@ async function skillDelete(scope,name){if(!confirm('Archive skill "'+name+'" ('+
 async function loadTeams(){document.getElementById("grid").innerHTML=empty("Loading teams…");
   let d={};try{d=await(await fetch('/api/teams')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load teams.");return;}
   const tm=d.teams||[];
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>👥 Teams</b> <span class="sub">'+tm.length+' team(s) — rung-4 rosters of agents that COORDINATE (each owns a distinct lens + files, then reconcile). Reserve for the rare coordinate-with-each-other case — a single agent or a Workflow (rung 3) is usually cheaper.</span>'
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Teams</b> <span class="sub">'+tm.length+' team(s) — rung-4 rosters of agents that COORDINATE (each owns a distinct lens + files, then reconcile). Reserve for the rare coordinate-with-each-other case — a single agent or a Workflow (rung 3) is usually cheaper.</span>'
     +'<div style="margin-left:auto"><button class="mini go" onclick="teamNew()">＋ New team</button></div></div>'
     +'<div class="meta" style="margin-top:6px">A team = <code>'+esc(d.dir||'teams')+'/&lt;slug&gt;/TEAM.md</code>: frontmatter <b>description</b> (the trigger) + a roster of <code>- **name** | lens: … | files: … | objective: …</code> lines. See <code>docs/MEMORY_SKILLS_AGENTS.md</code> sec 4.</div></div>';
   if(!tm.length){h+=empty("No teams yet. Add one: teams/<slug>/TEAM.md with a 3–5 member roster, each a distinct lens + files.");document.getElementById("grid").innerHTML=h;return;}
@@ -20044,7 +20044,7 @@ async function loadTeams(){document.getElementById("grid").innerHTML=empty("Load
         +(m.lens?' <span class="badge" style="background:#3b82f622;color:#60a5fa">'+e2(m.lens)+'</span>':'')
         +(m.objective?'<div class="sub" style="margin-top:3px">'+e2(m.objective)+'</div>':'')
         +(m.files?'<div class="meta" style="margin-top:2px">files: <code>'+e2(m.files)+'</code></div>':'')+'</div>';});
-    h+='<div class="btns" style="margin-top:10px"><button class="mini" onclick="teamView(\''+esc(t.slug)+'\')">🔍 View TEAM.md</button>'
+    h+='<div class="btns" style="margin-top:10px"><button class="mini" onclick="teamView(\''+esc(t.slug)+'\')">View TEAM.md</button>'
       +'<button class="mini" onclick="teamRun(\''+esc(t.slug)+'\')">▶ Run team</button></div>'
       +'<div id="tmv-'+esc(t.slug)+'" style="margin-top:9px"></div></div>';});
   document.getElementById("grid").innerHTML=h;}
@@ -20069,7 +20069,7 @@ async function loadAudit(){document.getElementById("grid").innerHTML=empty("Runn
   let d={};try{d=await(await fetch('/api/audit')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't run the audit.");return;}
   const it=d.items||[],ov=d.overlaps||[],c=d.counts||{},th=d.thresholds||{};
   const flagged=c.flagged||0,clean=c.clean||0,col=flagged?'#d29922':'#3fb950';
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🔬 Description Audit</b> <span class="sub">'+(c.items||0)+' model-facing description(s) across all four blocks — the anti-rot / tool-tester routine (sec 5.4). The orchestrator only sees DESCRIPTIONS at selection time, so a stale, vague, or overlapping one is why agents misfire.</span>'
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Description Audit</b> <span class="sub">'+(c.items||0)+' model-facing description(s) across all four blocks — the anti-rot / tool-tester routine (sec 5.4). The orchestrator only sees DESCRIPTIONS at selection time, so a stale, vague, or overlapping one is why agents misfire.</span>'
     +'<div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap"><button class="mini go" onclick="loadAudit()">↻ Re-run + write AUDIT.md</button><button class="mini" onclick="rosterRegen()">↻ Regenerate ROSTER.md</button></div></div>'
     +'<div style="display:flex;align-items:center;gap:14px;margin-top:6px;flex-wrap:wrap">'
     +'<span style="width:16px;height:16px;border-radius:50%;background:'+col+';box-shadow:0 0 14px '+col+'99;flex:0 0 16px"></span>'
@@ -20105,11 +20105,11 @@ async function loadProjects(){
   var cats={}; comps.forEach(function(c){ (cats[c.category]=cats[c.category]||[]).push(c); });
   var order=['Core','Lifecycle','Extensions','Agents','Docs'];
   var keys=order.filter(function(k){return cats[k];}).concat(Object.keys(cats).filter(function(k){return order.indexOf(k)<0;}));
-  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🗂 Projects</b> <span class="sub">the ClaudeFather platform — every component, fully documented</span><div style="margin-left:auto"><button class="mini go" onclick="viewCMD(\'docs/ARCHITECTURE.md\')">📖 Architecture</button></div></div></div>';
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Projects</b> <span class="sub">the ClaudeFather platform — every component, fully documented</span><div style="margin-left:auto"><button class="mini go" onclick="viewCMD(\'docs/ARCHITECTURE.md\')">Architecture</button></div></div></div>';
   keys.forEach(function(k){
     h+='<div class="pj-sec" style="grid-column:1/-1">'+esc(k)+' <span class="sub">'+cats[k].length+'</span></div>';
     cats[k].forEach(function(c){
-      h+='<div class="card pj-card" style="cursor:default;grid-column:1/-1"><div class="pj-top"><span class="pj-name">'+esc(c.name)+'</span>'+(c.path?'<code class="pj-path">'+esc(c.path)+'</code>':'')+(c.claude_md?'<button class="mini" style="margin-left:auto" onclick="viewCMD(\''+esc(c.claude_md)+'\')">📄 CLAUDE.md</button>':'')+'</div><div class="pj-sum">'+esc(c.summary)+'</div>';
+      h+='<div class="card pj-card" style="cursor:default;grid-column:1/-1"><div class="pj-top"><span class="pj-name">'+esc(c.name)+'</span>'+(c.path?'<code class="pj-path">'+esc(c.path)+'</code>':'')+(c.claude_md?'<button class="mini" style="margin-left:auto" onclick="viewCMD(\''+esc(c.claude_md)+'\')">CLAUDE.md</button>':'')+'</div><div class="pj-sum">'+esc(c.summary)+'</div>';
       if(c.children&&c.children.length){
         h+='<div class="pj-children">'+c.children.map(function(ch){
           return '<div class="pj-child"><div class="pj-ctop"><span class="pj-cname">'+esc(ch.name)+'</span>'+(ch.claude_md?' <a href="#" title="open CLAUDE.md" onclick="event.preventDefault();viewCMD(\''+esc(ch.claude_md)+'\')">📄</a>':'')+'</div>'+(ch.path?'<code class="pj-path">'+esc(ch.path)+'</code>':'')+'<div class="pj-csum">'+esc(ch.summary)+'</div></div>';
@@ -20128,7 +20128,7 @@ async function viewCMD(path){
 async function loadPortfolio(){document.getElementById("grid").innerHTML=empty("Scanning the portfolio…");
   let d={};try{d=await(await fetch('/api/portfolio')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load portfolio.");return;}
   const insts=d.instances||[],roll=d.roll||{};
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🛰 Portfolio</b> <span class="sub">'+(d.n||0)+' project ClaudeFather(s) overseen by '+esc(d.brand||'')+' &middot; use <b>➕ Add a ClaudeFather</b> (top right) to provision a new one</span></div>'
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Portfolio</b> <span class="sub">'+(d.n||0)+' project ClaudeFather(s) overseen by '+esc(d.brand||'')+' &middot; use <b>Add a ClaudeFather</b> (top right) to provision a new one</span></div>'
     +'<div style="display:flex;gap:22px;margin-top:12px;flex-wrap:wrap">'
     +pchip('#3fb950',roll.green||0,'healthy')+pchip('#d29922',roll.amber||0,'warnings')+pchip('#f85149',roll.red||0,'critical')+pchip('#8b949e',roll.down||0,'down')+'</div></div>';
   if(!insts.length){h+=empty("No child ClaudeFathers yet. Click ➕ Add a ClaudeFather above to provision one.");document.getElementById("grid").innerHTML=h;return;}
@@ -20164,9 +20164,9 @@ function cfAddWizard(){
    +'</div>'
    +'<div class="sub" style="margin:8px 0;line-height:1.5"><b>Install type</b> — <b>Agency</b>: runs only official, signed tools — locked &amp; safe, what a client/tenant gets. <b>Developer</b>: also lets you build + run your OWN custom tools in an operator-approved sandbox (your own installs). &nbsp;·&nbsp; <b>Tree shape</b> — <b>Product</b>: a modules tree. <b>Agency</b>: a clients + tools tree (like Sarah/AFP). &nbsp;·&nbsp; <b>Onboarding</b> — on first boot: <b>Adopt</b> COPIES the code in <b>Adopt from</b> INTO the bundle&rsquo;s project/ (self-contained — the node owns its code, no external split), then reads + structures it to spec; <b>Scaffold</b> builds a new shell; then hands to the Chief.</div>'
    +'<label class="cfpersist"><input type="checkbox" id="cf_persist" checked><span><b>Make it permanent &amp; join the mesh</b><br>On <b>Create &amp; start</b>, install it to survive reboots and add it to the fleet — no manual steps.</span></label>'
-   +'<div class="cfacts"><button class="mini" onclick="cfPlan()" title="Show the plan only — writes nothing">👁 Preview</button>'
-   +'<button class="mini go" onclick="cfProvision(false)" title="Build the folder, leave it off">📦 Create</button>'
-   +'<button class="mini go" onclick="cfProvision(true)" title="Build it, start it, finish setup">🚀 Create &amp; start</button></div>'
+   +'<div class="cfacts"><button class="mini" onclick="cfPlan()" title="Show the plan only — writes nothing">Preview</button>'
+   +'<button class="mini go" onclick="cfProvision(false)" title="Build the folder, leave it off">Create</button>'
+   +'<button class="mini go" onclick="cfProvision(true)" title="Build it, start it, finish setup">Create &amp; start</button></div>'
    +'<div class="cflegend">👁 <b>Preview</b> — plan only. &nbsp; 📦 <b>Create</b> — build it, leave it off. &nbsp; 🚀 <b>Create &amp; start</b> — build, start, finish setup, then open it and run its <b>Setup agent</b>.</div>'
    +'<pre id="cfout"></pre></div>');
 }
@@ -20210,7 +20210,7 @@ function secPill(s){return '<span style="background:'+secColor(s)+';color:#0a0a0
 function renderSecurity(){if(!SEC)return;const d=SEC,c=d.counts||{};
   const ov=d.overall||'unknown',light=secColor(ov=='unknown'?'info':ov);
   const lbl=ov=='err'?'Action needed':ov=='warn'?'Warnings':ov=='ok'?'Healthy':'No scan yet';
-  let h='<div class="card" style="cursor:default"><div class="modnav"><b>🛡 Security</b> <span class="sub">'+(d.ts?('scanned '+tago(d.ts)):'never scanned')+' · '+esc(d.repo||'')+'</span>'
+  let h='<div class="card" style="cursor:default"><div class="modnav"><b>Security</b> <span class="sub">'+(d.ts?('scanned '+tago(d.ts)):'never scanned')+' · '+esc(d.repo||'')+'</span>'
     +'<div style="margin-left:auto;display:flex;gap:8px"><button class="mini go" id="secscan" onclick="securityScan()">▶ Run scan</button></div></div>'
     +'<div style="display:flex;align-items:center;gap:14px;margin-top:13px;flex-wrap:wrap">'
     +'<span style="width:16px;height:16px;border-radius:50%;background:'+light+';box-shadow:0 0 14px '+light+'99;flex:0 0 16px"></span>'
@@ -20233,7 +20233,7 @@ function renderBackup(){if(!BACKUP)return;const b=BACKUP,st=b.state||{},lv=b.liv
   else if(lastSucc===null){light='#d29922';label='Never run';sub='no backup recorded yet — click Back up now';}
   else if(lastSucc>5*3600){light='#d29922';label='Stale';sub='last successful backup '+tago(st.last_success);}
   else if((lv.ahead||0)>0||(lv.uncommitted||0)>0){light='#d29922';label='Pending';sub=(lv.uncommitted||0)+' uncommitted · '+(lv.ahead||0)+' to push';}
-  let h='<div class="card" style="cursor:default"><div class="modnav"><b>💾 Backup</b> <span class="sub">'+esc(lv.remote||'')+' · '+esc(lv.branch||'?')+' · '+(b.scheduled||'')+'</span>'
+  let h='<div class="card" style="cursor:default"><div class="modnav"><b>Backup</b> <span class="sub">'+esc(lv.remote||'')+' · '+esc(lv.branch||'?')+' · '+(b.scheduled||'')+'</span>'
     +'<span class="badge" style="background:#c9a22722;color:var(--accent);margin-left:8px" title="storage strategy (cc.config storage_mode)">'+esc(b.storage_mode||'github')+'</span>'
     +((b.icloud&&b.icloud.warn)?'<span class="badge" style="background:#f8514922;color:#f85149;margin-left:6px" title="'+esc(b.icloud.warn)+'">⚠ iCloud path</span>':((b.icloud&&b.icloud.under_icloud_path)?'<span class="badge" style="background:#22c55e22;color:#22c55e;margin-left:6px" title="project is under the iCloud-synced folder">✓ iCloud synced</span>':''))
     +'<div style="margin-left:auto"><button class="mini go" id="bknow" onclick="backupNow()">▶ Back up now</button></div></div>'
@@ -20459,7 +20459,7 @@ function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="c
   +'<div class="meta">active '+ago(now-x.activity)+' ago</div>'
   +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="openInSessions(\''+esc(x.name)+'\')">▶ open</button>'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
-  +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎 file</button>'
+  +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">file</button>'
   +'<button class="mini" onclick="endSess(\''+esc(x.name)+'\',false)" title="handoff + close">end</button>'
   +'<button class="mini" style="color:#f85149" onclick="endSess(\''+esc(x.name)+'\',true)" title="force kill">kill</button></div></div>';}
 function sessTile(x,i){const big=(SESSBIG==x.name);
@@ -20566,7 +20566,7 @@ async function loadDocs(){
   document.getElementById("grid").innerHTML=empty("Loading managed CLAUDE.md blocks…");
   let d;try{d=await(await fetch("/api/managed")).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn’t load.");return;}
   const c=d.coverage;
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>📊 CLAUDE.md coverage</span><span><button class="mini" onclick="runDoctor()">🩺 Doctor</button> <button class="mini go" onclick="editBlock()">+ New block</button></span></h3>'
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>📊 CLAUDE.md coverage</span><span><button class="mini" onclick="runDoctor()">Doctor</button> <button class="mini go" onclick="editBlock()">+ New block</button></span></h3>'
     +'<div class="meta">Meaningful folders: <b style="color:var(--ink)">'+c.meaningfulHave+'/'+c.meaningful+'</b> have a CLAUDE.md · Data buckets: <b style="color:var(--ink)">'+c.bucketsHave+'/'+c.buckets+'</b> · '+c.total+' folders in the project.</div>'
     +'<div class="meta" style="margin-top:4px">Blocks write only between their CC markers — hand-written content is never touched. The Doctor flags over-budget docs, sub-tool duplication, block drift, and registered folders missing a CLAUDE.md.</div><div id="docfix" style="margin-top:8px"></div></div>';
   h+=(d.blocks||[]).map(docCard).join("")||empty("No managed blocks yet — click + New block.");
@@ -20604,8 +20604,8 @@ function docCard(b){const ok=b.targets&&b.insync==b.targets;const col=ok?"#3fb95
    +'<div class="meta">Scope: '+(SCOPELABEL[b.scope]||b.scope)+(b.hasStub?" · has bucket stub":"")+'</div>'
    +'<div class="meta" style="color:'+col+'">'+b.insync+'/'+b.targets+' folders in sync'+(b.present>b.insync?(" · "+(b.present-b.insync)+" on an old version"):"")+'</div>'
    +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="applyBlock(\''+b.id+'\')">▶ Apply</button>'
-   +'<button class="mini" onclick="editBlock(\''+b.id+'\')">✎ Edit</button>'
-   +'<button class="mini" style="color:#f85149" onclick="rmBlock(\''+b.id+'\')">🗑 Remove</button></div></div>';}
+   +'<button class="mini" onclick="editBlock(\''+b.id+'\')">Edit</button>'
+   +'<button class="mini" style="color:#f85149" onclick="rmBlock(\''+b.id+'\')">Remove</button></div></div>';}
 async function editBlock(id){let b={id:"",title:"",scope:"pillars",body:"",stub:""};
   if(id)b=await(await fetch("/api/managed-block?id="+encodeURIComponent(id))).json();
   const opts=SCOPES.map(s=>'<option value="'+s+'"'+(b.scope==s?" selected":"")+'>'+SCOPELABEL[s]+'</option>').join("");
@@ -20661,7 +20661,7 @@ function busyOn(msg,sub){ var o=document.getElementById('cfbusy'); if(!o){ o=doc
 function busyOff(){ var o=document.getElementById('cfbusy'); if(o) o.style.display='none'; }
 // ---- "How this works" explainers: per-feature, auto-shows once, dismissible + never-again, reopen via the ? button ----
 var HELP={
- gmail:{t:'✉️ Gmail — a full client, built in',h:'<p>Keyboard-first triage: <b>j/k</b> move · <b>↵</b> open · <b>e</b> archive · <b>s</b> star · <b>#</b> trash · <b>r</b> reply · <b>c</b> compose · <b>z</b> undo. Saved lanes, threaded reader, search.</p><p><b>✨ Smart reply</b> drafts a reply <i>in your voice</i> using everything we know about the sender — past emails, calls, calendar, Drive files, pipeline status — and stages it as a Gmail <b>draft</b>. It <b>never sends</b>; you review and click Send.</p><p><b>🔎 Sender history</b> = a one-glance dossier. Attachments preview/download inline; <b>💾 Save to…</b> drops a file straight into a client/project folder. New mail appears on its own (list auto-refreshes; badge shows unread).</p>'},
+ gmail:{t:'✉️ Gmail — a full client, built in',h:'<p>Keyboard-first triage: <b>j/k</b> move · <b>↵</b> open · <b>e</b> archive · <b>s</b> star · <b>#</b> trash · <b>r</b> reply · <b>c</b> compose · <b>z</b> undo. Saved lanes, threaded reader, search.</p><p><b>Smart reply</b> drafts a reply <i>in your voice</i> using everything we know about the sender — past emails, calls, calendar, Drive files, pipeline status — and stages it as a Gmail <b>draft</b>. It <b>never sends</b>; you review and click Send.</p><p><b>Sender history</b> = a one-glance dossier. Attachments preview/download inline; <b>Save to…</b> drops a file straight into a client/project folder. New mail appears on its own (list auto-refreshes; badge shows unread).</p>'},
  calendar:{t:'📅 Calendar',h:'<p>Day / week / month / agenda. <b>Drag</b> the grid to create, drag edges to resize, drag to move. <b>Natural-language quick-add</b> — type "lunch with Sam thu 1pm". Click an event to edit, RSVP, or delete (with undo). Gold line = now.</p>'},
  drive:{t:'🗂️ Drive',h:'<p>Browse folders with breadcrumbs, search, grid/list. <b>Spacebar = Quick Look</b> (full-screen preview without leaving). Multi-select for batch actions; open or download anything.</p>'},
  files:{t:'📁 Files',h:'<p>Everything your agents make for you, newest first — open or download from anywhere (mobile too). Email attachments you "Save to…" a folder land here.</p>'},
@@ -20711,7 +20711,7 @@ async function loadTree(days){
   let d; try{d=await(await fetch("/api/convo-tree?days="+TREEDAYS)).json();}catch(e){g.innerHTML=empty("Failed to load tree.");return;}
   CONVOMAP={};
   const sel=[[1,'24h'],[7,'7d'],[30,'30d'],[90,'90d']].map(x=>'<button class="mini'+(TREEDAYS==x[0]?' go':'')+'" onclick="loadTree('+x[0]+')">'+x[1]+'</button>').join("");
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🌳 Conversation tree</b><div style="margin-left:auto;display:flex;gap:6px">'+sel+'</div></div>'
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Conversation tree</b><div style="margin-left:auto;display:flex;gap:6px">'+sel+'</div></div>'
     +'<div class="meta" style="margin-top:6px">'+d.count+' conversations · '+d.families+' threads (forks grouped under their origin) · nested by the folder each was launched from · tap one for details + to jump back in.</div></div>';
   h+='<div class="card treebox" style="cursor:default;grid-column:1/-1">'+(treeNode(d.tree,0,true)||empty("No conversations in this range."))+'</div>';
   g.innerHTML=h;
@@ -20771,7 +20771,7 @@ async function loadChief(){
   let h='<div class="chiefhero" style="grid-column:1/-1"><div class="cheroL"><div class="cherobadge">🎖</div><div>'
     +'<div class="cherotitle">Chief of Staff</div>'
     +'<div class="cherosub">Top-level command — in charge of the agents, this portal, the file system, and the live product. '+(c.chief_alive?'<b style="color:var(--ok)">● on the line now</b>':'standing by, ready when you are')+'.</div></div></div>'
-    +'<div class="cheroR"><button class="cherobtn" onclick="talkChief()">💬 Talk to me</button></div></div>';
+    +'<div class="cheroR"><button class="cherobtn" onclick="talkChief()">Talk to me</button></div></div>';
   const stat=(icon,val,label,lens,extra)=>'<div class="card cstat" onclick="gotoLens(\''+lens+'\')"><div class="cstatv">'+val+'</div><div class="cstatl">'+icon+' '+label+'</div>'+(extra?'<div class="meta">'+e2(extra)+'</div>':'')+'</div>';
   h+='<div class="cstats">';
   h+=stat('🟢',(c.sessions_n||0),'Live sessions','sessions',(c.sessions||[]).slice(0,3).join(', '));
@@ -20791,12 +20791,12 @@ async function loadChief(){
       +'<button class="mini" title="view the live terminal — do NOT close it" onclick="openInSessions(\''+esc(sv.name)+'\')">view</button></div>';});
   h+='</div>';
   h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>⚡ Quick actions</span></h3><div class="btns">'
-    +'<button class="mini go" onclick="talkChief()">💬 Talk to your Chief of Staff</button>'
+    +'<button class="mini go" onclick="talkChief()">Talk to your Chief of Staff</button>'
     +'<button class="mini" onclick="openLaunch(\'studio\',\'\')">＋ Launch a session</button>'
-    +'<button class="mini" onclick="gotoLens(\'ideas\')">💡 Capture an idea</button>'
-    +'<button class="mini" onclick="gotoLens(\'ralph\')">🔁 Loops</button>'
-    +'<button class="mini" onclick="gotoLens(\'modules\')">🧩 Modules</button>'
-    +'<button class="mini" onclick="gotoLens(\'tree\')">🌳 Conversations</button></div></div>';
+    +'<button class="mini" onclick="gotoLens(\'ideas\')">Capture an idea</button>'
+    +'<button class="mini" onclick="gotoLens(\'ralph\')">Loops</button>'
+    +'<button class="mini" onclick="gotoLens(\'modules\')">Modules</button>'
+    +'<button class="mini" onclick="gotoLens(\'tree\')">Conversations</button></div></div>';
   h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>🗂 The desk</span><button class="mini" onclick="gotoLens(\'docs\')">open Docs</button></h3>'
     +'<div class="meta">Highest-order references: '+(((window.CC&&window.CC.deskDocs)||[]).map(function(x){return '<code>'+esc(x)+'</code>';}).join(' · ')||'<code>CLAUDE.md</code>')+'.</div></div>';
   g.innerHTML=h;
@@ -20819,7 +20819,7 @@ function tkCard(t){
   var conf=(sug&&t.confidence)?('<span class="cc-conf" title="confidence">'+Math.round(t.confidence*100)+'%</span>'):'';
   var acts;
   if(sug){ acts=(t.kind==='calendar')
-      ? '<button class="mini go" onclick="tkCalendar(\''+t.id+'\')">📅 Calendar</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕</button>'
+      ? '<button class="mini go" onclick="tkCalendar(\''+t.id+'\')">Calendar</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕</button>'
       : '<button class="mini go" onclick="tkAccept(\''+t.id+'\')">✓ Accept</button><button class="mini" onclick="tkLaunch(\''+t.id+'\')">▶ Start</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕</button>'; }
   else if(t.status==='done'){ acts='<button class="mini" onclick="tkStatus(\''+t.id+'\',\'open\')">↺ Reopen</button>'; }
   else { acts='<button class="mini go" onclick="tkLaunch(\''+t.id+'\')">▶ Start</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'done\')">✓ Done</button><button class="mini" onclick="tkSnooze(\''+t.id+'\')">⏰</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕</button>'; }
@@ -20834,7 +20834,7 @@ function tkCard(t){
 }
 function renderTasks(){
   var grid=document.getElementById("grid");
-  var head='<div class="cc-head"><span class="cc-h-ic">✅</span><span class="cc-h-t">Tasks</span><span class="cc-h-sub">your morning command center</span><span class="cc-h-act"><button class="mini" onclick="tkAdd()">＋ Add</button><button class="mini" onclick="tkSweep()" title="Free: scan recent email for action items (no AI)">🔄 Scan email</button>'+((window.CC&&window.CC.google)?'<button class="mini go" onclick="tkAiScan()" title="AI deep scan: todos + calendar from recent correspondence (uses tokens)">✨ AI scan</button>':'')+'</span></div>';
+  var head='<div class="cc-head"><span class="cc-h-t">Tasks</span><span class="cc-h-sub">your morning command center</span><span class="cc-h-act"><button class="mini" onclick="tkAdd()">＋ Add</button><button class="mini" onclick="tkSweep()" title="Free: scan recent email for action items (no AI)">Scan email</button>'+((window.CC&&window.CC.google)?'<button class="mini go" onclick="tkAiScan()" title="AI deep scan: todos + calendar from recent correspondence (uses tokens)">AI scan</button>':'')+'</span></div>';
   var live=TASKS_DATA.filter(function(t){return t.status!=='dismissed';});
   var sug=live.filter(function(t){return t.status==='suggested';});
   var act=live.filter(function(t){return t.status==='open'||t.status==='doing';});
@@ -20843,7 +20843,7 @@ function renderTasks(){
   act.sort(function(a,b){ return wk(a.due)-wk(b.due) || ((a.due||'9')<(b.due||'9')?-1:1); });
   function sec(title,cls,arr){ if(!arr.length) return ''; return '<div class="cc-sec'+(cls?' '+cls:'')+'">'+title+'<span class="cc-n">'+arr.length+'</span></div><div class="cc-list">'+arr.map(tkCard).join('')+'</div>'; }
   var over=act.filter(function(t){return t.due&&t.due<T;}), tod=act.filter(function(t){return t.due===T;}), wko=act.filter(function(t){return t.due&&t.due>T;}), later=act.filter(function(t){return !t.due;});
-  var body=head+sec('🔔 Suggestions','',sug)+sec('⚠️ Overdue','warn',over)+sec('📌 Today','',tod)+sec('🗓 This week & later','',wko)+sec('• No date','',later)+sec('✓ Done','good',done);
+  var body=head+sec('Suggestions','',sug)+sec('Overdue','warn',over)+sec('Today','',tod)+sec('This week & later','',wko)+sec('• No date','',later)+sec('✓ Done','good',done);
   if(!live.length) body=head+empty('No tasks yet. Hit 🔄 Scan email or ✨ AI scan to pull action items from your mail, or ＋ Add one.');
   grid.innerHTML=body;
 }
@@ -20859,7 +20859,7 @@ async function tkAiScan(){ if(!confirm('Run an AI scan of your recent email + no
 async function loadIdeas(){
   const g=document.getElementById("grid");
   try{IDEAS=await(await fetch("/api/ideas")).json();}catch(e){IDEAS=[];}
-  let h='<div class="cc-head"><span class="cc-h-ic">💡</span><span class="cc-h-t">Ideas</span><span class="cc-chip"><b>'+IDEAS.length+'</b></span></div>';
+  let h='<div class="cc-head"><span class="cc-h-t">Ideas</span><span class="cc-chip"><b>'+IDEAS.length+'</b></span></div>';
   h+='<div class="cc-panel"><div class="cc-p-note" style="margin-top:0">Capture anything. When one becomes worth doing, <b>Promote</b> it into any module level — as a new sub-tool or a note on an existing module.</div>'
     +'<div class="cc-row-in"><input id="idea_t" class="cc-in" placeholder="idea title…">'
     +'<button class="mini go" onclick="ideaAdd()">＋ Add idea</button></div>'
@@ -20910,9 +20910,9 @@ async function loadCcr(){
   if(drift){
     const dv=drift.dist_version||"?";
     const nbehind=(drift.nodes||[]).filter(function(n){return n.status=='behind'||n.status=='drifted';}).length;
-    h+='<div class="cc-panel"><div class="cc-p-h"><b>🛰 Fleet drift</b> <span class="cc-p-sub">vs dist v'+e2(dv)+(drift.dist_ok?'':' · <span style="color:#f85149">dist unreadable</span>')+' · <code>'+e2(drift.dist_dir||"")+'</code></span>'
+    h+='<div class="cc-panel"><div class="cc-p-h"><b>Fleet drift</b> <span class="cc-p-sub">vs dist v'+e2(dv)+(drift.dist_ok?'':' · <span style="color:#f85149">dist unreadable</span>')+' · <code>'+e2(drift.dist_dir||"")+'</code></span>'
       +'<span class="cc-p-act">'
-      +'<button class="mini'+(nbehind?' go':'')+'" title="Refresh the dist mirror, then drive cc_update + restart into EVERY behind tenant node in one shot. Co-located source/dev nodes are skipped automatically." onclick="fleetUpdate(false)">⬆ Update all behind'+(nbehind?(' ('+nbehind+')'):'')+'</button>'
+      +'<button class="mini'+(nbehind?' go':'')+'" title="Refresh the dist mirror, then drive cc_update + restart into EVERY behind tenant node in one shot. Co-located source/dev nodes are skipped automatically." onclick="fleetUpdate(false)">Update all behind'+(nbehind?(' ('+nbehind+')'):'')+'</button>'
       +'<button class="mini" title="Force: re-converge every reachable tenant even if it already looks current (re-overlays + restarts)." onclick="fleetUpdate(true)">⟳ Force all</button>'
       +'<button class="mini" onclick="loadCcr()">⟳</button></span></div>';
     h+='<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">'+(drift.nodes||[]).map(function(n){
@@ -20922,11 +20922,11 @@ async function loadCcr(){
     }).join("")+'</div>';
     h+='<div class="cc-p-note">✅ current · ⬆️ ahead (build source, not yet staged to dist) · ⚠️ drifted (local edits — investigate) · ⬇️ behind (run cc-update) · ❔ unreachable. Hover a drifted/behind node for the differing files.</div></div>';
   }
-  h+='<div class="cc-panel"><div class="cc-p-h"><b>📥 Core Change Requests</b> <span class="cc-p-sub">'+open+' open / '+CCRS.length+' total</span></div>'
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Core Change Requests</b> <span class="cc-p-sub">'+open+' open / '+CCRS.length+' total</span></div>'
     +'<div class="cc-p-note">Every platform/core change routes HERE. Nodes + agents <b>propose</b>; you approve, build at Mission Control, and ship uniformly via the dist. Nodes never self-edit framework files. Lifecycle: new → triaged → approved → building → shipped.</div>'
     +'<div class="cc-row-in"><input id="ccr_t" class="cc-in" placeholder="title…" style="min-width:220px">'
     +'<select id="ccr_kind" class="cc-in">'
-    +'<option value="framework">⚙️ framework</option><option value="module">🗂 module</option><option value="extension">🧩 extension</option><option value="fix">🔧 fix</option></select>'
+    +'<option value="framework">framework</option><option value="module">module</option><option value="extension">extension</option><option value="fix">fix</option></select>'
     +'<button class="mini go" onclick="ccrAdd()">＋ File CCR</button></div>'
     +'<input id="ccr_surface" class="cc-in" placeholder="surface touched (e.g. server.py / agents/google) — optional" style="width:100%;box-sizing:border-box;margin-top:9px">'
     +'<textarea id="ccr_sum" class="cc-in" placeholder="summary: what + why (optional)"></textarea></div>';
@@ -20954,7 +20954,7 @@ function ccrCard(c){
     +(c.plan?'<details style="margin-top:6px"><summary class="meta" style="cursor:pointer">plan</summary><div class="cc-dt" style="white-space:pre-wrap">'+e2(c.plan)+'</div></details>':'')
     +cmts
     +'<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center"><span class="meta">status</span> <select class="cc-in" style="padding:5px 8px" onchange="ccrSet(\''+esc(c.id)+'\',this.value)">'+opts+'</select>'
-    +'<button class="mini" onclick="ccrComment(\''+esc(c.id)+'\')">💬 comment</button>'
+    +'<button class="mini" onclick="ccrComment(\''+esc(c.id)+'\')">comment</button>'
     +'<button class="mini" style="color:#f85149" onclick="ccrDel(\''+esc(c.id)+'\')">delete</button></div>'
     +'</div></div>';
 }
@@ -20973,16 +20973,16 @@ async function loadPropose(){
   try{const d=await(await fetch("/api/ccr-sent")).json();sent=d.sent||[];mc=d.mc||"";}catch(e){}
   CCR_SENT=sent;
   const mcline=mc?('routes to <code>'+e2(mc)+'</code>'):'<span style="color:#f85149">no Mission Control peer configured</span>';
-  let h='<div class="cc-head"><span class="cc-h-ic">📤</span><span class="cc-h-t">Propose a Core Change</span><span class="cc-h-sub">'+mcline+'</span></div>';
+  let h='<div class="cc-head"><span class="cc-h-t">Propose a Core Change</span><span class="cc-h-sub">'+mcline+'</span></div>';
   h+='<div class="cc-panel">'
     +'<div class="cc-p-note" style="margin-top:0">Core/platform changes (server.py, modules, extensions, framework files) are <b>not built locally</b>. Describe the change and send it to Mission Control — it gets queued, approved by James, built once, and shipped to every node uniformly via cc-update.</div>'
     +'<div class="cc-row-in"><input id="pr_t" class="cc-in" placeholder="title…" style="min-width:220px">'
     +'<select id="pr_kind" class="cc-in">'
-    +'<option value="framework">⚙️ framework</option><option value="module">🗂 module</option><option value="extension">🧩 extension</option><option value="fix">🔧 fix</option></select></div>'
+    +'<option value="framework">framework</option><option value="module">module</option><option value="extension">extension</option><option value="fix">fix</option></select></div>'
     +'<input id="pr_surface" class="cc-in" placeholder="surface touched (e.g. server.py / a module) — optional" style="width:100%;box-sizing:border-box;margin-top:9px">'
     +'<textarea id="pr_sum" class="cc-in" placeholder="summary: what + why"></textarea>'
     +'<textarea id="pr_plan" class="cc-in" placeholder="proposed plan (optional)"></textarea>'
-    +'<div style="margin-top:11px"><button class="mini go" onclick="proposeSend()"'+(mc?'':' disabled')+'>📤 Send to Mission Control</button></div></div>';
+    +'<div style="margin-top:11px"><button class="mini go" onclick="proposeSend()"'+(mc?'':' disabled')+'>Send to Mission Control</button></div></div>';
   h+='<div class="cc-panel"><div class="cc-p-h"><b>Sent from this node</b> <span class="cc-p-sub">'+sent.length+'</span></div>'
     +(sent.length?sent.map(s=>'<div class="cc-p-note" style="margin:7px 0 0">'+(CCR_KIND_ICO[s.kind]||"⚙️")+' <b>'+e2(s.title||"")+'</b> · '+tago(s.ts)+' · <span style="opacity:.7">'+e2(s.id||"")+'</span></div>').join(""):'<div class="cc-p-note">Nothing proposed yet.</div>')+'</div>';
   g.innerHTML=h;
@@ -21004,9 +21004,9 @@ async function loadAccounts(){
   var g=document.getElementById("grid"); g.innerHTML=empty("Loading accounts…");
   var d={}; try{ d=await(await fetch("/api/claude-accounts")).json(); }catch(e){ g.innerHTML=empty("Couldn't load accounts."); return; }
   var cur=d.current_email||'(unknown)';
-  var h='<div class="cc-head"><span class="cc-h-ic">🪪</span><span class="cc-h-t">Claude Accounts</span><span class="cc-h-sub">switch the Claude login for ALL sessions in one click — like /login, but instant</span></div>';
+  var h='<div class="cc-head"><span class="cc-h-t">Claude Accounts</span><span class="cc-h-sub">switch the Claude login for ALL sessions in one click — like /login, but instant</span></div>';
   h+='<div class="cc-panel"><div class="cc-p-h"><span>Currently logged in (all sessions): <b>'+e2(cur)+'</b></span>'
-    +'<span class="cc-p-act"><button class="mini go" onclick="acctSnapshot()" title="Capture the current login to the wallet -- re-run this after a /login to REFRESH a stale/expired saved account">📸 '+(d.current_saved?'Re-snapshot':'Snapshot to wallet')+'</button>'
+    +'<span class="cc-p-act"><button class="mini go" onclick="acctSnapshot()" title="Capture the current login to the wallet -- re-run this after a /login to REFRESH a stale/expired saved account">'+(d.current_saved?'Re-snapshot':'Snapshot to wallet')+'</button>'
     +'<button class="mini" onclick="acctUsage(this)">↻ check usage</button></span></div>'
     +'<div id="acctUsageBox" style="margin-top:11px"></div>'
     +'<div class="cc-p-note">To add another account: log into it (here or in a terminal with <code>/login</code>), then come back and <b>Snapshot</b>. After that, switching between saved accounts is one click and applies to every session live.</div></div>';
@@ -21075,7 +21075,7 @@ async function loadSettings(){
   const s=SETTINGS;
   const tierOpt=function(v,lbl){return '<option value="'+v+'"'+(s.tier===v?' selected':'')+'>'+lbl+'</option>';};
   const typeOpt=function(v,lbl){return '<option value="'+v+'"'+(s.type===v?' selected':'')+'>'+lbl+'</option>';};
-  let h='<div class="cc-head"><span class="cc-h-ic">⚙️</span><span class="cc-h-t">Settings</span><span class="cc-h-sub">'+e2(s.project_name||"")+' · '+(s.tier==="grandfather"?"ClaudeGrandfather":"ClaudeFather")+' · '+(s.type==="agency"?"Agency":"Project")+'</span></div>';
+  let h='<div class="cc-head"><span class="cc-h-t">Settings</span><span class="cc-h-sub">'+e2(s.project_name||"")+' · '+(s.tier==="grandfather"?"ClaudeGrandfather":"ClaudeFather")+' · '+(s.type==="agency"?"Agency":"Project")+'</span></div>';
   h+='<div class="cc-panel"><div class="cc-p-h"><b>Tier &amp; Type</b></div>'
     +'<div class="cc-p-note">Configure this node\'s <b>Tier</b> and <b>Type</b> here instead of hand-editing <code>cc.config.json</code>. Changes write to <code>'+e2(s.config_path||"cc.config.json")+'</code> (a preserve-path: survives <code>cc-update</code>) and take effect on the next restart.</div>'
     +'<div style="display:grid;grid-template-columns:120px 1fr;gap:10px;align-items:center;margin-top:6px">'
@@ -21085,20 +21085,20 @@ async function loadSettings(){
     + typeOpt("project","🗂 Project") + typeOpt("agency","🏢 Agency") +'</select>'
     +'</div>'
     +'<div class="meta" style="margin-top:12px">🎩 <b>ClaudeFather</b> shows project/agency lenses + <b>Propose Change</b> (route core changes up). 🏛 <b>ClaudeGrandfather</b> unlocks the overseer lenses — <b>Portfolio</b> + the <b>Change Requests</b> approval queue. Switching Tier auto-swaps the lens bundle (preset).</div>'
-    +'<div class="btns" style="margin-top:12px"><button class="mini go" onclick="settingsSave()">💾 Save</button></div></div>';
-  h+='<div class="cc-panel"><div class="cc-p-h"><b>🌐 Fleet usage visibility</b> <span class="cc-p-sub">cross-node usage sharing (enterprise multi-tenant)</span></div>'
+    +'<div class="btns" style="margin-top:12px"><button class="mini go" onclick="settingsSave()">Save</button></div></div>';
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Fleet usage visibility</b> <span class="cc-p-sub">cross-node usage sharing (enterprise multi-tenant)</span></div>'
     +'<div class="cc-p-note"><b>View</b> = does this node show the whole-fleet rollup or only its own usage. <b>Share</b> = may other nodes pull this node\'s usage. Single owner: keep both full/on. Tenants who shouldn\'t see each other: set child nodes to <b>view: own</b> (keep share on so the grandfather still rolls up everything), or <b>share: off</b> for total isolation. Applies on restart.</div>'
     +'<div style="display:grid;grid-template-columns:130px 1fr;gap:10px;align-items:center;margin-top:6px">'
     +'<div class="meta">This node shows</div><select id="set_fleetview" class="cc-in">'
-    +'<option value="full"'+(s.fleet_view==='full'?' selected':'')+'>🌐 Full fleet — overall + all nodes + all accounts</option>'
-    +'<option value="own"'+(s.fleet_view==='own'?' selected':'')+'>🔒 Only this node\'s own usage</option></select>'
+    +'<option value="full"'+(s.fleet_view==='full'?' selected':'')+'>Full fleet — overall + all nodes + all accounts</option>'
+    +'<option value="own"'+(s.fleet_view==='own'?' selected':'')+'>Only this node\'s own usage</option></select>'
     +'<div class="meta">Share upward</div><label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="set_fleetshare"'+(s.fleet_share?' checked':'')+'> let other nodes / the grandfather pull this node\'s usage</label>'
-    +'</div><div class="btns" style="margin-top:12px"><button class="mini go" onclick="settingsSave()">💾 Save</button></div></div>';
-  h+='<div class="cc-panel"><div class="cc-p-h"><b>🔑 Login token</b> <span class="cc-p-sub">'+(s.auth_on?'a token is set — required at /login':'no token set — this node is OPEN to anyone on the tailnet')+'</span></div>'
+    +'</div><div class="btns" style="margin-top:12px"><button class="mini go" onclick="settingsSave()">Save</button></div></div>';
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Login token</b> <span class="cc-p-sub">'+(s.auth_on?'a token is set — required at /login':'no token set — this node is OPEN to anyone on the tailnet')+'</span></div>'
     +'<div class="cc-p-note">Change this node\'s dashboard login token (the PIN at <code>/login</code>). It applies <b>immediately</b> — <b>this</b> window stays logged in, but other devices/sessions will need the new token. Persists to <code>'+e2(s.config_path||"cc.config.json")+'</code> (survives <code>cc-update</code>).</div>'
     +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">'
     +'<input id="set_newtok" class="cc-in" style="flex:1;min-width:200px" placeholder="new token (or leave blank to auto-generate)" autocomplete="off">'
-    +'<button class="mini" onclick="document.getElementById(\'set_newtok\').value=cfRandTok()">🎲 Generate</button>'
+    +'<button class="mini" onclick="document.getElementById(\'set_newtok\').value=cfRandTok()">Generate</button>'
     +'<button class="mini go" onclick="changeToken()">Change token</button></div>'
     +'<div id="tokresult" style="margin-top:11px;display:none;background:#0d0d14;border:1px solid var(--line);border-radius:9px;padding:11px;font-size:12.5px;line-height:1.5"></div>'
     +'<div class="meta" style="margin-top:10px;opacity:.7">🛟 Locked out by a typo? Run <code>cc-recover.sh</code> in a terminal on the host — it prints every node\'s current token, port, and URL.</div></div>';
@@ -21229,7 +21229,7 @@ function firstRunToken(){
   showM('<div class="cfw"><div class="vshead"><h2>🔒 Set a login token</h2><button class="mini" onclick="frtSkip()">Skip for now</button></div>'
    +'<div class="sub" style="margin-bottom:11px">This node has <b>no login token yet</b> — anyone on your tailnet can open it. Set one now (a PIN or a passphrase — your choice). You can change or remove it anytime in <b>Settings → Login token</b>.</div>'
    +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><input id="frt_tok" class="mini" style="flex:1;min-width:200px" placeholder="choose a token (min 4 chars)" autocomplete="off">'
-   +'<button class="mini" onclick="document.getElementById(\'frt_tok\').value=cfRandTok()">🎲 Generate</button>'
+   +'<button class="mini" onclick="document.getElementById(\'frt_tok\').value=cfRandTok()">Generate</button>'
    +'<button class="mini go" onclick="frtSet()">Set token</button></div>'
    +'<div id="frt_out" style="margin-top:11px;display:none;font-size:12.5px;line-height:1.5"></div></div>');
 }
@@ -21534,7 +21534,7 @@ function sbShowPanel(name,anchor){
   p.onmouseenter=function(){SB.popHover=true;clearTimeout(SB.holdT);};
   p.onmouseleave=function(){SB.popHover=false;sbLeave();};
   // The embedded terminal already has end/kill (and copy/compact/dashboard) -- don't duplicate them here.
-  var acts='<button class="mini" title="usage / cost for this session" onclick="sbUsage(\''+esc(name)+'\')">📊 Usage</button>';
+  var acts='<button class="mini" title="usage / cost for this session" onclick="sbUsage(\''+esc(name)+'\')">Usage</button>';
   // Only rebuild the shell when the panel is for a NEW session (so the iframe keeps its scroll/focus on re-hover).
   if(p.dataset.name!==name){
     p.dataset.name=name;
@@ -21941,8 +21941,8 @@ async function fxLearnVoice(){
     +'<div class="vslbl">Hard rules <span class="vssub">— ALWAYS obeyed, override everything (e.g. «always sign off &ldquo;Best, Sarah&rdquo;», «never say &ldquo;synergy&rdquo;», «no exclamation points»).</span></div>'
     +'<textarea id="vsRules" class="vsta" rows="4" placeholder="One rule per line.">'+e2(p.hard_rules||'')+'</textarea>'
     +'<div class="vsbtns">'
-      +'<button class="btn go" onclick="fxVoiceSave()">💾 Save</button>'
-      +'<button class="btn" onclick="fxVoiceOptimize()" title="Refine the profile from the edits you made to past drafts">✨ Optimize from my edits'+(pend?(' ('+pend+')'):'')+'</button>'
+      +'<button class="btn go" onclick="fxVoiceSave()">Save</button>'
+      +'<button class="btn" onclick="fxVoiceOptimize()" title="Refine the profile from the edits you made to past drafts">Optimize from my edits'+(pend?(' ('+pend+')'):'')+'</button>'
       +'<button class="btn" onclick="fxVoiceRebuild()" title="Re-read your Sent mail and rebuild from scratch">↻ Learn from Sent mail</button>'
       +'<button class="btn" onclick="closeM()">Close</button>'
     +'</div></div>';
@@ -21982,7 +21982,7 @@ function fxVoiceHelp(){
    +'<li>Hit <b>Reply / Reply-all → ✨ Draft in my voice</b> and the agent writes using: your profile + <b>how you actually write to those specific people</b> (most-formal style if it’s a group) + the thread + <b>past mail with that person</b> + the <b>client’s CLAUDE.md</b> + Granola call notes + your <b>calendar</b> (when it’s about scheduling). You get <b>2–3 variants</b> to choose from.</li>'
    +'<li>It <b>never sends</b> — it fills the composer; you review, edit, and send.</li>'
    +'<li>When you <b>edit a draft</b> before sending, we quietly note the change (no tokens spent).</li>'
-   +'<li>Every so often, hit <b>✨ Optimize from my edits</b> — the agent reviews your profile + all those edits at once, learns your corrections, and improves the profile. This is the <b>only</b> learning step that spends tokens, so you decide when it runs.</li>'
+   +'<li>Every so often, hit <b>Optimize from my edits</b> — the agent reviews your profile + all those edits at once, learns your corrections, and improves the profile. This is the <b>only</b> learning step that spends tokens, so you decide when it runs.</li>'
    +'</ol><p class="vssub">No em-dashes unless your profile shows you use them. Email content is treated as untrusted (prompt-injection safe). Your profile + edits live only on this node.</p>'
    +'</div></div>';
   showM(h);

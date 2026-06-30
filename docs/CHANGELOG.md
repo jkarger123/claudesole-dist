@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.61 -- 2026-06-30
+- DE-CARTOONY emoji sweep (site-wide, James-approved direction): removed DECORATIVE emoji from all lens headers,
+  section labels, panel titles, buttons, and dropdown options across every screen -> clean, enterprise/SOTA chrome.
+  - Done POSITIONALLY (stripped only at label-START: after <b>, button/option open-tags, cc-h-ic header glyphs,
+    sec() titles) so FUNCTIONAL status indicators embedded in data rows/badges are untouched: 🟢/⚪ account state,
+    ⚠ warnings, ⏳ running, the ✅/⬆️/⚠️/⬇️/❔ fleet-drift legend + chips, task source icons, file-type icons.
+  - Monochrome UI glyphs kept as affordances (▶ start, ✕ close, ＋ add, ✓ accept, ↻/⟳ refresh).
+  - GUARD: never strips an icon-ONLY control (📎 attach, ⏰ snooze, 🗑 archive, ☰ menu) -- those keep their glyph
+    so the button stays visible. Verified headless across lenses: 0 empty controls, 0 console errors.
+
 ## 0.99.60 -- 2026-06-30
 - SLEEKNESS pass (de-cartoony, brand preserved): global visual-treatment refinements that calm the whole UI
   uniformly without a rebrand (gold identity + logo kept).
