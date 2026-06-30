@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.85 -- 2026-06-30
+- "Add sub-tool" now CONFIRMS before adopting a non-empty existing folder. Adopting an existing folder (v0.99.83)
+  was silent, so documenting a whole app as a sub-tool felt like "I made a new thing and it was magically full."
+  Now module_add returns needs_confirm with the item count + a hint ("looks like a Vite app/Node/Python project")
+  for a non-empty undocumented folder; the UI asks "X already exists (N items - looks like a Vite app). Document it
+  as a sub-tool? Nothing inside is changed." and only adopts on yes. Empty/new folders create silently as before.
+  (Both the Projects "+ add sub-tool" and the launch-picker add-subfolder paths.)
+- NOTE (not shipped, a user-doc fix): a CLAUDE.md that writes a curl/deploy arg as bare "@_dist/portal.html" makes
+  Claude Code try to IMPORT that path on launch (the 1.3MB build artifact -> "over the 150k-char limit" warning).
+  Neutralized the bare ones in text2tune-web/CLAUDE.md (kept the real backticked curl). Watch for this @path footgun
+  in authored docs -- candidate for a claude-md-lint rule.
+
 ## 0.99.84 -- 2026-06-30
 - FIX (fuel gauge): the 5-hour window reset time jumped to ~24h the instant the window rolled over (e.g. James
   showed "5h 98% -> resets 23.9h"). Cause: a BARE reset time (which is exactly what the 5h session window reports)

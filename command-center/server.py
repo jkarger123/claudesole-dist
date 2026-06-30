@@ -8497,7 +8497,18 @@ def module_note(rel, text):
         _set_region(cm, NOTES_B, NOTES_E, "## Learnings (filed by agents; append-only)\n" + "\n".join(items))
     return {"ok": True, "rel": rel, "count": len(items)}
 
-def module_add(parent_rel, name, summary):
+def _folder_hint(nd, entries):
+    """A short human hint of what an existing folder looks like, for the adopt-confirm prompt."""
+    s = set(entries)
+    if "package.json" in s:
+        return "looks like a Vite app" if ("vite.config.ts" in s or "vite.config.js" in s) else "looks like a Node/JS project"
+    if "pyproject.toml" in s or "requirements.txt" in s or any(e.endswith(".py") for e in entries): return "looks like a Python project"
+    if "Cargo.toml" in s: return "looks like a Rust crate"
+    if "go.mod" in s: return "looks like a Go module"
+    if "index.html" in s: return "looks like a web project"
+    return ""
+
+def module_add(parent_rel, name, summary, adopt=False):
     name = re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:48]
     if not name: return {"ok": False, "error": "bad name"}
     try: pabs = projpath(parent_rel) if parent_rel else PROJECT
@@ -8506,12 +8517,15 @@ def module_add(parent_rel, name, summary):
     adopted = False
     if os.path.isdir(nd):
         # The folder already exists on disk. The Modules lens only SHOWS folders that carry a hand-authored
-        # CLAUDE.md, so plain code folders (worker/, data/, src/...) are INVISIBLE there -- and adding a sub-tool
-        # with such a name used to dead-end on a baffling "already exists" (the operator saw nothing). If it's
-        # ALREADY a documented sub-tool -> genuine duplicate. Otherwise ADOPT the existing folder: write its
-        # CLAUDE.md so it becomes a navigable sub-tool (exactly what the operator intended). Non-destructive --
-        # we only ever write the CLAUDE.md when there's no hand content to lose.
+        # CLAUDE.md, so plain code folders (worker/, data/, src/...) are INVISIBLE there. If it's ALREADY a
+        # documented sub-tool -> genuine duplicate. Otherwise we ADOPT it (write a CLAUDE.md so it becomes a
+        # navigable sub-tool) -- but if it has real content, that's the operator ADOPTING an existing folder, not
+        # creating a new one, so make it an EXPLICIT confirmed choice (don't silently document a whole app).
         if _has_hand(cm): return {"ok": False, "error": "a sub-tool named %r already exists here" % name}
+        try: entries = [e for e in os.listdir(nd) if e not in ("CLAUDE.md", ".DS_Store")]
+        except Exception: entries = []
+        if entries and not adopt:
+            return {"ok": False, "needs_confirm": True, "name": name, "count": len(entries), "hint": _folder_hint(nd, entries)}
         adopted = True
     else:
         os.makedirs(nd, exist_ok=True)
@@ -13530,7 +13544,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/ralph-launch":  return self._s(200, json.dumps(ralph_launch(body.get("name", ""))))
         if u.path == "/api/module-launch": return self._s(200, json.dumps(launch("studio", body.get("name") or (body.get("rel","").split("/")[-1] or "session"), rel=body.get("rel",""))))
         if u.path == "/api/module-note":   return self._s(200, json.dumps(module_note(body.get("rel",""), body.get("text",""))))
-        if u.path == "/api/module-add":    return self._s(200, json.dumps(module_add(body.get("parent",""), body.get("name",""), body.get("summary",""))))
+        if u.path == "/api/module-add":    return self._s(200, json.dumps(module_add(body.get("parent",""), body.get("name",""), body.get("summary",""), bool(body.get("adopt")))))
         if u.path == "/api/handoff-propose":   # WARM TRANSFER: an out-of-lane agent (or the UI) prepares a transfer
             return self._s(200, json.dumps(handoff_propose(
                 from_session=body.get("from_session"), to=body.get("to"), goal=body.get("goal", ""),
@@ -16026,7 +16040,13 @@ async function openAdminShell(){toast('Opening the admin shell (run sudo / inter
     if(r&&r.ok)openInSessions(r.session);else toast('Failed to open admin shell');}catch(e){toast('Failed to open admin shell');}}
 async function modAdd(parent){const name=(await promptM("New sub-tool/concept folder name (letters/numbers/-_):")||"").trim();if(!name)return;
   const summary=(await promptM("One line -- what is this module?")||"").trim();
-  const r=await(await fetch("/api/module-add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({parent,name,summary})})).json();
+  await modCreate(parent,name,summary,false);}
+async function modCreate(parent,name,summary,adopt){
+  const r=await(await fetch("/api/module-add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({parent,name,summary,adopt})})).json();
+  if(r&&r.needs_confirm){
+    if(await confirmM("A folder named \""+name+"\" already exists here ("+r.count+" item"+(r.count==1?"":"s")+(r.hint?" — "+r.hint:"")+").\n\nIt isn't a documented sub-tool yet. Document this EXISTING folder as a sub-tool? Nothing inside it is changed — only a CLAUDE.md is added."))
+      await modCreate(parent,name,summary,true);
+    return;}
   if(r&&r.ok){toast(r.adopted?("Adopted existing folder \""+name+"\" as a sub-tool (added its CLAUDE.md)."):"Sub-tool created + indexed in its parent.",4000);loadModules(MODREL);}else toast("Failed: "+((r||{}).error||"?"),5000);}
 async function modRemove(rel,name){if(!await confirmM("Remove module \""+name+"\"?\n\nIt + its files are moved to the archive (reversible), and the parent's index updates."))return;
   const r=await(await fetch("/api/module-remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rel})})).json();
@@ -16221,9 +16241,13 @@ function lpLaunch(rel){
 async function lpAddSub(){
   var name=(await promptM('New subfolder name (letters/numbers/-_):')||'').trim(); if(!name)return;
   var summary=(await promptM('One line — what is this folder?')||'').trim();
-  var r=null; try{ r=await(await fetch('/api/module-add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parent:LP.target,name:name,summary:summary})})).json(); }catch(e){}
+  await lpCreateSub(name,summary,false);
+}
+async function lpCreateSub(name,summary,adopt){
+  var r=null; try{ r=await(await fetch('/api/module-add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parent:LP.target,name:name,summary:summary,adopt:adopt})})).json(); }catch(e){}
+  if(r&&r.needs_confirm){ if(await confirmM('A folder named "'+name+'" already exists here ('+r.count+' item'+(r.count==1?'':'s')+(r.hint?' — '+r.hint:'')+').\n\nIt isn\'t a documented sub-tool yet. Document this EXISTING folder as a sub-tool? Nothing inside it is changed — only a CLAUDE.md is added.')) await lpCreateSub(name,summary,true); return; }
   if(!(r&&r.ok)){ toast('Couldn\'t create folder: '+((r||{}).error||'?'),5000); return; }
-  toast('Folder created in '+(LP.loc||'project root'));
+  toast(r.adopted?('Adopted existing "'+name+'" as a sub-tool'):('Folder created in '+(LP.loc||'project root')));
   lpNav(LP.loc);
 }
 function lpSearch(){
