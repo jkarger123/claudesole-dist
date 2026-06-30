@@ -51,5 +51,23 @@ if ksp:
           "'# preship-allow: kill-server'. Offending:", ksp)
     sys.exit(1)
 
+# DESIGN-SYSTEM gate: the dashboard must be built with the shared UI primitives, not one-off markup. Any NEW
+# feature/extension that hand-rolls a native dialog, an off-palette color, an inline-colored badge, or a
+# decorative chrome emoji FAILS HERE -- so the unified look stays locked in without periodic manual re-sweeps.
+# Full standard: docs/DESIGN_SYSTEM.md.  Linter: command-center/ui_lint.py.
+try:
+    import ui_lint
+    _viol = ui_lint.lint(src)
+except Exception as _e:
+    print("PRESHIP FAIL: could not run the UI design-system linter:", _e); sys.exit(1)
+if _viol:
+    print("PRESHIP FAIL: %d design-system violation(s) in the dashboard -- build with the shared classes "
+          "(docs/DESIGN_SYSTEM.md). Run `python3 command-center/ui_lint.py` for the full list:" % len(_viol))
+    _by = {}
+    for ln, kind, det in _viol: _by.setdefault(kind, []).append((ln, det))
+    for kind in sorted(_by):
+        print("  [%s] %d (e.g. server.py:%d %s)" % (kind, len(_by[kind]), _by[kind][0][0], _by[kind][0][1]))
+    sys.exit(1)
+
 print("PRESHIP OK: all %d local engine modules imported by server.py are in framework_paths (%s); no "
-      "kill-server footgun in shipped scripts" % (len(local), ", ".join(local)))
+      "kill-server footgun; UI design-system clean" % (len(local), ", ".join(local)))

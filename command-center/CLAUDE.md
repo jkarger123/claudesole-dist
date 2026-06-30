@@ -1,5 +1,13 @@
 # Command Center — the engine
 
+> **▶ UI WORK? READ `docs/DESIGN_SYSTEM.md` FIRST.** The dashboard has ONE design language — build every lens/
+> feature from the shared primitives (`cc-head`/`cc-list`/`cc-item`/`cc-grid`/`cc-tile`/`cc-panel`/`cc-in`,
+> `mini`/`btn`(+`danger`), `badge bdg-*`, `confirmM`/`promptM`/`alertM`, `toast`/`busyOn`). NEVER hand-roll a
+> native `confirm/prompt/alert`, an off-palette/GitHub-hex color, an inline-colored badge, or a decorative
+> header/button emoji. ENFORCED: `command-center/ui_lint.py` runs in the preship gate, so violations FAIL the
+> ship. Run `python3 command-center/ui_lint.py` (green = ships). New primitive? Add it to the shared CSS +
+> DESIGN_SYSTEM.md so the next feature reuses it — don't inline a one-off.
+
 <!-- CC:NOTES (preserve this region verbatim across regenerations) -->
 <!-- /CC:NOTES -->
 

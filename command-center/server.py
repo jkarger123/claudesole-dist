@@ -15583,7 +15583,7 @@ async function loadModules(rel){
         rows+='</div>';
       } else { total+=1; MODCONVOMAP[c.id]=c; rows+=convRow(c,""); }
     });
-    h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>💬 Conversations started in this folder'+(total?' <span class="sub">('+total+')</span>':'')+'</span><button class="mini go" onclick="modLaunch(\''+esc(MODREL)+'\')">+ new session here</button></h3>';
+    h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>Conversations started in this folder'+(total?' <span class="sub">('+total+')</span>':'')+'</span><button class="mini go" onclick="modLaunch(\''+esc(MODREL)+'\')">+ new session here</button></h3>';
     if(total){ h+='<div class="convscroll">'+rows+'</div>'; }
     else h+='<div class="meta">No past conversations here yet -- start one with "+ new session here".</div>';
     h+='</div>';
@@ -15613,7 +15613,7 @@ async function modResumeId(id,fork){const c=MODCONVOMAP[id]; if(!c)return;
   if(!r||!r.ok){toast((fork?"Fork":"Resume")+" failed: "+((r||{}).error||"?"),5000); return;}
   _openTerm(r);}
 function modCard(c){const n=(c.children||[]).length;
-  return '<div class="card" onclick="loadModules(\''+esc(c.rel)+'\')" style="cursor:pointer"><h3><span>🧩 '+esc(c.name)+'</span>'+(n?'<span class="badge bdg-blue">'+n+' inside</span>':'')+'</h3>'
+  return '<div class="card" onclick="loadModules(\''+esc(c.rel)+'\')" style="cursor:pointer"><h3><span>'+esc(c.name)+'</span>'+(n?'<span class="badge bdg-blue">'+n+' inside</span>':'')+'</h3>'
     +(c.summary?('<div class="meta"'+(c.summary_default?' style="opacity:.65;font-style:italic"':'')+'>'+esc(c.summary)+(c.summary_default?' <span class="sub">(suggested &mdash; set your own under the <code># title</code> in CLAUDE.md)</span>':'')+'</div>')
               :'<div class="meta sub" style="opacity:.55;font-style:italic">No summary yet &mdash; add a one-line description under the <code># title</code> in this module&#39;s CLAUDE.md and it shows here.</div>')
     +'<div class="meta sub" style="margin-top:4px"><code>'+esc(c.rel)+'</code>'+(c.last_convo?' · 💬 '+tago(c.last_convo):'')+'</div>'
@@ -15659,7 +15659,7 @@ async function loadRalph(){
   const q=(document.getElementById("search")||{value:""}).value.toLowerCase();
   L=L.filter(r=>!q||(r.name+" "+(r.goal||"")).toLowerCase().includes(q));
   const fin=L.filter(r=>!r.alive&&['done','halted','stopped','complete','finished'].includes(r.state)).length;
-  const head='<div class="card" style="cursor:default;grid-column:1/-1">'+ralphToggle()+'<h3 style="justify-content:space-between"><span>🔁 Ralph loops</span><span style="display:flex;gap:6px;align-items:center">'
+  const head='<div class="card" style="cursor:default;grid-column:1/-1">'+ralphToggle()+'<h3 style="justify-content:space-between"><span>Ralph loops</span><span style="display:flex;gap:6px;align-items:center">'
     +(fin?'<button class="mini" onclick="ralphArchiveDone('+fin+')" title="Move all done/halted/stopped loops to Previous loops">Clear '+fin+' done/stopped</button>':'')
     +'<button class="mini go" onclick="newRalph()">+ New loop</button></span></h3>'
     +'<div class="meta">File-driven autonomous agent loops. Launch runs one in its own terminal session — open it to watch live, edit its progress/notes, and interrupt. Several can run at once.</div></div>';
@@ -15683,7 +15683,7 @@ function prevCard(r){
   const when=r.ended?new Date(r.ended*1000).toLocaleDateString():"";
   const tag=r.source=="legacy"?'<span class="badge bdg-gray">legacy</span>':'<span class="badge bdg-cyan">archived</span>';
   const extra=(r.iterations?' · '+r.iterations+' iters':'')+(r.duration?' · ran '+fmtDur(r.duration):'');
-  return '<div class="card" onclick="openRalph(\''+esc(r.name)+'\')" style="cursor:pointer"><h3><span>📁 '+esc(r.name)+'</span>'+tag+'</h3>'
+  return '<div class="card" onclick="openRalph(\''+esc(r.name)+'\')" style="cursor:pointer"><h3><span>'+esc(r.name)+'</span>'+tag+'</h3>'
     +'<div class="meta">'+esc(r.goal||"(no title)")+'</div>'
     +'<div class="meta" style="color:'+col+'">'+esc(r.state)+(r.metric?' · '+esc(r.metric):'')+extra+'</div>'
     +'<div class="meta">'+(r.source=="legacy"?"last ran ":"ended ")+when+(r.has_runner?' · has .ps1 runner':'')+'</div></div>';
@@ -15699,7 +15699,7 @@ function ralphCard(r){
     btns='<button class="mini go" onclick="ralphLaunch(\''+esc(r.name)+'\')">▶ '+(ran?'relaunch':'launch')+'</button>'
         +'<button class="mini" title="move to Previous (completed)" onclick="ralphAct(\''+esc(r.name)+'\',\'archive\')">✓ complete</button>'
         +'<button class="mini danger" title="delete (reversible: moves to _trash)" onclick="ralphDel(\''+esc(r.name)+'\')">delete</button>'; }
-  return '<div class="card" onclick="openRalph(\''+esc(r.name)+'\')" style="cursor:pointer"><h3><span>🔁 '+esc(r.name)+'</span><span class="badge" style="background:'+col+'22;color:'+col+'">'+r.state+(r.alive?"":"")+'</span></h3>'
+  return '<div class="card" onclick="openRalph(\''+esc(r.name)+'\')" style="cursor:pointer"><h3><span>'+esc(r.name)+'</span><span class="badge" style="background:'+col+'22;color:'+col+'">'+r.state+(r.alive?"":"")+'</span></h3>'
     +'<div class="meta">'+esc(r.goal||"(no goal set)")+'</div>'+bar
     +'<div class="meta">'+ck+'/'+tot+' done ('+pct+'%)'+(p.phase?' · '+esc(p.phase):'')+(r.state=="running"&&r.iteration?' · iter '+r.iteration:'')+'</div>'
     +(r.state=="running"&&p.next?'<div class="meta" style="color:#58a6ff">next: '+esc(p.next)+'</div>':'')
@@ -16425,7 +16425,7 @@ function clientCard(cl){return '<div class="card" onclick="modLaunch(\''+esc(cl.
 // open a client's correspondence in a modal (Agency drill-in surface for the Mail tab)
 function mlClientMail(rel,name){
   cfReportFocus(name);   // a client/subject was opened -> report it to the focus engine (web-side context bridge)
-  showM('<h3>📬 '+e2(name)+' — Correspondence</h3><div id="mlFolderBox_'+mlKey(rel)+'" style="max-height:60vh;overflow:auto">'+empty('Loading…')+'</div>'
+  showM('<h3>'+e2(name)+' — Correspondence</h3><div id="mlFolderBox_'+mlKey(rel)+'" style="max-height:60vh;overflow:auto">'+empty('Loading…')+'</div>'
     +'<div class="btns" style="margin-top:10px"><button class="mini" onclick="closeM()">Close</button></div>');
   ML.folders=null; setTimeout(function(){ mlFolderMail(rel,name); }, 60);
 }
@@ -17810,7 +17810,7 @@ function mlFolderCard(rel,name){
   if(!mlOn()) return '';
   var k=mlKey(rel);
   setTimeout(function(){ mlFolderMail(rel,name); }, 50);
-  return '<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>📬 Correspondence</span></h3>'
+  return '<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>Correspondence</span></h3>'
     +'<div class="sub" style="margin:-2px 0 11px;color:var(--dim);line-height:1.55">Gmail threads that belong to this project — <b>auto-collected</b> by the matchers below (a sender domain, an address, or a keyword). Read-only; nothing is sent from here. <a onclick="ccHelp(\'correspondence\')" style="color:var(--accent);cursor:pointer;font-weight:600">Learn more</a></div>'
     +'<div id="mlFolderBox_'+k+'">'+empty('Loading…')+'</div></div>';
 }
@@ -17859,7 +17859,7 @@ async function gmUndo(){
 
 // ---- snooze (client side: add CC/Snoozed label + remove INBOX) ----
 async function gmSnoozeMenu(){
-  showM('<h2>⏰ Snooze</h2><div class="gm-snooze-opts" style="display:flex;flex-direction:column;gap:8px">'
+  showM('<h2>Snooze</h2><div class="gm-snooze-opts" style="display:flex;flex-direction:column;gap:8px">'
     +['Later today','Tomorrow','This weekend','Next week'].map(function(o){
         return '<button class="btn" onclick="gmDoSnooze()">'+o+'</button>';
       }).join('')
@@ -18180,7 +18180,7 @@ function gmcDiscard(){ closeM(); GMC=null; }
 function gmcEditSignature(){
   var box=document.getElementById('mbox'); if(!box||!GMC) return;
   GMC._savedModal=box.innerHTML;
-  box.innerHTML='<div class="gmc-sigedit"><h2>✍ Signature</h2>'
+  box.innerHTML='<div class="gmc-sigedit"><h2>Signature</h2>'
     +'<div class="gmc-sigbody" id="gmcSigEd" contenteditable="true">'+(gmcSignature()||'')+'</div>'
     +'<div class="btns"><button class="btn" onclick="gmcCloseSig()">Cancel</button>'
     +'<button class="btn go" onclick="gmcSaveSig()">Save signature</button></div></div>';
@@ -19641,7 +19641,7 @@ var VAULT={data:null};
 async function loadVault(){
   var g=document.getElementById('grid');g.innerHTML=empty('Loading credential vault…');
   var d={};try{d=await(await fetch('/api/vault')).json();}catch(e){g.innerHTML=empty("Couldn't load the vault.");return;}
-  if(d&&d.error){g.innerHTML='<div class="card" style="cursor:default"><h3><span>🔐 Credential Vault</span></h3><div class="meta" style="margin-top:8px">'+esc(d.error)+'</div></div>';return;}
+  if(d&&d.error){g.innerHTML='<div class="card" style="cursor:default"><h3><span>Credential Vault</span></h3><div class="meta" style="margin-top:8px">'+esc(d.error)+'</div></div>';return;}
   VAULT.data=d;var secs=(d.secrets||[]);
   if(!d.available){g.innerHTML=affCss()+'<div class="aff-wrap"><div class="aff-head"><b style="font-size:16px">🔐 Credential Vault</b></div><div class="card" style="cursor:default"><div class="meta">The vault needs the <code>cryptography</code> package (Fernet) for encryption-at-rest. Install it on this node: <code>pip install --user cryptography</code>, then restart.</div></div></div>';return;}
   var shared=secs.filter(function(s){return s.has_shared;}).length;
@@ -19755,7 +19755,7 @@ async function loadAffiliate(){
   if(!mc.ok){
     var msg=(mc.error||'').toLowerCase();
     var hint=/not configured/.test(msg)?'Set the Skimlinks publisher ID + Supabase URL/key in this node\'s deploy env (run the extension Set up), then run the first sync.':(/not licensed/.test(msg)?'This node isn\'t licensed for Skimlinks — Mission Control must grant a signed entitlement.':(/not installed/.test(msg)?'The Skimlinks extension isn\'t installed on this node.':'Could not reach the data: '+esc(mc.error||'?')));
-    g.innerHTML='<div class="card" style="cursor:default"><h3><span>🔗 Affiliate Intelligence</span></h3><div class="meta" style="margin-top:8px">'+hint+'</div></div>';return;
+    g.innerHTML='<div class="card" style="cursor:default"><h3><span>Affiliate Intelligence</span></h3><div class="meta" style="margin-top:8px">'+hint+'</div></div>';return;
   }
   var rc=await affData('merchants','&status=removed&count=1');
   var ch=await affData('changes','&count=1');
@@ -19781,7 +19781,7 @@ async function loadAffiliate(){
       +'<div class="aff-pane"><h3><span>Merchants</span><span class="sub">'+AFF.rows.length+' shown</span></h3><div class="aff-scroll"><table class="aff-tbl">'
         +'<thead><tr><th>Merchant</th><th class="num">Commission</th><th class="num">eCPC</th><th class="num">Daily sales</th><th class="num">Conv.</th><th>Status</th><th class="num">Tenure</th><th></th></tr></thead>'
         +'<tbody>'+(AFF.rows.map(affRow).join('')||'<tr><td colspan="8" style="padding:16px;text-align:center;color:var(--dim)">no merchants match</td></tr>')+'</tbody></table></div></div>'
-      +'<div class="aff-pane"><h3><span>📈 Top movers</span><span class="sub">recent commission changes</span></h3>'
+      +'<div class="aff-pane"><h3><span>Top movers</span><span class="sub">recent commission changes</span></h3>'
         +'<div class="aff-scroll">'+(movers.length?movers.map(affMover).join(''):'<div class="meta" style="padding:13px">no recent commission changes logged</div>')+'</div></div>'
     +'</div></div>';
   g.innerHTML=h;
@@ -19839,7 +19839,7 @@ async function loadSubstack(){
     +'<div class="aff-panels">'
       +'<div class="aff-pane"><h3><span>Tracked posts</span><span class="sub">'+posts.length+' shown'+(pubs.length?(' · '+esc(pubs.join(', '))):'')+'</span></h3><div class="aff-scroll"><table class="aff-tbl">'
         +'<thead><tr><th>Post</th><th>Publication</th><th>Date</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>'
-      +'<div class="aff-pane"><h3><span>✍️ Draft a post</span></h3><div class="sub-form" style="padding:11px 13px">'
+      +'<div class="aff-pane"><h3><span>Draft a post</span></h3><div class="sub-form" style="padding:11px 13px">'
         +'<label>Topic / working title</label><input id="subtopic" placeholder="e.g. Why agencies should run their own AI control plane">'
         +'<label>Audience (optional)</label><input id="subaud" placeholder="agency owners, indie devs…">'
         +'<label>Tone (optional)</label><input id="subtone" placeholder="punchy, analytical, friendly…">'
@@ -19942,9 +19942,9 @@ async function aisAnalytics(){
       +'<div class="aff-pane"><h3><span>Requests</span><span class="sub">'+reqs.length+' shown</span></h3><div class="aff-scroll"><table class="aff-tbl">'
         +'<thead><tr><th>When</th><th>Endpoint</th><th>Brand</th><th>Providers</th><th class="num">Cost</th><th class="num">Latency</th><th>OK</th></tr></thead><tbody>'
         +(reqs.map(aisReqRow).join('')||'<tr><td colspan="7" style="padding:16px;text-align:center;color:var(--dim)">no requests yet</td></tr>')+'</tbody></table></div></div>'
-      +'<div class="aff-pane"><h3><span>📄 Recent reports</span><span class="sub">'+reports.length+'</span></h3><div class="aff-scroll" style="max-height:32vh">'
+      +'<div class="aff-pane"><h3><span>Recent reports</span><span class="sub">'+reports.length+'</span></h3><div class="aff-scroll" style="max-height:32vh">'
         +(reports.length?reports.map(aisReportRow).join(''):'<div class="meta" style="padding:13px">no reports yet</div>')
-        +'</div><h3 style="border-top:1px solid var(--line)"><span>👤 Accounts</span><span class="sub">'+accts.length+'</span></h3><div class="aff-scroll" style="max-height:22vh">'
+        +'</div><h3 style="border-top:1px solid var(--line)"><span>Accounts</span><span class="sub">'+accts.length+'</span></h3><div class="aff-scroll" style="max-height:22vh">'
         +(accts.length?accts.map(aisAcctRow).join(''):'<div class="meta" style="padding:13px">no accounts</div>')+'</div></div>'
     +'</div>';
   if(body) body.innerHTML=h;
@@ -20168,7 +20168,7 @@ async function loadProjects(){
   grid.innerHTML=h;
 }
 async function viewCMD(path){
-  showM('<div class="pj-view"><div class="vshead"><h2>📄 '+esc(path)+'</h2><button class="mini" onclick="closeM()">✕ Close</button></div><pre class="pj-md"><span class="spin"></span> loading…</pre></div>');
+  showM('<div class="pj-view"><div class="vshead"><h2>'+esc(path)+'</h2><button class="mini" onclick="closeM()">✕ Close</button></div><pre class="pj-md"><span class="spin"></span> loading…</pre></div>');
   var t=''; try{ t=await(await fetch('/api/file-get?b64='+b64u(path))).text(); }catch(e){ t='(could not load '+path+')'; }
   var pre=document.querySelector('.pj-md'); if(pre) pre.textContent=t||'(empty)';
 }
@@ -20193,7 +20193,7 @@ async function loadPortfolio(){document.getElementById("grid").innerHTML=empty("
 function cfF(k,label,ph){return '<label class="cff">'+label+'<input id="cf_'+k+'" class="mini" placeholder="'+esc(ph)+'"></label>';}
 function cfSel(k,label,opts){return '<label class="cff">'+label+'<select id="cf_'+k+'" class="mini">'+opts.map(o=>'<option value="'+o[0]+'">'+esc(o[1])+'</option>').join('')+'</select></label>';}
 function cfAddWizard(){
-  showM('<div class="cfw"><div class="vshead"><h2>➕ Add a ClaudeFather</h2><button class="mini" onclick="closeM()">✕ Close</button></div>'
+  showM('<div class="cfw"><div class="vshead"><h2>Add a ClaudeFather</h2><button class="mini" onclick="closeM()">✕ Close</button></div>'
    +'<div class="sub" style="margin-bottom:2px">A new, self-contained instance — its own movable folder (framework + config + secrets + project + deliverables). Nothing starts until you choose below.</div>'
    +'<div class="cfgrid">'
    +cfF('id','ID','a-z 0-9 _ -  ·  e.g. bakery')
@@ -20613,7 +20613,7 @@ async function loadDocs(){
   document.getElementById("grid").innerHTML=empty("Loading managed CLAUDE.md blocks…");
   let d;try{d=await(await fetch("/api/managed")).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn’t load.");return;}
   const c=d.coverage;
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>📊 CLAUDE.md coverage</span><span><button class="mini" onclick="runDoctor()">Doctor</button> <button class="mini go" onclick="editBlock()">+ New block</button></span></h3>'
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>CLAUDE.md coverage</span><span><button class="mini" onclick="runDoctor()">Doctor</button> <button class="mini go" onclick="editBlock()">+ New block</button></span></h3>'
     +'<div class="meta">Meaningful folders: <b style="color:var(--ink)">'+c.meaningfulHave+'/'+c.meaningful+'</b> have a CLAUDE.md · Data buckets: <b style="color:var(--ink)">'+c.bucketsHave+'/'+c.buckets+'</b> · '+c.total+' folders in the project.</div>'
     +'<div class="meta" style="margin-top:4px">Blocks write only between their CC markers — hand-written content is never touched. The Doctor flags over-budget docs, sub-tool duplication, block drift, and registered folders missing a CLAUDE.md.</div><div id="docfix" style="margin-top:8px"></div></div>';
   h+=(d.blocks||[]).map(docCard).join("")||empty("No managed blocks yet — click + New block.");
@@ -20634,7 +20634,7 @@ async function loadDoctor(){
   const iss=r.issues||[];const errs=iss.filter(x=>x.sev=="err").length;const warns=iss.length-errs;
   const ok=!iss.length;const col=ok?"#3fb950":(errs?"#f85149":"#d29922");
   const lbl=ok?"All clean":(errs?(errs+" to fix"):(warns+" to tidy"));
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>🩺 System self-check</span>'
+  let h='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>System self-check</span>'
    +'<button class="mini go" onclick="loadDoctor()">↻ Re-run</button></h3>'
    +'<div class="meta" style="display:flex;align-items:center;gap:8px;margin-top:4px"><span style="width:10px;height:10px;border-radius:50%;background:'+col+';flex:0 0 10px"></span><b style="color:'+col+'">'+lbl+'</b>'
    +'<span style="color:var(--mut)"> · '+errs+' error'+(errs==1?"":"s")+' · '+warns+' warning'+(warns==1?"":"s")+'</span></div>'
@@ -20647,7 +20647,7 @@ async function loadDoctor(){
   g.innerHTML=h;
 }
 function docCard(b){const ok=b.targets&&b.insync==b.targets;const col=ok?"#3fb950":(b.present?"#d29922":"#f85149");
-  return '<div class="card" style="cursor:default"><h3><span>📘 '+b.title+'</span><span class="badge bdg-cyan">v'+b.version+'</span></h3>'
+  return '<div class="card" style="cursor:default"><h3><span>'+b.title+'</span><span class="badge bdg-cyan">v'+b.version+'</span></h3>'
    +'<div class="meta">Scope: '+(SCOPELABEL[b.scope]||b.scope)+(b.hasStub?" · has bucket stub":"")+'</div>'
    +'<div class="meta" style="color:'+col+'">'+b.insync+'/'+b.targets+' folders in sync'+(b.present>b.insync?(" · "+(b.present-b.insync)+" on an old version"):"")+'</div>'
    +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="applyBlock(\''+b.id+'\')">▶ Apply</button>'
@@ -20788,7 +20788,7 @@ function tago(t){if(!t)return"";const s=Date.now()/1000-t;if(s<3600)return Math.
 function gotoRalph(){closeInfo();const b=document.querySelector('#lens button[data-l=ralph]');if(b)b.click();}
 function convoInfo(id){const c=CONVOMAP[id];if(!c)return;closeInfo();
   const ov=document.createElement("div");ov.id="cinfo";ov.className="overlay";ov.onclick=e=>{if(e.target==ov)closeInfo();};
-  if(c.ralph){ov.innerHTML='<div class="sheet"><h3><span>🔁 Ralph loop</span><button class="mini" onclick="closeInfo()">✕</button></h3>'
+  if(c.ralph){ov.innerHTML='<div class="sheet"><h3><span>Ralph loop</span><button class="mini" onclick="closeInfo()">✕</button></h3>'
       +'<div style="font-weight:600;font-size:14px;margin:2px 0 10px">'+e2(c.ralph)+'</div>'
       +'<div class="meta">'+c.iters+' iterations collapsed into one entry · last active '+tago(c.mtime)+'</div>'
       +'<div class="meta">📁 <code>'+e2((c.cwd||"?").replace(/.*\/hptuners(-control)?\//,"…/"))+'</code></div>'
@@ -20796,7 +20796,7 @@ function convoInfo(id){const c=CONVOMAP[id];if(!c)return;closeInfo();
       +'<div class="btns" style="margin-top:14px"><button class="mini go" onclick="gotoRalph()">▶ open in Ralph Loops</button></div></div>';
     document.body.appendChild(ov);return;}
   const forks=(c.forks&&c.forks.length)?'<div class="meta">⑂ '+c.forks.length+' fork(s) branch from this thread</div>':'';
-  ov.innerHTML='<div class="sheet"><h3><span>💬 Conversation</span><button class="mini" onclick="closeInfo()">✕</button></h3>'
+  ov.innerHTML='<div class="sheet"><h3><span>Conversation</span><button class="mini" onclick="closeInfo()">✕</button></h3>'
     +'<div style="font-weight:600;font-size:14px;margin:2px 0 10px;line-height:1.4">'+e2(c.label||"(no opening message)")+'</div>'
     +'<div class="meta">📁 launched in <code>'+e2((c.cwd||"?").replace(/.*\/hptuners(-control)?\//,"…/"))+'</code></div>'
     +'<div class="meta">🕑 last active '+tago(c.mtime)+' · id <code>'+esc((c.id||"").slice(0,8))+'</code></div>'+forks
@@ -20836,7 +20836,7 @@ async function loadChief(){
   }
   h+=stat('💡',(c.ideas_n||0),'Ideas','ideas','captured');
   h+='</div>';
-  h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>🛡 Live product &amp; services</span><span class="sub">managed here — kept out of Sessions so they can\'t be closed by accident</span></h3>';
+  h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>Live product &amp; services</span><span class="sub">managed here — kept out of Sessions so they can\'t be closed by accident</span></h3>';
   (c.services||[]).forEach(sv=>{const col=sv.up?'var(--ok)':'var(--err)';
     h+='<div style="display:flex;align-items:center;gap:11px;padding:8px 0;border-top:1px solid var(--line)">'
       +'<span style="width:9px;height:9px;border-radius:50%;background:'+col+';flex:0 0 9px"></span>'
@@ -20844,14 +20844,14 @@ async function loadChief(){
       +'<span class="badge" style="background:'+col+'22;color:'+col+'">'+(sv.up?'up':'down')+'</span>'
       +'<button class="mini" title="view the live terminal — do NOT close it" onclick="openInSessions(\''+esc(sv.name)+'\')">view</button></div>';});
   h+='</div>';
-  h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>⚡ Quick actions</span></h3><div class="btns">'
+  h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>Quick actions</span></h3><div class="btns">'
     +'<button class="mini go" onclick="talkChief()">Talk to your Chief of Staff</button>'
     +'<button class="mini" onclick="openLaunch(\'studio\',\'\')">＋ Launch a session</button>'
     +'<button class="mini" onclick="gotoLens(\'ideas\')">Capture an idea</button>'
     +'<button class="mini" onclick="gotoLens(\'ralph\')">Loops</button>'
     +'<button class="mini" onclick="gotoLens(\'modules\')">Modules</button>'
     +'<button class="mini" onclick="gotoLens(\'tree\')">Conversations</button></div></div>';
-  h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>🗂 The desk</span><button class="mini" onclick="gotoLens(\'docs\')">open Docs</button></h3>'
+  h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>The desk</span><button class="mini" onclick="gotoLens(\'docs\')">open Docs</button></h3>'
     +'<div class="meta">Highest-order references: '+(((window.CC&&window.CC.deskDocs)||[]).map(function(x){return '<code>'+esc(x)+'</code>';}).join(' · ')||'<code>CLAUDE.md</code>')+'.</div></div>';
   g.innerHTML=h;
 }
@@ -21280,7 +21280,7 @@ applyPreset();   // preset hides project-only lenses on an org instance + lands 
 if(window.CC && !window.CC.authOn && !sessionStorage.getItem('cf_tok_dismissed')){ setTimeout(firstRunToken, 2300); }
 function firstRunToken(){
   if(window.CC && window.CC.authOn) return;
-  showM('<div class="cfw"><div class="vshead"><h2>🔒 Set a login token</h2><button class="mini" onclick="frtSkip()">Skip for now</button></div>'
+  showM('<div class="cfw"><div class="vshead"><h2>Set a login token</h2><button class="mini" onclick="frtSkip()">Skip for now</button></div>'
    +'<div class="sub" style="margin-bottom:11px">This node has <b>no login token yet</b> — anyone on your tailnet can open it. Set one now (a PIN or a passphrase — your choice). You can change or remove it anytime in <b>Settings → Login token</b>.</div>'
    +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><input id="frt_tok" class="mini" style="flex:1;min-width:200px" placeholder="choose a token (min 4 chars)" autocomplete="off">'
    +'<button class="mini" onclick="document.getElementById(\'frt_tok\').value=cfRandTok()">Generate</button>'
@@ -21988,7 +21988,7 @@ async function fxLearnVoice(){
   var meta=p.ok ? ('Built '+e2(built)+(p.depth?(' · '+p.depth+' emails'):'')+' · formality: '+e2(p.formality||'?')+' · em-dashes: '+(p.uses_em_dash?'yes':'no')+(p.optimized_at?(' · optimized '+new Date(p.optimized_at*1000).toLocaleDateString()):''))
                 : 'No profile yet — click "Learn from Sent mail" to build one.';
   var body='<div class="vstudio">'
-    +'<div class="vshead"><h2>🎙 Your Writing Voice</h2><button class="mini" onclick="fxVoiceHelp()" title="How this works">ⓘ How it works</button></div>'
+    +'<div class="vshead"><h2>Your Writing Voice</h2><button class="mini" onclick="fxVoiceHelp()" title="How this works">ⓘ How it works</button></div>'
     +'<div class="vsmeta">'+meta+'</div>'
     +'<div class="vslbl">Style profile <span class="vssub">— what the AI learned. Edit anything; this is exactly what guides your drafts.</span></div>'
     +'<textarea id="vsProfile" class="vsta" rows="13" placeholder="Build a profile from your Sent mail, or write your own style notes here.">'+e2(p.profile_md||'')+'</textarea>'
@@ -22028,7 +22028,7 @@ async function fxVoiceOptimize(){
   fxLearnVoice();
 }
 function fxVoiceHelp(){
-  var h='<div class="vstudio vshelp"><div class="vshead"><h2>🎙 How VoiceMatch works</h2><button class="mini" onclick="fxLearnVoice()">← back</button></div>'
+  var h='<div class="vstudio vshelp"><div class="vshead"><h2>How VoiceMatch works</h2><button class="mini" onclick="fxLearnVoice()">← back</button></div>'
    +'<div class="vshbody">'
    +'<p><b>Goal:</b> smart replies that sound like YOU, not AI — using everything we know about the client.</p><ol>'
    +'<li><b>Learn my voice</b> reads ~150 of your Sent emails and builds a <b>style profile</b> (tone, punctuation, greetings, sign-offs, whether you use em-dashes). Stored per inbox — AFP learns Sarah, carsearch learns you.</li>'

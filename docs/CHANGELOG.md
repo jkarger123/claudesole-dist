@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.66 -- 2026-06-30
+- DESIGN SYSTEM LOCKED IN (so the unified look never needs re-sweeping):
+  - Finished the de-emoji sweep -- extended it to card titles/headers/labels (h3/h2/span/label/summary), removing
+    the last 28 decorative emoji (module 🧩, folder 📁, etc.) the earlier pass missed. Icon-only controls keep a glyph.
+  - NEW `command-center/ui_lint.py` -- the design-system ENFORCER. Flags native confirm/prompt/alert, off-palette
+    GitHub hexes in inline styles, inline-colored badges, and decorative chrome emoji. Wired into the preship gate
+    (`preship.py`), so ANY future feature/extension that hand-rolls a one-off UI primitive FAILS THE SHIP.
+  - NEW `docs/DESIGN_SYSTEM.md` -- the one standard (components + 4 hard rules + how to add a lens). Pointers added
+    to `command-center/CLAUDE.md` and `extensions/AUTHORING.md` so agents building features/extensions see it first.
+
 ## 0.99.65 -- 2026-06-30
 - Badge code-hygiene: moved 30 status badges from inline `style="background:#x22;color:#x"` to an exact-match
   `.badge.bdg-*` palette in CSS (zero visual change -- verified the computed colors match to the pixel). The 11

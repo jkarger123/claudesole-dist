@@ -1,7 +1,7 @@
 {
   "product": "ClaudeFather",
   "former_name": "Claudesole",
-  "version": "0.99.65",
+  "version": "0.99.66",
   "description": "Manifest that defines which paths are FRAMEWORK (ship + propagate to every ClaudeFather deployment on update) vs PRESERVE (per-deployment config/data/secrets/learnings -- never overwritten by an update).",
   "framework_paths": [
     "core.sig.json",
@@ -11,6 +11,7 @@
     "cf-build-appliance.sh",
     "cf-key-backup.sh",
     "cf-key-restore.sh",
+    "docs/DESIGN_SYSTEM.md",
     "docs/RECOVERY.md",
     "docs/HARDENING.md",
     "docs/VAULT.md",
@@ -37,6 +38,7 @@
     "command-center/focus.py",
     "command-center/clips.py",
     "command-center/preship.py",
+    "command-center/ui_lint.py",
     "command-center/slack.py",
     "command-center/zoom.py",
     "command-center/mesh_stop_hook.py",

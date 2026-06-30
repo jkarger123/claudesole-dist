@@ -5,6 +5,12 @@ An Extension is an installable capability in the Marketplace lens. The promise t
 that to work, every extension MUST ship clear, structured instructions -- what it is, why you'd want it, how
 it works, and the safe way to run it. No extension ships without this.
 
+> **▶ If your extension contributes a LENS/UI: it MUST use the dashboard design system (`docs/DESIGN_SYSTEM.md`).**
+> Build the lens from the shared primitives (`cc-head`/`cc-list`/`cc-item`/`cc-grid`/`cc-tile`/`cc-panel`/`cc-in`,
+> `mini`/`btn`(+`danger`), `badge bdg-*`, `confirmM`/`promptM`/`alertM`, `toast`). NEVER a native dialog,
+> off-palette/GitHub-hex color, inline-colored badge, or decorative header/button emoji. The preship linter
+> (`command-center/ui_lint.py`) FAILS the ship on violations — so a one-off-styled lens cannot reach the fleet.
+
 ## THE STANDARD -- every extension is built to this (checklist)
 Build EVERY extension to the same spec so they're consistent + agent-usable. An extension ships:
 1. **`extension.json`** -- catalog card + model-facing `summary`/`description` + `provides[]`/`requires[]` (below).
