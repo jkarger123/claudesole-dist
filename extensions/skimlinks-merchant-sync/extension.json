@@ -2,7 +2,7 @@
   "id": "skimlinks-merchant-sync",
   "name": "Skimlinks Affiliate Intelligence",
   "category": "agent-tool",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "icon": "\ud83d\udd17",
   "summary": "Weekly Skimlinks merchant sync + a built-in affiliate-intelligence lens (commissions, new/removed, top movers).",
   "description": "Pulls the full Skimlinks merchant catalog into your Supabase on a schedule and tracks every change -- new/removed merchants, commission moves, tenure. Adds a built-in Affiliate Intelligence lens (searchable merchant grid, top movers, per-merchant commission-change timeline) and lets agents query the data or drag a merchant straight into a session. Replaces the old external dashboard -- everything lives inside the control center.",

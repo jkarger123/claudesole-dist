@@ -171,48 +171,64 @@ class SkimlinksAPI:
         self.client_id = client_id
 
     def fetch_all(self, limit: int = None) -> List[Dict]:
-        """Fetch all merchants from Skimlinks API."""
+        """Fetch the FULL merchant catalog (V3 offset pagination), resilient to Skimlinks' frequent read timeouts
+        and rate limits: a transient failure RETRIES the same page with escalating backoff instead of ending the
+        fetch (the old code aborted at the first timeout -- that's why a full pass kept dying at ~3,400). Returns
+        the COMPLETE catalog, or RAISES on an incomplete fetch -- NEVER a silent partial, because a partial would
+        make the downstream diff falsely soft-delete every merchant past the cut-off. Dedups by advertiser_id."""
         all_merchants = []
+        seen_ids = set()
         offset = 0
         batch_size = 200
+        MAX_TRIES = 6                          # consecutive transient failures on ONE page before we give up (-> raise)
 
         while True:
-            try:
-                resp = requests.get(
-                    self.BASE_URL,
-                    params={
-                        'apikey': self.client_id,
-                        'limit': batch_size,
-                        'offset': offset
-                    },
-                    timeout=30
-                )
+            tries = 0
+            while True:                        # inner loop: retry THIS page until a 200, or we exhaust tries
+                try:
+                    resp = requests.get(
+                        self.BASE_URL,
+                        params={'apikey': self.client_id, 'limit': batch_size, 'offset': offset},
+                        timeout=60,
+                    )
+                    if resp.status_code == 200:
+                        break
+                    if resp.status_code == 429 or resp.status_code >= 500:   # rate-limited / transient server error
+                        tries += 1
+                        if tries >= MAX_TRIES:
+                            raise RuntimeError(f"Skimlinks {resp.status_code} persisted at offset {offset}")
+                        wait = min(60, 5 * (2 ** (tries - 1)))
+                        print(f"\n  [WARN] {resp.status_code} at {len(all_merchants):,} merchants -- backing off {wait}s ({tries}/{MAX_TRIES})...")
+                        time.sleep(wait)
+                        continue
+                    raise RuntimeError(f"Skimlinks API error {resp.status_code}")    # hard 4xx -> abort
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                    tries += 1
+                    if tries >= MAX_TRIES:
+                        raise RuntimeError(f"network failure at offset {offset} after {tries} tries: {e}")
+                    wait = min(60, 5 * (2 ** (tries - 1)))
+                    print(f"\n  [WARN] timeout at {len(all_merchants):,} merchants -- retry {tries}/{MAX_TRIES} in {wait}s...")
+                    time.sleep(wait)
+                    continue
 
-                if resp.status_code == 429:
-                    print(f"\n  [WARN] Rate limited at {len(all_merchants):,} merchants")
-                    break
+            data = resp.json()
+            merchants = data.get('merchants', [])
+            if not merchants:
+                break                          # natural end of the catalog -> done
 
-                if resp.status_code != 200:
-                    print(f"\n  [ERROR] API error {resp.status_code}")
-                    break
+            for m in merchants:
+                aid = str(m.get('advertiser_id', ''))
+                if aid and aid in seen_ids:
+                    continue
+                if aid:
+                    seen_ids.add(aid)
+                all_merchants.append(m)
 
-                data = resp.json()
-                merchants = data.get('merchants', [])
+            print(f"  Fetched {len(all_merchants):,} merchants...", end='\r')
+            offset += batch_size
 
-                if not merchants:
-                    break
-
-                all_merchants.extend(merchants)
-                print(f"  Fetched {len(all_merchants):,} merchants...", end='\r')
-
-                offset += batch_size
-
-                if limit and len(all_merchants) >= limit:
-                    all_merchants = all_merchants[:limit]
-                    break
-
-            except Exception as e:
-                print(f"\n  [ERROR] {e}")
+            if limit and len(all_merchants) >= limit:
+                all_merchants = all_merchants[:limit]
                 break
 
         print()
@@ -378,7 +394,15 @@ def run_sync(db: SupabaseClient, api: SkimlinksAPI, dry_run: bool = False, quick
     # Step 1: Fetch from API
     print("\n[1/7] Fetching merchants from Skimlinks API...")
     limit = 1000 if quick else None
-    api_merchants = api.fetch_all(limit=limit)
+    try:
+        api_merchants = api.fetch_all(limit=limit)
+    except Exception as e:
+        # fetch_all raises rather than return a partial -> abort WITHOUT writing, so we never false-delete the
+        # merchants that simply weren't fetched. (This is the count-independent guard; the MIN_EXPECTED check below
+        # is the secondary one for a genuinely-shrunk catalog.)
+        print(f"\n  [ABORT] Skimlinks fetch did not complete: {e}")
+        print("  Aborting sync to prevent falsely marking merchants as removed (no DB writes made).")
+        return
 
     if not api_merchants:
         print("[ERROR] No merchants fetched from API")

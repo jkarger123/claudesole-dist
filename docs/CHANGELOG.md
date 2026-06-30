@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.79 -- 2026-06-30
+- Skimlinks extension (v1.1.0): hardened the merchant fetch against the Skimlinks API's frequent read timeouts.
+  The old fetch_all aborted the whole pass at the first timeout (dying at ~3,400 of ~32k); now it RETRIES the same
+  page with escalating backoff (timeouts + 429/5xx), and either returns the COMPLETE catalog or RAISES -- never a
+  silent partial. The caller aborts WITHOUT writing on a raise, so an incomplete fetch can never false-delete the
+  merchants that simply weren't fetched (count-independent guard, on top of the existing MIN_EXPECTED check).
+  Dedups by advertiser_id. (First step of the Fleet Jobs migration -- docs/FLEET_JOBS.md -- making Skimlinks a
+  reliable central job before it moves onto the overseer.)
+
 ## 0.99.78 -- 2026-06-30
 - FIX: auto-compact orphaned by a restart. The compact worker is a daemon thread in the server process; a restart
   mid-compact (every ship / auto-converge / crash) killed it -- leaving the handoff WRITTEN but /compact + re-read
