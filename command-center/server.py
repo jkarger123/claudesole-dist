@@ -8411,6 +8411,14 @@ def module_note(rel, text):
     with MOD_LOCK:
         m = re.search(re.escape(NOTES_B) + r"(.*?)" + re.escape(NOTES_E), _read(cm), re.S)
         items = re.findall(r"(?m)^- .*$", m.group(1)) if m else []
+        # DEDUP on write: skip a learning that substantially repeats one already filed here, so the records don't
+        # pile up near-duplicates over time (keeps each module's CC:NOTES a tight, high-signal index).
+        nt = _norm_toks(text)
+        if nt:
+            for ex in items:
+                et = _norm_toks(ex)
+                if et and (len(nt & et) / float(min(len(nt), len(et)))) >= 0.75:
+                    return {"ok": True, "rel": rel, "count": len(items), "skipped": "duplicate"}
         items.append("- " + text)
         _set_region(cm, NOTES_B, NOTES_E, "## Learnings (filed by agents; append-only)\n" + "\n".join(items))
     return {"ok": True, "rel": rel, "count": len(items)}
@@ -9578,13 +9586,9 @@ def sessions_active(names):
         if n: d.setdefault(n, {})["active_ts"] = now
     save(_SESS_META, d); return {"ok": True, "n": len(names or [])}
 
-def _harvest_pointer(rel, name, subject):
-    """Server SAFETY-NET harvest: file a pointer note into the folder's records so an idle/abandoned conversation's
-    existence + resumability is never lost. (The real semantic distill is the agent's own job via `cc-note`, briefed
-    at every launch; module_note dedups so an agent note + this pointer don't double up.)"""
-    try: module_note(rel, "Conversation on '%s' ran here (%s) -- archived + one-click resumable. (auto-filed)"
-                     % ((subject or name)[:80], time.strftime("%Y-%m-%d")))
-    except Exception: pass
+# NOTE: we deliberately do NOT file a "a conversation ran here" pointer into a folder's CC:NOTES -- that is
+# low-signal cruft that bloats the records. A session's existence + one-click resumability lives in the archive
+# ledger (_archived_sessions.json, shown in the Workspace hygiene panel); CC:NOTES holds only DURABLE learnings.
 
 _OPPOSITES = [("enable", "disable"), ("enabled", "disabled"), ("never", "always"), ("increase", "decrease"),
               ("add", "remove"), ("use", "avoid"), ("keep", "drop"), ("true", "false"), ("allow", "block")]
@@ -9626,7 +9630,7 @@ def _distill_harvest(rel, name, subject):
                     if n >= 4: break
                 if n: return n
     except Exception: pass
-    _harvest_pointer(rel, name, subject); return 0
+    return 0   # nothing durable -> file NOTHING into the folder notes (existence lives in the archive ledger)
 
 def _archive_session(name, reason="idle-auto"):
     """Retire a conversation: harvest (safety net) -> save a resume record -> close the tmux session. NEVER a
@@ -9828,14 +9832,58 @@ def housekeeping_digest():
     return {"ok": True, "last": cur.get("last"), "recent": cur.get("recent", [])[:30],
             "on": CC.get("housekeeping", True) is not False}
 
+_NOTES_CURATE_SEEN = {}          # rel -> last curate ts (throttle ~once/day per folder)
+_NOTES_CURATE_MIN = 12           # only curate a folder once its learnings pass this (below = no bloat to fix)
+_NOTES_CURATE_BACKUP = os.path.join(STATE_DIR, "_notes_curate_backup.jsonl")
+def _curate_notes_once(max_folders=4):
+    """Keep folder records TIGHT + high-signal: when a folder's CC:NOTES has grown past a threshold, a free
+    `claude -p` pass dedupes, merges related learnings, drops superseded/stale ones, and resolves [CONFLICT?]
+    tags -- rewriting it as a curated index. Gated by `smart`; throttled ~once/day per folder; CONSERVATIVE
+    (only accepts a shorter, non-nuked result) and backs up the pre-curation notes so a learning is never lost."""
+    if CC.get("smart", True) is False: return {"curated": []}
+    out = []; now = time.time()
+    for ab, rel in iter_folders():
+        if len(out) >= max_folders: break
+        cm = os.path.join(ab, "CLAUDE.md")
+        if not os.path.isfile(cm): continue
+        try: m = re.search(re.escape(NOTES_B) + r"(.*?)" + re.escape(NOTES_E), _read(cm), re.S)
+        except Exception: continue
+        if not m: continue
+        items = re.findall(r"(?m)^- .*$", m.group(1))
+        if len(items) <= _NOTES_CURATE_MIN: continue                       # not bloated -> leave it alone
+        if (now - _NOTES_CURATE_SEEN.get(rel, 0)) < 86400: continue        # once/day per folder
+        _NOTES_CURATE_SEEN[rel] = now
+        curated = _claude_text("These are the append-only LEARNINGS in a code module's CLAUDE.md. Curate them into "
+            "a TIGHT, high-signal set: merge duplicates + closely-related points, DROP anything superseded or stale, "
+            "and where two notes conflict (one may be tagged [CONFLICT?]) keep the correct/most-recent one. Preserve "
+            "every DISTINCT durable fact; NEVER invent. Output ONLY the final list, one per line each starting '- ', "
+            "terse, shorter than the input.\n\n" + "\n".join(items), timeout=60)
+        if not curated: continue
+        new_items = [ln.strip() for ln in curated.splitlines() if ln.strip().startswith("- ")]
+        if not new_items or len(new_items) >= len(items) or len(new_items) < max(2, len(items) // 6): continue  # reject no-op / nuke
+        try:                                                               # BACKUP the originals first (reversible)
+            with open(_NOTES_CURATE_BACKUP, "a") as bf:
+                bf.write(json.dumps({"ts": int(now), "rel": rel, "before": items}) + "\n")
+        except Exception: pass
+        with MOD_LOCK:
+            _set_region(cm, NOTES_B, NOTES_E, "## Learnings (filed by agents; append-only)\n" + "\n".join(new_items))
+        out.append({"rel": rel or "<root>", "before": len(items), "after": len(new_items)})
+        try:
+            with open(_HOUSEKEEP_LOG, "a") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M ") + "curate: %s notes %d -> %d\n" % (rel or "<root>", len(items), len(new_items)))
+        except Exception: pass
+    return {"curated": out}
+
 def _housekeeping_once():
-    archived = []; drift = {"checked": 0, "proposed": []}
+    archived = []; drift = {"checked": 0, "proposed": []}; curated = []
     try: regen_all_children()        # regenerates every folder's CC:CHILDREN + the root CC:TREEMAP (idempotent)
     except Exception: pass
     try: _refresh_topics()           # keep live conversations' topics current (relevance-match + drift detection)
     except Exception: pass
     try:                             # DRIFT SWEEP: propose warm transfers for conversations that wandered off-lane
         if CC.get("handoff", True) is not False: drift = _drift_sweep()
+    except Exception: pass
+    try: curated = _curate_notes_once().get("curated", [])   # CURATE: keep bloated folder records tight (dedupe/merge)
     except Exception: pass
     try:                             # RECONCILE: retire idle, harvested, un-held conversations (folders converge)
         if CC.get("reconcile", True) is not False:
@@ -9872,10 +9920,10 @@ def _housekeeping_once():
     try:
         _housekeeping_digest_write({"ts": int(time.time()), "map_regen": True,
             "drift_checked": drift.get("checked", 0), "transfers_proposed": drift.get("proposed", []),
-            "archived": archived, "doc_issues_total": len(issues), "doc_issues_new": len(fresh),
+            "archived": archived, "notes_curated": curated, "doc_issues_total": len(issues), "doc_issues_new": len(fresh),
             "fresh_issues": [{"sev": i.get("sev"), "path": i.get("path"), "msg": (i.get("msg") or "")[:160]} for i in fresh[:8]]})
     except Exception: pass
-    return {"issues": len(issues), "fresh": len(fresh), "drift": drift, "archived": archived}
+    return {"issues": len(issues), "fresh": len(fresh), "drift": drift, "archived": archived, "curated": curated}
 def _housekeeping_loop():
     time.sleep(150)                  # let boot + the first treemap/integrity passes settle
     while True:
@@ -19543,11 +19591,13 @@ function hoDigestCard(dg){
     +'<span class="cc-chip"><b>'+(L.drift_checked||0)+'</b> conversations watched</span>'
     +'<span class="cc-chip"><b>'+((L.transfers_proposed||[]).length)+'</b> transfers proposed</span>'
     +'<span class="cc-chip"><b>'+((L.archived||[]).length)+'</b> idle retired</span>'
+    +'<span class="cc-chip"><b>'+((L.notes_curated||[]).length)+'</b> records tightened</span>'
     +'<span class="cc-chip"><b>'+(L.doc_issues_new||0)+'</b> new doc issues</span>'
     +'<span class="cc-chip">module map regenerated</span></div>';
   var det='';
   if((L.transfers_proposed||[]).length) det+='<div class="cc-p-note"><b>Proposed transfers:</b> '+L.transfers_proposed.map(function(p){return e2(p.from)+' &rarr; '+e2(p.to);}).join(', ')+' &mdash; confirm them below.</div>';
   if((L.archived||[]).length) det+='<div class="cc-p-note"><b>Retired (one-click resumable):</b> '+L.archived.map(e2).join(', ')+'</div>';
+  if((L.notes_curated||[]).length) det+='<div class="cc-p-note"><b>Records tightened:</b> '+L.notes_curated.map(function(c){return e2(c.rel)+' ('+c.before+'&rarr;'+c.after+' learnings)';}).join(', ')+'</div>';
   if((L.fresh_issues||[]).length) det+='<div class="cc-p-note"><b>Doc issues flagged:</b> '+L.fresh_issues.map(function(i){return e2((i.path||'')+': '+(i.msg||'').slice(0,80));}).join(' &middot; ')+'</div>';
   var recent=(dg.recent||[]).filter(function(r){return (r.transfers_proposed&&r.transfers_proposed.length)||(r.archived&&r.archived.length)||(r.doc_issues_new>0);}).slice(0,6);
   var tl=recent.length?('<div style="margin-top:9px;border-top:1px solid var(--line);padding-top:7px"><b style="font-size:11.5px;color:var(--mut)">Recent activity</b>'+recent.map(function(r){return '<div class="meta" style="margin-top:3px">'+hoAgo(r.ts)+' ago &middot; '+((r.transfers_proposed||[]).length)+' proposed &middot; '+((r.archived||[]).length)+' retired &middot; '+(r.doc_issues_new||0)+' issues</div>';}).join('')+'</div>'):'';

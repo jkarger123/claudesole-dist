@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.69 -- 2026-06-30
+- SELF-CURATING RECORDS -- folder memory stays tight + high-signal automatically (no manual upkeep, no bloat):
+  - DEDUP ON WRITE: module_note skips a learning that substantially repeats one already filed (token overlap >=0.75).
+  - NO MORE POINTER CRUFT: stopped filing "a conversation ran here (date)" lines into CC:NOTES on archive -- a
+    session's existence + resumability lives in the archive ledger, so folder notes hold ONLY durable learnings.
+  - PERIODIC CURATION: _curate_notes_once() (hourly housekeeping, gated by smart) -- when a folder's learnings pass
+    a threshold, a free claude -p pass dedupes, merges, drops superseded/stale, and resolves [CONFLICT?] tags,
+    rewriting CC:NOTES as a curated index. Conservative (only accepts a shorter result), throttled ~once/day per
+    folder, BACKS UP originals (_notes_curate_backup.jsonl). Shown as "records tightened" in the housekeeping digest.
+    Proven: 16 bloated notes -> 10 clean (paraphrases merged, .env-vs-vault conflict resolved), backup written.
+
 ## 0.99.68 -- 2026-06-30
 - Warm-transfer UX (James's spec): the drift proposal is now transparent + gently insistent + opt-out.
   - GENTLE POP-UP: when a conversation drifts, a dismissible gold corner prompt appears on ANY lens -- "this looks
