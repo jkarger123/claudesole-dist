@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.78 -- 2026-06-30
+- FIX: auto-compact orphaned by a restart. The compact worker is a daemon thread in the server process; a restart
+  mid-compact (every ship / auto-converge / crash) killed it -- leaving the handoff WRITTEN but /compact + re-read
+  never run, and the session stuck. Now: the lock persists the handoff path; _compact_worker gains resume=True
+  (skip the handoff step, go straight to /compact + re-read); _compact_recover() runs on boot and, for any
+  'running' lock owned by THIS instance whose process is gone, RESUMES the compact if the handoff is written +
+  the session is live (else releases the stale lock). So a restart during a compact self-heals instead of stalling.
+
 ## 0.99.77 -- 2026-06-30
 - ACCEPT A TRANSFER -> graceful origin stand-down: after the destination opens (warm), a gentle countdown popup
   offers to FILE AWAY the previous conversation you moved from -- "Keep it open" (pin) or "File it now" (or let the

@@ -7370,14 +7370,19 @@ _COMPACT_LOCK_STALE = 1800   # 30 min: a compact never legitimately runs this lo
 _COMPACT_COOLDOWN  = 900     # 15 min: don't auto-recompact a session this soon after one completed
 def _compact_lock_path(name):
     return os.path.join(_COMPACT_LOCK_DIR, re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:48] + ".lock")
-def _compact_lock_mark(name, state):
+def _compact_lock_mark(name, state, hpath=None):
     """Unconditionally stamp a session's lock (used by BOTH paths so any in-flight compact is visible to other
-    instances; manual compacts hold it too, which also blocks an auto re-fire for the cooldown after)."""
+    instances; manual compacts hold it too, which also blocks an auto re-fire for the cooldown after). The handoff
+    path is persisted so a boot-time recovery can RESUME an orphaned compact (a restart mid-compact -- e.g. a ship
+    or auto-converge -- would otherwise leave the handoff written but /compact + re-read never run)."""
     try: os.makedirs(_COMPACT_LOCK_DIR, exist_ok=True)
     except Exception: pass
+    if hpath is None:                                   # preserve the handoff path across state changes
+        try: hpath = (json.loads(open(_compact_lock_path(name)).read() or "{}") or {}).get("hpath", "")
+        except Exception: hpath = ""
     try:
         fd = os.open(_compact_lock_path(name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        os.write(fd, json.dumps({"state": state, "ts": time.time(), "pid": os.getpid(), "instance": INSTANCE_ID}).encode())
+        os.write(fd, json.dumps({"state": state, "ts": time.time(), "pid": os.getpid(), "instance": INSTANCE_ID, "hpath": hpath}).encode())
         os.close(fd)
     except Exception: pass
 def _compact_lock_acquire(name):
@@ -7588,33 +7593,39 @@ def compact_session(name):
     try: os.makedirs(os.path.dirname(hpath), exist_ok=True)
     except Exception: pass
     _compact_set(nm, "starting", "starting compact", hpath)
-    _compact_lock_mark(nm, "running")   # hold the cross-instance lock for the whole compact (manual + auto)
+    _compact_lock_mark(nm, "running", hpath)   # hold the cross-instance lock + persist hpath (so a restart can RESUME)
     threading.Thread(target=_compact_worker, args=(nm, hpath), daemon=True).start()
     return {"ok": True, "handoff": hpath}
 
-def _compact_worker(name, hpath):
+def _compact_worker(name, hpath, resume=False):
     try:
-        _compact_set(name, "handoff", "agent is writing the handoff doc...", hpath)
-        _send_line(name, (
-            "COMPACT PREP: before your context gets compacted, write a COMPREHENSIVE handoff to the file `%s`. "
-            "Include EVERYTHING needed to fully resume yourself: what you know and have discovered, every task you've "
-            "worked on and its current state, what you are working on right now, what's planned next, key file paths, "
-            "decisions made and why, open questions, and gotchas. Be thorough -- this file IS your memory across the "
-            "compaction. Write it now; when saved, reply on its own line: HANDOFF_DONE" % hpath))
-        time.sleep(4)
-        # wait until the handoff file exists, has stopped growing, and the agent is idle (reliable 'done writing' signal)
-        deadline = time.time() + 900; last = -1; stable = 0
-        while time.time() < deadline:
-            sz = os.path.getsize(hpath) if os.path.isfile(hpath) else -1
-            if sz > 200 and sz == last:
-                stable += 1
-                if stable >= 2 and not _pane_busy(name): break
-            else: stable = 0
-            last = sz; time.sleep(3)
-        if not (os.path.isfile(hpath) and os.path.getsize(hpath) > 200):
-            _compact_set(name, "aborted", "handoff was not written -- compact aborted, your context is untouched", hpath); return
-        _wait_idle(name, 120)
-        _compact_set(name, "compacting", "handoff written; running /compact ...", hpath)
+        _compact_lock_mark(name, "running", hpath)        # persist hpath for boot-recovery; (re-)own the lock
+        if resume:
+            # RESUME after a restart orphaned us: the handoff is already written -> skip straight to /compact + re-read.
+            _compact_set(name, "compacting", "resuming after a restart; running /compact ...", hpath)
+            _wait_idle(name, 120)
+        else:
+            _compact_set(name, "handoff", "agent is writing the handoff doc...", hpath)
+            _send_line(name, (
+                "COMPACT PREP: before your context gets compacted, write a COMPREHENSIVE handoff to the file `%s`. "
+                "Include EVERYTHING needed to fully resume yourself: what you know and have discovered, every task you've "
+                "worked on and its current state, what you are working on right now, what's planned next, key file paths, "
+                "decisions made and why, open questions, and gotchas. Be thorough -- this file IS your memory across the "
+                "compaction. Write it now; when saved, reply on its own line: HANDOFF_DONE" % hpath))
+            time.sleep(4)
+            # wait until the handoff file exists, has stopped growing, and the agent is idle (reliable 'done writing' signal)
+            deadline = time.time() + 900; last = -1; stable = 0
+            while time.time() < deadline:
+                sz = os.path.getsize(hpath) if os.path.isfile(hpath) else -1
+                if sz > 200 and sz == last:
+                    stable += 1
+                    if stable >= 2 and not _pane_busy(name): break
+                else: stable = 0
+                last = sz; time.sleep(3)
+            if not (os.path.isfile(hpath) and os.path.getsize(hpath) > 200):
+                _compact_set(name, "aborted", "handoff was not written -- compact aborted, your context is untouched", hpath); return
+            _wait_idle(name, 120)
+            _compact_set(name, "compacting", "handoff written; running /compact ...", hpath)
         started = False
         for _ in range(3):                        # clear any typed text, send /compact, confirm it began
             _clear_input(name)
@@ -7644,6 +7655,29 @@ def _compact_worker(name, hpath):
         _compact_set(name, "error", "compact error: %s" % e, hpath)
     finally:
         _compact_lock_mark(name, "done")   # release: stamps completion -> the cooldown blocks an immediate auto re-fire
+
+def _compact_recover():
+    """BOOT RECOVERY: a server restart mid-compact (every ship / auto-converge / crash) kills the worker thread --
+    leaving the handoff WRITTEN but /compact + re-read never run (the lock stuck 'running'). On boot, find any
+    'running' lock OWNED BY THIS instance whose process is gone, and if its handoff is written + the session is
+    still live, RESUME the compact (straight to /compact + re-read). Otherwise release the stale lock."""
+    time.sleep(50)                                          # let boot + the first housekeeping settle
+    try:
+        for f in glob.glob(os.path.join(_COMPACT_LOCK_DIR, "*.lock")):
+            try: d = json.loads(open(f).read() or "{}") or {}
+            except Exception: continue
+            if d.get("state") != "running": continue           # only an in-flight compact
+            if d.get("instance") != INSTANCE_ID: continue       # only THIS node's own session (co-located: don't touch others')
+            if d.get("pid") == os.getpid(): continue            # our own current process (shouldn't happen on boot)
+            name = os.path.basename(f)[:-5]                     # strip ".lock"
+            hpath = d.get("hpath") or ""
+            if not (hpath and os.path.isfile(hpath) and os.path.getsize(hpath) > 200):
+                _compact_lock_mark(name, "done"); continue      # no usable handoff -> release, nothing to resume
+            if sh([TMUX, "has-session", "-t", name])[0] != 0:
+                _compact_lock_mark(name, "done"); continue      # session gone -> release
+            _core_log("compact-recover", {"session": name, "hpath": hpath})
+            threading.Thread(target=_compact_worker, args=(name, hpath), kwargs={"resume": True}, daemon=True).start()
+    except Exception: pass
 
 def term_snapshot(name, lines=60):
     """Cheap live snapshot of a session's terminal (tmux capture-pane) -- for the sessions-desktop tiles,
@@ -22908,6 +22942,7 @@ if __name__ == "__main__":
         threading.Thread(target=_acct_autopilot_loop, daemon=True).start()  # USAGE: idle-gated auto-switch (no-op unless account_autopilot=auto AND the switch ledger is proven)
     threading.Thread(target=_autoapprove_loop, daemon=True).start()   # keep agents off the permission-prompt wall
     threading.Thread(target=_autocompact_loop, daemon=True).start()    # graceful auto-compact when a session's context fills past the threshold
+    threading.Thread(target=_compact_recover, daemon=True).start()     # RESUME any compact orphaned by a restart (handoff written but /compact never ran)
     threading.Thread(target=_tg_outbound_loop, daemon=True).start()    # Telegram: ping the phone when a routed session finishes/blocks
     threading.Thread(target=_tg_inbound_loop, daemon=True).start()     # Telegram: relay your replies back into the routed session
     threading.Thread(target=_sk_outbound_loop, daemon=True).start()    # Slack (team): post to a channel thread when a routed session finishes/blocks
