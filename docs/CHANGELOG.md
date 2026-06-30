@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.74 -- 2026-06-30
+- "Review the move" is now a FOCUSED POPUP, not the whole admin desk. The gentle drift prompt's "Review the move"
+  opens a clean modal for THAT one transfer: what drifted, where it'd go (from -> to box), a plain "why we move
+  things" explainer (records stay clean, your current session stays put, declining won't ask again), how many
+  pieces of context it carries, and Move it there / Keep it here. Decide in one place; the full Transfers desk
+  stays available for power users. (hoReview/hoReviewAccept/hoReviewDecline; the corner prompt routes here.)
+
 ## 0.99.73 -- 2026-06-30
 - Drift-sweep PRECISION (a "well-formed but wrong" false positive seen on AFP: Pipeline/solawave -> Pipeline):
   - SAME-LINEAGE GUARD: never propose moving a conversation into its own ANCESTOR or descendant (a client folder

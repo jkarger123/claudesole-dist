@@ -19679,18 +19679,40 @@ async function hoBadgePoll(){try{var d=await(await fetch('/api/handoffs?status=p
   else if(!d.proposed)hoHideAlert();
 }catch(e){}}
 // GENTLE prompt when a conversation drifts -- it pops up, clearly says what it'd do, and is one tap to dismiss.
+var HO_REVIEW_PKT=null;
 function hoShowAlert(p){var el=document.getElementById("hoAlert");
   if(!el){el=document.createElement("div");el.id="hoAlert";document.body.appendChild(el);}
+  HO_REVIEW_PKT=p;
   var topic=(p.goal||'').replace(/^work moved to:\s*/i,'').slice(0,72)||'a new topic';
   var dest=p.needs_new_home?('a new '+e2(p.to_subject||'home')):('<code>'+e2(p.to_scope||'?')+'</code>');
   el.innerHTML='<div class="opa-h"><span class="opa-dot"></span><b>This looks like it belongs elsewhere</b><span class="opa-x" title="dismiss" onclick="hoAlertDismiss(\''+esc(p.id)+'\')">&times;</span></div>'
     +'<div class="opa-body">A conversation in <code>'+e2(p.from_scope||'?')+'</code> drifted to &ldquo;'+e2(topic)+'&rdquo;. It belongs in '+dest+' &mdash; want to move it there?</div>'
-    +'<div class="opa-act"><button class="mini" onclick="hoAlertDismiss(\''+esc(p.id)+'\')">Not now</button><button class="mini go" onclick="hoAlertOpen()">Review the move</button></div>';
+    +'<div class="opa-act"><button class="mini" onclick="hoAlertDismiss(\''+esc(p.id)+'\')">Not now</button><button class="mini go" onclick="hoAlertReview()">Review the move</button></div>';
   el.classList.add("show");
 }
 function hoHideAlert(){var el=document.getElementById("hoAlert");if(el)el.classList.remove("show");}
 function hoAlertDismiss(id){if(id)HO_ALERT_SEEN[id]=1;hoHideAlert();}
-function hoAlertOpen(){hoHideAlert();try{gotoLens('handoffs');}catch(e){}}
+function hoAlertReview(){hoHideAlert();if(HO_REVIEW_PKT)hoReview(HO_REVIEW_PKT);else gotoLens('handoffs');}
+// FOCUSED review popup -- one transfer, plain language, decide right here (not the whole admin desk).
+function hoReview(p){
+  if(!p)return;
+  var topic=(p.goal||'').replace(/^work moved to:\s*/i,'')||'a new topic';
+  var dest=p.needs_new_home?('a NEW <code>'+e2(p.to_subject||'home')+'</code> folder (created under <code>'+e2(p.suggested_parent||'(root)')+'</code>)'):('<code>'+e2(p.to_scope||'?')+'</code>');
+  var n=(p.pointers||[]).length;
+  var ptr=n?('<div class="meta" style="margin-top:11px">It carries <b>'+n+'</b> piece'+(n==1?'':'s')+' of context (notes, calls, emails) so the next agent picks up informed &mdash; not blank.</div>'):'';
+  showM('<h2>Move this conversation?</h2>'
+    +'<div class="mbody" style="font-size:13.5px;line-height:1.6">'
+    +'A conversation that’s been running in <code>'+e2(p.from_scope||'?')+'</code> has drifted onto:<br><b>&ldquo;'+e2(topic.slice(0,140))+'&rdquo;</b> &mdash; which really belongs somewhere else.'
+    +'<div style="margin:13px 0;padding:11px 13px;background:var(--card2);border:1px solid var(--line);border-radius:11px">'
+      +'<div class="sub" style="text-transform:uppercase;letter-spacing:.05em;font-size:10px">where it would move</div>'
+      +'<div style="margin-top:5px;font-size:14px"><code>'+e2(p.from_scope||'?')+'</code> &nbsp;&rarr;&nbsp; '+dest+'</div></div>'
+    +'<div class="meta" style="line-height:1.6"><b>Why we move things:</b> every conversation lives in a folder, and keeping it in the folder it’s actually about keeps that folder’s records clean and the work easy to find later. If you move it, the agent opens (or resumes) in the right place with this conversation’s goal + context handed over &mdash; <b>your current session stays exactly where it is.</b> Prefer to keep it where it is? “Keep it here” declines and won’t suggest this again.</div>'
+    +ptr
+    +'</div>'
+    +'<div class="btns"><button class="btn" onclick="hoReviewDecline(\''+esc(p.id)+'\')">Keep it here</button><button class="btn go" onclick="hoReviewAccept(\''+esc(p.id)+'\')">Move it there</button></div>');
+}
+function hoReviewAccept(id){closeM();hoAccept(id);}
+function hoReviewDecline(id){closeM();hoDecline(id);}
 async function loadNotes(){
   var box=document.getElementById("grid");if(!box)return;
   var d={};try{d=await(await fetch("/api/opnotes")).json();}catch(e){box.innerHTML=empty("Couldn't load notes.");return;}
