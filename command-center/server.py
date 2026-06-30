@@ -8491,13 +8491,23 @@ def module_add(parent_rel, name, summary):
     if not name: return {"ok": False, "error": "bad name"}
     try: pabs = projpath(parent_rel) if parent_rel else PROJECT
     except Exception: return {"ok": False, "error": "bad parent"}
-    nd = os.path.join(pabs, name)
-    if os.path.isdir(nd): return {"ok": False, "error": "already exists"}
-    os.makedirs(nd, exist_ok=True)
-    open(os.path.join(nd, "CLAUDE.md"), "w").write(
+    nd = os.path.join(pabs, name); cm = os.path.join(nd, "CLAUDE.md")
+    adopted = False
+    if os.path.isdir(nd):
+        # The folder already exists on disk. The Modules lens only SHOWS folders that carry a hand-authored
+        # CLAUDE.md, so plain code folders (worker/, data/, src/...) are INVISIBLE there -- and adding a sub-tool
+        # with such a name used to dead-end on a baffling "already exists" (the operator saw nothing). If it's
+        # ALREADY a documented sub-tool -> genuine duplicate. Otherwise ADOPT the existing folder: write its
+        # CLAUDE.md so it becomes a navigable sub-tool (exactly what the operator intended). Non-destructive --
+        # we only ever write the CLAUDE.md when there's no hand content to lose.
+        if _has_hand(cm): return {"ok": False, "error": "a sub-tool named %r already exists here" % name}
+        adopted = True
+    else:
+        os.makedirs(nd, exist_ok=True)
+    open(cm, "w").write(
         "# %s\n\n%s\n\n**Parent:** `../CLAUDE.md` -> read up-tree (this folder's pillar, then the root master).\n" % (name, summary or "(describe what this module is)"))
     regen_children(pabs); regen_treemap(force=True)
-    return {"ok": True, "rel": os.path.relpath(nd, PROJECT)}
+    return {"ok": True, "rel": os.path.relpath(nd, PROJECT), "adopted": adopted}
 
 def module_remove(rel):
     import time, shutil
@@ -16006,7 +16016,7 @@ async function openAdminShell(){toast('Opening the admin shell (run sudo / inter
 async function modAdd(parent){const name=(await promptM("New sub-tool/concept folder name (letters/numbers/-_):")||"").trim();if(!name)return;
   const summary=(await promptM("One line -- what is this module?")||"").trim();
   const r=await(await fetch("/api/module-add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({parent,name,summary})})).json();
-  if(r&&r.ok){toast("Module created + indexed in its parent.");loadModules(MODREL);}else toast("Failed: "+((r||{}).error||"?"),5000);}
+  if(r&&r.ok){toast(r.adopted?("Adopted existing folder \""+name+"\" as a sub-tool (added its CLAUDE.md)."):"Sub-tool created + indexed in its parent.",4000);loadModules(MODREL);}else toast("Failed: "+((r||{}).error||"?"),5000);}
 async function modRemove(rel,name){if(!await confirmM("Remove module \""+name+"\"?\n\nIt + its files are moved to the archive (reversible), and the parent's index updates."))return;
   const r=await(await fetch("/api/module-remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rel})})).json();
   if(r&&r.ok){toast("Archived.");loadModules(MODREL);}else toast("Failed: "+((r||{}).error||"?"),5000);}

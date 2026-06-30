@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.83 -- 2026-06-30
+- FIX: "add sub-tool" no longer dead-ends on a baffling "already exists" for a folder you can't see. The Modules
+  lens only shows folders carrying a hand-authored CLAUDE.md, but module_add collided against EVERY directory on
+  disk -- so on a code project (e.g. text2tune, full of worker/data/src/... folders without a CLAUDE.md) adding a
+  sub-tool whose name matched an invisible code folder failed. Now: if the folder already exists but ISN'T a
+  documented sub-tool, module_add ADOPTS it (writes its CLAUDE.md so it becomes navigable -- exactly the intent);
+  it only errors when a real documented sub-tool already exists there ("a sub-tool named X already exists here").
+  Non-destructive (writes the CLAUDE.md only when there's no hand content to lose); the toast says "adopted".
+
 ## 0.99.82 -- 2026-06-30
 - FIX (mesh reliability): a chief's reply to a peer could be silently dropped when an OPERATOR turn interleaved
   between the incoming "[message from X]" and the chief's reply -- the Stop hook's _reply_after severed at the next
