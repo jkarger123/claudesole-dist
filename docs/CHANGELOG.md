@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.65 -- 2026-06-30
+- Badge code-hygiene: moved 30 status badges from inline `style="background:#x22;color:#x"` to an exact-match
+  `.badge.bdg-*` palette in CSS (zero visual change -- verified the computed colors match to the pixel). The 11
+  remaining inline badges are runtime-COMPUTED colors (e.g. status-driven), which legitimately stay inline.
+  All badge styling is now centralized + named.
+
 ## 0.99.64 -- 2026-06-30
 - FINAL polish: tokenized the last off-palette surfaces that used hardcoded GitHub colors (off-brand blue/green).
   - Login page (first screen): GitHub green/blue -> gold-brand dark card w/ gold accent bar, gradient button, focus

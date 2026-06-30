@@ -15247,6 +15247,24 @@ body.gm-resizing iframe{pointer-events:none}
 textarea.cc-in{width:100%;box-sizing:border-box;min-height:48px;resize:vertical;line-height:1.5;margin-top:9px}
 /* Status pill (lifecycle states) */
 .cc-pill{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.4px;padding:2px 9px;border-radius:20px;white-space:nowrap}
+/* Badge color palette -- exact-match classes that replace the old inline `style="background:#x22;color:#x"` badges. */
+.badge.bdg-amber{background:#d2992222;color:#d29922}
+.badge.bdg-violet{background:#8b5cf622;color:#a78bfa}
+.badge.bdg-green{background:#3fb95022;color:#3fb950}
+.badge.bdg-ok{background:#22c55e22;color:#22c55e}
+.badge.bdg-red{background:#f8514922;color:#f85149}
+.badge.bdg-cyan{background:#58a6ff22;color:#58a6ff}
+.badge.bdg-blue{background:#3b82f622;color:#3b82f6}
+.badge.bdg-blue2{background:#3b82f622;color:#60a5fa}
+.badge.bdg-azure{background:#1f6feb22;color:#58a6ff}
+.badge.bdg-gray{background:#a0a0b022;color:#a0a0b0}
+.badge.bdg-slate{background:#8b949e22;color:#8b949e}
+.badge.bdg-gold{background:#c9a22722;color:var(--accent)}
+.badge.bdg-lilac{background:#bc8cff22;color:#bc8cff}
+.badge.bdg-teal{background:#10b98122;color:#34d399}
+.badge.bdg-ink{background:#0006;color:var(--mut)}
+.badge.bdg-dim{background:#2a2a33;color:var(--dim)}
+.badge.bdg-plain{background:#22222e;color:var(--mut);text-transform:none;letter-spacing:0}
 /* Projects lens (overseer platform map) */
 .pj-sec{font-weight:700;font-size:13px;margin:16px 2px 2px;color:var(--ink)}
 .pj-card .pj-top{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
@@ -15508,7 +15526,7 @@ function render(){
   document.getElementById("grid").innerHTML=h||empty("Nothing here.");
 }
 function empty(t){return "<p style='color:var(--mut)'>"+t+"</p>";}
-function compCard(c){const k=c.kind=="spine"?'<span class="badge" style="background:#d2992222;color:#d29922">spine</span>':'';
+function compCard(c){const k=c.kind=="spine"?'<span class="badge bdg-amber">spine</span>':'';
   return '<div class="card" onclick="openComp(\''+c.id+'\')"><h3><span>'+c.name+'</span><span style="display:flex;gap:5px">'+k+badge(c.status)+'</span></h3><div class="brief">'+(c.summary||"")+'</div>'+((c.areas&&c.areas.length)?'<div class="meta">'+c.areas.length+' areas · <code>'+(c.path||"")+'</code></div>':'')+(c.active?'<div class="meta" style="color:var(--accent)">▶ '+e2(c.active).slice(0,80)+'</div>':'')+'</div>';}
 function rouCard(r){
   var last=r.last_run?('ran '+tago(r.last_run)+(r.last_status?(' · '+(r.last_status=='ok'?'✅ ok':(r.last_status=='running'?'⏳ running':'❌ '+esc(r.last_status)+(r.last_exit!=null?(' (exit '+r.last_exit+')'):''))) ):'')):'never run';
@@ -15595,7 +15613,7 @@ async function modResumeId(id,fork){const c=MODCONVOMAP[id]; if(!c)return;
   if(!r||!r.ok){toast((fork?"Fork":"Resume")+" failed: "+((r||{}).error||"?"),5000); return;}
   _openTerm(r);}
 function modCard(c){const n=(c.children||[]).length;
-  return '<div class="card" onclick="loadModules(\''+esc(c.rel)+'\')" style="cursor:pointer"><h3><span>🧩 '+esc(c.name)+'</span>'+(n?'<span class="badge" style="background:#3b82f622;color:#3b82f6">'+n+' inside</span>':'')+'</h3>'
+  return '<div class="card" onclick="loadModules(\''+esc(c.rel)+'\')" style="cursor:pointer"><h3><span>🧩 '+esc(c.name)+'</span>'+(n?'<span class="badge bdg-blue">'+n+' inside</span>':'')+'</h3>'
     +(c.summary?('<div class="meta"'+(c.summary_default?' style="opacity:.65;font-style:italic"':'')+'>'+esc(c.summary)+(c.summary_default?' <span class="sub">(suggested &mdash; set your own under the <code># title</code> in CLAUDE.md)</span>':'')+'</div>')
               :'<div class="meta sub" style="opacity:.55;font-style:italic">No summary yet &mdash; add a one-line description under the <code># title</code> in this module&#39;s CLAUDE.md and it shows here.</div>')
     +'<div class="meta sub" style="margin-top:4px"><code>'+esc(c.rel)+'</code>'+(c.last_convo?' · 💬 '+tago(c.last_convo):'')+'</div>'
@@ -15663,7 +15681,7 @@ async function loadRalphPrev(){
 function prevCard(r){
   const col=r.state=="complete"?"#3fb950":(r.state=="partial"?"#d29922":"#a0a0b0");
   const when=r.ended?new Date(r.ended*1000).toLocaleDateString():"";
-  const tag=r.source=="legacy"?'<span class="badge" style="background:#a0a0b022;color:#a0a0b0">legacy</span>':'<span class="badge" style="background:#58a6ff22;color:#58a6ff">archived</span>';
+  const tag=r.source=="legacy"?'<span class="badge bdg-gray">legacy</span>':'<span class="badge bdg-cyan">archived</span>';
   const extra=(r.iterations?' · '+r.iterations+' iters':'')+(r.duration?' · ran '+fmtDur(r.duration):'');
   return '<div class="card" onclick="openRalph(\''+esc(r.name)+'\')" style="cursor:pointer"><h3><span>📁 '+esc(r.name)+'</span>'+tag+'</h3>'
     +'<div class="meta">'+esc(r.goal||"(no title)")+'</div>'
@@ -15701,11 +15719,11 @@ async function newRalph(){
 function jobCard(j){return '<div class="card" style="cursor:default"><h3><span>'+j.name+'</span>'+badge(j.status)+'</h3>'+(j.component?'<div class="meta">'+j.component+'</div>':'')+'<div class="brief">'+(j.desc||"")+'</div>'+(j.next?'<div class="meta" style="color:var(--accent)">next: '+e2(j.next)+'</div>':'')+'</div>';}
 function machCard(m){const st=ST[m.id]||m.status||"";const ok=st=="online";return '<div class="card" onclick="openMach(\''+m.id+'\')"><h3><span><span class="dot '+(ok?"ok":(st=="offline"?"bad":""))+'"></span> '+m.name+'</span></h3><div class="meta">'+m.role+'</div><div class="brief"><code>'+(m.ssh||"")+'</code></div></div>';}
 function openComp(id){const c=D.components.find(x=>x.id==id);
-  let h='<h2>'+c.name+' '+(c.kind=="spine"?'<span class="badge" style="background:#d2992222;color:#d29922">spine</span> ':'')+badge(c.status)+'</h2>'
+  let h='<h2>'+c.name+' '+(c.kind=="spine"?'<span class="badge bdg-amber">spine</span> ':'')+badge(c.status)+'</h2>'
    +'<div class="brief" style="margin:8px 0">'+(c.summary||"")+'</div>';
   if(c.active)h+='<div class="meta" style="color:var(--accent)">▶ active: '+e2(c.active)+'</div>';
   if(c.notes)h+='<div class="meta">'+e2(c.notes)+'</div>';
-  if(c.areas&&c.areas.length)h+='<div style="margin:9px 0;display:flex;flex-wrap:wrap;gap:5px">'+c.areas.map(a=>'<span class="badge" style="background:#22222e;color:var(--mut);text-transform:none;letter-spacing:0">'+e2(a)+'</span>').join('')+'</div>';
+  if(c.areas&&c.areas.length)h+='<div style="margin:9px 0;display:flex;flex-wrap:wrap;gap:5px">'+c.areas.map(a=>'<span class="badge bdg-plain">'+e2(a)+'</span>').join('')+'</div>';
   if(c.key_files&&c.key_files.length)h+='<div class="meta">key files: '+c.key_files.slice(0,6).map(f=>'<code>'+f.split("/").pop()+'</code>').join(' ')+'</div>';
   h+='<div class="meta" style="margin-top:8px">Path: <code>'+PROJ()+'/'+(c.path||"")+'</code></div>'
    +'<div class="btns" style="margin-top:14px"><button class="btn go" onclick="openLaunch(\'studio\',\''+id+'\')">▶ Claude — Studio</button>'
@@ -16393,14 +16411,14 @@ async function loadAgency(){document.getElementById("grid").innerHTML=empty("Loa
   let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>\U0001f3e2 Agency</b> <span class="sub">'+(c.clients||0)+' clients &middot; '+(c.partners||0)+' partners &middot; '+(c.pipeline||0)+' in pipeline &middot; '+(c.tools||0)+' reusable tools</span></div></div>';
   h+=secHead('\U0001f464 Clients');
   if((d.clients||[]).length)d.clients.forEach(function(cl){h+=clientCard(cl);}); else h+=empty('No clients yet (a folder under '+esc(dirs.clients||'Clients')+'/).');
-  if((d.partners||[]).length){h+=secHead('\U0001f91d Partners');d.partners.forEach(function(p){h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>'+esc(p.name)+'</span><span class="badge" style="background:#8b5cf622;color:#a78bfa">'+(p.clients||[]).length+' clients'+(p.work?' &middot; '+p.work+' work':'')+'</span></h3><div class="sub">'+e2(p.summary||'')+'</div><div class="modgrid" style="margin-top:8px">'+((p.clients||[]).map(clientCard).join('')||'<div class="meta">no clients yet</div>')+'</div></div>';});}
+  if((d.partners||[]).length){h+=secHead('\U0001f91d Partners');d.partners.forEach(function(p){h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>'+esc(p.name)+'</span><span class="badge bdg-violet">'+(p.clients||[]).length+' clients'+(p.work?' &middot; '+p.work+' work':'')+'</span></h3><div class="sub">'+e2(p.summary||'')+'</div><div class="modgrid" style="margin-top:8px">'+((p.clients||[]).map(clientCard).join('')||'<div class="meta">no clients yet</div>')+'</div></div>';});}
   if((d.pipeline||[]).length){h+=secHead('\U0001f4e5 Pipeline');d.pipeline.forEach(function(p){h+='<div class="card" onclick="modLaunch(\''+esc(p.rel)+'\')" style="cursor:pointer"><h3><span>'+esc(p.name)+'</span></h3><div class="meta">'+e2(p.summary||'')+'</div></div>';});}
-  if((d.tools||[]).length){h+=secHead('\U0001f9f0 Tools (reusable)');d.tools.forEach(function(tl){var ub=(tl.used_by||[]);h+='<div class="card" style="cursor:default"><h3><span>'+esc(tl.name)+'</span>'+(ub.length?'<span class="badge" style="background:#22c55e22;color:#22c55e">'+ub.length+' clients</span>':'<span class="badge" style="background:#8b949e22;color:#8b949e">unused</span>')+'</h3><div class="meta">'+e2(tl.summary||'')+'</div>'+(ub.length?'<div class="meta sub" style="margin-top:4px">used by: '+esc(ub.join(', '))+'</div>':'')+'<div class="btns" style="margin-top:8px"><button class="mini go" onclick="modLaunch(\''+esc(tl.rel)+'\')">&#9654; open</button></div></div>';});}
+  if((d.tools||[]).length){h+=secHead('\U0001f9f0 Tools (reusable)');d.tools.forEach(function(tl){var ub=(tl.used_by||[]);h+='<div class="card" style="cursor:default"><h3><span>'+esc(tl.name)+'</span>'+(ub.length?'<span class="badge bdg-ok">'+ub.length+' clients</span>':'<span class="badge bdg-slate">unused</span>')+'</h3><div class="meta">'+e2(tl.summary||'')+'</div>'+(ub.length?'<div class="meta sub" style="margin-top:4px">used by: '+esc(ub.join(', '))+'</div>':'')+'<div class="btns" style="margin-top:8px"><button class="mini go" onclick="modLaunch(\''+esc(tl.rel)+'\')">&#9654; open</button></div></div>';});}
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';}
 function secHead(t){return '<div class="card" style="cursor:default;grid-column:1/-1;background:transparent;border:none;padding:8px 2px 0"><b style="font-size:15px">'+t+'</b></div>';}
-function clientCard(cl){return '<div class="card" onclick="modLaunch(\''+esc(cl.rel)+'\')" style="cursor:pointer"><h3><span>'+esc(cl.name)+'</span>'+(cl.partner?'<span class="badge" style="background:#8b5cf622;color:#a78bfa">'+esc(cl.partner)+'</span>':'')+'</h3>'
+function clientCard(cl){return '<div class="card" onclick="modLaunch(\''+esc(cl.rel)+'\')" style="cursor:pointer"><h3><span>'+esc(cl.name)+'</span>'+(cl.partner?'<span class="badge bdg-violet">'+esc(cl.partner)+'</span>':'')+'</h3>'
   +'<div class="meta">'+e2(cl.summary||'')+'</div>'
-  +((cl.tools||[]).length?'<div style="margin-top:7px;display:flex;gap:4px;flex-wrap:wrap">'+cl.tools.map(function(x){return '<span class="badge" style="background:#c9a22722;color:var(--accent)">'+esc(x)+'</span>';}).join('')+'</div>':'<div class="meta sub" style="margin-top:6px">no tools applied yet</div>')
+  +((cl.tools||[]).length?'<div style="margin-top:7px;display:flex;gap:4px;flex-wrap:wrap">'+cl.tools.map(function(x){return '<span class="badge bdg-gold">'+esc(x)+'</span>';}).join('')+'</div>':'<div class="meta sub" style="margin-top:6px">no tools applied yet</div>')
   +'<div class="meta sub" style="margin-top:6px">'+(cl.artifacts||0)+' artifact folder(s)</div>'
   +((window.CC&&window.CC.google)?('<div class="btns" style="margin-top:8px" onclick="event.stopPropagation()"><button class="mini" onclick="mlClientMail(\''+esc(cl.rel)+'\',\''+esc(cl.name)+'\')">Mail</button></div>'):'')
   +'</div>';}
@@ -16513,7 +16531,7 @@ async function loadCapture(){
   var clips=d.clips||[];var props=d.proposals||[];var clients=d.clients||[];
   var pend=clips.filter(function(c){return c.status==='pending';});
   var bysub=d.by_subject||{};
-  var subjChips=Object.keys(bysub).sort().map(function(s){return '<span class="badge" style="background:#bc8cff22;color:#bc8cff">'+esc(s||'(no subject)')+' '+bysub[s]+'</span>';}).join(' ');
+  var subjChips=Object.keys(bysub).sort().map(function(s){return '<span class="badge bdg-lilac">'+esc(s||'(no subject)')+' '+bysub[s]+'</span>';}).join(' ');
   var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#9986;&#65039; Capture</b> <span class="sub">'+pend.length+' clip(s) pending &middot; '+props.length+' proposal(s) to review</span> <button class="mini go" onclick="capProcess()">&#9889; Process clips</button></div>'
     +'<div class="meta" style="margin-top:8px">Anything you save from where you work lands here and is ingested into your context store. <b>Process clips</b> clusters them per subject and proposes a dated <code>CC:CLIPS</code> note + tasks &mdash; review-first, nothing edits a file until you approve.</div>'
     +(subjChips?'<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">'+subjChips+'</div>':'')+'</div>';
@@ -16559,8 +16577,8 @@ async function loadCapture(){
 async function loadContext(){
   let s={};try{s=await(await fetch('/api/context/stats')).json();}catch(e){}
   let cs={};try{cs=await(await fetch('/api/context-settings')).json();}catch(e){}
-  const kinds=Object.entries(s.by_kind||{}).map(function(kv){return '<span class="badge" style="background:#1f6feb22;color:#58a6ff">'+esc(kv[0])+' '+kv[1]+'</span>';}).join(' ');
-  const srcs=Object.entries(s.by_source||{}).map(function(kv){return '<span class="badge" style="background:#3fb95022;color:#3fb950">'+esc(kv[0])+' '+kv[1]+'</span>';}).join(' ');
+  const kinds=Object.entries(s.by_kind||{}).map(function(kv){return '<span class="badge bdg-azure">'+esc(kv[0])+' '+kv[1]+'</span>';}).join(' ');
+  const srcs=Object.entries(s.by_source||{}).map(function(kv){return '<span class="badge bdg-green">'+esc(kv[0])+' '+kv[1]+'</span>';}).join(' ');
   let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#129504; Context</b> <span class="sub">'+(s.events||0)+' events &middot; '+(s.entities||0)+' entities &middot; '+(s.fts?'FTS5':'LIKE')+'</span><div style="margin-left:auto;display:flex;gap:6px"><button class="mini go" onclick="ctxBackfill()">&#8635; Re-ingest</button></div></div>'
     +'<div class="meta" style="margin-top:8px">Everything ClaudeFather knows, each item carrying where it came from and how much to trust it. Completeness lives here; the router hands each agent a small, cited slice on demand &mdash; never the whole pile (too much context makes the model worse, not better).</div>'
     +(kinds?'<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">'+kinds+'</div>':'')
@@ -16602,7 +16620,7 @@ async function ctxScoutGo(){
       var ref=it.refs||{};var loc=ref.url||ref.link||(ref.rel?('file: '+ref.rel):'')||(ref.thread?('thread '+ref.thread):'');
       var open=ref.url?('<a href="'+esc(ref.url)+'" target="_blank" rel="noopener">open &#8599;</a>'):(loc?('<span class="sub">'+e2(loc)+'</span>'):'');
       return '<div style="display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--line)">'
-        +'<span class="badge" style="background:#1f6feb22;color:#58a6ff;flex:0 0 auto">'+esc(it.kind)+'</span>'
+        +'<span class="badge bdg-azure" style="flex:0 0 auto">'+esc(it.kind)+'</span>'
         +'<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:12.5px">'+e2(it.title||'(untitled)')+'</div>'
         +'<div class="sub" style="margin-top:1px">'+e2(it.why||'')+(open?(' &middot; '+open):'')+'</div></div></div>';
     }).join('');
@@ -16766,7 +16784,7 @@ async function ctxAssemble(){
   h+=b.items.map(function(it){
     var tcol=it.trust>=3?'#3fb950':it.trust>=2?'#58a6ff':it.trust>=1?'#d29922':'#8b949e';
     return '<div class="card" style="cursor:default;border-left:3px solid '+tcol+'"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b>'+e2(it.title||it.kind)+'</b>'
-      +'<span class="badge" style="background:#0006;color:var(--mut)">'+esc(it.kind)+' &middot; '+esc(it.source)+'</span>'
+      +'<span class="badge bdg-ink">'+esc(it.kind)+' &middot; '+esc(it.source)+'</span>'
       +'<span class="badge" style="background:'+tcol+'22;color:'+tcol+'">trust '+it.trust+'</span>'
       +'<span class="sub" style="margin-left:auto">'+ago(Date.now()/1000-it.ts)+' ago &middot; score '+it.score+'</span></div>'
       +(it.snippet?'<div class="meta" style="margin-top:5px">'+e2(it.snippet)+'</div>':'')+'</div>';
@@ -19391,7 +19409,7 @@ async function loadHandoffs(){
     +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px"><input id="hoRouteQ" placeholder="try the router: type a topic&hellip;" style="'+COMMS_INP+';flex:1;min-width:200px" onkeydown="if(event.key===\'Enter\')hoRoute()"><button class="mini" onclick="hoRoute()">Where would this go?</button></div><div id="hoRouteOut" class="meta" style="margin-top:6px"></div></div>';
   if(!proposed.length) h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="meta">No transfers awaiting. When a conversation needs to move homes, it shows up here for your one-click confirm.</div></div>';
   proposed.forEach(function(p){h+=hoCard(p,true);});
-  if(done.length){h+='<div class="card" style="cursor:default;grid-column:1/-1"><b style="font-size:12.5px;color:var(--mut)">Recent</b>'+done.map(function(p){return '<div style="padding:6px 0;border-top:1px solid var(--line);font-size:12px"><span class="badge" style="background:#2a2a33;color:var(--dim)">'+esc(p.status)+'</span> '+e2(p.from_scope||'?')+' &rarr; '+e2(p.to_scope||p.to_subject||'?')+' &middot; <span class="sub">'+e2((p.goal||'').slice(0,60))+'</span></div>';}).join('')+'</div>';}
+  if(done.length){h+='<div class="card" style="cursor:default;grid-column:1/-1"><b style="font-size:12.5px;color:var(--mut)">Recent</b>'+done.map(function(p){return '<div style="padding:6px 0;border-top:1px solid var(--line);font-size:12px"><span class="badge bdg-dim">'+esc(p.status)+'</span> '+e2(p.from_scope||'?')+' &rarr; '+e2(p.to_scope||p.to_subject||'?')+' &middot; <span class="sub">'+e2((p.goal||'').slice(0,60))+'</span></div>';}).join('')+'</div>';}
   var hy={};try{hy=await(await fetch('/api/hygiene')).json();}catch(e){}
   h+=hoHygieneCard(hy);
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
@@ -19570,7 +19588,7 @@ async function loadBuild(){
   var exts=d.custom||[];
   if(!exts.length){h+=empty("No custom extensions yet. Scaffold one above to start building.");}
   else exts.forEach(function(x){
-    var auth=x.authorized; var badge=auth==="custom"?'<span class="badge" style="background:#3fb95022;color:#3fb950">approved &middot; runnable</span>':'<span class="badge" style="background:#d2992222;color:#d29922">not approved</span>';
+    var auth=x.authorized; var badge=auth==="custom"?'<span class="badge bdg-green">approved &middot; runnable</span>':'<span class="badge bdg-amber">not approved</span>';
     h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3 style="display:flex;align-items:center;gap:9px"><span>&#129520; '+e2(x.name||x.id)+'</span> '+badge+'</h3>'
       +'<div class="meta sub">'+e2(x.summary||"")+'</div>'
       +'<div class="meta sub" style="margin-top:3px">id: <code>'+esc(x.id)+'</code> &middot; functions: '+esc((x.functions||[]).join(", ")||"none")+' &middot; edit: <code>custom/extensions/'+esc(x.id)+'/server/run.py</code></div>'
@@ -19982,7 +20000,7 @@ async function subagentsSection(){
     +'<div class="meta" style="margin-top:6px">Build a team: tick the teammates you want below, then <b>Open team session</b> — a lead opens pre-briefed with exactly that team (it delegates to them via the Agent tool) and you give it the assignment in the session.</div></div>';
   if(!subs.length){return h+empty("No subagent defs found under .claude/agents/.");}
   subs.forEach(s=>{h+='<div class="card" style="cursor:default"><h3><span><input type="checkbox" class="teamck" value="'+esc(s.slug)+'" onchange="teamCount()" title="add to the team" style="margin-right:7px;vertical-align:middle"> '+esc(s.slug||'?')+'</span>'
-    +'<span class="badge" style="background:#10b98122;color:#34d399">'+esc(s.scope||'')+'</span></h3>'
+    +'<span class="badge bdg-teal">'+esc(s.scope||'')+'</span></h3>'
     +'<div class="sub" style="margin-top:7px;min-height:18px">'+e2(s.description||'(no description — invisible to the orchestrator at selection time)')+'</div>'
     +'<div class="meta" style="margin-top:8px">tools: <code>'+esc(s.tools||'(all)')+'</code> · model: <code>'+esc(s.model||'inherit')+'</code></div></div>';});
   return h;}
@@ -20025,8 +20043,8 @@ async function loadSkills(){document.getElementById("grid").innerHTML=empty("Loa
   sk.forEach(s=>{const col=s.scope=='user'?'#3b82f6':'#3fb950';
     h+='<div class="card" style="cursor:default"><h3><span>'+esc(s.name)+'</span><span style="display:flex;gap:5px">'
       +'<span class="badge" style="background:'+col+'22;color:'+col+'">'+s.scope+'</span>'
-      +'<span class="badge" style="background:#8b5cf622;color:#a78bfa">'+esc(s.invocation)+'</span>'
-      +((s.lint&&s.lint.length)?'<span class="badge" style="background:#f8514922;color:#f85149" title="'+esc(s.lint.join(", "))+'">⚠ '+s.lint.length+'</span>':'')+'</h3>'
+      +'<span class="badge bdg-violet">'+esc(s.invocation)+'</span>'
+      +((s.lint&&s.lint.length)?'<span class="badge bdg-red" title="'+esc(s.lint.join(", "))+'">⚠ '+s.lint.length+'</span>':'')+'</h3>'
       +'<div class="sub" style="margin-top:6px">'+e2(s.description||'(no description — Claude can\'t tell when to use this)')+'</div>'
       +((s.lint&&s.lint.length)?'<div class="meta" style="margin-top:4px;color:#f85149">⚠ lint: '+esc(s.lint.join(", "))+'</div>':'')
       +(s.when_to_use?'<div class="meta" style="margin-top:4px">when: '+e2(s.when_to_use)+'</div>':'')
@@ -20065,12 +20083,12 @@ async function loadTeams(){document.getElementById("grid").innerHTML=empty("Load
   if(!tm.length){h+=empty("No teams yet. Add one: teams/<slug>/TEAM.md with a 3–5 member roster, each a distinct lens + files.");document.getElementById("grid").innerHTML=h;return;}
   tm.forEach(t=>{
     h+='<div class="card" style="cursor:default"><h3><span>'+esc(t.name)+'</span>'
-      +'<span class="badge" style="background:#8b5cf622;color:#a78bfa">'+(t.n_members||0)+' members</span></h3>'
+      +'<span class="badge bdg-violet">'+(t.n_members||0)+' members</span></h3>'
       +'<div class="sub" style="margin-top:6px">'+e2(t.description||'(no description — the model can\'t tell when to convene this team)')+'</div>'
       +(t.when_to_use?'<div class="meta" style="margin-top:4px">when: '+e2(t.when_to_use)+'</div>':'');
     (t.members||[]).forEach(m=>{
       h+='<div style="margin-top:7px;padding:6px 0;border-top:1px solid var(--line)"><b>'+esc(m.name||'?')+'</b>'
-        +(m.lens?' <span class="badge" style="background:#3b82f622;color:#60a5fa">'+e2(m.lens)+'</span>':'')
+        +(m.lens?' <span class="badge bdg-blue2">'+e2(m.lens)+'</span>':'')
         +(m.objective?'<div class="sub" style="margin-top:3px">'+e2(m.objective)+'</div>':'')
         +(m.files?'<div class="meta" style="margin-top:2px">files: <code>'+e2(m.files)+'</code></div>':'')+'</div>';});
     h+='<div class="btns" style="margin-top:10px"><button class="mini" onclick="teamView(\''+esc(t.slug)+'\')">View TEAM.md</button>'
@@ -20112,7 +20130,7 @@ async function loadAudit(){document.getElementById("grid").innerHTML=empty("Runn
       +'<div class="sub" style="margin-top:6px">'+e2(a.description||'(no description — invisible to the model)')+'</div>'
       +'<div class="btns" style="margin-top:10px"><button class="mini" onclick="auditRun(\''+esc(a.block||'')+'\',\''+esc(slug)+'\')">▶ Live audit-run</button></div></div>';});
   if(ov.length){h+='<div class="card" style="cursor:default;grid-column:1/-1"><div style="font-weight:700;margin-bottom:6px">Overlapping descriptions (merge or disambiguate)</div>';
-    ov.forEach(o=>{h+='<div style="padding:8px 0;border-top:1px solid var(--line)"><b>'+esc(o.a)+'</b> ⇄ <b>'+esc(o.b)+'</b> <span class="badge" style="background:#d2992222;color:#d29922">'+o.score+'</span><div class="meta" style="margin-top:3px">shared: '+esc((o.shared||[]).join(', '))+'</div></div>';});
+    ov.forEach(o=>{h+='<div style="padding:8px 0;border-top:1px solid var(--line)"><b>'+esc(o.a)+'</b> ⇄ <b>'+esc(o.b)+'</b> <span class="badge bdg-amber">'+o.score+'</span><div class="meta" style="margin-top:3px">shared: '+esc((o.shared||[]).join(', '))+'</div></div>';});
     h+='</div>';}
   document.getElementById("grid").innerHTML=h;}
 async function auditRun(block,slug){if(!block||!slug)return;
@@ -20263,8 +20281,8 @@ function renderBackup(){if(!BACKUP)return;const b=BACKUP,st=b.state||{},lv=b.liv
   else if(lastSucc>5*3600){light='#d29922';label='Stale';sub='last successful backup '+tago(st.last_success);}
   else if((lv.ahead||0)>0||(lv.uncommitted||0)>0){light='#d29922';label='Pending';sub=(lv.uncommitted||0)+' uncommitted · '+(lv.ahead||0)+' to push';}
   let h='<div class="card" style="cursor:default"><div class="modnav"><b>Backup</b> <span class="sub">'+esc(lv.remote||'')+' · '+esc(lv.branch||'?')+' · '+(b.scheduled||'')+'</span>'
-    +'<span class="badge" style="background:#c9a22722;color:var(--accent);margin-left:8px" title="storage strategy (cc.config storage_mode)">'+esc(b.storage_mode||'github')+'</span>'
-    +((b.icloud&&b.icloud.warn)?'<span class="badge" style="background:#f8514922;color:#f85149;margin-left:6px" title="'+esc(b.icloud.warn)+'">⚠ iCloud path</span>':((b.icloud&&b.icloud.under_icloud_path)?'<span class="badge" style="background:#22c55e22;color:#22c55e;margin-left:6px" title="project is under the iCloud-synced folder">✓ iCloud synced</span>':''))
+    +'<span class="badge bdg-gold" style="margin-left:8px" title="storage strategy (cc.config storage_mode)">'+esc(b.storage_mode||'github')+'</span>'
+    +((b.icloud&&b.icloud.warn)?'<span class="badge bdg-red" style="margin-left:6px" title="'+esc(b.icloud.warn)+'">⚠ iCloud path</span>':((b.icloud&&b.icloud.under_icloud_path)?'<span class="badge bdg-ok" style="margin-left:6px" title="project is under the iCloud-synced folder">✓ iCloud synced</span>':''))
     +'<div style="margin-left:auto"><button class="mini go" id="bknow" onclick="backupNow()">▶ Back up now</button></div></div>'
     +'<div style="display:flex;align-items:center;gap:14px;margin-top:13px;flex-wrap:wrap">'
     +'<span style="width:16px;height:16px;border-radius:50%;background:'+light+';box-shadow:0 0 14px '+light+'99;flex:0 0 16px"></span>'
@@ -20629,7 +20647,7 @@ async function loadDoctor(){
   g.innerHTML=h;
 }
 function docCard(b){const ok=b.targets&&b.insync==b.targets;const col=ok?"#3fb950":(b.present?"#d29922":"#f85149");
-  return '<div class="card" style="cursor:default"><h3><span>📘 '+b.title+'</span><span class="badge" style="background:#58a6ff22;color:#58a6ff">v'+b.version+'</span></h3>'
+  return '<div class="card" style="cursor:default"><h3><span>📘 '+b.title+'</span><span class="badge bdg-cyan">v'+b.version+'</span></h3>'
    +'<div class="meta">Scope: '+(SCOPELABEL[b.scope]||b.scope)+(b.hasStub?" · has bucket stub":"")+'</div>'
    +'<div class="meta" style="color:'+col+'">'+b.insync+'/'+b.targets+' folders in sync'+(b.present>b.insync?(" · "+(b.present-b.insync)+" on an old version"):"")+'</div>'
    +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="applyBlock(\''+b.id+'\')">▶ Apply</button>'
@@ -20863,7 +20881,7 @@ function tkCard(t){
     +'<div class="cc-ic">'+tkSrcIcon(t)+'</div>'
     +'<div class="cc-main">'
       +'<div class="cc-ti"'+(t.status==='done'?' style="opacity:.6;text-decoration:line-through"':'')+'>'+esc(t.title)+'</div>'
-      +'<div class="cc-mt">'+(cl?'<span class="locchip">📍 '+esc(cl)+'</span>':'')+tkDueLabel(t)+(t.status==='doing'?'<span class="badge" style="background:#3fb95022;color:#3fb950">running</span>':'')+tkSrcLink(t)+conf+'</div>'
+      +'<div class="cc-mt">'+(cl?'<span class="locchip">📍 '+esc(cl)+'</span>':'')+tkDueLabel(t)+(t.status==='doing'?'<span class="badge bdg-green">running</span>':'')+tkSrcLink(t)+conf+'</div>'
       +(t.detail?'<div class="cc-dt">'+esc(t.detail)+'</div>':'')
     +'</div>'
     +'<div class="cc-acts">'+acts+'</div></div>';
