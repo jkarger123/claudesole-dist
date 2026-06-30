@@ -9484,10 +9484,16 @@ def handoff_accept(hid, force_new=False):
     return {"ok": True, "session": res.get("session"), "to_scope": to_rel, "created_home": created,
             "resumed": bool(res.get("resumed")), "term": res.get("term")}
 
-def handoff_decline(hid, reason=""):
+def handoff_decline(hid, reason="", suppress=True):
     d = _hand_load(); pkt = next((h for h in d.get("handoffs", []) if h["id"] == hid), None)
     if not pkt: return {"ok": False, "error": "no such handoff"}
     pkt["status"] = "declined"; pkt["decline_reason"] = (reason or "")[:200]; _hand_save(d)
+    # STICKY DECLINE: "keep it here -- don't suggest this again." Remember the topic the operator chose to keep in
+    # place so the server-side drift sweep won't re-propose the SAME move. (A genuinely NEW drift later still asks.)
+    fs = pkt.get("from_session")
+    if suppress and fs and pkt.get("by") == "auto-housekeeping":
+        topic = _norm_toks(_smeta(fs).get("recent_kw") or "") or _norm_toks(pkt.get("goal") or "")
+        if topic: _smeta_set(fs, drift_suppress_topic=" ".join(sorted(topic)), drift_suppress_ts=time.time())
     return {"ok": True}
 
 def handoffs_list(status=None):
@@ -9783,6 +9789,8 @@ def _drift_sweep():
         if not rk or not stok: continue
         checked += 1
         if len(rk & stok) > 0: continue                            # still on-lane
+        sup = _norm_toks(m.get("drift_suppress_topic") or "")      # operator declined this drift before ("keep it here")
+        if sup and (len(rk & sup) / float(len(rk))) >= 0.5: continue
         if s in open_for: continue                                 # already an open proposal for this one
         if (time.time() - float(m.get("drift_proposed_ts") or 0)) < _DRIFT_REPROPOSE_SEC: continue
         topic = " ".join(sorted(rk))
@@ -14287,6 +14295,15 @@ body.ss-dragging .basketwrap{box-shadow:0 0 0 2px rgba(var(--accent-rgb),.35) in
 #opAlert .opa-x:hover{color:#fff}
 #opAlert .opa-body{font-size:12.5px;color:var(--near,#e8e8ef);margin:8px 0 11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto}
 #opAlert .opa-act{text-align:right}
+/* gentle warm-transfer prompt (gold, no pulse, stacked above the red notes alert) -- suggestion, not alarm */
+#hoAlert{position:fixed;right:18px;bottom:200px;z-index:99997;width:344px;max-width:calc(100vw - 36px);background:#15151c;border:1.5px solid rgba(var(--accent-rgb),.65);border-radius:14px;box-shadow:0 14px 50px rgba(0,0,0,.6),0 0 0 4px rgba(var(--accent-rgb),.13);padding:13px 15px;transform:translateY(28px) scale(.96);opacity:0;pointer-events:none;transition:all .28s cubic-bezier(.2,.8,.25,1)}
+#hoAlert.show{transform:none;opacity:1;pointer-events:auto}
+#hoAlert .opa-h{display:flex;align-items:center;gap:8px;font-size:13px;color:#fff}
+#hoAlert .opa-h b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#hoAlert .opa-dot{width:9px;height:9px;border-radius:50%;background:var(--accent);flex:0 0 auto;box-shadow:0 0 8px var(--accent)}
+#hoAlert .opa-x{cursor:pointer;color:var(--dim);font-size:18px;line-height:1;flex:0 0 auto}#hoAlert .opa-x:hover{color:#fff}
+#hoAlert .opa-body{font-size:12.5px;color:#e8e8ef;margin:8px 0 11px;line-height:1.45;word-break:break-word}
+#hoAlert .opa-act{display:flex;gap:7px;justify-content:flex-end}
 #main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .topbar{display:flex;align-items:center;gap:12px;padding:15px 24px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 .topbar h2{margin:0;font-size:19px;font-weight:800;flex:0 0 auto;letter-spacing:.2px}
@@ -19578,14 +19595,33 @@ function hoCard(p,active){
     +(p.next?'<div class="meta" style="margin-top:4px"><b>Next:</b> '+e2(p.next)+'</div>':'')
     +(ptr?'<div class="meta" style="margin-top:6px"><b>Pointers it&rsquo;ll carry:</b><ul style="margin:4px 0 0 16px">'+ptr+'</ul></div>':'')
     +flag
-    +(active?'<div style="margin-top:10px;display:flex;gap:8px;align-items:center"><button class="mini go" onclick="hoAccept(\''+esc(p.id)+'\')">&#128260; Warm-transfer there</button><button class="mini" onclick="hoDecline(\''+esc(p.id)+'\')">Decline</button><a href="#" class="sub" style="margin-left:auto;font-size:11px" title="Open a separate parallel session instead of resuming the home agent already there" onclick="event.preventDefault();hoAccept(\''+esc(p.id)+'\',true)">open separate</a></div>':'')
+    +(active?'<div class="meta" style="margin-top:8px"><b>If you move it:</b> '+(p.needs_new_home?('a new <code>'+esc(p.to_subject||'home')+'</code> folder is created under <code>'+esc(p.suggested_parent||'(root)')+'</code> and an agent opens there'):('the agent in <code>'+esc(p.to_scope||'?')+'</code> opens (or resumes)'))+', handed this conversation&rsquo;s goal + the pointers above. Your current session stays put. <b>Keep it here</b> declines &mdash; and won&rsquo;t suggest this move again.</div>':'')
+    +(active?'<div style="margin-top:10px;display:flex;gap:8px;align-items:center"><button class="mini go" onclick="hoAccept(\''+esc(p.id)+'\')">&#128260; Move it there</button><button class="mini" title="keep this conversation here -- and stop suggesting this move" onclick="hoDecline(\''+esc(p.id)+'\')">Keep it here</button><a href="#" class="sub" style="margin-left:auto;font-size:11px" title="Open a separate parallel session instead of resuming the home agent already there" onclick="event.preventDefault();hoAccept(\''+esc(p.id)+'\',true)">open separate</a></div>':'')
     +'</div>';
 }
 async function hoAccept(id,forceNew){toast('Opening the right place&hellip;',2500);try{var r=await(await fetch('/api/handoff-accept',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,force_new:!!forceNew})})).json();if(r.ok){toast((r.resumed?'Resumed the home agent in ':'Opened ')+esc(r.to_scope)+(r.created_home?' (new home created)':''),5000);if(r.session){try{gotoLens('sessions');}catch(e){}setTimeout(function(){try{openInSessions(r.session);}catch(e){}},300);return;}}else{toast('Accept failed: '+esc(r.error||''),4500);}}catch(e){toast('Accept failed',3500);}loadHandoffs();}
 async function hoDecline(id){try{await fetch('/api/handoff-decline',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});}catch(e){}toast('Declined',2000);loadHandoffs();}
 async function hoRoute(){var el=document.getElementById('hoRouteOut');var q=((document.getElementById('hoRouteQ')||{}).value||'').trim();if(!q){el.innerHTML='';return;}el.innerHTML='Routing&hellip;';try{var d=await(await fetch('/api/route?q='+encodeURIComponent(q))).json();if(d.needs_new_home){el.innerHTML='&rarr; <b style="color:var(--accent)">No home yet</b> &mdash; would create one under <code>'+esc(d.suggested_parent||'(root)')+'</code>.';}else{var dd=d.destination||{};el.innerHTML='&rarr; <code>'+esc(dd.rel)+'</code> <span class="sub">('+Math.round((dd.confidence||0)*100)+'% match)</span>'+((d.alternatives&&d.alternatives.length>1)?(' &middot; also: '+d.alternatives.slice(1,4).map(function(a){return '<code>'+esc(a.rel)+'</code>';}).join(', ')):'');}}catch(e){el.innerHTML='route failed';}}
 function hoSetBadge(n){var b=document.getElementById('transfersBadge');if(b){if(n>0){b.textContent=n>99?'99+':n;b.style.display='inline-block';}else{b.textContent='';b.style.display='none';}}try{paintNavNotif();}catch(e){}}
-async function hoBadgePoll(){try{var d=await(await fetch('/api/handoffs?status=proposed')).json();hoSetBadge(d.proposed||0);}catch(e){}}
+var HO_ALERT_SEEN={};
+async function hoBadgePoll(){try{var d=await(await fetch('/api/handoffs?status=proposed')).json();hoSetBadge(d.proposed||0);
+  var top=(d.handoffs||[])[0];
+  if(top&&LENS!=="handoffs"&&!HO_ALERT_SEEN[top.id])hoShowAlert(top);
+  else if(!d.proposed)hoHideAlert();
+}catch(e){}}
+// GENTLE prompt when a conversation drifts -- it pops up, clearly says what it'd do, and is one tap to dismiss.
+function hoShowAlert(p){var el=document.getElementById("hoAlert");
+  if(!el){el=document.createElement("div");el.id="hoAlert";document.body.appendChild(el);}
+  var topic=(p.goal||'').replace(/^work moved to:\s*/i,'').slice(0,72)||'a new topic';
+  var dest=p.needs_new_home?('a new '+e2(p.to_subject||'home')):('<code>'+e2(p.to_scope||'?')+'</code>');
+  el.innerHTML='<div class="opa-h"><span class="opa-dot"></span><b>This looks like it belongs elsewhere</b><span class="opa-x" title="dismiss" onclick="hoAlertDismiss(\''+esc(p.id)+'\')">&times;</span></div>'
+    +'<div class="opa-body">A conversation in <code>'+e2(p.from_scope||'?')+'</code> drifted to &ldquo;'+e2(topic)+'&rdquo;. It belongs in '+dest+' &mdash; want to move it there?</div>'
+    +'<div class="opa-act"><button class="mini" onclick="hoAlertDismiss(\''+esc(p.id)+'\')">Not now</button><button class="mini go" onclick="hoAlertOpen()">Review the move</button></div>';
+  el.classList.add("show");
+}
+function hoHideAlert(){var el=document.getElementById("hoAlert");if(el)el.classList.remove("show");}
+function hoAlertDismiss(id){if(id)HO_ALERT_SEEN[id]=1;hoHideAlert();}
+function hoAlertOpen(){hoHideAlert();try{gotoLens('handoffs');}catch(e){}}
 async function loadNotes(){
   var box=document.getElementById("grid");if(!box)return;
   var d={};try{d=await(await fetch("/api/opnotes")).json();}catch(e){box.innerHTML=empty("Couldn't load notes.");return;}

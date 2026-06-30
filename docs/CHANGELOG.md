@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.68 -- 2026-06-30
+- Warm-transfer UX (James's spec): the drift proposal is now transparent + gently insistent + opt-out.
+  - GENTLE POP-UP: when a conversation drifts, a dismissible gold corner prompt appears on ANY lens -- "this looks
+    like it belongs elsewhere: <from> drifted to <topic>, belongs in <dest> -- want to move it there?" with
+    Not now / Review the move. Suggestion, not alarm (no red, no pulse).
+  - CLEARER CARD: spells out exactly what accepting does (open/resume the home agent, or CREATE a new <subject>
+    folder under <parent>), notes your current session stays put. Buttons: "Move it there" / "Keep it here".
+  - STICKY DECLINE: "Keep it here" now suppresses that same drift so it is NOT re-proposed (topic-keyed; a
+    genuinely new drift later still asks). Proven: propose -> decline -> next pass proposes 0.
+
 ## 0.99.67 -- 2026-06-30
 - WARM TRANSFER + HOUSEKEEPING, now ENFORCED by the platform (not just asked of the agent). Root cause of "no
   agent ever passed me off": the transfer was an ADVISORY line in the agent's prompt that models never self-act
