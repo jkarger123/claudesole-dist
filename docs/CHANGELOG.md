@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.67 -- 2026-06-30
+- WARM TRANSFER + HOUSEKEEPING, now ENFORCED by the platform (not just asked of the agent). Root cause of "no
+  agent ever passed me off": the transfer was an ADVISORY line in the agent's prompt that models never self-act
+  on (0 proposals in the system's entire history). Fix = the server now does the watching.
+  - `_drift_sweep()` (in the hourly housekeeping pass): watches every live SCOPED work conversation, and when its
+    topic has drifted off the folder it sits in, the SERVER proposes a warm transfer to the right home -- routed
+    deterministically, with the `smart` subscription model confirming ambiguous cases (high-precision, deduped,
+    6h cooldown). Proven live: a read_write session working on patches -> auto-proposed read_write->patches (90%).
+  - VISIBLE housekeeping: new `Automatic housekeeping` digest card in the Transfers lens (+ `/api/housekeeping-digest`,
+    `/api/housekeeping-run` to run a pass on demand) -- shows conversations watched, transfers proposed, idle retired,
+    doc issues, map regen, + a recent-activity timeline. The discipline is no longer invisible.
+  - Archive tuning: service/infra sessions (node servers / live product / brain) are now protected from auto-archive
+    (`_is_service_session`), so reconcile only retires real idle WORK conversations.
+
 ## 0.99.66 -- 2026-06-30
 - DESIGN SYSTEM LOCKED IN (so the unified look never needs re-sweeping):
   - Finished the de-emoji sweep -- extended it to card titles/headers/labels (h3/h2/span/label/summary), removing

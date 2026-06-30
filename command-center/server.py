@@ -9648,7 +9648,8 @@ def resume_archived(name):
     return res
 
 def _archive_eligible(name):
-    if name == CHIEF or name.startswith(("admin-", "chief", "ralph-")): return False   # protected
+    if name == CHIEF or name.startswith(("admin-", "chief", "ralph-")): return False   # protected (system)
+    if _is_service_session(name): return False                                         # protected (node server / live product)
     m = _smeta(name)
     if m.get("pin") or m.get("agent_hold"): return False
     if float(m.get("hold_until") or 0) > time.time(): return False
@@ -9740,19 +9741,101 @@ def context_settings():
 # surfaces NEW issues (over-budget CLAUDE.md, managed-block drift, missing docs) -- logged, and ERRORs notified
 # ONCE/day per issue (anti-spam). Idempotent + cheap; runs in a daemon thread so it never blocks serving.
 _HOUSEKEEP_LOG = os.path.join(STATE_DIR, "_housekeeping.log")
+_HOUSEKEEP_DIGEST = os.path.join(STATE_DIR, "_housekeeping_digest.json")   # last-pass summary, for the visible digest
 _HOUSEKEEP_SEEN = {}
+_DRIFT_REPROPOSE_SEC = 6 * 3600        # don't re-propose the same drifting conversation more than ~once/6h
+
+def _is_service_session(name):
+    """Infra/service tmux sessions that are NOT user conversations -- never drift-sweep or auto-archive them
+    (they're the node dashboards / live product / brain). Protects against retiring a running server."""
+    if name in ("hpcc", "t2tbridge", "t2tcrons"): return True
+    if name.startswith("cc-") and not name.startswith("cc-uw"): return True   # cc-<node> server; cc-uw-* = user work
+    return False
+
+def _confirm_drift_llm(rel, summ, topic, dest_name):
+    """High-precision gate for AMBIGUOUS drift: ask the cheap subscription model (free) whether the conversation
+    has genuinely moved to a topic that belongs elsewhere. Returns False on any failure (fail-closed = no spam)."""
+    q = ("A work conversation is filed under the folder '%s' (%s). Its recent activity is about: \"%s\". "
+         "Has it clearly MOVED to a different topic that belongs elsewhere (e.g. %s), rather than still being part "
+         "of '%s'? Answer ONLY yes or no." % (os.path.basename(rel), (summ or "no summary")[:140], topic[:200],
+                                              dest_name or "another area", os.path.basename(rel)))
+    a = _claude_text(q, model="claude-haiku-4-5", timeout=25)
+    return bool(a and a.strip().lower().startswith("y"))
+
+def _drift_sweep():
+    """SERVER-SIDE warm transfer: instead of waiting for an agent to notice it's off-lane (which it ~never does),
+    WE watch every live work conversation and PROPOSE a handoff when its topic has drifted out of the folder it
+    sits in. Deterministic-first (lexical drift + router); the `smart` model only confirms ambiguous cases. The
+    proposal lands in the Transfers tab for one-click confirm -- the platform observes, you decide."""
+    if CC.get("handoff", True) is False:
+        return {"checked": 0, "proposed": []}
+    cand_sum = {c["rel"]: c["summary"] for c in _scope_candidates()}
+    open_for = {h.get("from_session") for h in _hand_load().get("handoffs", []) if h.get("status") == "proposed"}
+    checked = 0; proposed = []
+    for s in _live_sessions():
+        if s == CHIEF or s.startswith(("admin-", "ralph-", "chief")) or _is_service_session(s): continue
+        rel = _session_scope(s)
+        if rel is None: continue                                   # no lane (not in the project tree) -> skip
+        m = _smeta(s)
+        if m.get("pin") or m.get("agent_hold"): continue
+        rk = _norm_toks(m.get("recent_kw") or "")
+        stok = _norm_toks(os.path.basename(rel) + " " + (cand_sum.get(rel) or ""))
+        if not rk or not stok: continue
+        checked += 1
+        if len(rk & stok) > 0: continue                            # still on-lane
+        if s in open_for: continue                                 # already an open proposal for this one
+        if (time.time() - float(m.get("drift_proposed_ts") or 0)) < _DRIFT_REPROPOSE_SEC: continue
+        topic = " ".join(sorted(rk))
+        routed = route(topic, exclude=rel)
+        dest = routed.get("destination")
+        if dest and dest.get("rel") == rel: continue
+        if not dest and not routed.get("needs_new_home"): continue
+        conf = (dest or {}).get("confidence") or 0.0
+        if conf < 0.45:                                            # ambiguous -> require model confirmation
+            if CC.get("smart", True) is False: continue
+            if not _confirm_drift_llm(rel, cand_sum.get(rel) or "", topic, (dest or {}).get("name") or ""):
+                continue
+        r = handoff_propose(from_session=s, to=None, goal=("work moved to: " + topic[:110]),
+                            summary=("Auto-detected by housekeeping: this conversation in '%s' is now working on '%s', "
+                                     "which is off-lane. Confirm to hand it to the right home." % (rel, topic[:140])),
+                            by="auto-housekeeping")
+        _smeta_set(s, drift_proposed_ts=time.time())
+        if r.get("ok"):
+            ho = r["handoff"]
+            proposed.append({"session": s, "from": rel,
+                             "to": ho.get("to_scope") or ("NEW: " + (ho.get("to_subject") or "?")), "topic": topic[:90]})
+    return {"checked": checked, "proposed": proposed}
+
+def _housekeeping_digest_write(d):
+    try:
+        cur = load(_HOUSEKEEP_DIGEST, {"last": None, "recent": []})
+        cur["last"] = d
+        cur["recent"] = ([d] + cur.get("recent", []))[:30]
+        save(_HOUSEKEEP_DIGEST, cur)
+    except Exception: pass
+
+def housekeeping_digest():
+    """The visible record of what automatic housekeeping has been DOING -- so the discipline isn't invisible."""
+    cur = load(_HOUSEKEEP_DIGEST, {"last": None, "recent": []})
+    return {"ok": True, "last": cur.get("last"), "recent": cur.get("recent", [])[:30],
+            "on": CC.get("housekeeping", True) is not False}
+
 def _housekeeping_once():
+    archived = []; drift = {"checked": 0, "proposed": []}
     try: regen_all_children()        # regenerates every folder's CC:CHILDREN + the root CC:TREEMAP (idempotent)
     except Exception: pass
     try: _refresh_topics()           # keep live conversations' topics current (relevance-match + drift detection)
     except Exception: pass
+    try:                             # DRIFT SWEEP: propose warm transfers for conversations that wandered off-lane
+        if CC.get("handoff", True) is not False: drift = _drift_sweep()
+    except Exception: pass
     try:                             # RECONCILE: retire idle, harvested, un-held conversations (folders converge)
         if CC.get("reconcile", True) is not False:
-            r = reconcile_once()
-            if r.get("archived"):
+            r = reconcile_once(); archived = r.get("archived") or []
+            if archived:
                 with open(_HOUSEKEEP_LOG, "a") as f:
                     f.write(time.strftime("%Y-%m-%d %H:%M ") + "reconcile: archived %d idle conversation(s): %s\n"
-                            % (len(r["archived"]), ", ".join(r["archived"][:8])))
+                            % (len(archived), ", ".join(archived[:8])))
     except Exception: pass
     try: issues = (doctor() or {}).get("issues", [])
     except Exception: issues = []
@@ -9761,6 +9844,12 @@ def _housekeeping_once():
         key = (it.get("path", "") + "|" + (it.get("msg", "") or "")[:60])
         if now - _HOUSEKEEP_SEEN.get(key, 0) > 86400:     # once/day per distinct issue
             _HOUSEKEEP_SEEN[key] = now; fresh.append(it)
+    if drift.get("proposed"):
+        try:
+            with open(_HOUSEKEEP_LOG, "a") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M ") + "drift: proposed %d warm transfer(s): %s\n"
+                        % (len(drift["proposed"]), ", ".join("%s->%s" % (p["from"], p["to"]) for p in drift["proposed"][:6])))
+        except Exception: pass
     if fresh:
         try:
             with open(_HOUSEKEEP_LOG, "a") as f:
@@ -9771,7 +9860,14 @@ def _housekeeping_once():
         if errs:
             try: notify_send("ClaudeFather housekeeping: %d issue(s) to look at (Doctor): %s" % (len(errs), "; ".join((i.get("path") or "?") for i in errs[:4])))
             except Exception: pass
-    return {"issues": len(issues), "fresh": len(fresh)}
+    # DIGEST: the visible record of what this pass did (drives the Housekeeping card in the Transfers lens)
+    try:
+        _housekeeping_digest_write({"ts": int(time.time()), "map_regen": True,
+            "drift_checked": drift.get("checked", 0), "transfers_proposed": drift.get("proposed", []),
+            "archived": archived, "doc_issues_total": len(issues), "doc_issues_new": len(fresh),
+            "fresh_issues": [{"sev": i.get("sev"), "path": i.get("path"), "msg": (i.get("msg") or "")[:160]} for i in fresh[:8]]})
+    except Exception: pass
+    return {"issues": len(issues), "fresh": len(fresh), "drift": drift, "archived": archived}
 def _housekeeping_loop():
     time.sleep(150)                  # let boot + the first treemap/integrity passes settle
     while True:
@@ -12900,6 +12996,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(handoffs_list((q.get("status", [""])[0]) or None), default=str))
         if u.path == "/api/hygiene":    # workspace hygiene: conversations per folder + the resumable archive
             return self._s(200, json.dumps(hygiene(), default=str))
+        if u.path == "/api/housekeeping-digest":   # the visible record of what automatic housekeeping has been doing
+            return self._s(200, json.dumps(housekeeping_digest(), default=str))
         if u.path == "/api/system":  # self-describing capability map (runtime + surfaces) -- for UI gating + agents
             return self._s(200, json.dumps(system_info(), default=str))
         if u.path == "/api/browser/commands":  # the desktop browser polls for agent-queued commands (Browser v2)
@@ -13191,6 +13289,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/session-archive":   return self._s(200, json.dumps(_archive_session(body.get("name", ""), "manual"), default=str))
         if u.path == "/api/session-resume":    return self._s(200, json.dumps(resume_archived(body.get("name", "")), default=str))
         if u.path == "/api/reconcile":         return self._s(200, json.dumps(reconcile_once(), default=str))
+        if u.path == "/api/housekeeping-run":  return self._s(200, json.dumps({"ok": True, "result": _housekeeping_once(), "digest": housekeeping_digest().get("last")}, default=str))
         if u.path == "/api/module-remove": return self._s(200, json.dumps(module_remove(body.get("rel",""))))
         if u.path == "/api/module-combine":return self._s(200, json.dumps(module_combine(body.get("a",""), body.get("b",""))))
         if u.path == "/api/module-regen":  return self._s(200, json.dumps({"ok": True, "regenerated": regen_all_children()}))
@@ -19407,6 +19506,8 @@ async function loadHandoffs(){
   var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128260; Transfers &mdash; the warm-transfer desk</b> <span class="sub">'+proposed.length+' awaiting you</span></div>'
     +'<div class="meta" style="margin:6px 0">When an agent\'s conversation drifts out of its lane, it prepares a <b>warm transfer</b> &mdash; a packet (goal, where it left off, pointers) routed to the right home (created if none exists). You confirm; the next agent picks up in the right place with clean memory. You can always decline and keep going. Toggle it under <a href="#" onclick="event.preventDefault();gotoLens(\'context\')">Context engineering</a>.</div>'
     +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px"><input id="hoRouteQ" placeholder="try the router: type a topic&hellip;" style="'+COMMS_INP+';flex:1;min-width:200px" onkeydown="if(event.key===\'Enter\')hoRoute()"><button class="mini" onclick="hoRoute()">Where would this go?</button></div><div id="hoRouteOut" class="meta" style="margin-top:6px"></div></div>';
+  var dg={};try{dg=await(await fetch('/api/housekeeping-digest')).json();}catch(e){}
+  h+=hoDigestCard(dg);
   if(!proposed.length) h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="meta">No transfers awaiting. When a conversation needs to move homes, it shows up here for your one-click confirm.</div></div>';
   proposed.forEach(function(p){h+=hoCard(p,true);});
   if(done.length){h+='<div class="card" style="cursor:default;grid-column:1/-1"><b style="font-size:12.5px;color:var(--mut)">Recent</b>'+done.map(function(p){return '<div style="padding:6px 0;border-top:1px solid var(--line);font-size:12px"><span class="badge bdg-dim">'+esc(p.status)+'</span> '+e2(p.from_scope||'?')+' &rarr; '+e2(p.to_scope||p.to_subject||'?')+' &middot; <span class="sub">'+e2((p.goal||'').slice(0,60))+'</span></div>';}).join('')+'</div>';}
@@ -19415,6 +19516,27 @@ async function loadHandoffs(){
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
 }
 function hoDur(s){s=Math.max(0,s|0);return s<60?(s+'s'):s<3600?((s/60|0)+'m'):s<86400?((s/3600|0)+'h'):((s/86400|0)+'d');}
+// The VISIBLE record of what automatic housekeeping is doing -- so the discipline isn't invisible to the operator.
+function hoDigestCard(dg){
+  if(!dg||!dg.ok) return '';
+  var L=dg.last, on=dg.on;
+  var head='<div class="cc-panel"><div class="cc-p-h"><b>Automatic housekeeping</b> <span class="cc-p-sub">'+(on?'active':'<span style="color:#d29922">off</span>')+(L?(' &middot; last pass '+hoAgo(L.ts)+' ago'):' &middot; no pass yet')+'</span><span class="cc-p-act"><button class="mini go" onclick="hoRunHK()">Run a pass now</button></span></div>';
+  if(!L) return head+'<div class="cc-p-note" style="margin-top:0">Every hour the platform regenerates the module map, watches each live conversation for topic-drift (and proposes a warm transfer when one wanders off its lane), retires idle conversations, and runs Doctor. Hit <b>Run a pass now</b> to do one and see exactly what it did.</div></div>';
+  var chips='<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:10px">'
+    +'<span class="cc-chip"><b>'+(L.drift_checked||0)+'</b> conversations watched</span>'
+    +'<span class="cc-chip"><b>'+((L.transfers_proposed||[]).length)+'</b> transfers proposed</span>'
+    +'<span class="cc-chip"><b>'+((L.archived||[]).length)+'</b> idle retired</span>'
+    +'<span class="cc-chip"><b>'+(L.doc_issues_new||0)+'</b> new doc issues</span>'
+    +'<span class="cc-chip">module map regenerated</span></div>';
+  var det='';
+  if((L.transfers_proposed||[]).length) det+='<div class="cc-p-note"><b>Proposed transfers:</b> '+L.transfers_proposed.map(function(p){return e2(p.from)+' &rarr; '+e2(p.to);}).join(', ')+' &mdash; confirm them below.</div>';
+  if((L.archived||[]).length) det+='<div class="cc-p-note"><b>Retired (one-click resumable):</b> '+L.archived.map(e2).join(', ')+'</div>';
+  if((L.fresh_issues||[]).length) det+='<div class="cc-p-note"><b>Doc issues flagged:</b> '+L.fresh_issues.map(function(i){return e2((i.path||'')+': '+(i.msg||'').slice(0,80));}).join(' &middot; ')+'</div>';
+  var recent=(dg.recent||[]).filter(function(r){return (r.transfers_proposed&&r.transfers_proposed.length)||(r.archived&&r.archived.length)||(r.doc_issues_new>0);}).slice(0,6);
+  var tl=recent.length?('<div style="margin-top:9px;border-top:1px solid var(--line);padding-top:7px"><b style="font-size:11.5px;color:var(--mut)">Recent activity</b>'+recent.map(function(r){return '<div class="meta" style="margin-top:3px">'+hoAgo(r.ts)+' ago &middot; '+((r.transfers_proposed||[]).length)+' proposed &middot; '+((r.archived||[]).length)+' retired &middot; '+(r.doc_issues_new||0)+' issues</div>';}).join('')+'</div>'):'';
+  return head+chips+det+tl+'</div>';
+}
+async function hoRunHK(){busyOn('Running a housekeeping pass&hellip;','regenerate map &middot; watch for drift &middot; retire idle &middot; Doctor');try{await fetch('/api/housekeeping-run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});}catch(e){}busyOff();loadHandoffs();}
 function hoHygieneCard(hy){
   if(!hy||!hy.ok)return '';
   var folders=hy.folders||[],arch=hy.archived||[],multi=hy.multi||[];
