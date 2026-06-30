@@ -9411,6 +9411,19 @@ def _handoff_note(pkt):
     return "Handoff received (%s): %s%s" % (time.strftime("%Y-%m-%d"),
             (pkt.get("goal") or pkt.get("to_subject") or "topic"), ("; next: " + pkt["next"]) if pkt.get("next") else "")
 
+def _handoff_kickoff(pkt):
+    """First-TURN seed for a freshly-launched handoff session -- makes the agent OPEN warm: greet + summarize what
+    it's picking up (the packet is already in its system context) + the next step, so the operator never re-explains.
+    Runs as the boot prompt (reliable; no racy send-keys). This is the difference between 'warm transfer' and being
+    dropped into a cold blank session."""
+    g = (pkt.get("goal") or pkt.get("to_subject") or "this work")
+    return ("You have just received a WARM TRANSFER: a conversation was handed to you because it belongs in THIS "
+            "scope. The full packet -- goal, where it left off, decisions, open questions, next step, and pointers -- "
+            "is already in your system context above; you do NOT need anything re-explained. OPEN your reply by "
+            "greeting the operator and, in 2-4 short lines, stating exactly what you're picking up: the goal "
+            "(\"%s\"), where the prior conversation left off, and the very next step you'll take -- then ask whether "
+            "to proceed. Pull from the pointers as needed." % str(g)[:160])
+
 def _live_sessions():
     code, o, _ = sh([TMUX, "list-sessions", "-F", "#{session_name}"])
     return [s.strip() for s in o.splitlines() if s.strip()] if code == 0 else []
@@ -9476,7 +9489,8 @@ def handoff_accept(hid, force_new=False):
             extra = (_NEW_FOLDER_BRIEF + "\n\n" + extra + "\n\nThis is a BRAND-NEW home: FIRST deep-dive the project "
                      "for everything relevant to this topic + fill in this folder's CLAUDE.md (title + one-line + what "
                      "you learned), THEN continue the goal above.")
-        res = launch("studio", "ho-" + _slug(pkt["to_subject"]), rel=to_rel, extra_sys=extra)
+        # SEED a warm opening turn so the agent GREETS with what it's picking up (not a cold blank prompt).
+        res = launch("studio", "ho-" + _slug(pkt["to_subject"]), rel=to_rel, extra_sys=extra, seed=_handoff_kickoff(pkt))
     try:                                               # tag a freshly-opened session's topic for future relevance matching
         if res.get("session") and not target: _smeta_set(res.get("session"), subject=pkt.get("to_subject"), goal=pkt.get("goal"), active_ts=time.time())
     except Exception: pass

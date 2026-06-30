@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.76 -- 2026-06-30
+- FIX: accepting a warm transfer that opens a FRESH session now actually feels warm. The packet was being passed
+  only as a silent --append-system-prompt (the agent HAD the context but never surfaced it), so you landed in a
+  cold blank Claude prompt. Now the fresh launch also gets a SEED first-turn (_handoff_kickoff) that makes the
+  agent OPEN by greeting + summarizing what it's picking up (goal, where it left off, next step) and asking to
+  proceed -- no re-explaining. (The resume-into-existing path was already warm via _handoff_message.)
+
 ## 0.99.75 -- 2026-06-30
 - PRE-ARCHIVE HEADS-UP: idle conversations are no longer tidied up silently. When one first becomes eligible, a
   calm corner popup shows what'll happen + why, with a live COUNTDOWN (30-min grace window) and Keep it open /
