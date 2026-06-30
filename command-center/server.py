@@ -9777,7 +9777,10 @@ def _drift_sweep():
     WE watch every live work conversation and PROPOSE a handoff when its topic has drifted out of the folder it
     sits in. Deterministic-first (lexical drift + router); the `smart` model only confirms ambiguous cases. The
     proposal lands in the Transfers tab for one-click confirm -- the platform observes, you decide."""
-    if CC.get("handoff", True) is False:
+    # The unscoped OVERSEER (ROLE=org) shares the tmux server and sees EVERY node's sessions; it must NOT manage
+    # individual conversations (it would scope them against the wrong project root -> garbage proposals). Each
+    # project node sweeps its OWN sessions; the overseer only oversees the fleet.
+    if ROLE == "org" or CC.get("handoff", True) is False:
         return {"checked": 0, "proposed": []}
     cand_sum = {c["rel"]: c["summary"] for c in _scope_candidates()}
     open_for = {h.get("from_session") for h in _hand_load().get("handoffs", []) if h.get("status") == "proposed"}
@@ -9785,7 +9788,7 @@ def _drift_sweep():
     for s in _live_sessions():
         if s == CHIEF or s.startswith(("admin-", "ralph-", "chief")) or _is_service_session(s): continue
         rel = _session_scope(s)
-        if rel is None: continue                                   # no lane (not in the project tree) -> skip
+        if not rel: continue                                       # need a REAL sub-folder lane (skip None + root "") -- no lane = nothing to drift from
         m = _smeta(s)
         if m.get("pin") or m.get("agent_hold"): continue
         rk = _norm_toks(m.get("recent_kw") or "")
@@ -9885,8 +9888,8 @@ def _housekeeping_once():
     except Exception: pass
     try: curated = _curate_notes_once().get("curated", [])   # CURATE: keep bloated folder records tight (dedupe/merge)
     except Exception: pass
-    try:                             # RECONCILE: retire idle, harvested, un-held conversations (folders converge)
-        if CC.get("reconcile", True) is not False:
+    try:                             # RECONCILE: retire idle conversations (project nodes only -- the unscoped overseer
+        if CC.get("reconcile", True) is not False and ROLE != "org":      # shares tmux + would archive OTHER nodes' sessions)
             r = reconcile_once(); archived = r.get("archived") or []
             if archived:
                 with open(_HOUSEKEEP_LOG, "a") as f:

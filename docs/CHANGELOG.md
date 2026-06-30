@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.71 -- 2026-06-30
+- FIX drift-sweep false positive: the unscoped OVERSEER (ROLE=org) shares the tmux server and sees every node's
+  sessions, so it was proposing warm transfers on OTHER nodes' conversations -- scoped against the wrong project
+  root, producing garbage ("a conversation in ? drifted to ...; belongs in command-center"). Now (1) the org/overseer
+  skips the session-acting passes entirely (drift sweep + reconcile) -- each PROJECT node manages its own sessions;
+  (2) drift requires a REAL sub-folder lane (skip None + root "") -- no lane = nothing to drift from. Cleaned the
+  stray proposals.
+
 ## 0.99.70 -- 2026-06-30
 - DOC: docs/ENGINEERING_AUTOPILOT.md -- the canonical reference for the whole discipline system: how the context
   payload is controlled (Menu/Scout/Vault) AND how engineer-grade habits are auto-enforced (folder structure,
