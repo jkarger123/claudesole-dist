@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.86 -- 2026-06-30
+- Doctor now catches the stray-@import footgun fleet-wide. Claude Code reads "@path" in a CLAUDE.md as an IMPORT
+  directive, so a bare @path written as a command arg (e.g. "PUT @_dist/portal.html") makes it load that whole file
+  into context on launch -> the "over the 150k-char limit" warning + bloat. doctor()/_stray_at_imports flags any
+  BARE @path (not in backticks/fenced code) resolving to a real file over 150k chars -- precise: backticked @paths,
+  small/legit imports, and non-file @tokens (@media, @4, user@host) are ignored (no false positives). Runs in the
+  hourly housekeeping sweep on every node + surfaces in the digest with the fix. Proven across 4 cases.
+
 ## 0.99.85 -- 2026-06-30
 - "Add sub-tool" now CONFIRMS before adopting a non-empty existing folder. Adopting an existing folder (v0.99.83)
   was silent, so documenting a whole app as a sub-tool felt like "I made a new thing and it was magically full."

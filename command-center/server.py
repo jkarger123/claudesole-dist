@@ -8164,6 +8164,25 @@ def _authored_lines(txt):
         if not skip: out += 1
     return out
 
+_AT_IMPORT_LIMIT = 150_000     # Claude Code refuses to import a CLAUDE.md @path over ~150k chars (the warning the operator hit)
+def _stray_at_imports(txt, base_dir):
+    """Claude Code reads '@path' in a CLAUDE.md as an IMPORT directive. A BARE @path (NOT inside backticks/code)
+    that resolves to a LARGE file -- e.g. a curl arg written as '@_dist/portal.html', a build artifact -- makes
+    Claude Code load that whole file into context on launch ('over the 150k-char limit' + bloat). Return the bare
+    @paths that resolve to an oversized existing file. Backticked/fenced @paths are NOT imported (ignored); non-file
+    @tokens (@media, @4, user@host) resolve to nothing and are skipped -- so this only fires on the real footgun."""
+    bare = re.sub(r"```.*?```", "", txt, flags=re.S)     # drop fenced code
+    bare = re.sub(r"`[^`]*`", "", bare)                  # drop inline code
+    out = []
+    for m in re.finditer(r"(?<![\w`])@([\w./~-]+\.[A-Za-z0-9]{1,6})", bare):   # bare @path WITH a file extension
+        rel = m.group(1)
+        try:
+            p = os.path.normpath(os.path.join(base_dir, rel))
+            if os.path.isfile(p) and os.path.getsize(p) > _AT_IMPORT_LIMIT:
+                out.append((rel, os.path.getsize(p)))
+        except Exception: pass
+    return out
+
 def doctor():
     """Self-maintenance check: flags over-budget docs, sub-tool duplication, managed-block drift, and
        registered components missing a CLAUDE.md -- so the multi-level doc system stays clean as it grows."""
@@ -8189,6 +8208,8 @@ def doctor():
             issues.append({"sev": "warn", "path": label, "msg": "%d authored lines (>%d budget; %d total incl. managed map) - slim to an index + pointers" % (n, BUDGET, ntot)})
         if depth >= 2 and "CC:BEGIN" in txt:
             issues.append({"sev": "warn", "path": label, "msg": "sub-tool doc carries a managed CC block (an ancestor already delivers it) - should be hand content only"})
+        for rel_imp, sz in _stray_at_imports(txt, ab):
+            issues.append({"sev": "warn", "path": label, "msg": "stray '@%s' import (%.1fMB): Claude Code reads @path in a CLAUDE.md as an IMPORT and will load this whole file into context on launch (the 'over the 150k-char limit' warning). Wrap it in backticks or drop the @ if it's a command arg, not a real import." % (rel_imp, sz / 1048576.0)})
     for b in managed_overview()["blocks"]:
         if b["present"] != b["targets"] or b["insync"] != b["present"]:
             issues.append({"sev": "warn", "path": "block:" + b["id"], "msg": "%d/%d targets present, %d in-sync - re-Apply in the Docs lens" % (b["present"], b["targets"], b["insync"])})
