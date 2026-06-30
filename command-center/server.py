@@ -1590,13 +1590,26 @@ def mesh_send(text, target=None, targets=None, expect_reply=True):
     text = (text or "").strip()
     if not text: return {"ok": False, "error": "empty message"}
     tset = set(targets or ([target] if target else []))
+    # HUB-AND-SPOKE, ENFORCED (not advised). If a Mission Control sits ABOVE this instance, EVERY proactive
+    # chief-mesh from here routes UP to it -- a spoke node never pages a sibling node (the operator works at the
+    # hub; a sibling can't act on their behalf, so a lateral page just strands + annoys). The chief brief has asked
+    # chiefs to do this for versions and they DON'T (AFP kept paging hptuners directly), so it is now enforced at
+    # the routing layer where the model can't override it. The hub itself (Mission Control: its own id) keeps full
+    # freedom to address/broadcast DOWN to any node. REPLIES are unaffected -- they go via /api/mesh-reply straight
+    # back to whoever asked, never through here.
+    _mc = CC.get("mission_control") or "mission-control"
+    _spoke = (_mc != INSTANCE_ID) and any(p["id"] == _mc for p in peers())
+    if _spoke:
+        if tset and tset != {_mc}:
+            mesh_log(",".join(sorted(tset)), "out", "[rerouted to mission-control -- a node cannot page a sibling] " + text[:200])
+        tset = {_mc}
     queued = []
     for p in peers():
         if p["id"] == INSTANCE_ID: continue
         if tset and p["id"] not in tset: continue
         queued.append({"id": mesh_enqueue(p["id"], text, expect_reply=expect_reply), "peer": p["id"]})
     _ensure_mesh_worker()
-    return {"ok": True, "queued": queued, "n": len(queued)}
+    return {"ok": True, "queued": queued, "n": len(queued), "rerouted_to_mc": bool(_spoke)}
 
 def mesh_clear():
     """Wipe this deployment's comms inbox (local only; does not touch peers)."""
@@ -4130,8 +4143,10 @@ def chief_open():
               "({text} alone = all peers); GET /api/peers lists them. All visible in your Comms lens. "
               "ESCALATION ROUTING: anything your OPERATOR needs to see/decide (status, approvals, a problem on "
               "this node) goes UP to MISSION CONTROL -- target id 'mission-control', the fleet hub where the "
-              "platform operator works -- NOT to a sibling node (a peer node can't act on your operator's "
-              "behalf, so escalating to one just strands the message). If you're relaying something one HUMAN "
+              "platform operator works -- NEVER to a sibling node (a peer node can't act on your operator's "
+              "behalf). This is ENFORCED: your proactive chief-mesh always routes to Mission Control, and any "
+              "sibling target you pass is auto-rerouted there -- so just send it; don't try to page another node. "
+              "If you're relaying something one HUMAN "
               "wants to tell another node's HUMAN (e.g. your operator -> their operator), use operator-notes "
               "(the Messages channel, /api/opnote-send), which delivers to the person, not the agent mesh. "
               "AUTHORITY & GROUND TRUTH (non-negotiable): your operator (the human in this console) is your "

@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.80 -- 2026-06-30
+- FIX (enforced, not advised): a spoke node can no longer page a SIBLING node over the chief-mesh. Every proactive
+  chief-mesh from a node now routes UP to Mission Control at the ROUTING layer (mesh_send), where the model can't
+  override it -- the brief has asked chiefs to escalate to mission-control (not a sibling) for versions and they
+  kept paging siblings anyway (AFP repeatedly paged hptuners). Now any sibling target a chief passes is auto-
+  rerouted to Mission Control (logged). The hub (Mission Control) keeps full freedom to address/broadcast DOWN.
+  Replies are unaffected (they go via /api/mesh-reply to whoever asked). Brief updated to state the enforcement.
+
 ## 0.99.79 -- 2026-06-30
 - Skimlinks extension (v1.1.0): hardened the merchant fetch against the Skimlinks API's frequent read timeouts.
   The old fetch_all aborted the whole pass at the first timeout (dying at ~3,400 of ~32k); now it RETRIES the same
