@@ -8284,12 +8284,19 @@ def _loose_secrets_scan():
     Doctor flags them. Detection ONLY -- never auto-moves (moving could orphan an external MCP server, like the
     google scrub did). The operator moves them into the vault deliberately."""
     hits = []; pat = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|_API)", re.I)
+    def _pathlike(k, v):
+        # A LOCATION/PATH var holds WHERE a secret file lives, not the secret itself (e.g. GOOGLE_CLIENT_SECRET_PATH
+        # -> a .json path). It is NOT a loose secret; vaulting it would orphan the consumer. Don't flag it.
+        vv = str(v or "").strip().strip('"').strip("'")
+        return bool(re.search(r"_(PATH|PATHS|FILE|FILES|DIR|DIRS|HOME)$", str(k or ""), re.I)) or vv.startswith(("/", "~", "./", "../"))
     try:
         if os.path.isfile(DEPLOY_ENV):
             for line in open(DEPLOY_ENV, errors="ignore"):
                 line = line.strip()
-                if line and not line.startswith("#") and "=" in line and pat.search(line.split("=", 1)[0]):
-                    hits.append(".env.claudefather:" + line.split("=", 1)[0].strip())
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, val = line.partition("=")
+                    if pat.search(k) and not _pathlike(k.strip(), val):
+                        hits.append(".env.claudefather:" + k.strip())
     except Exception: pass
     try:
         for mj in glob.glob(os.path.join(EXT_DIR, "*", "mcp.json")):
@@ -8298,7 +8305,7 @@ def _loose_secrets_scan():
             servers = (m.get("mcpServers") or m.get("servers") or {}) if isinstance(m, dict) else {}
             for srv in (servers.values() if isinstance(servers, dict) else []):
                 for k, v in ((srv or {}).get("env") or {}).items():
-                    if pat.search(k) and isinstance(v, str) and len(v) > 12 and not v.startswith("${") and "vault:" not in v:
+                    if pat.search(k) and isinstance(v, str) and len(v) > 12 and not v.startswith("${") and "vault:" not in v and not _pathlike(k, v):
                         hits.append(os.path.relpath(mj, CC_HOME) + ":" + k)
     except Exception: pass
     return hits[:20]

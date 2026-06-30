@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.87 -- 2026-06-30
+- FIX (Doctor false positive): "N secret(s) live OUTSIDE the central vault" fired on EVERY node for
+  GOOGLE_CLIENT_SECRET_PATH -- which is a FILE PATH (where the Google OAuth client-secret lives), not a secret
+  value; the scanner matched it only because the key name contains "SECRET". _loose_secrets_scan now skips
+  location/path vars (keys ending _PATH/_FILE/_DIR/_HOME, or values that are filesystem paths) -- they hold WHERE a
+  secret is, not the secret, and vaulting one would orphan its consumer. No real loose secret existed; the warning
+  clears fleet-wide.
+
 ## 0.99.86 -- 2026-06-30
 - Doctor now catches the stray-@import footgun fleet-wide. Claude Code reads "@path" in a CLAUDE.md as an IMPORT
   directive, so a bare @path written as a command arg (e.g. "PUT @_dist/portal.html") makes it load that whole file
