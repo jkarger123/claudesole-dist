@@ -13756,11 +13756,11 @@ function tUpload(f){if(!f)return;if(f.size>TMAXMB*1024*1024){st.textContent='fil
 RALPH_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ralph loop</title>
 <link rel="stylesheet" href="/static/xterm.css">
 <style>
-:root{--bg:#0a0a0f;--bg2:#12121a;--card:#1a1a24;--ink:#ffffff;--mut:#a0a0b0;--line:#2a2a3a;--accent:#c9a227;--accent-light:#e8c547;--ok:#22c55e;--grad:linear-gradient(135deg,#c9a227,#e8c547,#c9a227);--glow:0 0 26px rgba(201,162,39,.26)}
+:root{--bg:#0a0a0f;--bg2:#12121a;--card:#1a1a24;--ink:#ffffff;--mut:#a0a0b0;--line:#2a2a3a;--accent:#c9a227;--accent-light:#e8c547;--ok:#22c55e;--grad:linear-gradient(135deg,#d6b23c,#c9a227);--glow:0 10px 28px rgba(0,0,0,.5)}
 *{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:14px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;-webkit-text-size-adjust:100%}
 header{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#12121a,#0a0a0f);flex-wrap:wrap}
 header a{color:var(--accent-light);text-decoration:none;font-weight:700}
-.badge{font-size:10px;font-weight:800;padding:3px 9px;border-radius:20px;text-transform:uppercase;letter-spacing:.4px}
+.badge{font-size:10px;font-weight:700;padding:3px 8px;border-radius:7px;text-transform:uppercase;letter-spacing:.3px}
 .note{color:var(--mut);font-size:12px}
 .mini{font-size:12px;padding:7px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}.mini.go{background:var(--grad);color:#15120a;border:none;font-weight:700}
 #main{display:flex;height:calc(100vh - 53px)}
@@ -13863,7 +13863,7 @@ function placeholder(){
 </script></body></html>"""
 
 PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>text2tune — Command Center</title><link rel="icon" type="image/png" href="/static/brand/claudefather_favicon.png?v=2"><link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=2"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#0a0a0f"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/light/style.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/fill/style.css"><style>
-:root{--bg:#0a0a0f;--bg2:#12121a;--card:#1a1a24;--card2:#22222e;--ink:#ffffff;--mut:#a0a0b0;--dim:#606070;--line:#2a2a3a;--accent:#c9a227;--accent-rgb:201,162,39;--accent-light:#e8c547;--accent-dark:#9a7a1a;--accent2:#7a1220;--accent2-light:#a01828;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--blue:#3b82f6;--grad:linear-gradient(135deg,#c9a227,#e8c547,#c9a227);--glow:0 0 26px rgba(201,162,39,.26)}
+:root{--bg:#0a0a0f;--bg2:#12121a;--card:#1a1a24;--card2:#22222e;--ink:#ffffff;--mut:#a0a0b0;--dim:#606070;--line:#2a2a3a;--accent:#c9a227;--accent-rgb:201,162,39;--accent-light:#e8c547;--accent-dark:#9a7a1a;--accent2:#7a1220;--accent2-light:#a01828;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--blue:#3b82f6;--grad:linear-gradient(135deg,#d6b23c,#c9a227);--glow:0 10px 28px rgba(0,0,0,.5)}
 /* brand lockup styled in the .brand rule below (cfmark + gold-foil serif wordmark) */
 /* Self-hosted display font for the brand title -- Cinzel Decorative (SIL OFL 1.1, commercial-OK + redistributable),
    an ornate Roman-caps face for an epic film-title feel. Self-hosted so it renders on EVERY user's browser. */
@@ -13873,7 +13873,7 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 #side{flex:0 0 234px;width:234px;background:#0c0c12;border-right:1px solid var(--line);display:flex;flex-direction:column;padding:15px 12px}
 .brand{display:flex;align-items:center;gap:11px;padding:8px 8px 18px}
 .brand .cfmark{height:36px;width:auto;flex:0 0 auto;filter:drop-shadow(0 0 11px rgba(201,162,39,.5))}
-.brand .bword{display:flex;flex-direction:column;line-height:1.08;font-family:'Cinzel Decorative',"Copperplate","Copperplate Gothic Bold","Didot",Georgia,serif;font-weight:700;font-size:16.5px;letter-spacing:.4px;background:linear-gradient(92deg,#f7df85,#e8c547 45%,#b8862a 72%,#f0d05f);background-size:200% auto;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;animation:brandsheen 6s linear infinite}
+.brand .bword{display:flex;flex-direction:column;line-height:1.08;font-family:'Cinzel Decorative',"Copperplate","Copperplate Gothic Bold","Didot",Georgia,serif;font-weight:700;font-size:16.5px;letter-spacing:.4px;background:linear-gradient(92deg,#f7df85,#e8c547 45%,#b8862a 72%,#f0d05f);background-size:200% auto;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent}
 .brand .bword small{font-family:-apple-system,BlinkMacSystemFont,sans-serif;-webkit-text-fill-color:initial;color:var(--accent);font-weight:700;font-size:9px;letter-spacing:3px;margin-top:4px;opacity:.85;border-top:1px solid rgba(201,162,39,.28);padding-top:4px;width:max-content}
 @keyframes brandsheen{to{background-position:200% center}}
 .lens{display:flex;flex-direction:column;gap:3px;flex:1;overflow-y:auto;margin:0}
@@ -14203,11 +14203,11 @@ textarea{width:100%;min-height:240px;font-family:ui-monospace,Menlo,Monaco,monos
 .card:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:var(--glow)}
 .card h3{margin:0 0 5px;font-size:15px;display:flex;align-items:flex-start;gap:8px;justify-content:space-between;min-width:0}
 .card h3>span:first-child{min-width:0;overflow-wrap:anywhere}
-.badge{font-size:10px;font-weight:800;padding:3px 9px;border-radius:20px;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;flex:0 0 auto}
+.badge{font-size:10px;font-weight:700;padding:3px 8px;border-radius:7px;text-transform:uppercase;letter-spacing:.3px;white-space:nowrap;flex:0 0 auto}
 .meta{color:var(--mut);font-size:12px;margin-top:5px;overflow-wrap:anywhere}.brief{color:var(--mut);font-size:12.5px;margin-top:7px}.sub{color:var(--dim);font-size:12px}
 .modal-bg{position:fixed;inset:0;background:rgba(8,8,12,.74);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);display:none;align-items:center;justify-content:center;z-index:50;padding:18px}
 .modal-bg.show,.modal-bg[style*="flex"]{animation:mfade .14s ease}@keyframes mfade{from{opacity:0}to{opacity:1}}
-.modal{position:relative;background:linear-gradient(180deg,#1b1b26 0%,#141420 100%);border:1px solid rgba(255,255,255,.09);border-radius:18px;padding:26px 26px 22px;width:min(560px,94vw);max-height:88vh;overflow:auto;box-shadow:0 26px 80px rgba(0,0,0,.62),0 1px 0 rgba(255,255,255,.05) inset;animation:mpop .16s cubic-bezier(.2,.85,.2,1)}
+.modal{position:relative;background:linear-gradient(180deg,#1b1b26 0%,#141420 100%);border:1px solid rgba(255,255,255,.09);border-radius:14px;padding:26px 26px 22px;width:min(560px,94vw);max-height:88vh;overflow:auto;box-shadow:0 18px 50px rgba(0,0,0,.5);animation:mpop .16s cubic-bezier(.2,.85,.2,1)}
 @keyframes mpop{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}
 .modal::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;border-radius:18px 18px 0 0;background:var(--grad);opacity:.9}
 .modal h2{margin:0 0 16px;font-size:19px;font-weight:700;letter-spacing:-.01em;color:var(--ink);display:flex;align-items:center;gap:9px}
@@ -16754,7 +16754,7 @@ async function ctxAssemble(){
 // /api/mesh, independent of TUI state, with a composer to message any peer chief or all of them. ----
 let COMMS_TGT="";                 // thread filter (which peer's messages to show; "" = all)
 let COMMS_RCPT=new Set();          // selected recipients for the composer ("" set = all peers)
-const COMMS_INP="background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:7px 9px;font:inherit";
+const COMMS_INP="background:var(--card2);color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:9px 11px;font:inherit";
 const COMMS_HEALTH={ok:"#3fb950",down:"#f85149",unknown:"#8b949e"};
 const COMMS_STATUS={pending:["queued","#d29922"],delivered:["delivered","#58a6ff"],replied:["replied","#3fb950"],failed:["failed","#f85149"]};
 function commsTime(ts){try{return new Date((ts||0)*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}catch(e){return"";}}

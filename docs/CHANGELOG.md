@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.60 -- 2026-06-30
+- SLEEKNESS pass (de-cartoony, brand preserved): global visual-treatment refinements that calm the whole UI
+  uniformly without a rebrand (gold identity + logo kept).
+  - `--glow` gold bloom (0 0 26px gold) -> neutral depth shadow (0 10px 28px black). Kills the "neon/casino" pop
+    on every card/hover/panel at once.
+  - `--grad` 3-stop shimmer (#c9a227,#e8c547,#c9a227) -> refined 2-stop (#d6b23c,#c9a227). Calmer CTAs.
+  - Logo wordmark: removed the continuous `brandsheen` shimmer animation (now a clean static gold wordmark).
+  - `.badge`: bubbly fully-rounded 800-weight pill -> crisp 7px-radius 700-weight tag (matches the cc-tag system);
+    instantly upgrades all ~75 badge usages site-wide.
+  - `.modal`: 18px radius + theatrical 80px shadow -> 14px + restrained shadow.
+  - CONSISTENCY: the `COMMS_INP` input constant (~19 hand-rolled inputs across Brief/Calls/Capture/Context/Build)
+    now uses design tokens (var(--card2)/--line/--ink) instead of hardcoded GitHub hexes -> matches `.cc-in`.
+
 ## 0.99.59 -- 2026-06-30
 - STANDARDIZATION: core-integrity no longer fingerprints markdown docs (`.md`, esp. per-module `CLAUDE.md`).
   Those legitimately carry per-node `CC:NOTES`, so signing them made EVERY appliance perpetually report the
