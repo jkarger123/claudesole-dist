@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.70 -- 2026-06-30
+- DOC: docs/ENGINEERING_AUTOPILOT.md -- the canonical reference for the whole discipline system: how the context
+  payload is controlled (Menu/Scout/Vault) AND how engineer-grade habits are auto-enforced (folder structure,
+  filing, warm-transfer routing, record-keeping, self-curating notes, housekeeping) -- Assisted/transparent/opt-out.
+  Pointer added to command-center/CLAUDE.md so agents touching context/lifecycle code read the model first.
+
 ## 0.99.69 -- 2026-06-30
 - SELF-CURATING RECORDS -- folder memory stays tight + high-signal automatically (no manual upkeep, no bloat):
   - DEDUP ON WRITE: module_note skips a learning that substantially repeats one already filed (token overlap >=0.75).

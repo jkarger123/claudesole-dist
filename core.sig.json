@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "34cd82ebcc75fb104765afa98fa48a6ee22ce775416f4f5d088a9a9eb1ef9150",
+      "claudesole.manifest.json": "d098adf26b13e7302873df2f4405fbfccaa9bbb323056e6445d3a12aa4c678d8",
       "command-center/cc-brief": "566b5d91b27874cfbe6a55228d5021011df3fcb3ca6a084926e8b040a31e15ec",
       "command-center/cc-handoff": "9194f8a409f322c9835615cdb014dc9e626a469611ea127b1e9e7a6bf4db2532",
       "command-center/cc-hold": "a756f97be0fef2e0b764324f6830c1c63859347e009f04e8e4a6b8e5ccf9a3fc",
@@ -114,9 +114,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1782807113,
+    "generated": 1782807656,
     "v": 1,
-    "version": "0.99.69"
+    "version": "0.99.70"
   },
-  "sig": "mPYLaTXfJar8N6qQlXR3ZAOIWpOO3Atx99n8QtXMjwnD3Eeo0jOt2In34KDG/DGqTfjlfN3jx5Cp3IxbdiDwBA=="
+  "sig": "rjDnNERMiIMI3hauQSv3ONcjDwHPpYiWGpgNPpwgHXHt8ku4LjjLoxqaPEN/wu1Kqu3GYpqYVCce//4hjanpCg=="
 }

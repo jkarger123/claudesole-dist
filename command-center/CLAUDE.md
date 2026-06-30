@@ -1,5 +1,10 @@
 # Command Center — the engine
 
+> **▶ THE DISCIPLINE SYSTEM: `docs/ENGINEERING_AUTOPILOT.md`** — how we control the context payload (Menu/Scout/
+> Vault) AND auto-enforce engineer-grade habits (folder structure, filing, warm-transfer routing, record-keeping,
+> self-curating notes, housekeeping). Read it before touching context briefs, the housekeeping loop, the
+> warm-transfer/drift sweep, or session lifecycle — it's the model you're plugging into.
+
 > **▶ UI WORK? READ `docs/DESIGN_SYSTEM.md` FIRST.** The dashboard has ONE design language — build every lens/
 > feature from the shared primitives (`cc-head`/`cc-list`/`cc-item`/`cc-grid`/`cc-tile`/`cc-panel`/`cc-in`,
 > `mini`/`btn`(+`danger`), `badge bdg-*`, `confirmM`/`promptM`/`alertM`, `toast`/`busyOn`). NEVER hand-roll a
