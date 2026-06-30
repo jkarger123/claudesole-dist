@@ -12002,6 +12002,10 @@ def _core_files():
     for p in sorted(out):
         rel = os.path.relpath(p, CC_HOME)
         if rel == "core.sig.json" or any(s.strip("/") in rel for s in CORE_HASH_SKIP): continue
+        # NEVER integrity-sign docs: markdown (esp. CLAUDE.md) legitimately carries per-node CC:NOTES, so a
+        # signed hash makes EVERY appliance perpetually "drifted" on the same doc. Code/config only -- keeps
+        # every install reporting identical/clean. (An exact/glob framework_path can otherwise pull a .md in.)
+        if rel.endswith(".md"): continue
         rels.append(rel)
     return rels
 def _core_hash(rel):
@@ -15150,6 +15154,76 @@ body.gm-resizing iframe{pointer-events:none}
 .tk-card .tk-due{font-weight:600}.tk-card .tk-due.tk-over{color:#f85149}.tk-card .tk-due.tk-today{color:var(--accent)}
 .tk-card .tk-detail{margin-top:7px;font-size:12.5px;color:var(--mut);line-height:1.5}
 .tk-card.tk-sug{border-left:3px solid var(--accent)}
+/* ===== cc-* : the uniform modern surface system (lens header · action rows · equal-height tiles) ===== */
+/* GLOBAL: the masonry grid was resolving auto rows too short, so tall cards overflowed and OVERLAPPED.
+   max-content makes every row fit its tallest card -> no overlap on any card-grid lens. */
+.wrap{grid-auto-rows:max-content}
+/* Slim lens header — replaces the big full-width header card */
+.cc-head{grid-column:1/-1;display:flex;align-items:center;gap:11px;flex-wrap:wrap;padding:1px 2px 2px}
+.cc-head .cc-h-ic{font-size:19px;line-height:1}
+.cc-head .cc-h-t{font-size:17px;font-weight:750;letter-spacing:-.01em;color:var(--ink)}
+.cc-head .cc-h-sub{font-size:12.5px;color:var(--dim)}
+.cc-head .cc-h-act{margin-left:auto;display:flex;gap:7px;flex-wrap:wrap}
+.cc-chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--mut);background:var(--card2);border:1px solid var(--line);border-radius:20px;padding:3px 10px;white-space:nowrap}
+.cc-chip b{color:var(--ink);font-weight:750}
+/* Section label inside a list */
+.cc-sec{grid-column:1/-1;display:flex;align-items:center;gap:8px;margin:15px 2px 1px;font-size:11.5px;font-weight:750;text-transform:uppercase;letter-spacing:.05em;color:var(--dim)}
+.cc-sec:first-child{margin-top:4px}
+.cc-sec .cc-n{background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:0 7px;font-size:11px;font-weight:600;color:var(--mut)}
+.cc-sec.warn{color:#f0883e}.cc-sec.warn .cc-n{color:#f0883e;border-color:#f0883e44}
+.cc-sec.good{color:#3fb950}.cc-sec.good .cc-n{color:#3fb950;border-color:#3fb95044}
+/* Dense action row (Tasks / Notes) — a real list, not stacked cards */
+.cc-list{grid-column:1/-1;display:flex;flex-direction:column;gap:7px}
+.cc-item{display:flex;align-items:flex-start;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;transition:border-color .14s,background .14s}
+.cc-item:hover{border-color:#3d444d;background:var(--card2)}
+.cc-item .cc-ic{flex:0 0 auto;width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:15px;background:var(--card2);border:1px solid var(--line)}
+.cc-item.accent{border-left:2px solid var(--accent)}
+.cc-item .cc-main{flex:1;min-width:0}
+.cc-item .cc-ti{font-size:13.5px;font-weight:650;color:var(--ink);line-height:1.42;overflow-wrap:anywhere}
+.cc-item .cc-mt{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:5px;font-size:11.5px;color:var(--mut)}
+.cc-item .cc-dt{font-size:12.5px;color:var(--mut);line-height:1.5;margin-top:6px;overflow-wrap:anywhere}
+.cc-item .cc-acts{flex:0 0 auto;display:flex;align-items:center;gap:5px;flex-wrap:wrap;justify-content:flex-end}
+.cc-item .cc-body{margin-top:8px}
+.cc-conf{font:600 11px/1 ui-monospace,Menlo,monospace;color:var(--mut);border:1px solid var(--line);border-radius:6px;padding:2px 6px}
+@media(max-width:680px){.cc-item{flex-wrap:wrap}.cc-item .cc-acts{width:100%;justify-content:flex-start;margin-top:6px}}
+/* Equal-height tile grid (Extensions / Marketplace) — self-contained, can't overlap */
+.cc-grid{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,290px),1fr));gap:12px;align-items:stretch;margin-top:2px}
+.cc-tile{display:flex;flex-direction:column;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:15px 16px;transition:border-color .14s,transform .14s,box-shadow .14s;min-width:0}
+.cc-tile:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:var(--glow)}
+.cc-tile.on{border-color:rgba(var(--accent-rgb),.5);box-shadow:inset 0 0 0 1px rgba(var(--accent-rgb),.16)}
+.cc-tile .cc-t-h{display:flex;align-items:center;gap:9px}
+.cc-tile .cc-t-ic{flex:0 0 auto;font-size:16px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:9px;background:var(--card2);border:1px solid var(--line)}
+.cc-tile .cc-t-nm{flex:1;min-width:0;font-size:14px;font-weight:750;color:var(--ink);line-height:1.25;overflow-wrap:anywhere}
+.cc-tile .cc-t-tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:10px}
+.cc-tag{font-size:9.5px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;padding:3px 8px;border-radius:7px;white-space:nowrap;border:1px solid transparent}
+.cc-tag.cat{background:rgba(139,92,246,.14);color:#a78bfa}
+.cc-tag.paid{background:rgba(201,162,39,.14);color:#e3b341}
+.cc-tag.ok{background:rgba(34,197,94,.14);color:#22c55e}
+.cc-tag.lock{background:rgba(248,81,73,.14);color:#f85149}
+.cc-tile .cc-t-sum{font-size:12.5px;color:var(--mut);line-height:1.5;margin-top:10px;flex:1}
+.cc-tile .cc-t-needs{font-size:11.5px;color:var(--dim);margin-top:9px;line-height:1.5}
+.cc-tile .cc-t-needs ul{margin:3px 0 0 16px;padding:0}
+.cc-tile .cc-t-foot{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-top:13px;padding-top:12px;border-top:1px solid var(--line)}
+/* Slim full-width composer (Notes) */
+.cc-compose{grid-column:1/-1;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 15px}
+.cc-compose .cc-c-row{display:flex;gap:9px;align-items:center;margin-top:10px;flex-wrap:wrap}
+.cc-searchbar{grid-column:1/-1;display:flex;align-items:center;gap:9px;background:var(--card2);border:1px solid var(--line);border-radius:11px;padding:8px 12px}
+.cc-searchbar input{flex:1;background:transparent;border:none;color:var(--ink);font:inherit;outline:none}
+/* Full-width panel (forms / config sections) — one container style everywhere */
+.cc-panel{grid-column:1/-1;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:15px 16px}
+.cc-panel .cc-p-h{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.cc-panel .cc-p-h b{font-size:14px;font-weight:750;color:var(--ink)}
+.cc-panel .cc-p-h .cc-p-act{margin-left:auto;display:flex;gap:7px;flex-wrap:wrap}
+.cc-panel .cc-p-sub{font-size:12px;color:var(--dim)}
+.cc-panel .cc-p-note{font-size:12.5px;color:var(--mut);line-height:1.55;margin:8px 0}
+/* Shared form controls — uniform inputs/selects/textareas inside panels */
+.cc-in{background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:9px 11px;font:inherit;outline:none;transition:border-color .12s,box-shadow .12s}
+.cc-in:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(var(--accent-rgb),.16)}
+.cc-row-in{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.cc-row-in .cc-in{flex:1;min-width:200px}
+textarea.cc-in{width:100%;box-sizing:border-box;min-height:48px;resize:vertical;line-height:1.5;margin-top:9px}
+/* Status pill (lifecycle states) */
+.cc-pill{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.4px;padding:2px 9px;border-radius:20px;white-space:nowrap}
 /* Projects lens (overseer platform map) */
 .pj-sec{font-weight:700;font-size:13px;margin:16px 2px 2px;color:var(--ink)}
 .pj-card .pj-top{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
@@ -19378,32 +19452,38 @@ async function loadNotebook(){
   var d={};try{d=await(await fetch(url)).json();}catch(e){box.innerHTML=empty("Couldn't load Notes.");return;}
   NB.notes=d.notes||[];NB.hasVoice=!!d.has_voice;
   var voice=NB.hasVoice?'<button id="nbRec" class="mini" onclick="nbToggleRec()">&#127908; Dictate</button>':'<span class="sub" title="Add DEEPGRAM_API_KEY in the Vault lens to enable voice">&#127908; voice off &mdash; add the Deepgram key</span>';
-  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128211; Notes</b> <span class="sub">write or speak a note &mdash; on save it becomes tasks and joins your brief &amp; context</span></div>'
-    +'<textarea id="nbInput" rows="5" style="width:100%;box-sizing:border-box;'+COMMS_INP+';padding:11px;margin-top:9px;font:inherit;line-height:1.5;resize:vertical" placeholder="Type your note&hellip; or hit Dictate and just talk. When you Save, I pull out the tasks, decisions and follow-ups, file it into your context, and it shows up in your morning brief."></textarea>'
-    +'<div style="display:flex;gap:9px;align-items:center;margin-top:9px;flex-wrap:wrap">'+voice+'<span id="nbRecStatus" class="sub"></span><button class="btn go" style="margin-left:auto" onclick="nbSave()">&#10003; Save note</button></div></div>';
-  h+='<div class="card" style="cursor:default;grid-column:1/-1;padding:9px 12px"><div style="display:flex;align-items:center;gap:8px"><span>&#128269;</span><input id="nbSearch" value="'+esc(NB.q||"")+'" oninput="clearTimeout(window._nbst);window._nbst=setTimeout(nbSearch,250)" placeholder="Search your notes &mdash; title, text, tasks, decisions, tags&hellip;" style="flex:1;'+COMMS_INP+';padding:7px 10px;font:inherit">'+(NB.q?('<button class="mini" onclick="NB.q=\'\';loadNotebook()">clear</button> <span class="sub">'+(d.matched||0)+' of '+(d.total||0)+'</span>'):'<span class="sub">'+(d.total||0)+' note'+((d.total===1)?'':'s')+'</span>')+'</div></div>';
-  if(!NB.notes.length)h+=empty(NB.q?("No notes match “"+esc(NB.q)+"”."):"No notes yet &mdash; write or dictate one above.");
+  var h='<div class="cc-head"><span class="cc-h-ic">&#128211;</span><span class="cc-h-t">Notes</span><span class="cc-h-sub">write or speak a note &mdash; on save it becomes tasks and joins your brief &amp; context</span></div>';
+  h+='<div class="cc-compose">'
+    +'<textarea id="nbInput" rows="4" style="width:100%;box-sizing:border-box;'+COMMS_INP+';padding:11px;font:inherit;line-height:1.5;resize:vertical" placeholder="Type your note&hellip; or hit Dictate and just talk. When you Save, I pull out the tasks, decisions and follow-ups, file it into your context, and it shows up in your morning brief."></textarea>'
+    +'<div class="cc-c-row">'+voice+'<span id="nbRecStatus" class="sub"></span><button class="btn go" style="margin-left:auto" onclick="nbSave()">&#10003; Save note</button></div></div>';
+  h+='<div class="cc-searchbar"><span>&#128269;</span><input id="nbSearch" value="'+esc(NB.q||"")+'" oninput="clearTimeout(window._nbst);window._nbst=setTimeout(nbSearch,250)" placeholder="Search your notes &mdash; title, text, tasks, decisions, tags&hellip;">'+(NB.q?('<button class="mini" onclick="NB.q=\'\';loadNotebook()">clear</button> <span class="sub">'+(d.matched||0)+' of '+(d.total||0)+'</span>'):'<span class="cc-chip"><b>'+(d.total||0)+'</b> note'+((d.total===1)?'':'s')+'</span>')+'</div>';
+  if(!NB.notes.length){ h+=empty(NB.q?("No notes match “"+esc(NB.q)+"”."):"No notes yet &mdash; write or dictate one above."); box.innerHTML=h; return; }
+  h+='<div class="cc-list">';
   NB.notes.forEach(function(n){
     var gsd={kind:'note',id:n.id,name:(n.title||'note')};
-    var tasks=(n.tasks||[]).map(function(t){return '<div class="meta" style="margin-left:8px">&bull; '+e2(t.title||'')+(t.due?' <span class="sub">(due '+esc(t.due)+')</span>':'')+'</div>';}).join('');
-    var rems=(n.reminders||[]).map(function(r){return '<div class="meta" style="margin-left:8px">&#8986; '+e2(r.text||'')+(r.when?' <span class="sub">('+esc(r.when)+')</span>':'')+'</div>';}).join('');
+    var tasks=(n.tasks||[]).map(function(t){return '<div class="meta" style="margin-left:2px">&bull; '+e2(t.title||'')+(t.due?' <span class="sub">(due '+esc(t.due)+')</span>':'')+'</div>';}).join('');
+    var rems=(n.reminders||[]).map(function(r){return '<div class="meta" style="margin-left:2px">&#8986; '+e2(r.text||'')+(r.when?' <span class="sub">('+esc(r.when)+')</span>':'')+'</div>';}).join('');
     var nAct=(n.tasks||[]).length+(n.reminders||[]).length;
-    var decs=((n.decisions&&n.decisions.length)?'<div class="meta sub" style="margin-top:6px"><b>Decisions</b></div>'+n.decisions.map(function(x){return '<div class="meta" style="margin-left:8px">&bull; '+e2(x)+'</div>';}).join(''):'');
-    var tags=((n.tags&&n.tags.length)?'<div class="sub" style="margin-top:7px">'+n.tags.map(function(t){return '<span style="background:rgba(var(--accent-rgb),.12);border-radius:10px;padding:1px 8px;margin-right:5px">'+esc(t)+'</span>';}).join('')+'</div>':'');
-    h+='<div class="card" '+ssAttr(gsd)+' style="cursor:default;grid-column:1/-1;border-left:3px solid var(--accent)">'
-      +'<div style="display:flex;align-items:center;gap:8px"><b>'+e2(n.title||'Note')+'</b> '+ssBtn(gsd)+'<span class="sub" style="margin-left:auto">'+esc(n.date||'')+'</span></div>'
-      +(n.summary?'<div style="margin:5px 0">'+e2(n.summary)+'</div>':'')
-      +((tasks||rems)?('<div class="meta sub" style="margin-top:6px"><b>Action items</b></div>'+tasks+rems+(n.applied?'<div class="sub" style="margin-top:5px;color:#3fb950">&#10003; added to Tasks</div>':'<button class="mini go" style="margin-top:7px" onclick="nbApply(\''+n.id+'\')">&#43; Add '+nAct+' to Tasks</button>')):'')
-      +decs+tags
-      +'<div style="margin-top:9px;display:flex;gap:6px"><button class="mini" onclick="nbRaw(this)">raw</button><button class="mini" onclick="nbDelete(\''+n.id+'\')">delete</button></div>'
-      +'<div class="nbraw" style="display:none;white-space:pre-wrap;margin-top:7px;font-size:12px;color:var(--mut);border-top:1px solid var(--line);padding-top:7px">'+e2(n.text||'')+'</div></div>';
+    var decs=((n.decisions&&n.decisions.length)?'<div class="meta sub" style="margin-top:7px"><b>Decisions</b></div>'+n.decisions.map(function(x){return '<div class="meta" style="margin-left:2px">&bull; '+e2(x)+'</div>';}).join(''):'');
+    var tags=((n.tags&&n.tags.length)?'<div style="margin-top:8px;display:flex;gap:5px;flex-wrap:wrap">'+n.tags.map(function(t){return '<span class="cc-tag cat">'+esc(t)+'</span>';}).join('')+'</div>':'');
+    h+='<div class="cc-item accent" '+ssAttr(gsd)+'>'
+      +'<div class="cc-ic">&#128221;</div>'
+      +'<div class="cc-main">'
+        +'<div class="cc-mt" style="margin-top:0"><span class="cc-ti" style="font-size:13.5px">'+e2(n.title||'Note')+'</span>'+ssBtn(gsd)+'<span class="sub" style="margin-left:auto">'+esc(n.date||'')+'</span></div>'
+        +(n.summary?'<div class="cc-dt">'+e2(n.summary)+'</div>':'')
+        +((tasks||rems)?('<div class="cc-body"><div class="meta sub"><b>Action items</b></div>'+tasks+rems+(n.applied?'<div class="sub" style="margin-top:6px;color:#3fb950">&#10003; added to Tasks</div>':'<button class="mini go" style="margin-top:8px" onclick="nbApply(\''+n.id+'\')">&#43; Add '+nAct+' to Tasks</button>')+'</div>'):'')
+        +decs+tags
+        +'<div style="margin-top:10px;display:flex;gap:6px"><button class="mini" onclick="nbRaw(this)">raw</button><button class="mini" style="color:#f85149" onclick="nbDelete(\''+n.id+'\')">delete</button></div>'
+        +'<div class="nbraw" style="display:none;white-space:pre-wrap;margin-top:8px;font-size:12px;color:var(--mut);border-top:1px solid var(--line);padding-top:8px">'+e2(n.text||'')+'</div>'
+      +'</div></div>';
   });
+  h+='</div>';
   box.innerHTML=h;
 }
 async function nbSave(){var ta=document.getElementById("nbInput");if(!ta||!ta.value.trim()){toast("Write or dictate something first.",2500);return;}var v=ta.value;ta.value="";toast("Saving &mdash; pulling out the actions&hellip;",3500);try{await fetch("/api/note-save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:v})});}catch(e){}setTimeout(loadNotebook,1600);}
 async function nbApply(id){try{var r=await(await fetch("/api/note-apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:id})})).json();toast(r.ok?("Added "+r.added+" to your Tasks (review there)"):"Failed",3500);}catch(e){}loadNotebook();}
 async function nbDelete(id){try{await fetch("/api/note-delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:id})});}catch(e){}loadNotebook();}
-function nbRaw(btn){var c=btn.closest('.card');var r=c&&c.querySelector('.nbraw');if(r)r.style.display=r.style.display==='none'?'block':'none';}
+function nbRaw(btn){var c=btn.closest('.cc-item')||btn.closest('.card');var r=c&&c.querySelector('.nbraw');if(r)r.style.display=r.style.display==='none'?'block':'none';}
 async function nbToggleRec(){
   var btn=document.getElementById("nbRec"),st=document.getElementById("nbRecStatus");
   if(NB.rec&&NB.rec.state==="recording"){NB.rec.stop();return;}
@@ -19563,25 +19643,28 @@ async function vaultDel(id){if(!confirm('Delete secret '+id+'? Nodes leasing it 
 async function loadMarketplace(){document.getElementById("grid").innerHTML=empty("Loading marketplace…");
   let d={};try{d=await(await fetch('/api/extensions')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load the marketplace.");return;}
   const ex=d.extensions||[];const q=(document.getElementById("search").value||"").toLowerCase();
-  const hdr='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🏛 Marketplace</b> <span class="sub">'+ex.filter(e=>e.installed).length+' installed / '+ex.length+' available · '+esc(((window.CC&&window.CC.product)||"ClaudeFather").replace(/^the /i,""))+' v'+(d.version||'?')+'</span> <button class="mini" onclick="checkUpdates()">⟳ Check for updates</button></div></div>';
-  const cards=ex.filter(e=>!q||((e.name||'')+(e.summary||'')+(e.category||'')).toLowerCase().includes(q)).map(e=>{
+  const nInst=ex.filter(e=>e.installed).length;
+  const hdr='<div class="cc-head"><span class="cc-h-ic">🏛</span><span class="cc-h-t">Marketplace</span>'
+    +'<span class="cc-chip"><b>'+nInst+'</b> installed</span><span class="cc-chip"><b>'+ex.length+'</b> available</span>'
+    +'<span class="cc-h-sub">'+esc(((window.CC&&window.CC.product)||"ClaudeFather").replace(/^the /i,""))+' v'+(d.version||'?')+'</span>'
+    +'<span class="cc-h-act"><button class="mini" onclick="checkUpdates()">⟳ Check for updates</button></span></div>';
+  const tiles=ex.filter(e=>!q||((e.name||'')+(e.summary||'')+(e.category||'')).toLowerCase().includes(q)).map(e=>{
     const req=(e.requires||[]).map(r=>'<li>'+esc(r.label||r.key)+'</li>').join('');
     const price=(e.pricing&&(e.pricing.monthly_usd||e.pricing.monthly))?('$'+(e.pricing.monthly_usd||e.pricing.monthly)+'/mo'):'';
-    const tierBadge=e.paid?(' <span class="badge" title="Paid extension'+(e.publisher?(' · by '+esc(e.publisher)):'')+'" style="background:#c9a22722;color:#e3b341">💳 Paid'+(price?(' · '+esc(price)):'')+'</span>'
-        +(e.entitled?' <span class="badge" title="This node holds a valid signed entitlement" style="background:#22c55e22;color:#22c55e">✓ licensed</span>'
-                    :' <span class="badge" title="Locked — needs a Mission-Control-signed entitlement" style="background:#f8514922;color:#f85149">🔒 locked</span>')):'';
-    return '<div class="card" style="cursor:default">'
-      +'<h3 style="margin:0 0 4px">'+esc(e.icon||'•')+' '+esc(e.name||e.id)
-        +' <span class="badge" style="background:#8b5cf622;color:#a78bfa">'+esc(e.category||'extension')+'</span>'+tierBadge
-        +(e.installed?' <span class="badge" style="background:#22c55e22;color:#22c55e">installed</span>':'')+'</h3>'
-      +'<div class="sub" style="margin:2px 0 6px">'+esc(e.summary||e.description||'')+'</div>'
-      +(req?'<div class="meta" style="margin-bottom:6px">needs:<ul style="margin:3px 0 0 16px;padding:0">'+req+'</ul></div>':'')
-      +'<div class="modnav" style="gap:6px">'
-        +(e.installed?('<button class="mini" onclick="extSetup(\''+esc(e.id)+'\')">🧭 Set up</button><button class="mini" style="color:#f85149" onclick="extUninstall(\''+esc(e.id)+'\')">remove</button>')
-          :(e.locked?('<button class="mini" title="Requires a paid entitlement signed by Mission Control" onclick="extRequest(\''+esc(e.id)+'\','+JSON.stringify(price||'').replace(/"/g,"&quot;")+')">🔒 Request access</button>')
-                    :'<button class="mini go" onclick="extInstall(\''+esc(e.id)+'\')">＋ Install</button>'))
-      +'</div></div>';}).join("")||empty("No extensions in the catalog yet.");
-  document.getElementById("grid").innerHTML=hdr+cards;}
+    var tags='<span class="cc-tag cat">'+esc(e.category||'extension')+'</span>';
+    if(e.paid){ tags+='<span class="cc-tag paid" title="Paid extension'+(e.publisher?(' · by '+esc(e.publisher)):'')+'">💳 Paid'+(price?(' '+esc(price)):'')+'</span>';
+      tags+=e.entitled?'<span class="cc-tag ok" title="This node holds a valid signed entitlement">✓ Licensed</span>':'<span class="cc-tag lock" title="Locked — needs a Mission-Control-signed entitlement">🔒 Locked</span>'; }
+    if(e.installed) tags+='<span class="cc-tag ok">✓ Installed</span>';
+    var foot=e.installed?('<button class="mini" onclick="extSetup(\''+esc(e.id)+'\')">🧭 Set up</button><button class="mini" style="color:#f85149" onclick="extUninstall(\''+esc(e.id)+'\')">remove</button>')
+      :(e.locked?('<button class="mini" title="Requires a paid entitlement signed by Mission Control" onclick="extRequest(\''+esc(e.id)+'\','+JSON.stringify(price||'').replace(/"/g,"&quot;")+')">🔒 Request access</button>')
+                :'<button class="mini go" onclick="extInstall(\''+esc(e.id)+'\')">＋ Install</button>');
+    return '<div class="cc-tile'+(e.installed?' on':'')+'">'
+      +'<div class="cc-t-h"><span class="cc-t-ic">'+esc(e.icon||'•')+'</span><span class="cc-t-nm">'+esc(e.name||e.id)+'</span></div>'
+      +'<div class="cc-t-tags">'+tags+'</div>'
+      +'<div class="cc-t-sum">'+esc(e.summary||e.description||'')+'</div>'
+      +(req?'<div class="cc-t-needs">needs:<ul>'+req+'</ul></div>':'')
+      +'<div class="cc-t-foot">'+foot+'</div></div>';}).join("");
+  document.getElementById("grid").innerHTML=hdr+(tiles?('<div class="cc-grid">'+tiles+'</div>'):empty("No extensions match your search."));}
 async function extInstall(id){const r=await(await fetch('/api/extension-install',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})).json();
   if(r&&r.ok){toast('Installed '+id+' — opening the setup guide…');loadMarketplace();extSetup(id);}
   else if(r&&r.locked){toast('🔒 '+id+' is a paid extension'+(r.pricing&&(r.pricing.monthly_usd||r.pricing.monthly)?(' ($'+(r.pricing.monthly_usd||r.pricing.monthly)+'/mo)'):'')+' — needs a Mission-Control-signed entitlement.',7000);}
@@ -20733,31 +20816,34 @@ function tkSrcLink(t){ if((t.source_link||'').indexOf('gmail-thread:')===0){ var
 function tkDueLabel(t){ if(!t.due) return ''; var d=t.due, cls='tk-due'; if(d<TASKS_TODAY) cls+=' tk-over'; else if(d===TASKS_TODAY) cls+=' tk-today'; var dt=new Date(d+'T00:00:00'); var lbl=(d===TASKS_TODAY?'today':(d<TASKS_TODAY?('overdue · '+dt.toLocaleDateString(undefined,{month:'short',day:'numeric'})):dt.toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'}))); return '<span class="'+cls+'">📆 '+lbl+'</span>'; }
 function tkCard(t){
   var sug=(t.status==='suggested'), cl=tkClientName(t.client);
-  var conf=(sug&&t.confidence)?('<span class="tk-conf">'+Math.round(t.confidence*100)+'%</span>'):'';
+  var conf=(sug&&t.confidence)?('<span class="cc-conf" title="confidence">'+Math.round(t.confidence*100)+'%</span>'):'';
   var acts;
   if(sug){ acts=(t.kind==='calendar')
-      ? '<button class="mini go" onclick="tkCalendar(\''+t.id+'\')">📅 Add to calendar</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕ Dismiss</button>'
-      : '<button class="mini go" onclick="tkAccept(\''+t.id+'\')">✓ Accept</button><button class="mini" onclick="tkLaunch(\''+t.id+'\')">▶ Start</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕ Dismiss</button>'; }
+      ? '<button class="mini go" onclick="tkCalendar(\''+t.id+'\')">📅 Calendar</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕</button>'
+      : '<button class="mini go" onclick="tkAccept(\''+t.id+'\')">✓ Accept</button><button class="mini" onclick="tkLaunch(\''+t.id+'\')">▶ Start</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕</button>'; }
   else if(t.status==='done'){ acts='<button class="mini" onclick="tkStatus(\''+t.id+'\',\'open\')">↺ Reopen</button>'; }
-  else { acts='<button class="mini go" onclick="tkLaunch(\''+t.id+'\')">▶ Start</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'done\')">✓ Done</button><button class="mini" onclick="tkSnooze(\''+t.id+'\')">⏰ Snooze</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕</button>'; }
-  return '<div class="card tk-card'+(sug?' tk-sug':'')+'" style="cursor:default;grid-column:1/-1">'
-    +'<div class="tk-top"><span class="tk-ic">'+tkSrcIcon(t)+'</span><span class="tk-title">'+esc(t.title)+'</span>'+conf+'</div>'
-    +'<div class="tk-meta">'+(cl?'<span class="locchip">📍 '+esc(cl)+'</span> ':'')+tkDueLabel(t)+(t.status==='doing'?' <span class="badge" style="background:#3fb95022;color:#3fb950">running</span>':'')+' '+tkSrcLink(t)+'</div>'
-    +(t.detail?'<div class="tk-detail">'+esc(t.detail)+'</div>':'')
-    +'<div class="btns" style="margin-top:9px">'+acts+'</div></div>';
+  else { acts='<button class="mini go" onclick="tkLaunch(\''+t.id+'\')">▶ Start</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'done\')">✓ Done</button><button class="mini" onclick="tkSnooze(\''+t.id+'\')">⏰</button><button class="mini" onclick="tkStatus(\''+t.id+'\',\'dismissed\')">✕</button>'; }
+  return '<div class="cc-item'+(sug?' accent':'')+(t.status==='done'?' done':'')+'">'
+    +'<div class="cc-ic">'+tkSrcIcon(t)+'</div>'
+    +'<div class="cc-main">'
+      +'<div class="cc-ti"'+(t.status==='done'?' style="opacity:.6;text-decoration:line-through"':'')+'>'+esc(t.title)+'</div>'
+      +'<div class="cc-mt">'+(cl?'<span class="locchip">📍 '+esc(cl)+'</span>':'')+tkDueLabel(t)+(t.status==='doing'?'<span class="badge" style="background:#3fb95022;color:#3fb950">running</span>':'')+tkSrcLink(t)+conf+'</div>'
+      +(t.detail?'<div class="cc-dt">'+esc(t.detail)+'</div>':'')
+    +'</div>'
+    +'<div class="cc-acts">'+acts+'</div></div>';
 }
 function renderTasks(){
   var grid=document.getElementById("grid");
-  var head='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>✅ Tasks</b> <span class="sub">your morning command center</span><div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap"><button class="mini" onclick="tkAdd()">＋ Add</button><button class="mini" onclick="tkSweep()" title="Free: scan recent email for action items (no AI)">🔄 Scan email</button>'+((window.CC&&window.CC.google)?'<button class="mini go" onclick="tkAiScan()" title="AI deep scan: todos + calendar from recent correspondence (uses tokens)">✨ AI scan</button>':'')+'</div></div></div>';
+  var head='<div class="cc-head"><span class="cc-h-ic">✅</span><span class="cc-h-t">Tasks</span><span class="cc-h-sub">your morning command center</span><span class="cc-h-act"><button class="mini" onclick="tkAdd()">＋ Add</button><button class="mini" onclick="tkSweep()" title="Free: scan recent email for action items (no AI)">🔄 Scan email</button>'+((window.CC&&window.CC.google)?'<button class="mini go" onclick="tkAiScan()" title="AI deep scan: todos + calendar from recent correspondence (uses tokens)">✨ AI scan</button>':'')+'</span></div>';
   var live=TASKS_DATA.filter(function(t){return t.status!=='dismissed';});
   var sug=live.filter(function(t){return t.status==='suggested';});
   var act=live.filter(function(t){return t.status==='open'||t.status==='doing';});
   var done=live.filter(function(t){return t.status==='done';});
   var T=TASKS_TODAY; function wk(d){ if(!d) return 3; if(d<T) return 0; if(d===T) return 1; return 2; }
   act.sort(function(a,b){ return wk(a.due)-wk(b.due) || ((a.due||'9')<(b.due||'9')?-1:1); });
-  function sec(title,arr){ if(!arr.length) return ''; return '<div class="tk-sec" style="grid-column:1/-1">'+title+' <span class="sub">'+arr.length+'</span></div>'+arr.map(tkCard).join(''); }
+  function sec(title,cls,arr){ if(!arr.length) return ''; return '<div class="cc-sec'+(cls?' '+cls:'')+'">'+title+'<span class="cc-n">'+arr.length+'</span></div><div class="cc-list">'+arr.map(tkCard).join('')+'</div>'; }
   var over=act.filter(function(t){return t.due&&t.due<T;}), tod=act.filter(function(t){return t.due===T;}), wko=act.filter(function(t){return t.due&&t.due>T;}), later=act.filter(function(t){return !t.due;});
-  var body=head+sec('🔔 Suggestions — accept to add',sug)+sec('⚠️ Overdue',over)+sec('📌 Today',tod)+sec('🗓 This week & later',wko)+sec('• No date',later)+sec('✓ Done',done);
+  var body=head+sec('🔔 Suggestions','',sug)+sec('⚠️ Overdue','warn',over)+sec('📌 Today','',tod)+sec('🗓 This week & later','',wko)+sec('• No date','',later)+sec('✓ Done','good',done);
   if(!live.length) body=head+empty('No tasks yet. Hit 🔄 Scan email or ✨ AI scan to pull action items from your mail, or ＋ Add one.');
   grid.innerHTML=body;
 }
@@ -20773,18 +20859,20 @@ async function tkAiScan(){ if(!confirm('Run an AI scan of your recent email + no
 async function loadIdeas(){
   const g=document.getElementById("grid");
   try{IDEAS=await(await fetch("/api/ideas")).json();}catch(e){IDEAS=[];}
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>💡 Ideas</b> <span class="sub">'+IDEAS.length+'</span></div>'
-    +'<div class="meta" style="margin:7px 0">Capture anything. When one becomes worth doing, <b>Promote</b> it into any module level — as a new sub-tool or a note on an existing module.</div>'
-    +'<div style="display:flex;gap:8px;flex-wrap:wrap"><input id="idea_t" placeholder="idea title…" style="flex:1;min-width:200px;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 11px">'
+  let h='<div class="cc-head"><span class="cc-h-ic">💡</span><span class="cc-h-t">Ideas</span><span class="cc-chip"><b>'+IDEAS.length+'</b></span></div>';
+  h+='<div class="cc-panel"><div class="cc-p-note" style="margin-top:0">Capture anything. When one becomes worth doing, <b>Promote</b> it into any module level — as a new sub-tool or a note on an existing module.</div>'
+    +'<div class="cc-row-in"><input id="idea_t" class="cc-in" placeholder="idea title…">'
     +'<button class="mini go" onclick="ideaAdd()">＋ Add idea</button></div>'
-    +'<textarea id="idea_n" placeholder="notes / detail (optional)" style="width:100%;margin-top:8px;min-height:54px;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 11px;font:inherit;resize:vertical"></textarea></div>';
-  h+=IDEAS.map(ideaCard).join("")||empty("No ideas yet — add one above.");
+    +'<textarea id="idea_n" class="cc-in" placeholder="notes / detail (optional)"></textarea></div>';
+  h+=(IDEAS.length?('<div class="cc-list">'+IDEAS.map(ideaCard).join("")+'</div>'):empty("No ideas yet — add one above."));
   g.innerHTML=h;
 }
-function ideaCard(i){return '<div class="card" style="cursor:default"><h3><span>💡 '+e2(i.title||"(untitled)")+'</span></h3>'
-  +(i.notes?'<div class="brief" style="white-space:pre-wrap">'+e2(i.notes)+'</div>':'')
-  +'<div class="meta">added '+tago(i.created)+'</div>'
-  +'<div class="btns" style="margin-top:9px"><button class="mini go" onclick="ideaPromote(\''+esc(i.id)+'\')">▶ Promote to module</button>'
+function ideaCard(i){return '<div class="cc-item">'
+  +'<div class="cc-ic">💡</div>'
+  +'<div class="cc-main"><div class="cc-ti">'+e2(i.title||"(untitled)")+'</div>'
+  +(i.notes?'<div class="cc-dt" style="white-space:pre-wrap">'+e2(i.notes)+'</div>':'')
+  +'<div class="cc-mt">added '+tago(i.created)+'</div></div>'
+  +'<div class="cc-acts"><button class="mini go" onclick="ideaPromote(\''+esc(i.id)+'\')">▶ Promote</button>'
   +'<button class="mini" style="color:#f85149" onclick="ideaDel(\''+esc(i.id)+'\')">delete</button></div></div>';}
 async function ideaAdd(){const t=document.getElementById("idea_t"),n=document.getElementById("idea_n");if(!t.value.trim())return;
   await fetch("/api/idea-add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:t.value,notes:n.value})});t.value="";n.value="";loadIdeas();}
@@ -20822,27 +20910,27 @@ async function loadCcr(){
   if(drift){
     const dv=drift.dist_version||"?";
     const nbehind=(drift.nodes||[]).filter(function(n){return n.status=='behind'||n.status=='drifted';}).length;
-    h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🛰 Fleet drift</b> <span class="sub">vs dist v'+e2(dv)+(drift.dist_ok?'':' · <span style="color:#f85149">dist unreadable</span>')+' · <code>'+e2(drift.dist_dir||"")+'</code></span> '
-      +'<span style="margin-left:auto;display:flex;gap:6px">'
+    h+='<div class="cc-panel"><div class="cc-p-h"><b>🛰 Fleet drift</b> <span class="cc-p-sub">vs dist v'+e2(dv)+(drift.dist_ok?'':' · <span style="color:#f85149">dist unreadable</span>')+' · <code>'+e2(drift.dist_dir||"")+'</code></span>'
+      +'<span class="cc-p-act">'
       +'<button class="mini'+(nbehind?' go':'')+'" title="Refresh the dist mirror, then drive cc_update + restart into EVERY behind tenant node in one shot. Co-located source/dev nodes are skipped automatically." onclick="fleetUpdate(false)">⬆ Update all behind'+(nbehind?(' ('+nbehind+')'):'')+'</button>'
       +'<button class="mini" title="Force: re-converge every reachable tenant even if it already looks current (re-overlays + restarts)." onclick="fleetUpdate(true)">⟳ Force all</button>'
       +'<button class="mini" onclick="loadCcr()">⟳</button></span></div>';
-    h+='<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">'+(drift.nodes||[]).map(function(n){
+    h+='<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">'+(drift.nodes||[]).map(function(n){
       const c=DRIFT_COL[n.status]||"#8b949e",ic=DRIFT_ICO[n.status]||"❔";
       const tip=(n.diff&&n.diff.length)?(' title="differs: '+esc(n.diff.join(", "))+'"'):'';
       return '<span'+tip+' style="border:1px solid '+c+'55;background:'+c+'15;color:'+c+';border-radius:9px;padding:4px 10px;font-size:12px;font-weight:600">'+ic+' '+e2(n.id||"?")+' · '+e2(n.status)+(n.version?(' v'+e2(n.version)):'')+(n.diff&&n.diff.length?(' ('+n.diff.length+')'):'')+'</span>';
     }).join("")+'</div>';
-    h+='<div class="meta" style="margin-top:8px">✅ current · ⬆️ ahead (build source, not yet staged to dist) · ⚠️ drifted (local edits — investigate) · ⬇️ behind (run cc-update) · ❔ unreachable. Hover a drifted/behind node for the differing files.</div></div>';
+    h+='<div class="cc-p-note">✅ current · ⬆️ ahead (build source, not yet staged to dist) · ⚠️ drifted (local edits — investigate) · ⬇️ behind (run cc-update) · ❔ unreachable. Hover a drifted/behind node for the differing files.</div></div>';
   }
-  h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>📥 Core Change Requests</b> <span class="sub">'+open+' open / '+CCRS.length+' total</span></div>'
-    +'<div class="meta" style="margin:7px 0">Every platform/core change routes HERE. Nodes + agents <b>propose</b>; you approve, build at Mission Control, and ship uniformly via the dist. Nodes never self-edit framework files. Lifecycle: new → triaged → approved → building → shipped.</div>'
-    +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px"><input id="ccr_t" placeholder="title…" style="flex:1;min-width:220px;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 11px">'
-    +'<select id="ccr_kind" style="background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px">'
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>📥 Core Change Requests</b> <span class="cc-p-sub">'+open+' open / '+CCRS.length+' total</span></div>'
+    +'<div class="cc-p-note">Every platform/core change routes HERE. Nodes + agents <b>propose</b>; you approve, build at Mission Control, and ship uniformly via the dist. Nodes never self-edit framework files. Lifecycle: new → triaged → approved → building → shipped.</div>'
+    +'<div class="cc-row-in"><input id="ccr_t" class="cc-in" placeholder="title…" style="min-width:220px">'
+    +'<select id="ccr_kind" class="cc-in">'
     +'<option value="framework">⚙️ framework</option><option value="module">🗂 module</option><option value="extension">🧩 extension</option><option value="fix">🔧 fix</option></select>'
     +'<button class="mini go" onclick="ccrAdd()">＋ File CCR</button></div>'
-    +'<input id="ccr_surface" placeholder="surface touched (e.g. server.py / agents/google) — optional" style="width:100%;margin-top:8px;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 11px">'
-    +'<textarea id="ccr_sum" placeholder="summary: what + why (optional)" style="width:100%;margin-top:8px;min-height:48px;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 11px;font:inherit;resize:vertical"></textarea></div>';
-  h+=CCRS.map(ccrCard).join("")||empty("No change requests yet — nodes propose them, or file one above.");
+    +'<input id="ccr_surface" class="cc-in" placeholder="surface touched (e.g. server.py / agents/google) — optional" style="width:100%;box-sizing:border-box;margin-top:9px">'
+    +'<textarea id="ccr_sum" class="cc-in" placeholder="summary: what + why (optional)"></textarea></div>';
+  h+=(CCRS.length?('<div class="cc-list">'+CCRS.map(ccrCard).join("")+'</div>'):empty("No change requests yet — nodes propose them, or file one above."));
   g.innerHTML=h;
 }
 async function fleetUpdate(force){
@@ -20857,15 +20945,18 @@ function ccrCard(c){
   const col=CCR_COL[c.status]||"#8b949e";const ico=CCR_KIND_ICO[c.kind]||"⚙️";
   const cmts=(c.comments||[]).map(m=>'<div class="meta" style="margin-top:4px">💬 <b>'+e2(m.by||"?")+'</b>: '+e2(m.text||"")+' <span style="opacity:.6">'+tago(m.ts)+'</span></div>').join("");
   const opts=CCR_FLOW.map(s=>'<option value="'+s+'"'+(s==c.status?' selected':'')+'>'+s+'</option>').join("");
-  return '<div class="card" style="cursor:default;border-left:3px solid '+col+'"><h3><span>'+ico+' '+e2(c.title||"(untitled)")+'</span>'
-    +'<span class="sub" style="background:'+col+'22;color:'+col+';border-radius:9px;padding:1px 9px;font-size:11px;font-weight:700">'+e2(c.status)+'</span></h3>'
-    +'<div class="meta">'+e2(c.kind)+' · from <b>'+e2(c.from_node||"?")+'</b> ('+e2(c.author||"agent")+') · '+tago(c.ts)+(c.surface?' · <code>'+e2(c.surface)+'</code>':'')+'</div>'
-    +(c.summary?'<div class="brief" style="white-space:pre-wrap;margin-top:7px">'+e2(c.summary)+'</div>':'')
-    +(c.plan?'<details style="margin-top:6px"><summary class="meta" style="cursor:pointer">plan</summary><div class="brief" style="white-space:pre-wrap;margin-top:4px">'+e2(c.plan)+'</div></details>':'')
+  return '<div class="cc-item" style="border-left:2px solid '+col+'">'
+    +'<div class="cc-ic">'+ico+'</div>'
+    +'<div class="cc-main">'
+    +'<div class="cc-mt" style="margin-top:0"><span class="cc-ti">'+e2(c.title||"(untitled)")+'</span><span class="cc-pill" style="background:'+col+'22;color:'+col+'">'+e2(c.status)+'</span></div>'
+    +'<div class="cc-mt">'+e2(c.kind)+' · from <b>'+e2(c.from_node||"?")+'</b> ('+e2(c.author||"agent")+') · '+tago(c.ts)+(c.surface?' · <code>'+e2(c.surface)+'</code>':'')+'</div>'
+    +(c.summary?'<div class="cc-dt" style="white-space:pre-wrap">'+e2(c.summary)+'</div>':'')
+    +(c.plan?'<details style="margin-top:6px"><summary class="meta" style="cursor:pointer">plan</summary><div class="cc-dt" style="white-space:pre-wrap">'+e2(c.plan)+'</div></details>':'')
     +cmts
-    +'<div class="btns" style="margin-top:9px;align-items:center"><span class="meta">status</span> <select onchange="ccrSet(\''+esc(c.id)+'\',this.value)" style="background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:5px">'+opts+'</select>'
+    +'<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center"><span class="meta">status</span> <select class="cc-in" style="padding:5px 8px" onchange="ccrSet(\''+esc(c.id)+'\',this.value)">'+opts+'</select>'
     +'<button class="mini" onclick="ccrComment(\''+esc(c.id)+'\')">💬 comment</button>'
-    +'<button class="mini" style="color:#f85149" onclick="ccrDel(\''+esc(c.id)+'\')">delete</button></div></div>';
+    +'<button class="mini" style="color:#f85149" onclick="ccrDel(\''+esc(c.id)+'\')">delete</button></div>'
+    +'</div></div>';
 }
 async function ccrAdd(){const t=document.getElementById("ccr_t");if(!t.value.trim())return;
   const kind=document.getElementById("ccr_kind").value,sum=document.getElementById("ccr_sum").value,surf=document.getElementById("ccr_surface").value;
@@ -20882,17 +20973,18 @@ async function loadPropose(){
   try{const d=await(await fetch("/api/ccr-sent")).json();sent=d.sent||[];mc=d.mc||"";}catch(e){}
   CCR_SENT=sent;
   const mcline=mc?('routes to <code>'+e2(mc)+'</code>'):'<span style="color:#f85149">no Mission Control peer configured</span>';
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>📤 Propose a Core Change</b> <span class="sub">'+mcline+'</span></div>'
-    +'<div class="meta" style="margin:7px 0">Core/platform changes (server.py, modules, extensions, framework files) are <b>not built locally</b>. Describe the change and send it to Mission Control — it gets queued, approved by James, built once, and shipped to every node uniformly via cc-update.</div>'
-    +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px"><input id="pr_t" placeholder="title…" style="flex:1;min-width:220px;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 11px">'
-    +'<select id="pr_kind" style="background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px">'
+  let h='<div class="cc-head"><span class="cc-h-ic">📤</span><span class="cc-h-t">Propose a Core Change</span><span class="cc-h-sub">'+mcline+'</span></div>';
+  h+='<div class="cc-panel">'
+    +'<div class="cc-p-note" style="margin-top:0">Core/platform changes (server.py, modules, extensions, framework files) are <b>not built locally</b>. Describe the change and send it to Mission Control — it gets queued, approved by James, built once, and shipped to every node uniformly via cc-update.</div>'
+    +'<div class="cc-row-in"><input id="pr_t" class="cc-in" placeholder="title…" style="min-width:220px">'
+    +'<select id="pr_kind" class="cc-in">'
     +'<option value="framework">⚙️ framework</option><option value="module">🗂 module</option><option value="extension">🧩 extension</option><option value="fix">🔧 fix</option></select></div>'
-    +'<input id="pr_surface" placeholder="surface touched (e.g. server.py / a module) — optional" style="width:100%;margin-top:8px;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 11px">'
-    +'<textarea id="pr_sum" placeholder="summary: what + why" style="width:100%;margin-top:8px;min-height:54px;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 11px;font:inherit;resize:vertical"></textarea>'
-    +'<textarea id="pr_plan" placeholder="proposed plan (optional)" style="width:100%;margin-top:8px;min-height:48px;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 11px;font:inherit;resize:vertical"></textarea>'
-    +'<div style="margin-top:8px"><button class="mini go" onclick="proposeSend()"'+(mc?'':' disabled')+'>📤 Send to Mission Control</button></div></div>';
-  h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Sent from this node</b> <span class="sub">'+sent.length+'</span></div>'
-    +(sent.length?sent.map(s=>'<div class="meta" style="margin-top:5px">'+(CCR_KIND_ICO[s.kind]||"⚙️")+' <b>'+e2(s.title||"")+'</b> · '+tago(s.ts)+' · <span style="opacity:.7">'+e2(s.id||"")+'</span></div>').join(""):'<div class="meta" style="margin-top:5px">Nothing proposed yet.</div>')+'</div>';
+    +'<input id="pr_surface" class="cc-in" placeholder="surface touched (e.g. server.py / a module) — optional" style="width:100%;box-sizing:border-box;margin-top:9px">'
+    +'<textarea id="pr_sum" class="cc-in" placeholder="summary: what + why"></textarea>'
+    +'<textarea id="pr_plan" class="cc-in" placeholder="proposed plan (optional)"></textarea>'
+    +'<div style="margin-top:11px"><button class="mini go" onclick="proposeSend()"'+(mc?'':' disabled')+'>📤 Send to Mission Control</button></div></div>';
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Sent from this node</b> <span class="cc-p-sub">'+sent.length+'</span></div>'
+    +(sent.length?sent.map(s=>'<div class="cc-p-note" style="margin:7px 0 0">'+(CCR_KIND_ICO[s.kind]||"⚙️")+' <b>'+e2(s.title||"")+'</b> · '+tago(s.ts)+' · <span style="opacity:.7">'+e2(s.id||"")+'</span></div>').join(""):'<div class="cc-p-note">Nothing proposed yet.</div>')+'</div>';
   g.innerHTML=h;
 }
 async function proposeSend(){const t=document.getElementById("pr_t");if(!t.value.trim()){toast("Title required");return;}
@@ -20912,23 +21004,27 @@ async function loadAccounts(){
   var g=document.getElementById("grid"); g.innerHTML=empty("Loading accounts…");
   var d={}; try{ d=await(await fetch("/api/claude-accounts")).json(); }catch(e){ g.innerHTML=empty("Couldn't load accounts."); return; }
   var cur=d.current_email||'(unknown)';
-  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🪪 Claude Accounts</b> <span class="sub">switch the Claude login for ALL sessions in one click — like /login, but instant from your saved accounts</span></div>'
-    +'<div style="margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
-    +'<div>Currently logged in (all sessions): <b>'+e2(cur)+'</b></div>'
-    +'<button class="mini go" onclick="acctSnapshot()" title="Capture the current login to the wallet -- re-run this after a /login to REFRESH a stale/expired saved account">📸 '+(d.current_saved?'Re-snapshot (refresh) this login':'Snapshot this login to the wallet')+'</button>'
-    +'<button class="mini" onclick="acctUsage(this)">↻ check usage</button></div>'
-    +'<div id="acctUsageBox" style="margin-top:10px"></div>'
-    +'<div class="sub" style="margin-top:8px">To add another account: log into it (here or in a terminal with <code>/login</code>), then come back and <b>Save this account</b>. After that, switching between saved accounts is one click and applies to every session live.</div></div>';
-  if(!(d.accounts||[]).length){ h+=empty("No saved accounts yet. You're logged in as "+e2(cur)+" — click 'Save this account to the wallet' above to capture it, then log into your other accounts and save each once."); }
-  (d.accounts||[]).forEach(function(a){
-    h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>'+(a.active?'🟢 ':'⚪ ')+e2(a.email||a.label)+'</span>'+(a.active?'<span class="badge" style="background:#3fb95022;color:#3fb950">active — all sessions</span>':'')+'</h3>'
-      +'<div class="meta sub">saved '+(a.ts?tago(a.ts):'?')+(a.label&&a.label!==a.email?(' · label: '+e2(a.label)):'')+'</div>'
-      +'<div class="btns" style="margin-top:9px">'
-      +(a.active?'<span class="sub">this is the live account</span>':'<button class="mini go" onclick="acctSwitch(\''+esc(a.label)+'\',\''+esc(a.email||a.label)+'\')">▶ switch all sessions to this</button>')
-      +'<button class="mini" style="color:#f85149" onclick="acctRemove(\''+esc(a.label)+'\')">remove</button>'
-      +'</div></div>';
-  });
-  g.innerHTML='<div class="modstack">'+h+'</div>';
+  var h='<div class="cc-head"><span class="cc-h-ic">🪪</span><span class="cc-h-t">Claude Accounts</span><span class="cc-h-sub">switch the Claude login for ALL sessions in one click — like /login, but instant</span></div>';
+  h+='<div class="cc-panel"><div class="cc-p-h"><span>Currently logged in (all sessions): <b>'+e2(cur)+'</b></span>'
+    +'<span class="cc-p-act"><button class="mini go" onclick="acctSnapshot()" title="Capture the current login to the wallet -- re-run this after a /login to REFRESH a stale/expired saved account">📸 '+(d.current_saved?'Re-snapshot':'Snapshot to wallet')+'</button>'
+    +'<button class="mini" onclick="acctUsage(this)">↻ check usage</button></span></div>'
+    +'<div id="acctUsageBox" style="margin-top:11px"></div>'
+    +'<div class="cc-p-note">To add another account: log into it (here or in a terminal with <code>/login</code>), then come back and <b>Snapshot</b>. After that, switching between saved accounts is one click and applies to every session live.</div></div>';
+  if(!(d.accounts||[]).length){ h+=empty("No saved accounts yet. You're logged in as "+e2(cur)+" — click 'Snapshot to wallet' above to capture it, then log into your other accounts and save each once."); }
+  else { h+='<div class="cc-list">';
+    (d.accounts||[]).forEach(function(a){
+      h+='<div class="cc-item'+(a.active?' accent':'')+'">'
+        +'<div class="cc-ic">'+(a.active?'🟢':'⚪')+'</div>'
+        +'<div class="cc-main"><div class="cc-mt" style="margin-top:0"><span class="cc-ti">'+e2(a.email||a.label)+'</span>'+(a.active?'<span class="cc-pill" style="background:#3fb95022;color:#3fb950">active</span>':'')+'</div>'
+        +'<div class="cc-mt">saved '+(a.ts?tago(a.ts):'?')+(a.label&&a.label!==a.email?(' · label: '+e2(a.label)):'')+'</div></div>'
+        +'<div class="cc-acts">'
+        +(a.active?'<span class="sub">live account</span>':'<button class="mini go" onclick="acctSwitch(\''+esc(a.label)+'\',\''+esc(a.email||a.label)+'\')">▶ switch all sessions</button>')
+        +'<button class="mini" style="color:#f85149" onclick="acctRemove(\''+esc(a.label)+'\')">remove</button>'
+        +'</div></div>';
+    });
+    h+='</div>';
+  }
+  g.innerHTML=h;
 }
 async function acctSnapshot(){
   toast('Saving the current login to the wallet…');
@@ -20979,28 +21075,29 @@ async function loadSettings(){
   const s=SETTINGS;
   const tierOpt=function(v,lbl){return '<option value="'+v+'"'+(s.tier===v?' selected':'')+'>'+lbl+'</option>';};
   const typeOpt=function(v,lbl){return '<option value="'+v+'"'+(s.type===v?' selected':'')+'>'+lbl+'</option>';};
-  let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>⚙️ Settings</b> <span class="sub">'+e2(s.project_name||"")+' · '+(s.tier==="grandfather"?"ClaudeGrandfather":"ClaudeFather")+' · '+(s.type==="agency"?"Agency":"Project")+'</span></div>'
-    +'<div class="meta" style="margin:7px 0">Configure this node\'s <b>Tier</b> and <b>Type</b> here instead of hand-editing <code>cc.config.json</code>. Changes write to <code>'+e2(s.config_path||"cc.config.json")+'</code> (a preserve-path: survives <code>cc-update</code>) and take effect on the next restart.</div>'
+  let h='<div class="cc-head"><span class="cc-h-ic">⚙️</span><span class="cc-h-t">Settings</span><span class="cc-h-sub">'+e2(s.project_name||"")+' · '+(s.tier==="grandfather"?"ClaudeGrandfather":"ClaudeFather")+' · '+(s.type==="agency"?"Agency":"Project")+'</span></div>';
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Tier &amp; Type</b></div>'
+    +'<div class="cc-p-note">Configure this node\'s <b>Tier</b> and <b>Type</b> here instead of hand-editing <code>cc.config.json</code>. Changes write to <code>'+e2(s.config_path||"cc.config.json")+'</code> (a preserve-path: survives <code>cc-update</code>) and take effect on the next restart.</div>'
     +'<div style="display:grid;grid-template-columns:120px 1fr;gap:10px;align-items:center;margin-top:6px">'
-    +'<div class="meta">Tier</div><select id="set_tier" style="background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px">'
+    +'<div class="meta">Tier</div><select id="set_tier" class="cc-in">'
     + tierOpt("father","🎩 ClaudeFather — project node (role=project)") + tierOpt("grandfather","🏛 ClaudeGrandfather — overseer (role=org)") +'</select>'
-    +'<div class="meta">Type</div><select id="set_type" style="background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px">'
+    +'<div class="meta">Type</div><select id="set_type" class="cc-in">'
     + typeOpt("project","🗂 Project") + typeOpt("agency","🏢 Agency") +'</select>'
     +'</div>'
     +'<div class="meta" style="margin-top:12px">🎩 <b>ClaudeFather</b> shows project/agency lenses + <b>Propose Change</b> (route core changes up). 🏛 <b>ClaudeGrandfather</b> unlocks the overseer lenses — <b>Portfolio</b> + the <b>Change Requests</b> approval queue. Switching Tier auto-swaps the lens bundle (preset).</div>'
     +'<div class="btns" style="margin-top:12px"><button class="mini go" onclick="settingsSave()">💾 Save</button></div></div>';
-  h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🌐 Fleet usage visibility</b> <span class="sub">cross-node usage sharing (enterprise multi-tenant)</span></div>'
-    +'<div class="meta" style="margin:7px 0"><b>View</b> = does this node show the whole-fleet rollup or only its own usage. <b>Share</b> = may other nodes pull this node\'s usage. Single owner: keep both full/on. Tenants who shouldn\'t see each other: set child nodes to <b>view: own</b> (keep share on so the grandfather still rolls up everything), or <b>share: off</b> for total isolation. Applies on restart.</div>'
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>🌐 Fleet usage visibility</b> <span class="cc-p-sub">cross-node usage sharing (enterprise multi-tenant)</span></div>'
+    +'<div class="cc-p-note"><b>View</b> = does this node show the whole-fleet rollup or only its own usage. <b>Share</b> = may other nodes pull this node\'s usage. Single owner: keep both full/on. Tenants who shouldn\'t see each other: set child nodes to <b>view: own</b> (keep share on so the grandfather still rolls up everything), or <b>share: off</b> for total isolation. Applies on restart.</div>'
     +'<div style="display:grid;grid-template-columns:130px 1fr;gap:10px;align-items:center;margin-top:6px">'
-    +'<div class="meta">This node shows</div><select id="set_fleetview" style="background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px">'
+    +'<div class="meta">This node shows</div><select id="set_fleetview" class="cc-in">'
     +'<option value="full"'+(s.fleet_view==='full'?' selected':'')+'>🌐 Full fleet — overall + all nodes + all accounts</option>'
     +'<option value="own"'+(s.fleet_view==='own'?' selected':'')+'>🔒 Only this node\'s own usage</option></select>'
     +'<div class="meta">Share upward</div><label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="set_fleetshare"'+(s.fleet_share?' checked':'')+'> let other nodes / the grandfather pull this node\'s usage</label>'
     +'</div><div class="btns" style="margin-top:12px"><button class="mini go" onclick="settingsSave()">💾 Save</button></div></div>';
-  h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>🔑 Login token</b> <span class="sub">'+(s.auth_on?'a token is set — required at /login':'no token set — this node is OPEN to anyone on the tailnet')+'</span></div>'
-    +'<div class="meta" style="margin:7px 0">Change this node\'s dashboard login token (the PIN at <code>/login</code>). It applies <b>immediately</b> — <b>this</b> window stays logged in, but other devices/sessions will need the new token. Persists to <code>'+e2(s.config_path||"cc.config.json")+'</code> (survives <code>cc-update</code>).</div>'
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>🔑 Login token</b> <span class="cc-p-sub">'+(s.auth_on?'a token is set — required at /login':'no token set — this node is OPEN to anyone on the tailnet')+'</span></div>'
+    +'<div class="cc-p-note">Change this node\'s dashboard login token (the PIN at <code>/login</code>). It applies <b>immediately</b> — <b>this</b> window stays logged in, but other devices/sessions will need the new token. Persists to <code>'+e2(s.config_path||"cc.config.json")+'</code> (survives <code>cc-update</code>).</div>'
     +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">'
-    +'<input id="set_newtok" class="mini" style="flex:1;min-width:200px" placeholder="new token (or leave blank to auto-generate)" autocomplete="off">'
+    +'<input id="set_newtok" class="cc-in" style="flex:1;min-width:200px" placeholder="new token (or leave blank to auto-generate)" autocomplete="off">'
     +'<button class="mini" onclick="document.getElementById(\'set_newtok\').value=cfRandTok()">🎲 Generate</button>'
     +'<button class="mini go" onclick="changeToken()">Change token</button></div>'
     +'<div id="tokresult" style="margin-top:11px;display:none;background:#0d0d14;border:1px solid var(--line);border-radius:9px;padding:11px;font-size:12.5px;line-height:1.5"></div>'

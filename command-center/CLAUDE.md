@@ -1,5 +1,8 @@
 # Command Center — the engine
 
+<!-- CC:NOTES (preserve this region verbatim across regenerations) -->
+<!-- /CC:NOTES -->
+
 <!-- CC:CHILDREN auto-managed by the Command Center; do not hand-edit -->
 **Sub-tools in this folder** (you can launch into any of these; file a learning to the one it belongs to):
 - `Usage/` -- >> Resume here: read _handoffs/20260628-1942__Usage.md first -- it is the latest handoff.

@@ -3,6 +3,27 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.59 -- 2026-06-30
+- STANDARDIZATION: core-integrity no longer fingerprints markdown docs (`.md`, esp. per-module `CLAUDE.md`).
+  Those legitimately carry per-node `CC:NOTES`, so signing them made EVERY appliance perpetually report the
+  same file as "drifted" (109/110 of AFP's integrity-log entries) and lit a red Doctor error -- a cosmetic
+  "why is this node different" wart. Docs were never meant to be in the hashed set (code/config only). Now every
+  install reports clean + identical integrity. (Ships with the uniform-UI work; re-signed core drops the .md files.)
+- (carries the 0.99.58 uniform-UI design system below to the full fleet.)
+
+## 0.99.58 -- 2026-06-29
+- UNIFORM UI design system (cc-*): one consistent, modern style for every repeated surface, replacing the
+  per-lens stacked full-width "cards" that wasted horizontal space and read as unfinished.
+  - FIXED a real layout bug: the masonry grid resolved its auto rows too short (~74px), so any tall card
+    OVERFLOWED and visually OVERLAPPED the cards below it (40 overlaps on Marketplace alone). One-line global
+    fix (`.wrap{grid-auto-rows:max-content}`) -> 0 overlaps on EVERY card-grid lens.
+  - New shared classes: `.cc-head` (slim lens header), `.cc-list`/`.cc-item` (dense action rows),
+    `.cc-grid`/`.cc-tile` (equal-height tiles, pill badges that never clip, footer-pinned actions),
+    `.cc-panel` (uniform form/config blocks), `.cc-tag`/`.cc-pill`/`.cc-sec`/`.cc-chip`, `.cc-in` (uniform inputs).
+  - Applied to: Tasks, Notes, Marketplace/Extensions, Ideas, Change Requests (CCR), Propose, Claude Accounts,
+    Settings. Each verified headless (0 overlaps, 0 console errors).
+  - Next: site-wide consistency pass (modals/popups, inputs, buttons) to collapse the remaining ad-hoc variants.
+
 ## 0.99.57 -- 2026-06-29
 - ENTERPRISE secret UX: agents no longer have to re-learn the vault each session.
   (1) cc-* CLIs now resolve on EVERY launched session's PATH (chief, agents, teams, ralph, resume, audits) --
