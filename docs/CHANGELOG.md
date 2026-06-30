@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.77 -- 2026-06-30
+- ACCEPT A TRANSFER -> graceful origin stand-down: after the destination opens (warm), a gentle countdown popup
+  offers to FILE AWAY the previous conversation you moved from -- "Keep it open" (pin) or "File it now" (or let the
+  ~90s timer expire) which harvests + closes it. When the origin tmux session dies, loadSessions reconciles PANES
+  so its split-pane just drops out -- works in split-screen + mobile single-pane. Broken-out /term tabs (desktop +
+  mobile) now check /api/session-exists on disconnect and say "filed away (resumable)" instead of the wrong
+  "session lives on". (hoOriginStandDown/#soAlert; handoff_accept returns from_session+origin_label.)
+
 ## 0.99.76 -- 2026-06-30
 - FIX: accepting a warm transfer that opens a FRESH session now actually feels warm. The packet was being passed
   only as a silent --append-system-prompt (the agent HAD the context but never surfaced it), so you landed in a

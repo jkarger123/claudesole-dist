@@ -9503,8 +9503,14 @@ def handoff_accept(hid, force_new=False):
         except Exception: pass
     pkt["status"] = "delivered"; pkt["to_session"] = res.get("session"); pkt["delivered_ts"] = int(time.time())
     pkt["created_home"] = created; pkt["resumed"] = bool(res.get("resumed")); _hand_save(d)
+    # ORIGIN: hand the operator a chance to file away the conversation they just moved FROM (a countdown popup) --
+    # but only if it's a still-live session that ISN'T the one we just resumed into (no self-archive).
+    orig = pkt.get("from_session")
+    orig_alive = bool(orig) and orig != res.get("session") and sh([TMUX, "has-session", "-t", orig])[0] == 0
     return {"ok": True, "session": res.get("session"), "to_scope": to_rel, "created_home": created,
-            "resumed": bool(res.get("resumed")), "term": res.get("term")}
+            "resumed": bool(res.get("resumed")), "term": res.get("term"),
+            "from_session": (orig if orig_alive else None),
+            "origin_label": (_smeta(orig).get("subject") or pkt.get("from_scope") or orig) if orig_alive else None}
 
 def handoff_decline(hid, reason="", suppress=True):
     d = _hand_load(); pkt = next((h for h in d.get("handoffs", []) if h["id"] == hid), None)
@@ -13153,6 +13159,9 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(housekeeping_digest(), default=str))
         if u.path == "/api/pending-archives":      # conversations about to be auto-archived (heads-up + countdown)
             return self._s(200, json.dumps(pending_archives(), default=str))
+        if u.path == "/api/session-exists":        # broken-out /term tab: was the session FILED AWAY or just detached?
+            _nm = re.sub(r"[^A-Za-z0-9_-]", "", (q.get("name", [""])[0] or ""))[:64]
+            return self._s(200, json.dumps({"alive": bool(_nm) and sh([TMUX, "has-session", "-t", _nm])[0] == 0}))
         if u.path == "/api/system":  # self-describing capability map (runtime + surfaces) -- for UI gating + agents
             return self._s(200, json.dumps(system_info(), default=str))
         if u.path == "/api/browser/commands":  # the desktop browser polls for agent-queued commands (Browser v2)
@@ -13913,7 +13922,11 @@ function skState(){fetch('/api/slack-session',{method:'POST',headers:{'Content-T
 function toggleSk(){fetch('/api/slack-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(function(cur){if(!cur.configured){st.textContent='Slack not set up -- install the Slack extension + set a comms_channel, then toggle';return;}fetch('/api/slack-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:!cur.on})}).then(r=>r.json()).then(function(s){skPaint(s);st.textContent=name+' - Slack '+(s.on?'ON (team channel + reply-in-thread)':'off');});});}
 ws.onopen=()=>{st.textContent=name+' - connected';fitNow();term.focus();applyMouse();tgState();skState();};
 ws.onmessage=(e)=>term.write(new Uint8Array(e.data));
-ws.onclose=()=>{st.textContent=name+' - detached (session lives on)';term.write('\r\n\x1b[33m[detached - close this tab; the session keeps running]\x1b[0m\r\n');};
+ws.onclose=()=>{var det=function(){st.textContent=name+' - detached (session lives on)';term.write('\r\n\x1b[33m[detached - close this tab; the session keeps running]\x1b[0m\r\n');};
+  fetch('/api/session-exists?name='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(d){
+    if(d&&d.alive===false){st.textContent=name+' - filed away';term.write('\r\n\x1b[36m[this conversation was filed away into its folder -- it is resumable from the dashboard. You can close this tab.]\x1b[0m\r\n');}
+    else det();
+  }).catch(det);};
 ws.onerror=()=>{st.textContent='connection error';};
 term.onData(d=>{if(ws.readyState===1)ws.send(new TextEncoder().encode(d));});
 // PASTE FIX: Ctrl/Cmd+V must paste the LOCAL (browser / T490) clipboard, NOT get forwarded to the
@@ -14461,6 +14474,15 @@ body.ss-dragging .basketwrap{box-shadow:0 0 0 2px rgba(var(--accent-rgb),.35) in
 #arAlert .opa-body{font-size:12.5px;color:#e8e8ef;margin:8px 0 11px;line-height:1.45;word-break:break-word}
 #arAlert .opa-act{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
 #arAlert .ar-cd{color:var(--accent);font-weight:700}
+/* post-accept "filing away the previous chat" popup -- same calm style as the idle heads-up */
+#soAlert{position:fixed;right:18px;bottom:54px;z-index:99996;width:346px;max-width:calc(100vw - 36px);background:#15151c;border:1.5px solid #3d444d;border-radius:14px;box-shadow:0 14px 50px rgba(0,0,0,.6);padding:13px 15px;transform:translateY(28px) scale(.96);opacity:0;pointer-events:none;transition:all .28s cubic-bezier(.2,.8,.25,1)}
+#soAlert.show{transform:none;opacity:1;pointer-events:auto}
+#soAlert .opa-h{display:flex;align-items:center;gap:8px;font-size:13px;color:#fff}
+#soAlert .opa-h b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#soAlert .opa-dot{width:9px;height:9px;border-radius:50%;background:#8a8a99;flex:0 0 auto}
+#soAlert .opa-body{font-size:12.5px;color:#e8e8ef;margin:8px 0 11px;line-height:1.45;word-break:break-word}
+#soAlert .opa-act{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
+#soAlert .ar-cd{color:var(--accent);font-weight:700}
 #main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .topbar{display:flex;align-items:center;gap:12px;padding:15px 24px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 .topbar h2{margin:0;font-size:19px;font-weight:800;flex:0 0 auto;letter-spacing:.2px}
@@ -19760,7 +19782,26 @@ function hoCard(p,active){
     +(active?'<div style="margin-top:10px;display:flex;gap:8px;align-items:center"><button class="mini go" onclick="hoAccept(\''+esc(p.id)+'\')">&#128260; Move it there</button><button class="mini" title="keep this conversation here -- and stop suggesting this move" onclick="hoDecline(\''+esc(p.id)+'\')">Keep it here</button><a href="#" class="sub" style="margin-left:auto;font-size:11px" title="Open a separate parallel session instead of resuming the home agent already there" onclick="event.preventDefault();hoAccept(\''+esc(p.id)+'\',true)">open separate</a></div>':'')
     +'</div>';
 }
-async function hoAccept(id,forceNew){toast('Opening the right place&hellip;',2500);try{var r=await(await fetch('/api/handoff-accept',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,force_new:!!forceNew})})).json();if(r.ok){toast((r.resumed?'Resumed the home agent in ':'Opened ')+esc(r.to_scope)+(r.created_home?' (new home created)':''),5000);if(r.session){try{gotoLens('sessions');}catch(e){}setTimeout(function(){try{openInSessions(r.session);}catch(e){}},300);return;}}else{toast('Accept failed: '+esc(r.error||''),4500);}}catch(e){toast('Accept failed',3500);}loadHandoffs();}
+async function hoAccept(id,forceNew){toast('Opening the right place&hellip;',2500);try{var r=await(await fetch('/api/handoff-accept',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,force_new:!!forceNew})})).json();if(r.ok){toast((r.resumed?'Resumed the home agent in ':'Opened ')+esc(r.to_scope)+(r.created_home?' (new home created)':''),5000);if(r.from_session)setTimeout(function(){hoOriginStandDown(r.from_session,r.to_scope,r.origin_label);},1100);if(r.session){try{gotoLens('sessions');}catch(e){}setTimeout(function(){try{openInSessions(r.session);}catch(e){}},300);return;}}else{toast('Accept failed: '+esc(r.error||''),4500);}}catch(e){toast('Accept failed',3500);}loadHandoffs();}
+// After accepting a transfer: gently offer to FILE AWAY the previous conversation (the one we moved FROM) with a
+// countdown. Keep it open = pin; File it now / timer-expiry = archive (harvest -> close). When the origin tmux
+// session dies, loadSessions reconciles PANES so its split-pane just drops out (works in split view + mobile).
+var SO_NAME=null, SO_TICK=null, SO_LEFT=0;
+function hoOriginStandDown(origin, dest, label){
+  if(!origin) return;
+  SO_NAME=origin; SO_LEFT=90;
+  var el=document.getElementById('soAlert');
+  if(!el){el=document.createElement('div');el.id='soAlert';document.body.appendChild(el);}
+  el.innerHTML='<div class="opa-h"><span class="opa-dot"></span><b>Filing away the previous chat</b></div>'
+    +'<div class="opa-body">You moved this work to <code>'+e2(String(dest||'the new home').slice(0,40))+'</code>. I&rsquo;ll save the previous conversation'+(label?(' &ldquo;'+e2(String(label).slice(0,36))+'&rdquo;'):'')+' into its folder and close its window in <span class="ar-cd" id="soCd">'+arFmt(SO_LEFT)+'</span> &mdash; unless you still need it.</div>'
+    +'<div class="opa-act"><button class="mini" onclick="hoOriginFile()">File it now</button><button class="mini go" onclick="hoOriginKeep()">Keep it open</button></div>';
+  el.classList.add('show');
+  if(SO_TICK)clearInterval(SO_TICK);
+  SO_TICK=setInterval(function(){ SO_LEFT--; var c=document.getElementById('soCd'); if(c)c.textContent=SO_LEFT>0?arFmt(SO_LEFT):'a moment'; if(SO_LEFT<=0) hoOriginFile(); },1000);
+}
+function hoOriginHide(){var el=document.getElementById('soAlert');if(el)el.classList.remove('show');if(SO_TICK){clearInterval(SO_TICK);SO_TICK=null;}SO_NAME=null;}
+async function hoOriginKeep(){var n=SO_NAME;hoOriginHide();if(n){try{await fetch('/api/session-hold',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,mode:'pin'})});toast('Kept the previous conversation open',3000);}catch(e){}}}
+async function hoOriginFile(){var n=SO_NAME;hoOriginHide();if(n){try{await fetch('/api/session-archive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n})});toast('Filed away the previous conversation &mdash; resumable in one click',3500);}catch(e){}try{if(typeof PANES!=='undefined'&&PANES.indexOf(n)>=0&&typeof paneDown==='function')paneDown(n);else if(LENS==='sessions'&&typeof loadSessions==='function')loadSessions(true);}catch(e){}}}
 async function hoDecline(id){try{await fetch('/api/handoff-decline',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});}catch(e){}toast('Declined',2000);loadHandoffs();}
 async function hoRoute(){var el=document.getElementById('hoRouteOut');var q=((document.getElementById('hoRouteQ')||{}).value||'').trim();if(!q){el.innerHTML='';return;}el.innerHTML='Routing&hellip;';try{var d=await(await fetch('/api/route?q='+encodeURIComponent(q))).json();if(d.needs_new_home){el.innerHTML='&rarr; <b style="color:var(--accent)">No home yet</b> &mdash; would create one under <code>'+esc(d.suggested_parent||'(root)')+'</code>.';}else{var dd=d.destination||{};el.innerHTML='&rarr; <code>'+esc(dd.rel)+'</code> <span class="sub">('+Math.round((dd.confidence||0)*100)+'% match)</span>'+((d.alternatives&&d.alternatives.length>1)?(' &middot; also: '+d.alternatives.slice(1,4).map(function(a){return '<code>'+esc(a.rel)+'</code>';}).join(', ')):'');}}catch(e){el.innerHTML='route failed';}}
 function hoSetBadge(n){var b=document.getElementById('transfersBadge');if(b){if(n>0){b.textContent=n>99?'99+':n;b.style.display='inline-block';}else{b.textContent='';b.style.display='none';}}try{paintNavNotif();}catch(e){}}
