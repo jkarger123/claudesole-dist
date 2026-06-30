@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.64 -- 2026-06-30
+- FINAL polish: tokenized the last off-palette surfaces that used hardcoded GitHub colors (off-brand blue/green).
+  - Login page (first screen): GitHub green/blue -> gold-brand dark card w/ gold accent bar, gradient button, focus
+    ring, emoji dropped. The secure-credential modal (#cfsec), the "brief ready" banner (was GitHub blue), and the
+    Drive preview overlay (#pvOverlay) all reskinned to design tokens (gold theme).
+  - Code hygiene: 19 delete/remove buttons moved from inline `style="color:#f85149"` to the `.mini.danger` class.
+  - (Remaining #0d1117 are intentional dark code-block backgrounds.)
+
 ## 0.99.63 -- 2026-06-30
 - Finished the dialog sweep: the embedded terminal page (TERM_PAGE, 3 confirms) and Ralph-loop page (RALPH_PAGE,
   1 confirm) now use self-contained styled dialogs matching the palette. ZERO native browser pop-ups remain

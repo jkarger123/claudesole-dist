@@ -12587,14 +12587,16 @@ def set_winsize(fd, rows, cols):
     except Exception: pass
 
 LOGIN_PAGE = """<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>Sign in</title><style>body{background:#0d1117;color:#e6edf3;font:15px/1.5 -apple-system,Segoe UI,sans-serif;
+<title>Sign in</title><style>body{background:#0a0a0f;color:#fff;font:15px/1.5 -apple-system,Segoe UI,sans-serif;
 display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
-.card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:28px;width:320px;box-shadow:0 8px 40px #0008}
-h1{font-size:18px;margin:0 0 4px}.sub{color:#8b949e;font-size:13px;margin:0 0 18px}
-input{width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:8px;padding:11px;font:inherit}
-button{width:100%;margin-top:12px;background:#238636;border:0;color:#fff;border-radius:8px;padding:11px;font:inherit;font-weight:600;cursor:pointer}
+.card{position:relative;background:#1a1a24;border:1px solid #2a2a3a;border-radius:14px;padding:28px;width:320px;box-shadow:0 18px 50px rgba(0,0,0,.55);overflow:hidden}
+.card:before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:linear-gradient(135deg,#d6b23c,#c9a227)}
+h1{font-size:18px;margin:0 0 4px;font-weight:750}.sub{color:#8a8a99;font-size:13px;margin:0 0 18px}
+input{width:100%;box-sizing:border-box;background:#22222e;border:1px solid #2a2a3a;color:#fff;border-radius:9px;padding:11px;font:inherit;outline:none}
+input:focus{border-color:#c9a227}
+button{width:100%;margin-top:12px;background:linear-gradient(135deg,#d6b23c,#c9a227);border:0;color:#15120a;border-radius:9px;padding:11px;font:inherit;font-weight:700;cursor:pointer}
 .err{color:#f85149;font-size:13px;margin-top:10px;min-height:18px}</style></head>
-<body><form class=card onsubmit="return go(event)"><h1>&#127963; Command Center</h1><div class=sub>Enter your access token to continue.</div>
+<body><form class=card onsubmit="return go(event)"><h1>Command Center</h1><div class=sub>Enter your access token to continue.</div>
 <input id=t type=password autofocus placeholder="access token" autocomplete=current-password>
 <button type=submit>Sign in</button><div class=err id=e></div></form>
 <script>async function go(ev){ev.preventDefault();var t=document.getElementById('t').value;
@@ -13827,8 +13829,8 @@ async function refresh(){
   const b=document.getElementById('lstate');b.textContent=state;b.style.background=c+'22';b.style.color=c;
   const p=st.progress||{};document.getElementById('lprog').textContent=(p.checked||0)+'/'+(p.total||0)+' done'+(st.iteration?'  ·  iter '+st.iteration:'')+(p.phase?'  ·  '+p.phase:'');
   let h='';
-  if(state=='running')h='<button class="mini" onclick="ract(\'pause\')">pause</button> <button class="mini" style="color:#f85149" onclick="ract(\'halt\')">halt</button> <button class="mini" style="color:#f85149" onclick="ract(\'kill\')">kill</button>';
-  else if(state=='paused')h='<button class="mini go" onclick="ract(\'resume\')">resume</button> <button class="mini" style="color:#f85149" onclick="ract(\'halt\')">halt</button>';
+  if(state=='running')h='<button class="mini" onclick="ract(\'pause\')">pause</button> <button class="mini danger" onclick="ract(\'halt\')">halt</button> <button class="mini danger" onclick="ract(\'kill\')">kill</button>';
+  else if(state=='paused')h='<button class="mini go" onclick="ract(\'resume\')">resume</button> <button class="mini danger" onclick="ract(\'halt\')">halt</button>';
   else h='<button class="mini go" onclick="launch()">launch</button>';
   document.getElementById('ctl').innerHTML=h;
   if(!DIRTY)document.getElementById('editor').value=DETAIL[TAB]==null?'':String(DETAIL[TAB]);
@@ -15600,7 +15602,7 @@ function modCard(c){const n=(c.children||[]).length;
     +'<div class="btns" style="margin-top:9px" onclick="event.stopPropagation()">'
     +'<button class="mini go" onclick="modLaunch(\''+esc(c.rel)+'\')">▶ launch</button>'
     +(n?'<button class="mini" onclick="loadModules(\''+esc(c.rel)+'\')">open ('+n+')</button>':'')
-    +'<button class="mini" style="color:#f85149" onclick="modRemove(\''+esc(c.rel)+'\',\''+esc(c.name)+'\')">remove</button>'
+    +'<button class="mini danger" onclick="modRemove(\''+esc(c.rel)+'\',\''+esc(c.name)+'\')">remove</button>'
     +'</div></div>';
 }
 async function modLaunch(rel){toast("Launching a session in "+rel+"…");
@@ -15673,12 +15675,12 @@ function ralphCard(r){
   const col=RCOL[r.state]||"#a0a0b0";
   const bar='<div style="height:6px;background:#22222e;border-radius:3px;overflow:hidden;margin:7px 0"><div style="height:100%;width:'+pct+'%;background:'+col+'"></div></div>';
   let btns='';
-  if(r.state=="running") btns='<button class="mini" onclick="ralphAct(\''+esc(r.name)+'\',\'pause\')">pause</button><button class="mini" style="color:#f85149" onclick="ralphAct(\''+esc(r.name)+'\',\'halt\')">halt</button>';
-  else if(r.state=="paused") btns='<button class="mini go" onclick="ralphAct(\''+esc(r.name)+'\',\'resume\')">▶ resume</button><button class="mini" style="color:#f85149" onclick="ralphAct(\''+esc(r.name)+'\',\'halt\')">halt</button>';
+  if(r.state=="running") btns='<button class="mini" onclick="ralphAct(\''+esc(r.name)+'\',\'pause\')">pause</button><button class="mini danger" onclick="ralphAct(\''+esc(r.name)+'\',\'halt\')">halt</button>';
+  else if(r.state=="paused") btns='<button class="mini go" onclick="ralphAct(\''+esc(r.name)+'\',\'resume\')">▶ resume</button><button class="mini danger" onclick="ralphAct(\''+esc(r.name)+'\',\'halt\')">halt</button>';
   else { const ran=(r.state=="done"||r.state=="halted"||r.state=="stopped");
     btns='<button class="mini go" onclick="ralphLaunch(\''+esc(r.name)+'\')">▶ '+(ran?'relaunch':'launch')+'</button>'
         +'<button class="mini" title="move to Previous (completed)" onclick="ralphAct(\''+esc(r.name)+'\',\'archive\')">✓ complete</button>'
-        +'<button class="mini" style="color:#f85149" title="delete (reversible: moves to _trash)" onclick="ralphDel(\''+esc(r.name)+'\')">delete</button>'; }
+        +'<button class="mini danger" title="delete (reversible: moves to _trash)" onclick="ralphDel(\''+esc(r.name)+'\')">delete</button>'; }
   return '<div class="card" onclick="openRalph(\''+esc(r.name)+'\')" style="cursor:pointer"><h3><span>🔁 '+esc(r.name)+'</span><span class="badge" style="background:'+col+'22;color:'+col+'">'+r.state+(r.alive?"":"")+'</span></h3>'
     +'<div class="meta">'+esc(r.goal||"(no goal set)")+'</div>'+bar
     +'<div class="meta">'+ck+'/'+tot+' done ('+pct+'%)'+(p.phase?' · '+esc(p.phase):'')+(r.state=="running"&&r.iteration?' · iter '+r.iteration:'')+'</div>'
@@ -16259,10 +16261,10 @@ function previewModal(b64,name){
   var ov=document.createElement('div');ov.id='pvOverlay';
   ov.style.cssText='position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;padding:18px';
   ov.onclick=function(e){if(e.target===ov)ov.remove();};
-  ov.innerHTML='<div style="background:#0d1117;border:1px solid #30363d;border-radius:10px;max-width:95vw;max-height:93vh;overflow:hidden;display:flex;flex-direction:column">'
-   +'<div style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid #30363d"><b style="flex:1;color:#c9d1d9;font-size:13px">'+(name||'').replace(/[<>&]/g,'')+'</b>'
-   +'<a href="'+dl+'" download style="color:#58a6ff;text-decoration:none;font-weight:600;margin-right:12px">&#8595; Download</a>'
-   +'<span onclick="var o=document.getElementById(\'pvOverlay\');if(o)o.remove()" style="cursor:pointer;color:#8b949e;font-size:22px;line-height:1">&times;</span></div>'
+  ov.innerHTML='<div style="background:var(--card);border:1px solid var(--line);border-radius:12px;max-width:95vw;max-height:93vh;overflow:hidden;display:flex;flex-direction:column">'
+   +'<div style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--line)"><b style="flex:1;color:var(--ink);font-size:13px">'+(name||'').replace(/[<>&]/g,'')+'</b>'
+   +'<a href="'+dl+'" download style="color:var(--accent);text-decoration:none;font-weight:600;margin-right:12px">&#8595; Download</a>'
+   +'<span onclick="var o=document.getElementById(\'pvOverlay\');if(o)o.remove()" style="cursor:pointer;color:var(--dim);font-size:22px;line-height:1">&times;</span></div>'
    +'<div style="display:flex;align-items:center;justify-content:center;min-height:120px">'+inner+'</div></div>';
   document.body.appendChild(ov);
   if(isPvTxt(name))fetch(url,{cache:'no-store'}).then(function(r){return r.text();}).then(function(t){var e=document.getElementById('pvBody');if(e)e.textContent=(t||'').slice(0,300000);}).catch(function(){var e=document.getElementById('pvBody');if(e)e.textContent='(could not load)';});
@@ -16799,7 +16801,7 @@ async function briefSurfacePoll(){
   let d;try{d=await(await fetch('/api/brief')).json();}catch(e){return;}
   var bn=document.getElementById('briefBanner');
   if(d&&d.unread_today&&d.today){
-    if(!bn){bn=document.createElement('div');bn.id='briefBanner';bn.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;background:linear-gradient(90deg,#1f6feb,#388bfd);color:#fff;padding:11px 16px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 12px rgba(0,0,0,.45);cursor:pointer;font-size:14px';document.body.appendChild(bn);}
+    if(!bn){bn=document.createElement('div');bn.id='briefBanner';bn.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;background:var(--card2);color:var(--ink);border-bottom:2px solid var(--accent);padding:11px 16px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 12px rgba(0,0,0,.45);cursor:pointer;font-size:14px';document.body.appendChild(bn);}
     bn.innerHTML='<span style="font-size:18px">☀️</span><b>Your morning brief is ready.</b><span style="opacity:.9">Tap to open and play it.</span><span style="margin-left:auto;opacity:.85;padding:0 6px" onclick="event.stopPropagation();briefDismiss()">✕</span>';
     bn.onclick=function(){LENS='brief';render();try{fetch('/api/brief-seen',{method:'POST'});}catch(e){}bn.remove();};
   }else if(bn){bn.remove();}
@@ -19500,7 +19502,7 @@ async function loadNotebook(){
         +(n.summary?'<div class="cc-dt">'+e2(n.summary)+'</div>':'')
         +((tasks||rems)?('<div class="cc-body"><div class="meta sub"><b>Action items</b></div>'+tasks+rems+(n.applied?'<div class="sub" style="margin-top:6px;color:#3fb950">&#10003; added to Tasks</div>':'<button class="mini go" style="margin-top:8px" onclick="nbApply(\''+n.id+'\')">&#43; Add '+nAct+' to Tasks</button>')+'</div>'):'')
         +decs+tags
-        +'<div style="margin-top:10px;display:flex;gap:6px"><button class="mini" onclick="nbRaw(this)">raw</button><button class="mini" style="color:#f85149" onclick="nbDelete(\''+n.id+'\')">delete</button></div>'
+        +'<div style="margin-top:10px;display:flex;gap:6px"><button class="mini" onclick="nbRaw(this)">raw</button><button class="mini danger" onclick="nbDelete(\''+n.id+'\')">delete</button></div>'
         +'<div class="nbraw" style="display:none;white-space:pre-wrap;margin-top:8px;font-size:12px;color:var(--mut);border-top:1px solid var(--line);padding-top:8px">'+e2(n.text||'')+'</div>'
       +'</div></div>';
   });
@@ -19656,7 +19658,7 @@ function vaultRow(s){
   var vals=(s.has_shared?'<span class="vlt-tag">shared</span>':'')+(s.node_overrides||[]).map(function(n){return '<span class="vlt-tag" style="border-color:var(--accent)">'+esc(n)+'</span>';}).join('');
   var st=s.revoked?'<span style="color:#f85149">revoked</span>':'<span style="color:var(--ok,#3fb950)">active</span>';
   var act='<button class="mini" onclick="vaultRevoke(\''+esc(s.id)+'\','+(s.revoked?'false':'true')+')">'+(s.revoked?'Restore':'Revoke')+'</button>'
-    +' <button class="mini" style="color:#f85149" onclick="vaultDel(\''+esc(s.id)+'\')">Delete</button>';
+    +' <button class="mini danger" onclick="vaultDel(\''+esc(s.id)+'\')">Delete</button>';
   return '<tr><td><b>'+esc(s.id)+'</b>'+(s.label&&s.label!==s.id?('<div class="sub" style="font-size:11px">'+esc(s.label)+'</div>'):'')+'</td><td>'+(scope||'—')+'</td><td>'+(vals||'<span style="color:var(--dim)">empty</span>')+'</td><td>'+st+'</td><td style="text-align:right">'+act+'</td></tr>';
 }
 async function vaultSave(){
@@ -19682,7 +19684,7 @@ async function loadMarketplace(){document.getElementById("grid").innerHTML=empty
     if(e.paid){ tags+='<span class="cc-tag paid" title="Paid extension'+(e.publisher?(' · by '+esc(e.publisher)):'')+'">💳 Paid'+(price?(' '+esc(price)):'')+'</span>';
       tags+=e.entitled?'<span class="cc-tag ok" title="This node holds a valid signed entitlement">✓ Licensed</span>':'<span class="cc-tag lock" title="Locked — needs a Mission-Control-signed entitlement">🔒 Locked</span>'; }
     if(e.installed) tags+='<span class="cc-tag ok">✓ Installed</span>';
-    var foot=e.installed?('<button class="mini" onclick="extSetup(\''+esc(e.id)+'\')">Set up</button><button class="mini" style="color:#f85149" onclick="extUninstall(\''+esc(e.id)+'\')">remove</button>')
+    var foot=e.installed?('<button class="mini" onclick="extSetup(\''+esc(e.id)+'\')">Set up</button><button class="mini danger" onclick="extUninstall(\''+esc(e.id)+'\')">remove</button>')
       :(e.locked?('<button class="mini" title="Requires a paid entitlement signed by Mission Control" onclick="extRequest(\''+esc(e.id)+'\','+JSON.stringify(price||'').replace(/"/g,"&quot;")+')">Request access</button>')
                 :'<button class="mini go" onclick="extInstall(\''+esc(e.id)+'\')">＋ Install</button>');
     return '<div class="cc-tile'+(e.installed?' on':'')+'">'
@@ -19965,7 +19967,7 @@ async function loadAgents(){document.getElementById("grid").innerHTML=empty("Loa
       +(a.has_run?'<button class="mini go" onclick="agentRun(\''+a.slug+'\')">▶ Run</button>':'')
       +'<button class="mini" onclick="agentReport(\''+a.slug+'\')">Details</button>'
       +'<button class="mini" onclick="openAgent(\''+a.slug+'\')">Talk</button>'
-      +'<button class="mini" style="color:#f85149" onclick="delAgent(\''+a.slug+'\')" title="archive this agent-tool (reversible)">🗑</button></div>'
+      +'<button class="mini danger" onclick="delAgent(\''+a.slug+'\')" title="archive this agent-tool (reversible)">🗑</button></div>'
       +'<div id="agrep-'+a.slug+'" style="margin-top:9px"></div></div>';});
   h+=await subagentsSection();
   document.getElementById("grid").innerHTML=h;}
@@ -20363,7 +20365,7 @@ function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attache
   +'<button class="mini" title="give Claude a file (upload + hand the path to this session)" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
   +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
-  +'<button class="mini" style="color:#f85149" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
+  +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
   +'</span></div>';}
 function renderFocus(s){
   if(!SESSBIG||!s.find(function(x){return x.name==SESSBIG;}))SESSBIG=s[0].name;
@@ -20386,7 +20388,7 @@ function paneHead(x){return '<div class="sthead"><span class="stdot">'+(x.attach
   +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
   +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
-  +'<button class="mini" style="color:#f85149" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
+  +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
   +'</span></div>';}
 function renderWorkspace(s){
   // reconcile PANES with live sessions; never empty (auto-show one big)
@@ -20488,7 +20490,7 @@ function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="c
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
   +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">file</button>'
   +'<button class="mini" onclick="endSess(\''+esc(x.name)+'\',false)" title="handoff + close">end</button>'
-  +'<button class="mini" style="color:#f85149" onclick="endSess(\''+esc(x.name)+'\',true)" title="force kill">kill</button></div></div>';}
+  +'<button class="mini danger" onclick="endSess(\''+esc(x.name)+'\',true)" title="force kill">kill</button></div></div>';}
 function sessTile(x,i){const big=(SESSBIG==x.name);
   return '<div class="stile'+(big?' big':'')+'" data-name="'+esc(x.name)+'"'+(big?(' data-ccsess="'+esc(x.name)+'"'):'')+'>'
     +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)
@@ -20497,7 +20499,7 @@ function sessTile(x,i){const big=(SESSBIG==x.name);
     +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
     +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
     +'<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
-    +'<button class="mini" style="color:#f85149" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'
+    +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'
     +'</span></div>'
     +(big?('<iframe class="stframe" src="/term?name='+encodeURIComponent(x.name)+'"></iframe>'+ccDropOverlay()):'<pre class="snap" id="snap_'+i+'">…</pre>')
     +'</div>';}
@@ -20632,7 +20634,7 @@ function docCard(b){const ok=b.targets&&b.insync==b.targets;const col=ok?"#3fb95
    +'<div class="meta" style="color:'+col+'">'+b.insync+'/'+b.targets+' folders in sync'+(b.present>b.insync?(" · "+(b.present-b.insync)+" on an old version"):"")+'</div>'
    +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="applyBlock(\''+b.id+'\')">▶ Apply</button>'
    +'<button class="mini" onclick="editBlock(\''+b.id+'\')">Edit</button>'
-   +'<button class="mini" style="color:#f85149" onclick="rmBlock(\''+b.id+'\')">Remove</button></div></div>';}
+   +'<button class="mini danger" onclick="rmBlock(\''+b.id+'\')">Remove</button></div></div>';}
 async function editBlock(id){let b={id:"",title:"",scope:"pillars",body:"",stub:""};
   if(id)b=await(await fetch("/api/managed-block?id="+encodeURIComponent(id))).json();
   const opts=SCOPES.map(s=>'<option value="'+s+'"'+(b.scope==s?" selected":"")+'>'+SCOPELABEL[s]+'</option>').join("");
@@ -20907,7 +20909,7 @@ function ideaCard(i){return '<div class="cc-item">'
   +(i.notes?'<div class="cc-dt" style="white-space:pre-wrap">'+e2(i.notes)+'</div>':'')
   +'<div class="cc-mt">added '+tago(i.created)+'</div></div>'
   +'<div class="cc-acts"><button class="mini go" onclick="ideaPromote(\''+esc(i.id)+'\')">▶ Promote</button>'
-  +'<button class="mini" style="color:#f85149" onclick="ideaDel(\''+esc(i.id)+'\')">delete</button></div></div>';}
+  +'<button class="mini danger" onclick="ideaDel(\''+esc(i.id)+'\')">delete</button></div></div>';}
 async function ideaAdd(){const t=document.getElementById("idea_t"),n=document.getElementById("idea_n");if(!t.value.trim())return;
   await fetch("/api/idea-add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:t.value,notes:n.value})});t.value="";n.value="";loadIdeas();}
 async function ideaDel(id){if(!await confirmM("Delete this idea?"))return;await fetch("/api/idea-delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});loadIdeas();}
@@ -20989,7 +20991,7 @@ function ccrCard(c){
     +cmts
     +'<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center"><span class="meta">status</span> <select class="cc-in" style="padding:5px 8px" onchange="ccrSet(\''+esc(c.id)+'\',this.value)">'+opts+'</select>'
     +'<button class="mini" onclick="ccrComment(\''+esc(c.id)+'\')">comment</button>'
-    +'<button class="mini" style="color:#f85149" onclick="ccrDel(\''+esc(c.id)+'\')">delete</button></div>'
+    +'<button class="mini danger" onclick="ccrDel(\''+esc(c.id)+'\')">delete</button></div>'
     +'</div></div>';
 }
 async function ccrAdd(){const t=document.getElementById("ccr_t");if(!t.value.trim())return;
@@ -21053,7 +21055,7 @@ async function loadAccounts(){
         +'<div class="cc-mt">saved '+(a.ts?tago(a.ts):'?')+(a.label&&a.label!==a.email?(' · label: '+e2(a.label)):'')+'</div></div>'
         +'<div class="cc-acts">'
         +(a.active?'<span class="sub">live account</span>':'<button class="mini go" onclick="acctSwitch(\''+esc(a.label)+'\',\''+esc(a.email||a.label)+'\')">▶ switch all sessions</button>')
-        +'<button class="mini" style="color:#f85149" onclick="acctRemove(\''+esc(a.label)+'\')">remove</button>'
+        +'<button class="mini danger" onclick="acctRemove(\''+esc(a.label)+'\')">remove</button>'
         +'</div></div>';
     });
     h+='</div>';
@@ -22247,18 +22249,18 @@ setInterval(()=>{fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;if(LENS=="
     if(showing===it.id)return; showing=it.id;
     var req=it.kind==='request';
     var o=document.createElement('div'); o.id='cfsec';
-    o.setAttribute('style','position:fixed;inset:0;z-index:99999;background:rgba(2,6,12,.72);display:flex;align-items:center;justify-content:center;padding:20px');
+    o.setAttribute('style','position:fixed;inset:0;z-index:99999;background:rgba(8,8,12,.74);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);display:flex;align-items:center;justify-content:center;padding:20px');
     var inner=req
-      ? '<input id="cfsecv" type="password" autocomplete="new-password" placeholder="paste the value here" style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:8px;padding:11px 12px;font:inherit;margin-top:12px">'
-        +'<div style="display:flex;gap:8px;margin-top:12px"><button id="cfsecok" style="flex:1;background:#238636;color:#fff;border:0;border-radius:8px;padding:10px;font:inherit;cursor:pointer">Submit securely</button><button id="cfsecx" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:8px;padding:10px 14px;font:inherit;cursor:pointer">Cancel</button></div>'
-        +'<div style="color:#8b949e;font-size:11px;margin-top:9px">Goes straight to the encrypted vault — never into the chat or transcript.</div>'
-      : '<div style="margin-top:12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:11px 12px;font-family:ui-monospace,Menlo,monospace;font-size:13px;color:#e6edf3;word-break:break-all;user-select:all">'+esc(it.value)+'</div>'
-        +'<div style="display:flex;gap:8px;margin-top:12px"><button id="cfseccopy" style="flex:1;background:#1f6feb;color:#fff;border:0;border-radius:8px;padding:10px;font:inherit;cursor:pointer">Copy</button><button id="cfsecok" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:8px;padding:10px 14px;font:inherit;cursor:pointer">Done</button></div>'
-        +'<div style="color:#8b949e;font-size:11px;margin-top:9px">Shown once — this value is not in the chat or transcript.</div>';
-    o.innerHTML='<div style="width:100%;max-width:440px;background:#161b22;border:1px solid #30363d;border-radius:14px;padding:18px 18px 16px;box-shadow:0 18px 60px rgba(0,0,0,.5)">'
-      +'<div style="font-size:15px;font-weight:700;color:#e6edf3">&#128272; '+(req?'A value is needed':'Sensitive value')+'</div>'
-      +'<div style="color:#c9d1d9;font-size:13.5px;margin-top:4px">'+esc(it.label)+(it.note?(' <span style="color:#8b949e">— '+esc(it.note)+'</span>'):'')+'</div>'
-      +(it.session?'<div style="color:#8b949e;font-size:11px;margin-top:2px">from session: '+esc(it.session)+'</div>':'')
+      ? '<input id="cfsecv" type="password" autocomplete="new-password" placeholder="paste the value here" style="width:100%;box-sizing:border-box;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:11px 12px;font:inherit;margin-top:12px">'
+        +'<div style="display:flex;gap:8px;margin-top:12px"><button id="cfsecok" style="flex:1;background:var(--ok);color:#06210f;border:0;border-radius:9px;padding:10px;font:inherit;font-weight:700;cursor:pointer">Submit securely</button><button id="cfsecx" style="background:var(--card2);color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:10px 14px;font:inherit;cursor:pointer">Cancel</button></div>'
+        +'<div style="color:var(--dim);font-size:11px;margin-top:9px">Goes straight to the encrypted vault — never into the chat or transcript.</div>'
+      : '<div style="margin-top:12px;background:var(--card2);border:1px solid var(--line);border-radius:9px;padding:11px 12px;font-family:ui-monospace,Menlo,monospace;font-size:13px;color:var(--ink);word-break:break-all;user-select:all">'+esc(it.value)+'</div>'
+        +'<div style="display:flex;gap:8px;margin-top:12px"><button id="cfseccopy" style="flex:1;background:var(--grad);color:#15120a;border:0;border-radius:9px;padding:10px;font:inherit;font-weight:700;cursor:pointer">Copy</button><button id="cfsecok" style="background:var(--card2);color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:10px 14px;font:inherit;cursor:pointer">Done</button></div>'
+        +'<div style="color:var(--dim);font-size:11px;margin-top:9px">Shown once — this value is not in the chat or transcript.</div>';
+    o.innerHTML='<div style="width:100%;max-width:440px;background:var(--card);border:1px solid var(--line);border-top:2px solid var(--accent);border-radius:14px;padding:18px 18px 16px;box-shadow:0 18px 50px rgba(0,0,0,.5)">'
+      +'<div style="font-size:15px;font-weight:700;color:var(--ink)">&#128272; '+(req?'A value is needed':'Sensitive value')+'</div>'
+      +'<div style="color:var(--mut);font-size:13.5px;margin-top:4px">'+esc(it.label)+(it.note?(' <span style="color:var(--dim)">— '+esc(it.note)+'</span>'):'')+'</div>'
+      +(it.session?'<div style="color:var(--dim);font-size:11px;margin-top:2px">from session: '+esc(it.session)+'</div>':'')
       +inner+'</div>';
     document.body.appendChild(o);
     var v=document.getElementById('cfsecv'); if(v)v.focus();
