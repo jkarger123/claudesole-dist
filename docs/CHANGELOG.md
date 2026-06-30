@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.82 -- 2026-06-30
+- FIX (mesh reliability): a chief's reply to a peer could be silently dropped when an OPERATOR turn interleaved
+  between the incoming "[message from X]" and the chief's reply -- the Stop hook's _reply_after severed at the next
+  user turn, so the reply got attributed to the operator turn and never forwarded (this lost carsearch's Step-7.7
+  confirmation to Mission Control). Now _reply_after skips interleaved operator turns and captures the chief's
+  actual reply block, stopping only at the next mesh message. Flush-retry widened to ~20s for loaded boxes. Because
+  an unforwarded message's uuid is never marked done, the stuck reply self-heals on the chief's next turn. Doctor
+  now warns if a chief's mesh reply-hook isn't wired at all. Ships to every node + every future install (the hook
+  is a signed framework file referenced by absolute path -- existing chiefs pick it up on their next turn, no
+  restart).
+
 ## 0.99.81 -- 2026-06-30
 - RUNNING-CODE version marker -- you can finally tell whether a node actually RELOADED a fix vs just had its files
   synced. BOOT_VERSION is frozen at process start (re-frozen on every os.execv self-restart); /api/health and

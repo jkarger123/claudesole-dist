@@ -8159,6 +8159,11 @@ def doctor():
     issues = []
     if _semver(BOOT_VERSION) < _semver(_manifest_version()):   # files updated by a converge but this process never re-exec'd
         issues.append({"sev": "warn", "path": "runtime", "msg": "running STALE code: this process booted on v%s but the framework on disk is v%s -- restart to load the update (the converge's restart didn't land)" % (BOOT_VERSION, _manifest_version())})
+    try:                                                       # mesh reply-forwarding must be wired or a chief's replies to peers silently never arrive
+        _hk = os.path.join(STATE_DIR, "_mesh_hook_settings.json")
+        if not (os.path.isfile(_hk) and "mesh_stop_hook" in _read(_hk)):
+            issues.append({"sev": "warn", "path": "mesh", "msg": "chief mesh reply-forwarding hook is NOT wired (_mesh_hook_settings.json missing/incomplete) -- this chief's replies to peers would silently never be delivered; relaunch the chief to re-wire it"})
+    except Exception: pass
     BUDGET = 200          # Anthropic guidance: CLAUDE.md adherence drops past ~200 lines -> keep it an index
     for ab, rel in iter_folders():
         cm = os.path.join(ab, "CLAUDE.md")
