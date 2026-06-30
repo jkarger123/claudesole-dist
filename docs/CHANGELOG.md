@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.81 -- 2026-06-30
+- RUNNING-CODE version marker -- you can finally tell whether a node actually RELOADED a fix vs just had its files
+  synced. BOOT_VERSION is frozen at process start (re-frozen on every os.execv self-restart); /api/health and
+  /api/fw-fingerprint now report `running_version` + a `stale` flag alongside the on-disk `version`. drift_report
+  judges behind/current by the RUNNING version (a files-synced-but-not-restarted node now shows behind +
+  stale_process, not falsely "current"), and fleet_converge RESTARTS a stale-process node even when the pull is a
+  no-op -- so a converge actually takes effect instead of leaving old code running. Doctor warns when a process is
+  running stale code. This is the systemic gap behind "I shipped the fix but nothing changed."
+
 ## 0.99.80 -- 2026-06-30
 - FIX (enforced, not advised): a spoke node can no longer page a SIBLING node over the chief-mesh. Every proactive
   chief-mesh from a node now routes UP to Mission Control at the ROUTING layer (mesh_send), where the model can't

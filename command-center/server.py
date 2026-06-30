@@ -197,7 +197,7 @@ def render_page():
     except Exception: _lenses = None
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
-        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(),
+        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(),
         "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md", "MASTER_HANDOFF.md",
             "FILE_SYSTEM_GOVERNANCE.md", "TEXT2TUNE_ARCHITECTURE.md", "ENTERPRISE_MIGRATION.md",
             "BRIDGE_MIGRATION.md"]})
@@ -4578,6 +4578,13 @@ def _manifest_version():
     try: return json.load(open(os.path.join(os.path.dirname(BASE), "claudesole.manifest.json"))).get("version")
     except Exception: return None
 
+# RUNNING-CODE version: captured ONCE at process start (re-frozen on every os.execv self-restart, since execv
+# re-imports this module). Distinct from _manifest_version(), which RE-READS the on-disk manifest each call. After a
+# converge file-sync the on-disk manifest says the NEW version while a not-yet-restarted process is still running
+# OLD code -- so _manifest_version() lies about what's executing. BOOT_VERSION is the only honest "what code is
+# actually running": BOOT_VERSION < _manifest_version() means "files updated, process NOT reloaded -> restart needed".
+BOOT_VERSION = _manifest_version()
+
 def _semver(v):
     """'0.2.0' -> (0,2,0); tolerant of junk/None so a malformed version sorts as oldest (0,)."""
     nums = re.findall(r"\d+", str(v or ""))
@@ -8150,6 +8157,8 @@ def doctor():
     """Self-maintenance check: flags over-budget docs, sub-tool duplication, managed-block drift, and
        registered components missing a CLAUDE.md -- so the multi-level doc system stays clean as it grows."""
     issues = []
+    if _semver(BOOT_VERSION) < _semver(_manifest_version()):   # files updated by a converge but this process never re-exec'd
+        issues.append({"sev": "warn", "path": "runtime", "msg": "running STALE code: this process booted on v%s but the framework on disk is v%s -- restart to load the update (the converge's restart didn't land)" % (BOOT_VERSION, _manifest_version())})
     BUDGET = 200          # Anthropic guidance: CLAUDE.md adherence drops past ~200 lines -> keep it an index
     for ab, rel in iter_folders():
         cm = os.path.join(ab, "CLAUDE.md")
@@ -12138,7 +12147,7 @@ def _fw_fingerprint(home):
     return out
 def fw_fingerprint():
     """Node-side: this deployment's framework version + core-file hashes (read from its own CC_HOME)."""
-    return {"id": INSTANCE_ID, "version": _manifest_version(), "home": CC_HOME, "files": _fw_fingerprint(CC_HOME)}
+    return {"id": INSTANCE_ID, "version": _manifest_version(), "running_version": BOOT_VERSION, "home": CC_HOME, "files": _fw_fingerprint(CC_HOME)}
 def _dist_dir():
     return os.path.expanduser(CC.get("dist_dir") or OFFICIAL_DIST_DIR)
 
@@ -12163,11 +12172,15 @@ def drift_report():
                 fp = json.loads(r.read().decode())
             node["reachable"] = True
             node["version"] = fp.get("version")
+            node["running_version"] = fp.get("running_version") or fp.get("version")   # what code is ACTUALLY running
             node["home"] = fp.get("home")
             files = fp.get("files", {}) or {}
+            rv = node["running_version"]
+            # files synced but the process hasn't re-exec'd yet -> running code is behind its own on-disk files
+            node["stale_process"] = _semver(rv) < _semver(fp.get("version"))
             if not dist_ok:
                 node["status"] = "no-dist"
-            elif _semver(fp.get("version")) < _semver(dist_ver):
+            elif _semver(rv) < _semver(dist_ver):     # judge by RUNNING version, not the on-disk file (which lies)
                 node["status"] = "behind"
                 node["diff"] = [k for k in dist_fp if files.get(k) != dist_fp.get(k)]
             else:
@@ -12597,11 +12610,14 @@ def fleet_converge(force=False):
             res["skipped"].append({"id": nid, "why": status}); continue
         upd = superadmin_send(nid, "cc_update", {"upstream": mirror})
         ok = bool(upd.get("ok") and (upd.get("result") or {}).get("ok"))
-        rec = {"id": nid, "from": status, "update": ok}
-        if ok:
+        rec = {"id": nid, "from": status, "update": ok, "stale_process": bool(n.get("stale_process"))}
+        # restart if the pull landed OR the node's process is running stale code (files already current but not
+        # reloaded -- the pull is a no-op, so the RESTART is the whole fix). This is what makes a converge actually
+        # take effect instead of silently leaving old code running.
+        if ok or n.get("stale_process"):
             rst = superadmin_send(nid, "restart")   # SEPARATE safe self-restart (never cc_update restart:true)
             rec["restart"] = bool(rst.get("ok") and (rst.get("result") or {}).get("ok"))
-            _aupd_log("MC converged %s (%s) update=%s restart=%s" % (nid, status, ok, rec.get("restart")))
+            _aupd_log("MC converged %s (%s) update=%s stale=%s restart=%s" % (nid, status, ok, n.get("stale_process"), rec.get("restart")))
         else:
             rec["error"] = (upd.get("error") or (upd.get("result") or {}).get("error") or "update failed")[:160]
         res["ran"].append(rec)
@@ -13079,7 +13095,7 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path); q = urllib.parse.parse_qs(u.query)
         if not self._auth_gate(u.path): return
         if u.path == "/login": return self._s(200, LOGIN_PAGE, "text/html; charset=utf-8")
-        if u.path == "/api/health": return self._s(200, json.dumps({"ok": True, "instance": INSTANCE_ID, "version": _manifest_version(), "auth": bool(AUTH_TOKEN), "edition": _edition(), "integrity": _CORE_STATUS.get("status"), "licensed": _licensed()}))
+        if u.path == "/api/health": return self._s(200, json.dumps({"ok": True, "instance": INSTANCE_ID, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "auth": bool(AUTH_TOKEN), "edition": _edition(), "integrity": _CORE_STATUS.get("status"), "licensed": _licensed()}))
         if u.path == "/ws": return self.handle_ws(q)
         if u.path == "/wsvnc": return self.handle_wsvnc()
         if u.path == "/api/convo-tree":
