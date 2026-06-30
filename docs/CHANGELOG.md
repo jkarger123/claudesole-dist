@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.73 -- 2026-06-30
+- Drift-sweep PRECISION (a "well-formed but wrong" false positive seen on AFP: Pipeline/solawave -> Pipeline):
+  - SAME-LINEAGE GUARD: never propose moving a conversation into its own ANCESTOR or descendant (a client folder
+    up into its generic parent category isn't a transfer -- it's demoting specific work into the container above it).
+  - ALWAYS model-confirm an auto proposal when `smart` is on (drift proposals are rare -> precision > a cheap call),
+    with a sharper prompt: a CLIENT/PROJECT folder is a proper noun, and a budget/proposal/call ABOUT it still
+    BELONGS to it even when the name isn't repeated -- so on-topic work no longer gets flagged. (smart off -> only a
+    strong lexical route proposes, conf>=0.6.) Cleaned the stray proposals.
+
 ## 0.99.72 -- 2026-06-30
 - MULTI-NODE-PER-INSTALL hardening (the real production topology: an overseer + one-or-more project nodes share
   one Mac's tmux server). Session-acting loops were using the UNSCOPED _live_sessions() and could act on OTHER

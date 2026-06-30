@@ -9769,10 +9769,14 @@ def _is_service_session(name):
 def _confirm_drift_llm(rel, summ, topic, dest_name):
     """High-precision gate for AMBIGUOUS drift: ask the cheap subscription model (free) whether the conversation
     has genuinely moved to a topic that belongs elsewhere. Returns False on any failure (fail-closed = no spam)."""
-    q = ("A work conversation is filed under the folder '%s' (%s). Its recent activity is about: \"%s\". "
-         "Has it clearly MOVED to a different topic that belongs elsewhere (e.g. %s), rather than still being part "
-         "of '%s'? Answer ONLY yes or no." % (os.path.basename(rel), (summ or "no summary")[:140], topic[:200],
-                                              dest_name or "another area", os.path.basename(rel)))
+    q = ("A work conversation is filed under the folder '%s' (%s). Its recent activity is about: \"%s\".\n"
+         "IMPORTANT: the folder is often a CLIENT or PROJECT named with a proper noun, and legitimate work on it "
+         "frequently does NOT repeat that name -- a budget, a proposal, a call, a follow-up ABOUT that client still "
+         "BELONGS to it. Only say yes if the conversation has CLEARLY moved to a genuinely DIFFERENT subject that "
+         "belongs in a separate home (like '%s') -- NOT if it's just on-topic work for '%s' that happens not to "
+         "mention the name. When unsure, answer no. Answer ONLY yes or no."
+         % (os.path.basename(rel), (summ or "no summary")[:140], topic[:200],
+            dest_name or "another area", os.path.basename(rel)))
     a = _claude_text(q, model="claude-haiku-4-5", timeout=25)
     return bool(a and a.strip().lower().startswith("y"))
 
@@ -9806,14 +9810,22 @@ def _drift_sweep():
         if (time.time() - float(m.get("drift_proposed_ts") or 0)) < _DRIFT_REPROPOSE_SEC: continue
         topic = " ".join(sorted(rk))
         routed = route(topic, exclude=rel)
-        dest = routed.get("destination")
-        if dest and dest.get("rel") == rel: continue
+        dest = routed.get("destination"); dest_rel = (dest or {}).get("rel")
+        if dest and dest_rel == rel: continue
+        # SAME-LINEAGE guard: never propose moving a conversation into its own ANCESTOR or descendant (e.g. a client
+        # folder 'Pipeline/solawave' "up" to the generic parent 'Pipeline'). That's not a transfer to a different
+        # home -- it's demoting specific work into the container above it. Real drift goes to a SEPARATE branch.
+        if dest_rel and (rel.startswith(dest_rel + "/") or dest_rel.startswith(rel + "/")): continue
         if not dest and not routed.get("needs_new_home"): continue
         conf = (dest or {}).get("confidence") or 0.0
-        if conf < 0.45:                                            # ambiguous -> require model confirmation
-            if CC.get("smart", True) is False: continue
+        # PRECISION: model-confirm EVERY auto proposal when `smart` is on (drift proposals are rare, so precision is
+        # worth one cheap call). This catches "still client/project work that just doesn't repeat the folder's
+        # proper-noun name." With smart OFF, only a STRONG lexical route proposes.
+        if CC.get("smart", True) is not False:
             if not _confirm_drift_llm(rel, cand_sum.get(rel) or "", topic, (dest or {}).get("name") or ""):
                 continue
+        elif conf < 0.6:
+            continue
         r = handoff_propose(from_session=s, to=None, goal=("work moved to: " + topic[:110]),
                             summary=("Auto-detected by housekeeping: this conversation in '%s' is now working on '%s', "
                                      "which is off-lane. Confirm to hand it to the right home." % (rel, topic[:140])),
