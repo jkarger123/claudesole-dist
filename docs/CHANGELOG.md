@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.72 -- 2026-06-30
+- MULTI-NODE-PER-INSTALL hardening (the real production topology: an overseer + one-or-more project nodes share
+  one Mac's tmux server). Session-acting loops were using the UNSCOPED _live_sessions() and could act on OTHER
+  co-located nodes' sessions. Now ownership-gated like auto-compact already was:
+  - reconcile/auto-archive only retires sessions in THIS node's project tree (_session_scope is not None) -- so
+    node A can no longer archive node B's idle session.
+  - (with v0.99.71: drift sweep requires a real sub-folder lane + the org/overseer skips session-acting entirely.)
+  Each node manages only its own conversations; the overseer oversees the fleet.
+
 ## 0.99.71 -- 2026-06-30
 - FIX drift-sweep false positive: the unscoped OVERSEER (ROLE=org) shares the tmux server and sees every node's
   sessions, so it was proposing warm transfers on OTHER nodes' conversations -- scoped against the wrong project

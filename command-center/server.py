@@ -9671,7 +9671,11 @@ def reconcile_once():
     arch = []
     for s in _live_sessions():
         try:
-            if _archive_eligible(s): _archive_session(s, "idle-auto"); arch.append(s)
+            # OWNERSHIP: only retire sessions in THIS node's project tree. Co-located nodes share one tmux server, so
+            # _live_sessions() includes OTHER nodes' sessions -- _session_scope is None for those (cwd not under our
+            # PROJECT), so we leave them to the node that owns them. (Drift sweep is gated the same way.)
+            if _session_scope(s) is not None and _archive_eligible(s):
+                _archive_session(s, "idle-auto"); arch.append(s)
         except Exception: pass
     return {"ok": True, "archived": arch}
 
