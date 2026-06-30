@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.84 -- 2026-06-30
+- FIX (fuel gauge): the 5-hour window reset time jumped to ~24h the instant the window rolled over (e.g. James
+  showed "5h 98% -> resets 23.9h"). Cause: a BARE reset time (which is exactly what the 5h session window reports)
+  that had just passed was projected to TOMORROW (+24h) by _parse_reset_ts. A 5h reset is always <=5h out, so now:
+  if today's occurrence passed, tomorrow's is used ONLY if it's within a window length (a genuine crossing-midnight
+  reset); otherwise the shown time is stale/just-flipped and the next boundary is +5h. This also fixes the
+  account-rotation recommender, which was mis-reading James as "locked ~24h" off that bogus timestamp. Self-corrects
+  on the next /usage poll; proven against stale-flip / crossing-midnight / normal cases.
+
 ## 0.99.83 -- 2026-06-30
 - FIX: "add sub-tool" no longer dead-ends on a baffling "already exists" for a folder you can't see. The Modules
   lens only shows folders carrying a hand-authored CLAUDE.md, but module_add collided against EVERY directory on

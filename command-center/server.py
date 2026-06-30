@@ -3121,8 +3121,19 @@ def _parse_reset_ts(txt, now=None):
             dt = datetime.datetime(nowdt.year, _USAGE_MONTHS.index(md.group(1)) + 1, int(md.group(2)), hh, mm, tzinfo=tz)
             if dt.timestamp() < now - 86400: dt = dt.replace(year=nowdt.year + 1)  # rolled into next year
         else:
+            # A BARE time (no date) is the 5-HOUR session window's reset. If today's occurrence has passed it's
+            # EITHER the genuine reset crossing midnight (tomorrow, but only if still within a window length) OR a
+            # just-flipped/stale reading. Rolling a just-passed bare time to TOMORROW (+24h) was the bug: the moment
+            # the 5h window rolled over, the reset read as ~24h away (and that bogus ts also mis-fed the account
+            # rotation recommender). A 5h reset is always <=5h out -> if tomorrow's occurrence is further than a
+            # window length, the shown time is stale, so the next boundary is +5h, not +1 day.
             dt = nowdt.replace(hour=hh, minute=mm, second=0, microsecond=0)
-            if dt.timestamp() <= now: dt = dt + datetime.timedelta(days=1)          # bare time already passed -> tomorrow
+            if dt.timestamp() <= now:
+                tom = dt + datetime.timedelta(days=1)
+                if tom.timestamp() - now <= 5 * 3600 + 1800:                        # genuine crossing-midnight reset within the window
+                    dt = tom
+                else:                                                               # stale/just-flipped -> next 5h boundary
+                    while dt.timestamp() <= now: dt = dt + datetime.timedelta(hours=5)
         return dt.timestamp()
     except Exception:
         return None
