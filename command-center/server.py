@@ -13581,7 +13581,15 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
   .fontgrp{display:flex;align-items:center;gap:8px;min-height:44px;padding:0 6px}
   .fontgrp button{flex:1;min-width:44px;min-height:38px;margin-left:0;justify-content:center;text-align:center}
   #moremenu .danger{margin-top:4px;border-top:2px solid #3a2230;color:#f85149;background:#241317}
-}</style></head><body>
+}
+#tdlg{position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(8,8,12,.74);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+#tdlg .tdlg-box{background:#1a1a24;border:1px solid #2a2a3a;border-radius:14px;padding:20px 22px;width:min(420px,94vw);box-shadow:0 18px 50px rgba(0,0,0,.6);position:relative;overflow:hidden}
+#tdlg .tdlg-box:before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:linear-gradient(135deg,#d6b23c,#c9a227)}
+#tdlg .tdlg-msg{color:#fff;font-size:13.5px;line-height:1.6;white-space:pre-line}
+#tdlg .tdlg-btns{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
+#tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid #2a2a3a;background:#22222e;color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px}
+#tdlg .tdlg-b.go{background:linear-gradient(135deg,#d6b23c,#c9a227);color:#15120a;border:none;font-weight:700}
+</style></head><body>
 <div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Show the text as selectable plain text so you can copy it (needed on mobile - the terminal itself is a canvas and can't be selected by touch)">&#10697; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><button id="mtog" onclick="toggleMouse()">scroll</button><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
 <button id="live" onclick="toLive()">&#8595; jump to live</button>
 <div id="copyov"><div id="copybar"><b>Selectable text</b><span id="copyst" style="color:#8a8a99">long-press to select, or</span><button onclick="copyAll()">&#10697; copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" style="border-color:#e8c547">&#10005; close</button></div><pre id="copybody"></pre></div>
@@ -13604,6 +13612,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 </div>
 <script src="/static/xterm.js"></script><script src="/static/addon-fit.js"></script>
 <script>
+function confirmM(msg){return new Promise(function(res){var ov=document.getElementById('tdlg');if(!ov){ov=document.createElement('div');ov.id='tdlg';ov.tabIndex=-1;document.body.appendChild(ov);}ov.innerHTML='<div class="tdlg-box"><div class="tdlg-msg"></div><div class="tdlg-btns"><button class="tdlg-b" id="_tNo">Cancel</button><button class="tdlg-b go" id="_tYes">Confirm</button></div></div>';ov.querySelector('.tdlg-msg').textContent=String(msg);ov.style.display='flex';var fin=function(v){ov.style.display='none';res(v);};document.getElementById('_tYes').onclick=function(){fin(true);};document.getElementById('_tNo').onclick=function(){fin(false);};ov.onkeydown=function(e){if(e.key==='Escape'){e.preventDefault();fin(false);}};ov.onmousedown=function(e){if(e.target===ov)fin(false);};setTimeout(function(){var y=document.getElementById('_tYes');if(y)y.focus();},40);});}
 const name=new URLSearchParams(location.search).get('name')||'';document.title='Claude: '+name;
 // Protected services (the Chief of Staff mesh endpoint / live product / Ralph loops) are constant
 // singletons -- strip their end+kill buttons so they can't be closed from the terminal view.
@@ -13631,12 +13640,12 @@ function applyMouse(){fetch('/api/term-mouse',{method:'POST',headers:{'Content-T
   document.body.classList.toggle('selmode',!MOUSE);   // select mode -> let touch select text, not scroll
   const b=document.getElementById('mtog');if(b){b.textContent=MOUSE?'🖱 scroll':'✂ select';b.title=MOUSE?'wheel scrolls. Click to switch to Select (drag to highlight, Ctrl+C to copy).':'drag to select, Ctrl+C to copy. Click to switch back to Scroll (wheel).';b.style.borderColor=MOUSE?'#2a2a3a':'#e8c547';}}
 function toggleMouse(){MOUSE=!MOUSE;localStorage.setItem('hpcc_mouse',MOUSE?'scroll':'select');applyMouse();term.focus();}
-function gracefulEnd(){if(!confirm('Gracefully end this session?\n\nClaude writes a handoff + updates the CLAUDE.md resume pointer, then closes (auto-finalizes within ~3 min). You can keep watching here.'))return;
+async function gracefulEnd(){if(!await confirmM('Gracefully end this session?\n\nClaude writes a handoff + updates the CLAUDE.md resume pointer, then closes (auto-finalizes within ~3 min). You can keep watching here.'))return;
   st.textContent=name+' - ending: writing handoff…';
   fetch('/api/close-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,force:false})}).catch(()=>{});}
-function killSess(){if(!confirm('Force-kill '+name+'?\n\nThis SKIPS the handoff -- no /endsession, no resume notes.'))return;
+async function killSess(){if(!await confirmM('Force-kill '+name+'?\n\nThis SKIPS the handoff -- no /endsession, no resume notes.'))return;
   fetch('/api/close-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,force:true})}).then(()=>{st.textContent='killed';setTimeout(()=>location.href='/#sessions',900);}).catch(()=>{});}
-function compactSess(){if(!confirm('Compact this session?\n\nThe agent writes a FULL handoff -> runs /compact -> re-reads the handoff to restore its memory. Takes a few minutes -- watch it here, and avoid typing while it runs.'))return;
+async function compactSess(){if(!await confirmM('Compact this session?\n\nThe agent writes a FULL handoff -> runs /compact -> re-reads the handoff to restore its memory. Takes a few minutes -- watch it here, and avoid typing while it runs.'))return;
   st.textContent=name+' - compact: starting…';
   fetch('/api/compact-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(r=>{if(!r||!r.ok){st.textContent='compact failed: '+((r||{}).error||'?');return;}compactPoll();}).catch(()=>{st.textContent='compact request failed';});}
 function compactPoll(){fetch('/api/compact-state?name='+encodeURIComponent(name)).then(r=>r.json()).then(s=>{if(!s||!s.step)return;st.textContent=name+' - compact: '+(s.msg||s.step);if(['done','aborted','error'].indexOf(s.step)<0)setTimeout(compactPoll,3000);}).catch(()=>{});}
@@ -13778,6 +13787,13 @@ header a{color:var(--accent-light);text-decoration:none;font-weight:700}
   #right{flex:1;min-width:0;min-height:0}
   .mini{min-height:38px}
 }
+#tdlg{position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(8,8,12,.74);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+#tdlg .tdlg-box{background:#1a1a24;border:1px solid #2a2a3a;border-radius:14px;padding:20px 22px;width:min(420px,94vw);box-shadow:0 18px 50px rgba(0,0,0,.6);position:relative;overflow:hidden}
+#tdlg .tdlg-box:before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:linear-gradient(135deg,#d6b23c,#c9a227)}
+#tdlg .tdlg-msg{color:#fff;font-size:13.5px;line-height:1.6;white-space:pre-line}
+#tdlg .tdlg-btns{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
+#tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid #2a2a3a;background:#22222e;color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px}
+#tdlg .tdlg-b.go{background:linear-gradient(135deg,#d6b23c,#c9a227);color:#15120a;border:none;font-weight:700}
 </style></head><body>
 <header>
   <a href="/">&larr; back</a>
@@ -13800,6 +13816,7 @@ header a{color:var(--accent-light);text-decoration:none;font-weight:700}
 </div>
 <script src="/static/xterm.js"></script><script src="/static/addon-fit.js"></script>
 <script>
+function confirmM(msg){return new Promise(function(res){var ov=document.getElementById('tdlg');if(!ov){ov=document.createElement('div');ov.id='tdlg';ov.tabIndex=-1;document.body.appendChild(ov);}ov.innerHTML='<div class="tdlg-box"><div class="tdlg-msg"></div><div class="tdlg-btns"><button class="tdlg-b" id="_tNo">Cancel</button><button class="tdlg-b go" id="_tYes">Confirm</button></div></div>';ov.querySelector('.tdlg-msg').textContent=String(msg);ov.style.display='flex';var fin=function(v){ov.style.display='none';res(v);};document.getElementById('_tYes').onclick=function(){fin(true);};document.getElementById('_tNo').onclick=function(){fin(false);};ov.onkeydown=function(e){if(e.key==='Escape'){e.preventDefault();fin(false);}};ov.onmousedown=function(e){if(e.target===ov)fin(false);};setTimeout(function(){var y=document.getElementById('_tYes');if(y)y.focus();},40);});}
 const NAME=new URLSearchParams(location.search).get('name')||'';document.title='Ralph: '+NAME;
 const COLS={running:'#3fb950',paused:'#d29922',blocked:'#f85149',done:'#3fb950',stopped:'#a0a0b0',halted:'#a0a0b0',idle:'#a0a0b0'};
 let DETAIL={},TAB='progress',DIRTY=false;
@@ -13816,8 +13833,8 @@ async function refresh(){
   document.getElementById('ctl').innerHTML=h;
   if(!DIRTY)document.getElementById('editor').value=DETAIL[TAB]==null?'':String(DETAIL[TAB]);
 }
-document.querySelectorAll('#tabs button').forEach(b=>b.onclick=()=>{
-  if(DIRTY&&!confirm('Discard unsaved edits to '+TAB+'?'))return;
+document.querySelectorAll('#tabs button').forEach(b=>b.onclick=async()=>{
+  if(DIRTY&&!await confirmM('Discard unsaved edits to '+TAB+'?'))return;
   document.querySelectorAll('#tabs button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
   TAB=b.dataset.t;DIRTY=false;document.getElementById('editor').value=DETAIL[TAB]==null?'':String(DETAIL[TAB]);});
 document.getElementById('editor').addEventListener('input',()=>{DIRTY=true;});

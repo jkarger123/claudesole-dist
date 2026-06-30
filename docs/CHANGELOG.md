@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.63 -- 2026-06-30
+- Finished the dialog sweep: the embedded terminal page (TERM_PAGE, 3 confirms) and Ralph-loop page (RALPH_PAGE,
+  1 confirm) now use self-contained styled dialogs matching the palette. ZERO native browser pop-ups remain
+  anywhere in the product (verified across all three page strings). node --check clean on every page script.
+
 ## 0.99.62 -- 2026-06-30
 - PRO DIALOGS: replaced all 56 native browser pop-ups in the dashboard (the gray OS `confirm()`/`prompt()`/`alert()`
   boxes -- the most "vibe-coded" thing left) with styled, promise-based modal dialogs that match the design system.
