@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.62 -- 2026-06-30
+- PRO DIALOGS: replaced all 56 native browser pop-ups in the dashboard (the gray OS `confirm()`/`prompt()`/`alert()`
+  boxes -- the most "vibe-coded" thing left) with styled, promise-based modal dialogs that match the design system.
+  - New helpers `confirmM()` / `promptM()` / `alertM()` (after showM): own `#ccDlg` overlay at z-index 10050 so they
+    STACK above any open modal/sheet; Esc + backdrop-click cancel; Enter confirms; danger variant for destructive ops.
+  - Converted all 56 call sites to `await`; made 9 sync handlers async; `gmcCmd` link-insert saves/restores the
+    contenteditable selection (a focus-stealing modal would otherwise lose it). Validated with `node --check` on the
+    full 617K-char dashboard script (0 syntax errors) + headless functional tests (confirm resolves true/false,
+    prompt returns value/null, 0 console errors).
+  - Also added `.btn.danger` / `.mini.danger` semantic classes.
+  - NOTE: the embedded terminal page (TERM_PAGE) still has 4 native dialogs (separate surface, no helpers yet) -- next.
+
 ## 0.99.61 -- 2026-06-30
 - DE-CARTOONY emoji sweep (site-wide, James-approved direction): removed DECORATIVE emoji from all lens headers,
   section labels, panel titles, buttons, and dropdown options across every screen -> clean, enterprise/SOTA chrome.

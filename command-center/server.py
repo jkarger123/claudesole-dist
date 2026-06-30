@@ -14209,6 +14209,10 @@ textarea{width:100%;min-height:240px;font-family:ui-monospace,Menlo,Monaco,monos
 .modal-bg.show,.modal-bg[style*="flex"]{animation:mfade .14s ease}@keyframes mfade{from{opacity:0}to{opacity:1}}
 .modal{position:relative;background:linear-gradient(180deg,#1b1b26 0%,#141420 100%);border:1px solid rgba(255,255,255,.09);border-radius:14px;padding:26px 26px 22px;width:min(560px,94vw);max-height:88vh;overflow:auto;box-shadow:0 18px 50px rgba(0,0,0,.5);animation:mpop .16s cubic-bezier(.2,.85,.2,1)}
 @keyframes mpop{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}
+#ccDlg{position:fixed;inset:0;z-index:10050;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(8,8,12,.74);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)}
+#ccDlg .modal{width:min(440px,94vw)}
+#ccDlg .mbody{font-size:13.5px;line-height:1.6;color:var(--ink);white-space:normal;margin:2px 0 2px;max-height:60vh;overflow:auto;overflow-wrap:anywhere}
+.btn.danger{background:rgba(248,81,73,.14);color:#f85149;border-color:rgba(248,81,73,.4)}.mini.danger{color:#f85149}
 .modal::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;border-radius:18px 18px 0 0;background:var(--grad);opacity:.9}
 .modal h2{margin:0 0 16px;font-size:19px;font-weight:700;letter-spacing:-.01em;color:var(--ink);display:flex;align-items:center;gap:9px}
 .row{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}.row label{font-size:11.5px;color:var(--mut);font-weight:700;letter-spacing:.2px}
@@ -15597,19 +15601,19 @@ function _openTerm(r){const n=(r&&(r.session||decodeURIComponent((String(r.term|
 async function openAdminShell(){toast('Opening the admin shell (run sudo / interactive commands here)…',3500);
   try{const r=await(await fetch('/api/admin-shell',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
     if(r&&r.ok)openInSessions(r.session);else toast('Failed to open admin shell');}catch(e){toast('Failed to open admin shell');}}
-async function modAdd(parent){const name=(prompt("New sub-tool/concept folder name (letters/numbers/-_):")||"").trim();if(!name)return;
-  const summary=(prompt("One line -- what is this module?")||"").trim();
+async function modAdd(parent){const name=(await promptM("New sub-tool/concept folder name (letters/numbers/-_):")||"").trim();if(!name)return;
+  const summary=(await promptM("One line -- what is this module?")||"").trim();
   const r=await(await fetch("/api/module-add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({parent,name,summary})})).json();
   if(r&&r.ok){toast("Module created + indexed in its parent.");loadModules(MODREL);}else toast("Failed: "+((r||{}).error||"?"),5000);}
-async function modRemove(rel,name){if(!confirm("Remove module \""+name+"\"?\n\nIt + its files are moved to the archive (reversible), and the parent's index updates."))return;
+async function modRemove(rel,name){if(!await confirmM("Remove module \""+name+"\"?\n\nIt + its files are moved to the archive (reversible), and the parent's index updates."))return;
   const r=await(await fetch("/api/module-remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rel})})).json();
   if(r&&r.ok){toast("Archived.");loadModules(MODREL);}else toast("Failed: "+((r||{}).error||"?"),5000);}
 async function modCombine(parent){
-  const a=(prompt("Combine -- the TARGET module name (kept, receives the other):")||"").trim();if(!a)return;
-  const b=(prompt("Combine -- the module to MERGE IN (its files move into the target; it's archived):")||"").trim();if(!b)return;
+  const a=(await promptM("Combine -- the TARGET module name (kept, receives the other):")||"").trim();if(!a)return;
+  const b=(await promptM("Combine -- the module to MERGE IN (its files move into the target; it's archived):")||"").trim();if(!b)return;
   if(a==b){toast("pick two different modules");return;}
   const ar=parent?parent+"/"+a:a, br=parent?parent+"/"+b:b;
-  if(!confirm("Merge \""+b+"\" into \""+a+"\"?\n\nFiles move into "+a+", their CLAUDE.mds combine (with provenance), and "+b+" is archived."))return;
+  if(!await confirmM("Merge \""+b+"\" into \""+a+"\"?\n\nFiles move into "+a+", their CLAUDE.mds combine (with provenance), and "+b+" is archived."))return;
   const r=await(await fetch("/api/module-combine",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({a:ar,b:br})})).json();
   if(r&&r.ok){toast("Combined "+b+" into "+a+".");loadModules(MODREL);}else toast("Failed: "+((r||{}).error||"?"),5000);}
 async function loadRalph(){
@@ -15625,7 +15629,7 @@ async function loadRalph(){
   document.getElementById("grid").innerHTML=head+(L.map(ralphCard).join("")||empty("No active loops — click + New loop."));
 }
 async function ralphArchiveDone(n){
-  if(n&&!confirm('Move '+n+' finished (done/halted/stopped) loop'+(n>1?'s':'')+' to Previous loops? Reversible — they stay readable under Previous.'))return;
+  if(n&&!await confirmM('Move '+n+' finished (done/halted/stopped) loop'+(n>1?'s':'')+' to Previous loops? Reversible — they stay readable under Previous.'))return;
   try{var r=await(await fetch('/api/ralph-archive-finished',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
     toast((r.count||0)+' loop'+((r.count===1)?'':'s')+' moved to Previous loops',2600);}catch(e){toast('Archive failed',2600);}
   loadRalph();
@@ -15666,12 +15670,12 @@ function ralphCard(r){
 }
 async function ralphLaunch(n){toast("Launching "+n+"…");const r=await(await fetch("/api/ralph-launch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n})})).json();if(r&&r.ok){toast("Loop launched — open it to watch.",4000);setTimeout(loadRalph,1200);}else toast("Failed: "+((r||{}).error||"?"),5000);}
 async function ralphAct(n,a){await fetch("/api/ralph-control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,action:a})});toast(a+" → "+n);setTimeout(loadRalph,800);}
-async function ralphDel(n){if(!confirm('Delete loop "'+n+'"?\n\nMoves it to _trash (reversible) and removes it from the list.'))return;const r=await(await fetch("/api/ralph-control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,action:"delete"})})).json();if(r&&r.ok){toast("Deleted "+n);loadRalph();}else toast("Failed: "+((r||{}).error||"?"),5000);}
+async function ralphDel(n){if(!await confirmM('Delete loop "'+n+'"?\n\nMoves it to _trash (reversible) and removes it from the list.'))return;const r=await(await fetch("/api/ralph-control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,action:"delete"})})).json();if(r&&r.ok){toast("Deleted "+n);loadRalph();}else toast("Failed: "+((r||{}).error||"?"),5000);}
 function openRalph(n){location.href="/ralph?name="+encodeURIComponent(n);}
-function newRalph(){
-  const name=(prompt("New loop name (letters/numbers/-_):")||"").trim(); if(!name)return;
-  const goal=(prompt("One-line goal:")||"").trim();
-  const cwd=(prompt("Working directory the agent runs in:",PROJ())||"").trim();
+async function newRalph(){
+  const name=(await promptM("New loop name (letters/numbers/-_):")||"").trim(); if(!name)return;
+  const goal=(await promptM("One-line goal:")||"").trim();
+  const cwd=(await promptM("Working directory the agent runs in:",PROJ())||"").trim();
   fetch("/api/ralph-create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,goal,cwd})}).then(r=>r.json()).then(r=>{
     if(r&&r.ok){toast("Loop created — opening it to set up the prompt + items.");openRalph(r.name);}else toast("Create failed: "+((r||{}).error||"?"),5000);});
 }
@@ -15792,8 +15796,8 @@ function lpLaunch(rel){
   doLaunch(t,'',nm,rel||'');
 }
 async function lpAddSub(){
-  var name=(prompt('New subfolder name (letters/numbers/-_):')||'').trim(); if(!name)return;
-  var summary=(prompt('One line — what is this folder?')||'').trim();
+  var name=(await promptM('New subfolder name (letters/numbers/-_):')||'').trim(); if(!name)return;
+  var summary=(await promptM('One line — what is this folder?')||'').trim();
   var r=null; try{ r=await(await fetch('/api/module-add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parent:LP.target,name:name,summary:summary})})).json(); }catch(e){}
   if(!(r&&r.ok)){ toast('Couldn\'t create folder: '+((r||{}).error||'?'),5000); return; }
   toast('Folder created in '+(LP.loc||'project root'));
@@ -15947,9 +15951,9 @@ function acmpBtn(){
   return '<button class="mini'+(on?' go':'')+'" id="acmpbtn" title="Auto-compact: when any session\'s context fills past '+p+'%, it automatically writes a full handoff, runs /compact, then re-reads the handoff — so a long session never blows its context window. Click to toggle; Shift-click to set the %." '
     +'onclick="toggleAutocompact(event)">Auto-compact '+(on?('on · '+p+'%'):'off')+'</button>';
 }
-function toggleAutocompact(ev){
+async function toggleAutocompact(ev){
   if(ev&&ev.shiftKey){
-    var v=prompt('Auto-compact at what % full? (50–99)', Math.round(ACMP.pct||95)); if(v==null)return;
+    var v=await promptM('Auto-compact at what % full? (50–99)', Math.round(ACMP.pct||95)); if(v==null)return;
     var n=parseFloat(v); if(isNaN(n))return;
     fetch('/api/autocompact',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pct:n,on:true})}).then(r=>r.json()).then(r=>{if(r){ACMP={on:r.on,pct:r.pct};paintSessTools(SESSDATA?SESSDATA.length:null);}});
     return;
@@ -16760,7 +16764,7 @@ const COMMS_STATUS={pending:["queued","#d29922"],delivered:["delivered","#58a6ff
 function commsTime(ts){try{return new Date((ts||0)*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}catch(e){return"";}}
 function commsFilter(id){COMMS_TGT=id;loadComms();}
 function commsToggleRcpt(id){if(COMMS_RCPT.has(id))COMMS_RCPT.delete(id);else COMMS_RCPT.add(id);commsRefresh();}
-async function commsClear(){if(!confirm("Clear this instance's comms log? (local only)"))return;try{await fetch('/api/mesh-clear',{method:'POST'});}catch(e){}loadComms();}
+async function commsClear(){if(!await confirmM("Clear this instance's comms log? (local only)"))return;try{await fetch('/api/mesh-clear',{method:'POST'});}catch(e){}loadComms();}
 async function commsSend(){
   const ta=document.getElementById('commsMsg');const t=((ta||{}).value||"").trim();
   if(!t){toast("Type a message first");return;}
@@ -17954,8 +17958,14 @@ function gmcToggleCc(){ var w=document.getElementById('gmcCcWrap'); if(w) w.styl
 function gmcCmd(cmd, arg){
   var ed=document.getElementById('gmcBody'); if(ed) ed.focus();
   if(arg==='__link'){
-    var url=prompt('Link URL:','https://'); if(!url) return;
-    document.execCommand('createLink', false, url); gmcMarkLinks(); gmcDirty(); return;
+    var _sel=window.getSelection(); var _rng=(_sel&&_sel.rangeCount)?_sel.getRangeAt(0).cloneRange():null;
+    promptM('Link URL','https://',{title:'Insert link'}).then(function(url){
+      if(!url) return;
+      if(ed) ed.focus();
+      if(_rng){ var s=window.getSelection(); s.removeAllRanges(); s.addRange(_rng); }
+      document.execCommand('createLink', false, url); gmcMarkLinks(); gmcDirty();
+    });
+    return;
   }
   if(cmd==='formatBlock' && arg){ document.execCommand('formatBlock', false, '<'+arg+'>'); gmcDirty(); return; }
   try{ document.execCommand(cmd, false, arg||null); }catch(e){}
@@ -18635,7 +18645,7 @@ async function calQuickAdd(){
 async function calUndoCreate(id){var r=await(await fetch('/api/google/calendar-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})).json();
   if(r&&r.ok){toast('Removed');loadCalendar(true);}else toast('Undo failed',3000);}
 async function calRsvp(id,resp){
-  var notify=confirm('Notify the organizer of your response?');
+  var notify=await confirmM('Notify the organizer of your response?');
   toast('Responding…');
   var r=await(await fetch('/api/google/calendar-rsvp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,response:resp,sendUpdates:notify?'all':'none'})})).json();
   if(r&&r.ok){toast({accepted:'Going &#10003;',tentative:'Maybe &#10003;',declined:'Declined &#10003;'}[resp]||'Done');calClosePop();loadCalendar(true);}
@@ -18805,7 +18815,7 @@ async function calSaveEvent(id){
   var reminders=remSel==='default'?'default':(remSel==='none'?[]:[{method:'popup',minutes:parseInt(remSel,10)}]);
   var attendees=(CAL._guests||[]).filter(function(g){return !g.self;}).map(function(g){return {email:g.email,optional:!!g.optional};});
   var meet=document.getElementById('evMeet')&&document.getElementById('evMeet').checked&&!document.getElementById('evMeet').disabled;
-  var sendUpdates=attendees.length?(confirm('Email invitations / updates to '+attendees.length+' guest(s)?')?'all':'none'):'none';
+  var sendUpdates=attendees.length?(await confirmM('Email invitations / updates to '+attendees.length+' guest(s)?')?'all':'none'):'none';
   var payload={summary:t,location:gVal('evL'),desc:gVal('evD'),tz:CAL.tz,allDay:allDay,color:color,
     recurrence:rr,reminders:reminders,attendees:attendees,sendUpdates:sendUpdates};
   if(meet)payload.meet=true;
@@ -18939,7 +18949,7 @@ function calStartNowTicker(){
 
 // ---- keyboard navigation ----------------------------------------------------
 function calOrderedEvents(){return CAL.events.slice().filter(function(e){return !e.allDay;}).sort(function(a,b){return a._s-b._s;});}
-function calKeyHandler(e){
+async function calKeyHandler(e){
   if(LENS!='calendar')return;
   var t=(e.target.tagName||'');if(t=='INPUT'||t=='TEXTAREA')return;
   if(document.getElementById('mbg').style.display=='flex')return; // modal open
@@ -18965,7 +18975,7 @@ function calKeyHandler(e){
     return;}
   if(k=='Enter'){if(CAL.selEvId){e.preventDefault();calOpenEvent(CAL.selEvId,null);}return;}
   if(k=='e'||k=='E'){if(CAL.selEvId){e.preventDefault();calEdit(CAL.selEvId);}return;}
-  if(k=='Backspace'||k=='Delete'){if(CAL.selEvId){e.preventDefault();if(confirm('Delete this event?'))calDelete(CAL.selEvId);}return;}
+  if(k=='Backspace'||k=='Delete'){if(CAL.selEvId){e.preventDefault();if(await confirmM('Delete this event?'))calDelete(CAL.selEvId);}return;}
 }
 document.addEventListener('keydown',calKeyHandler);
 
@@ -19633,13 +19643,13 @@ function vaultRow(s){
   return '<tr><td><b>'+esc(s.id)+'</b>'+(s.label&&s.label!==s.id?('<div class="sub" style="font-size:11px">'+esc(s.label)+'</div>'):'')+'</td><td>'+(scope||'—')+'</td><td>'+(vals||'<span style="color:var(--dim)">empty</span>')+'</td><td>'+st+'</td><td style="text-align:right">'+act+'</td></tr>';
 }
 async function vaultSave(){
-  var id=(document.getElementById('vsid').value||'').trim();if(!id){alert('Secret ID required');return;}
+  var id=(document.getElementById('vsid').value||'').trim();if(!id){await alertM('Secret ID required');return;}
   var body={id:id,label:(document.getElementById('vslabel').value||'').trim()||null,value:document.getElementById('vsval').value,scope:(document.getElementById('vsscope').value||'').trim()||null,node:(document.getElementById('vsnode').value||'').trim()||null};
   var r=await(await fetch('/api/vault-set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
-  if(!r.ok){alert('Save failed: '+(r.error||'?'));return;}loadVault();
+  if(!r.ok){await alertM('Save failed: '+(r.error||'?'));return;}loadVault();
 }
 async function vaultRevoke(id,rev){await fetch('/api/vault-revoke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,revoked:rev})});loadVault();}
-async function vaultDel(id){if(!confirm('Delete secret '+id+'? Nodes leasing it will lose access.'))return;await fetch('/api/vault-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});loadVault();}
+async function vaultDel(id){if(!await confirmM('Delete secret '+id+'? Nodes leasing it will lose access.'))return;await fetch('/api/vault-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});loadVault();}
 async function loadMarketplace(){document.getElementById("grid").innerHTML=empty("Loading marketplace…");
   let d={};try{d=await(await fetch('/api/extensions')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load the marketplace.");return;}
   const ex=d.extensions||[];const q=(document.getElementById("search").value||"").toLowerCase();
@@ -19669,7 +19679,7 @@ async function extInstall(id){const r=await(await fetch('/api/extension-install'
   if(r&&r.ok){toast('Installed '+id+' — opening the setup guide…');loadMarketplace();extSetup(id);}
   else if(r&&r.locked){toast('🔒 '+id+' is a paid extension'+(r.pricing&&(r.pricing.monthly_usd||r.pricing.monthly)?(' ($'+(r.pricing.monthly_usd||r.pricing.monthly)+'/mo)'):'')+' — needs a Mission-Control-signed entitlement.',7000);}
   else toast('Install failed: '+((r||{}).error||'?'),5000);}
-function extRequest(id,price){alert('🔒 “'+id+'” is a paid extension'+(price?(' ('+price+')'):'')+'.\n\nIt unlocks only with a Mission-Control-signed entitlement — it cannot be self-granted.\n\nInternal fleet nodes are licensed automatically. External customers: purchase/request access and Mission Control issues a signed entitlement to this node.');}
+async function extRequest(id,price){await alertM('🔒 “'+id+'” is a paid extension'+(price?(' ('+price+')'):'')+'.\n\nIt unlocks only with a Mission-Control-signed entitlement — it cannot be self-granted.\n\nInternal fleet nodes are licensed automatically. External customers: purchase/request access and Mission Control issues a signed entitlement to this node.');}
 // ===== Affiliate Intelligence lens (Skimlinks extension) -- laid out like the original dashboard:
 // KPI strip + a 2-column body (merchant TABLE | top-movers side panel). NOT stacked cards. =====
 var AFFEXT='skimlinks-merchant-sync', AFF={q:'',status:'',sort:'daily',rows:[]};
@@ -19765,7 +19775,7 @@ async function affTimeline(advid,name){
   }).join('')+'</div>';
 }
 async function affRunSync(){
-  if(!confirm('Run the full Skimlinks sync now? It takes ~30-50 minutes and writes to your Supabase. (It also runs automatically every Sunday 03:00.)'))return;
+  if(!await confirmM('Run the full Skimlinks sync now? It takes ~30-50 minutes and writes to your Supabase. (It also runs automatically every Sunday 03:00.)'))return;
   try{var r=await(await fetch('/api/routine-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Skimlinks weekly sync'})})).json();
     toast(r&&r.ok?'Sync started — watch the Routines lens for status.':('Could not start sync: '+((r||{}).error||'?')),5000);}catch(e){toast('Failed to start sync',4000);}
 }
@@ -19806,10 +19816,10 @@ async function loadSubstack(){
 }
 async function subSync(){st_toast('Syncing Substack feeds…');await fetch('/api/substack-sync',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});setTimeout(loadSubstack,2500);}
 async function subDraft(){
-  var topic=(document.getElementById('subtopic').value||'').trim();if(!topic){alert('Enter a topic');return;}
+  var topic=(document.getElementById('subtopic').value||'').trim();if(!topic){await alertM('Enter a topic');return;}
   var body={topic:topic,audience:(document.getElementById('subaud').value||''),tone:(document.getElementById('subtone').value||''),length:(document.getElementById('sublen').value||''),source:(document.getElementById('subsrc').value||'')};
   var r=await(await fetch('/api/substack-draft',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
-  if(!r.ok){alert('Draft failed: '+(r.error||'?'));return;}
+  if(!r.ok){await alertM('Draft failed: '+(r.error||'?'));return;}
   st_toast('Drafting… it will appear under Drafts + in Files in ~30–60s');
   setTimeout(loadSubstack,30000);
 }
@@ -19912,7 +19922,7 @@ function aisReqRow(r){
 }
 function aisReportRow(c){return '<div class="aff-mv"><span style="overflow:hidden;text-overflow:ellipsis"><b>'+esc((c.brand||'?')).slice(0,28)+'</b><div class="sub">'+esc((c.query||'')).slice(0,38)+' · '+tago(c.created_at)+'</div></span><span class="sub" style="white-space:nowrap">'+(c.sources_count!=null?(c.sources_count+' src'):'')+'</span></div>';}
 function aisAcctRow(a){return '<div class="aff-mv"><span><b>'+esc(a.display_name||'?')+'</b> <span class="sub">'+esc(a.role||'')+'</span></span><span class="sub">'+(a.is_active?'active':'inactive')+'</span></div>';}
-async function extUninstall(id){if(!confirm('Remove extension "'+id+'"? (your accounts/keys are NOT deleted)'))return;
+async function extUninstall(id){if(!await confirmM('Remove extension "'+id+'"? (your accounts/keys are NOT deleted)'))return;
   const r=await(await fetch('/api/extension-uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})).json();
   if(r&&r.ok){toast('Removed '+id);loadMarketplace();}else toast('Failed: '+((r||{}).error||'?'),5000);}
 async function extSetup(id){toast('Opening the setup guide for '+id+'…',3000);
@@ -19961,7 +19971,7 @@ function teamCount(){const n=document.querySelectorAll('.teamck:checked').length
 async function teamSession(){
   const members=[...document.querySelectorAll('.teamck:checked')].map(c=>c.value);
   if(!members.length){toast('Tick at least one teammate first.',4000);return;}
-  const assignment=(prompt('Optional -- the assignment for the team (leave blank to brief it in the session):','')||'').trim();
+  const assignment=(await promptM('Optional -- the assignment for the team (leave blank to brief it in the session):','')||'').trim();
   toast('Convening team: '+members.join(', ')+'…',5000);
   try{const r=await(await fetch('/api/team-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({members,assignment})})).json();
     if(r&&r.ok)openInSessions(r.session);else toast('Failed: '+((r||{}).error||'?'),5000);}catch(e){toast('Team session failed');}}
@@ -19977,11 +19987,11 @@ async function agentReport(slug){const el=document.getElementById('agrep-'+slug)
     +'<div class="sub" style="margin-top:3px">'+e2(x.detail||'')+'</div>'
     +(x.evidence?'<div class="meta" style="margin-top:3px;white-space:pre-wrap;opacity:.65">'+e2(x.evidence)+'</div>':'')+'</div>';});
   el.innerHTML=h;}
-async function newAgent(){const name=(prompt("New agent-tool name (letters/numbers/-):")||"").trim();if(!name)return;
-  const summary=(prompt("One line -- what does this agent do + WHEN to use it?")||"").trim();
+async function newAgent(){const name=(await promptM("New agent-tool name (letters/numbers/-):")||"").trim();if(!name)return;
+  const summary=(await promptM("One line -- what does this agent do + WHEN to use it?")||"").trim();
   const r=await(await fetch('/api/agent-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,summary})})).json();
   if(r&&r.ok){toast('Agent-tool scaffolded (charter + tools/run.py). Run it, or open its dir to add real checks.');loadAgents();}else toast('Failed: '+((r||{}).error||'?'),5000);}
-async function delAgent(slug){if(!confirm('Archive agent-tool "'+slug+'"?\\n\\nIt moves to agents/_archive/ (reversible) and leaves the lens.'))return;
+async function delAgent(slug){if(!await confirmM('Archive agent-tool "'+slug+'"?\\n\\nIt moves to agents/_archive/ (reversible) and leaves the lens.'))return;
   const r=await(await fetch('/api/agent-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slug})})).json();
   if(r&&r.ok){toast('Archived '+slug+' (recoverable in agents/_archive/).');loadAgents();}else toast('Failed: '+((r||{}).error||'?'),5000);}
 // ---- Skills lens: the REAL Claude Code skills (.claude/skills) this project's sessions load. Description
@@ -20013,15 +20023,15 @@ async function skillView(scope,name){const el=document.getElementById('skv-'+sco
   let d={};try{d=await(await fetch('/api/skill?scope='+scope+'&name='+encodeURIComponent(name))).json();}catch(e){el.innerHTML=empty("Couldn't load.");return;}
   if(!d.ok){el.innerHTML='<div class="sub">'+e2(d.error||'error')+'</div>';return;}
   el.innerHTML='<div class="meta" style="margin-bottom:4px">'+esc(d.dir||'')+'/SKILL.md</div><pre class="snap" style="white-space:pre-wrap;max-height:360px;overflow:auto">'+e2(d.body||'')+'</pre>';}
-async function skillNew(){const name=(prompt("New skill name (letters/numbers/-):")||"").trim();if(!name)return;
-  const scope=(prompt("Scope -- 'project' (this project only) or 'user' (all your projects):","project")||"project").trim();
-  const desc=(prompt("One-line description -- WHAT it does + WHEN to use it (this is the trigger Claude sees):")||"").trim();
+async function skillNew(){const name=(await promptM("New skill name (letters/numbers/-):")||"").trim();if(!name)return;
+  const scope=(await promptM("Scope -- 'project' (this project only) or 'user' (all your projects):","project")||"project").trim();
+  const desc=(await promptM("One-line description -- WHAT it does + WHEN to use it (this is the trigger Claude sees):")||"").trim();
   const r=await(await fetch('/api/skill-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scope,name,description:desc})})).json();
   if(r&&r.ok){toast('Skill created — opening it to author.');skillOpen(r.scope,r.name);}else toast('Failed: '+((r||{}).error||'?'),5000);}
 async function skillOpen(scope,name){toast('Opening '+name+' to edit…',3000);
   try{const r=await(await fetch('/api/skill-open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scope,name})})).json();
     if(r&&r.ok)openInSessions(r.session);else toast('Could not open: '+((r||{}).error||'?'));}catch(e){toast('Open failed');}}
-async function skillDelete(scope,name){if(!confirm('Archive skill "'+name+'" ('+scope+')? It moves to _archive/ and is recoverable, but Claude will stop loading it.'))return;
+async function skillDelete(scope,name){if(!await confirmM('Archive skill "'+name+'" ('+scope+')? It moves to _archive/ and is recoverable, but Claude will stop loading it.'))return;
   try{const r=await(await fetch('/api/skill-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scope,name})})).json();
     if(r&&r.ok){toast('Skill archived to '+(r.archived||'_archive')+'.',4000);loadSkills();}else toast('Delete failed: '+((r||{}).error||'?'),5000);}catch(e){toast('Delete failed');}}
 // ---- Teams lens: rung-4 coordinating rosters (teams/<slug>/TEAM.md). Each team = several agents owning a
@@ -20059,8 +20069,8 @@ async function teamView(slug){const el=document.getElementById('tmv-'+slug);if(!
   let d={};try{d=await(await fetch('/api/team?name='+encodeURIComponent(slug))).json();}catch(e){el.innerHTML=empty("Couldn't load.");return;}
   if(!d.ok){el.innerHTML='<div class="sub">'+e2(d.error||'error')+'</div>';return;}
   el.innerHTML='<div class="meta" style="margin-bottom:4px">'+esc(d.dir||'')+'/TEAM.md</div><pre class="snap" style="white-space:pre-wrap;max-height:360px;overflow:auto">'+e2(d.body||'')+'</pre>';}
-async function teamNew(){const name=(prompt("New team slug (letters/numbers/-):")||"").trim();if(!name)return;
-  const desc=(prompt("One line -- WHEN to convene this team (the trigger the model sees; reserve for coordinate-then-reconcile work):")||"").trim();
+async function teamNew(){const name=(await promptM("New team slug (letters/numbers/-):")||"").trim();if(!name)return;
+  const desc=(await promptM("One line -- WHEN to convene this team (the trigger the model sees; reserve for coordinate-then-reconcile work):")||"").trim();
   const r=await(await fetch('/api/team-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,description:desc})})).json();
   if(r&&r.ok){toast('Team scaffolded (TEAM.md + 3-member starter roster). Edit teams/'+r.slug+'/TEAM.md to fill the lenses + files.',5000);loadTeams();}else toast('Failed: '+((r||{}).error||'?'),5000);}
 // ---- Description-Audit lens: the anti-rot / tool-tester routine (sec 5.4). Static description_audit() across
@@ -20180,7 +20190,7 @@ async function cfPost(extra){
 }
 async function cfPlan(){var r=await cfPost({dry:true});if(!r)return;var o=document.getElementById('cfout');o.textContent=r.ok?r.plan:('ERROR: '+(r.error||'?'));}
 async function cfProvision(launch){
-  if(!confirm(launch?'Create AND start this ClaudeFather now?':'Create this ClaudeFather (without starting it)?'))return;
+  if(!await confirmM(launch?'Create AND start this ClaudeFather now?':'Create this ClaudeFather (without starting it)?'))return;
   var pc=document.getElementById('cf_persist'); var persist=!!(launch && pc && pc.checked);
   var r=await cfPost({launch:launch, persist:persist, mesh:persist});if(!r)return;var o=document.getElementById('cfout');
   if(!r.ok){o.textContent='ERROR: '+(r.error||'?');return;}
@@ -20204,7 +20214,7 @@ async function chiefComms(){var t=document.getElementById('chieftarget'),m=docum
     var h='';(r.replies||[]).forEach(function(x){h+='<div class="card" style="cursor:default;margin-top:8px"><h3><span>'+esc(x.id)+'</span><span class="badge" style="background:'+(x.ok?'#22c55e22;color:#22c55e':'#f8514922;color:#f85149')+'">'+(x.ok?'replied':'no reply')+'</span></h3><pre class="snap" style="white-space:pre-wrap;max-height:240px;overflow:auto">'+e2(x.reply||'')+'</pre></div>';});
     if(m)m.value=''; if(rd)rd.innerHTML=h||empty('No peers reached.');
   }catch(e){if(rd)rd.innerHTML=empty('Comms failed.');}}
-async function chiefDM(id){var t=document.getElementById('chieftarget'),m=document.getElementById('chiefmsg');var msg=(prompt('Message to the '+id+' chief:','')||'').trim();if(!msg)return;if(t)t.value=id;if(m)m.value=msg;chiefComms();}
+async function chiefDM(id){var t=document.getElementById('chieftarget'),m=document.getElementById('chiefmsg');var msg=(await promptM('Message to the '+id+' chief:','')||'').trim();if(!msg)return;if(t)t.value=id;if(m)m.value=msg;chiefComms();}
 function secColor(s){return s=='err'?'#f85149':s=='warn'?'#d29922':s=='ok'?'#3fb950':'#8b949e';}
 function secPill(s){return '<span style="background:'+secColor(s)+';color:#0a0a0f;border-radius:5px;padding:1px 7px;font-size:11px;font-weight:800">'+s+'</span>';}
 function renderSecurity(){if(!SEC)return;const d=SEC,c=d.counts||{};
@@ -20484,7 +20494,7 @@ function startSnaps(){if(SNAPTIMER)clearInterval(SNAPTIMER);
     live.forEach((x,i)=>{if(SESSVIEW=='grid'&&SESSBIG==x.name)return;refreshSnap(i,x.name);});};
   doit();SNAPTIMER=setInterval(doit,2500);}
 function ago(s){s=Math.max(0,Math.floor(s));return s<60?s+"s":s<3600?Math.floor(s/60)+"m":Math.floor(s/3600)+"h";}
-async function endSess(n,force){if(force&&!confirm("Force-kill "+n+"?\n\nThis SKIPS the handoff -- no /endsession, no resume notes."))return;
+async function endSess(n,force){if(force&&!await confirmM("Force-kill "+n+"?\n\nThis SKIPS the handoff -- no /endsession, no resume notes."))return;
   if(!force)toast("Sending /endsession to "+esc(n)+" -- writes a handoff, updates the CLAUDE.md resume pointer, then closes.",6500);
   await fetch("/api/close-session",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,force})});
   setTimeout(loadSessions,force?700:3000);}
@@ -20620,7 +20630,7 @@ async function saveBlock(ap){const b={title:document.getElementById("bT").value,
   if(ap)await fetch("/api/managed-apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:r.block.id})});
   closeM();await loadDocs();toast(ap?"Applied across the project.":"Saved.");}
 async function applyBlock(id){toast("Applying…",5000);const r=await(await fetch("/api/managed-apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})})).json();await loadDocs();toast("Applied — "+(r.counts.created||0)+" created, "+(r.counts.updated||0)+" updated.",6000);}
-async function rmBlock(id){if(!confirm("Remove this block from every CLAUDE.md? (strips only the managed region)"))return;await fetch("/api/managed-remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,deleteBlock:true})});await loadDocs();toast("Removed.");}
+async function rmBlock(id){if(!await confirmM("Remove this block from every CLAUDE.md? (strips only the managed region)"))return;await fetch("/api/managed-remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,deleteBlock:true})});await loadDocs();toast("Removed.");}
 // ---- add to registries ----
 function addBtns(kind){return '<div class="btns"><button class="btn" onclick="closeM()">Cancel</button><button class="btn go" onclick="submitAdd(\''+kind+'\')">Create</button></div>';}
 function openAdd(){const L=LENS;
@@ -20655,6 +20665,13 @@ async function submitAdd(kind){const v=id=>{const e=document.getElementById(id);
 function showM(h){document.getElementById("mbox").innerHTML=h;document.getElementById("mbg").style.display="flex";}
 function closeM(){document.getElementById("mbg").style.display="none";}
 document.getElementById("mbg").addEventListener("click",e=>{if(e.target.id=="mbg")closeM();});
+// ---- styled dialogs: promise-based replacements for native confirm/prompt/alert (stack ABOVE any open modal) ----
+function _ccdlg(inner){ var d=document.getElementById('ccDlg'); if(!d){ d=document.createElement('div'); d.id='ccDlg'; d.tabIndex=-1; document.body.appendChild(d); d.addEventListener('mousedown',function(e){ if(e.target===d&&d._esc) d._esc(); }); d.addEventListener('keydown',function(e){ if(e.key==='Escape'&&d._esc){ e.preventDefault(); d._esc(); } }); } d.innerHTML='<div class="modal" role="dialog" aria-modal="true">'+inner+'</div>'; d.style.display='flex'; return d; }
+function _ccdlgClose(){ var d=document.getElementById('ccDlg'); if(d){ d.style.display='none'; d._esc=null; } }
+function _dlgmsg(s){ return esc(String(s)).replace(/\n/g,'<br>'); }
+function confirmM(msg,opt){ opt=opt||{}; return new Promise(function(res){ var d=_ccdlg((opt.title?'<h2>'+esc(opt.title)+'</h2>':'')+'<div class="mbody">'+_dlgmsg(msg)+'</div><div class="btns"><button class="btn" id="_dCancel">'+esc(opt.cancel||'Cancel')+'</button><button class="btn '+(opt.danger?'danger':'go')+'" id="_dOk">'+esc(opt.ok||'Confirm')+'</button></div>'); var fin=function(v){ _ccdlgClose(); res(v); }; d._esc=function(){fin(false);}; document.getElementById('_dOk').onclick=function(){fin(true);}; document.getElementById('_dCancel').onclick=function(){fin(false);}; setTimeout(function(){var b=document.getElementById('_dOk');if(b)b.focus();},40); }); }
+function promptM(label,def,opt){ opt=opt||{}; return new Promise(function(res){ var d=_ccdlg((opt.title?'<h2>'+esc(opt.title)+'</h2>':'')+'<div class="row">'+(label?'<label>'+_dlgmsg(label)+'</label>':'')+'<input id="_dIn" value="'+esc(def==null?'':String(def))+'" autocomplete="off"></div><div class="btns"><button class="btn" id="_dCancel">Cancel</button><button class="btn go" id="_dOk">'+esc(opt.ok||'OK')+'</button></div>'); var inp=document.getElementById('_dIn'); var fin=function(v){ _ccdlgClose(); res(v); }; d._esc=function(){fin(null);}; document.getElementById('_dOk').onclick=function(){fin(inp?inp.value:'');}; document.getElementById('_dCancel').onclick=function(){fin(null);}; if(inp){ inp.onkeydown=function(e){ if(e.key==='Enter'){e.preventDefault();fin(inp.value);} else if(e.key==='Escape'){e.preventDefault();fin(null);} }; setTimeout(function(){inp.focus();inp.select();},40); } }); }
+function alertM(msg,opt){ opt=opt||{}; return new Promise(function(res){ var d=_ccdlg((opt.title?'<h2>'+esc(opt.title)+'</h2>':'')+'<div class="mbody">'+_dlgmsg(msg)+'</div><div class="btns"><button class="btn go" id="_dOk">'+esc(opt.ok||'OK')+'</button></div>'); var fin=function(){ _ccdlgClose(); res(); }; d._esc=fin; document.getElementById('_dOk').onclick=fin; setTimeout(function(){var b=document.getElementById('_dOk');if(b)b.focus();},40); }); }
 function toast(t,ms){const e=document.getElementById("toast");e.innerHTML=t;e.style.display="block";clearTimeout(e._t);e._t=setTimeout(()=>e.style.display="none",ms||2800);}
 // Reusable busy overlay -- show a spinner + message during any slow op so it never looks frozen.
 function busyOn(msg,sub){ var o=document.getElementById('cfbusy'); if(!o){ o=document.createElement('div'); o.id='cfbusy'; o.className='cfbusy'; document.body.appendChild(o);} o.innerHTML='<div class="cfbusy-card"><div class="spin big"></div><div class="cfbusy-msg">'+(msg||'Working…')+'</div>'+(sub?('<div class="cfbusy-sub">'+sub+'</div>'):'')+'</div>'; o.style.display='flex'; }
@@ -20855,7 +20872,7 @@ function tkAdd(){ showM('<h2>＋ New task</h2><div class="row"><label>Task</labe
 async function tkAddGo(){ var t=((document.getElementById("tkT")||{}).value)||''; var d=((document.getElementById("tkD")||{}).value)||null; if(!t.trim()){toast("Enter a task");return;} await fetch('/api/task-add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,due:d})}); closeM(); loadTasks(); }
 async function tkCalendar(id){ busyOn('📅 Adding to your calendar…'); var r=null; try{ r=await(await fetch('/api/task-calendar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})).json(); }catch(e){} busyOff(); if(!r||!r.ok){ toast('Calendar: '+esc((r&&r.error)||'failed'),6000); return; } toast('📅 Added to calendar: '+esc(r.title||'')+' · '+esc(r.date||''),5000); loadTasks(); }
 async function tkSweep(){ busyOn('🔄 Scanning recent email for action items…','free — no AI'); var r=null; try{ r=await(await fetch('/api/tasks-sweep',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json(); }catch(e){} busyOff(); toast(r&&r.ok?('Found '+(r.added||0)+' new suggestion'+((r.added===1)?'':'s')):'Scan failed',5000); loadTasks(); }
-async function tkAiScan(){ if(!confirm('Run an AI scan of your recent email + notes for todos and calendar suggestions?\n\nUses tokens (one batched pass). Everything lands as suggestions you accept.')) return; busyOn('✨ AI scanning your recent correspondence…','finding todos + calendar items — about a minute'); var r=null; try{ r=await(await fetch('/api/tasks-ai-scan',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json(); }catch(e){} busyOff(); if(!r||!r.ok){ toast('AI scan: '+esc((r&&r.error)||'failed'),6000); return;} toast('✨ '+(r.tasks||0)+' todos + '+(r.events||0)+' calendar suggestions added',6000); loadTasks(); }
+async function tkAiScan(){ if(!await confirmM('Run an AI scan of your recent email + notes for todos and calendar suggestions?\n\nUses tokens (one batched pass). Everything lands as suggestions you accept.')) return; busyOn('✨ AI scanning your recent correspondence…','finding todos + calendar items — about a minute'); var r=null; try{ r=await(await fetch('/api/tasks-ai-scan',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json(); }catch(e){} busyOff(); if(!r||!r.ok){ toast('AI scan: '+esc((r&&r.error)||'failed'),6000); return;} toast('✨ '+(r.tasks||0)+' todos + '+(r.events||0)+' calendar suggestions added',6000); loadTasks(); }
 async function loadIdeas(){
   const g=document.getElementById("grid");
   try{IDEAS=await(await fetch("/api/ideas")).json();}catch(e){IDEAS=[];}
@@ -20876,7 +20893,7 @@ function ideaCard(i){return '<div class="cc-item">'
   +'<button class="mini" style="color:#f85149" onclick="ideaDel(\''+esc(i.id)+'\')">delete</button></div></div>';}
 async function ideaAdd(){const t=document.getElementById("idea_t"),n=document.getElementById("idea_n");if(!t.value.trim())return;
   await fetch("/api/idea-add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:t.value,notes:n.value})});t.value="";n.value="";loadIdeas();}
-async function ideaDel(id){if(!confirm("Delete this idea?"))return;await fetch("/api/idea-delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});loadIdeas();}
+async function ideaDel(id){if(!await confirmM("Delete this idea?"))return;await fetch("/api/idea-delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});loadIdeas();}
 function flattenMods(n,acc,depth){if(n.rel!==undefined&&n.rel!==""){acc.push({rel:n.rel,name:'  '.repeat(depth-1)+n.name});}(n.children||[]).forEach(c=>flattenMods(c,acc,depth+1));return acc;}
 async function ideaPromote(id){const idea=IDEAS.find(x=>x.id==id);if(!idea)return;
   let tree;try{tree=await(await fetch("/api/module-tree")).json();}catch(e){toast("Couldn't load modules");return;}
@@ -20934,11 +20951,11 @@ async function loadCcr(){
   g.innerHTML=h;
 }
 async function fleetUpdate(force){
-  if(!confirm(force?'Force re-converge EVERY reachable tenant node (re-overlay + restart), even if current?':'Update all behind nodes now? This refreshes the dist mirror, then runs cc_update + restart on each behind tenant. (Source/dev nodes are skipped.)'))return;
-  let r;try{r=await(await fetch('/api/fleet-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:!!force})})).json();}catch(e){alert('fleet update failed: '+e);return;}
+  if(!await confirmM(force?'Force re-converge EVERY reachable tenant node (re-overlay + restart), even if current?':'Update all behind nodes now? This refreshes the dist mirror, then runs cc_update + restart on each behind tenant. (Source/dev nodes are skipped.)'))return;
+  let r;try{r=await(await fetch('/api/fleet-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:!!force})})).json();}catch(e){await alertM('fleet update failed: '+e);return;}
   const ran=(r.ran||[]).map(function(n){return (n.update?'✅':'❌')+' '+n.id+' (was '+n.from+')'+(n.restart===false?' — update ok, restart failed':'')+(n.error?(' — '+n.error):'');}).join('\n')||'(nothing to update)';
   const skip=(r.skipped||[]).map(function(n){return '• '+n.id+': '+n.why;}).join('\n');
-  alert('Mirror: '+(r.mirror||'?')+'\n\nConverged:\n'+ran+(skip?('\n\nSkipped:\n'+skip):''));
+  await alertM('Mirror: '+(r.mirror||'?')+'\n\nConverged:\n'+ran+(skip?('\n\nSkipped:\n'+skip):''));
   loadCcr();
 }
 function ccrCard(c){
@@ -20963,8 +20980,8 @@ async function ccrAdd(){const t=document.getElementById("ccr_t");if(!t.value.tri
   await fetch("/api/ccr-submit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:t.value,kind:kind,summary:sum,surface:surf,from_node:"mission-control",author:"James"})});
   loadCcr();}
 async function ccrSet(id,status){await fetch("/api/ccr-update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,status})});loadCcr();}
-async function ccrComment(id){const t=prompt("Comment:");if(!t)return;await fetch("/api/ccr-update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,comment:t,by:"James"})});loadCcr();}
-async function ccrDel(id){if(!confirm("Delete this change request?"))return;await fetch("/api/ccr-delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});loadCcr();}
+async function ccrComment(id){const t=await promptM("Comment:");if(!t)return;await fetch("/api/ccr-update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,comment:t,by:"James"})});loadCcr();}
+async function ccrDel(id){if(!await confirmM("Delete this change request?"))return;await fetch("/api/ccr-delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});loadCcr();}
 
 // ---- Propose Change lens (project nodes): submit-only form that sends a CCR UP to Mission Control ----
 let CCR_SENT=[];
@@ -21037,7 +21054,7 @@ async function acctSnapshot(){
 // merged one (the "it went back to the old look" bug).
 function acctReload(){ if(LENS==='usage'){ loadAcctWin(); } else { loadAccounts(); } }
 async function acctSwitch(label,email){
-  if(!confirm('Switch the Claude login for EVERY session to '+email+'?\n\nThis is live — all running sessions use it on their next request (no restart). It VERIFIES the new login can read /usage and auto-rolls-back if it can\'t. Your current account stays saved in the wallet.\n\nTakes ~10-20s (it reads the new login).'))return;
+  if(!await confirmM('Switch the Claude login for EVERY session to '+email+'?\n\nThis is live — all running sessions use it on their next request (no restart). It VERIFIES the new login can read /usage and auto-rolls-back if it can\'t. Your current account stays saved in the wallet.\n\nTakes ~10-20s (it reads the new login).'))return;
   toast('Switching + verifying '+email+'… (~15s)',8000);
   var r={}; try{ r=await(await fetch('/api/account-switch-verified',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:(label||email)})})).json(); }catch(e){}
   if(r&&r.ok){ toast('✓ Now logged in as '+(r.email||email)+' — verified across all sessions',6000); }
@@ -21054,7 +21071,7 @@ async function awSetMode(mode){
   loadAcctWin();
 }
 async function acctRemove(label){
-  if(!confirm('Remove "'+label+'" from the wallet? (the stored credential is deleted; the LIVE login is unchanged. You can re-save it while logged into it.)'))return;
+  if(!await confirmM('Remove "'+label+'" from the wallet? (the stored credential is deleted; the LIVE login is unchanged. You can re-save it while logged into it.)'))return;
   await fetch('/api/claude-account/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label})}); acctReload();
 }
 async function acctUsage(btn){
@@ -21107,7 +21124,7 @@ async function loadSettings(){
 function cfRandTok(){var a=new Uint8Array(16);crypto.getRandomValues(a);return Array.from(a,function(b){return b.toString(16).padStart(2,"0")}).join("");}
 async function changeToken(){
   var v=(document.getElementById("set_newtok").value||"").trim();
-  if(!confirm("Change this node's login token now?\\n\\nThis window stays logged in; OTHER devices will need the new token. (cc-recover.sh always prints the current token if you get stuck.)"))return;
+  if(!await confirmM("Change this node's login token now?\\n\\nThis window stays logged in; OTHER devices will need the new token. (cc-recover.sh always prints the current token if you get stuck.)"))return;
   var r;try{r=await(await fetch("/api/auth-token-set",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token:v})})).json();}catch(e){toast("Request failed");return;}
   if(!r||!r.ok){toast("Failed: "+((r||{}).error||"?"),5000);return;}
   var el=document.getElementById("tokresult");
@@ -21387,9 +21404,9 @@ function paintNavMode(){
 }
 function navToggleRank(){var s=navState();s.autorank=!s.autorank;navSave(s);renderNav();}
 function navAuto(){var s=navState();delete s.mode;delete s.order;delete s.tree;delete s.autorank;navSave(s);renderNav();}
-function navNewCat(){var s=navState();if(!s.tree||!s.tree.length)s.tree=seedTree();var nm=prompt("New category name:","Less used");if(nm===null)return;s.tree.push({t:"grp",id:"g"+Date.now(),name:(nm.trim()||"Group"),collapsed:false,items:[]});s.mode="manual";navSave(s);renderNav();}
+async function navNewCat(){var s=navState();if(!s.tree||!s.tree.length)s.tree=seedTree();var nm=await promptM("New category name:","Less used");if(nm===null)return;s.tree.push({t:"grp",id:"g"+Date.now(),name:(nm.trim()||"Group"),collapsed:false,items:[]});s.mode="manual";navSave(s);renderNav();}
 function navToggleGrp(gid){var s=navState();(s.tree||[]).forEach(function(n){if(n.t==="grp"&&n.id===gid)n.collapsed=!n.collapsed;});navSave(s);renderNav();}
-function navRenameGrp(gid){var s=navState();var n=(s.tree||[]).filter(function(x){return x.t==="grp"&&x.id===gid;})[0];if(!n)return;var nm=prompt("Category name:",n.name);if(nm===null)return;n.name=nm.trim()||n.name;navSave(s);renderNav();}
+async function navRenameGrp(gid){var s=navState();var n=(s.tree||[]).filter(function(x){return x.t==="grp"&&x.id===gid;})[0];if(!n)return;var nm=await promptM("Category name:",n.name);if(nm===null)return;n.name=nm.trim()||n.name;navSave(s);renderNav();}
 function navDelGrp(gid){var s=navState();var t=s.tree||[];for(var i=0;i<t.length;i++){if(t[i].t==="grp"&&t[i].id===gid){var freed=(t[i].items||[]).map(function(l){return{t:"tab",l:l};});t.splice.apply(t,[i,1].concat(freed));break;}}if(!navHasGrp(s))s.mode="manual";navSave(s);renderNav();}
 // ---- drag/drop (delegated; handles tabs AND category headers)
 function navClearMarks(){var n=document.getElementById("lens");if(!n)return;n.querySelectorAll(".drop-before,.drop-after,.dragover").forEach(function(x){x.classList.remove("drop-before","drop-after","dragover");});}
@@ -21568,7 +21585,7 @@ async function sbExit(name){
   sbHide(); setTimeout(sbPoll,1200);
 }
 async function sbKill(name){
-  if(!confirm('Force-kill '+name+'?\n\nThis SKIPS the handoff — no /endsession, no resume notes.'))return;
+  if(!await confirmM('Force-kill '+name+'?\n\nThis SKIPS the handoff — no /endsession, no resume notes.'))return;
   try{ var r=await(await fetch('/api/close-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,force:true})})).json();
     if(r&&r.protected&&typeof toast==='function')toast(r.error||'Protected session — cannot be killed.',6000); }catch(e){}
   sbHide(); setTimeout(sbPoll,700);
@@ -21744,7 +21761,7 @@ function basketAdd(d){ if(typeof d==='string'){try{d=JSON.parse(d);}catch(e){ret
   if(basketHas(d)){ toast('Already in the basket',2200); return false; }
   BASKET.push(d); basketPersist(); toast('&#129530; Added to basket ('+BASKET.length+')',2200); return true; }
 function basketRemove(i){ BASKET.splice(i,1); basketPersist(); }
-function basketClear(){ if(!BASKET.length)return; if(!confirm('Clear all '+BASKET.length+' item(s) from the basket?'))return; BASKET=[]; basketPersist(); }
+async function basketClear(){ if(!BASKET.length)return; if(!await confirmM('Clear all '+BASKET.length+' item(s) from the basket?'))return; BASKET=[]; basketPersist(); }
 function basketUploadFile(file){ var rd=new FileReader(); rd.onload=function(){
   fetch('/api/basket-upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:file.name,mime:file.type||'',data:rd.result})})
     .then(function(r){return r.json();}).then(function(r){ if(r&&r.ok){ basketAdd({kind:'upload',path:r.path,name:file.name}); } else { toast('Upload failed: '+((r||{}).error||'?'),5000); } })
@@ -21760,15 +21777,15 @@ async function basketSendTo(session){
     else toast('Basket send failed: '+((r||{}).error||'?'),6000);
   }catch(e){ toast('Basket send failed.',5000); }
 }
-function basketSavePack(){ if(!BASKET.length){ toast('Add items first, then save them as a pack.',3500); return; }
-  var name=prompt('Save this basket as a reusable pack named:',''); if(name==null) return; name=name.trim(); if(!name) return;
+async function basketSavePack(){ if(!BASKET.length){ toast('Add items first, then save them as a pack.',3500); return; }
+  var name=await promptM('Save this basket as a reusable pack named:',''); if(name==null) return; name=name.trim(); if(!name) return;
   fetch('/api/baskets-save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,items:BASKET})})
     .then(function(r){return r.json();}).then(function(r){ if(r&&r.ok){ BK_PACKS=r.packs||[]; toast('&#128190; Saved pack “'+esc(name)+'”',3500); renderBasket(); } else toast('Save failed: '+((r||{}).error||'?'),5000); }); }
 function basketLoadPack(id){ var p=BK_PACKS.find(function(x){return x.id===id;}); if(!p)return;
   var added=0; (p.items||[]).forEach(function(d){ if(d&&d.kind&&!basketHas(d)){ BASKET.push(d); added++; } });
   basketPersist(); toast('&#129530; Loaded '+added+' item(s) from “'+esc(p.name)+'”',3000); }
-function basketDelPack(ev,id){ if(ev){ev.stopPropagation();} var p=BK_PACKS.find(function(x){return x.id===id;}); if(!p)return;
-  if(!confirm('Delete the saved pack “'+p.name+'”?'))return;
+async function basketDelPack(ev,id){ if(ev){ev.stopPropagation();} var p=BK_PACKS.find(function(x){return x.id===id;}); if(!p)return;
+  if(!await confirmM('Delete the saved pack “'+p.name+'”?'))return;
   fetch('/api/baskets-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})
     .then(function(r){return r.json();}).then(function(r){ if(r&&r.ok){ BK_PACKS=r.packs||[]; renderBasket(); } }); }
 function basketFetchPacks(){ fetch('/api/baskets').then(function(r){return r.json();}).then(function(r){ if(r&&r.ok){ BK_PACKS=r.packs||[]; renderBasket(); } }).catch(function(){}); }
@@ -21955,7 +21972,7 @@ async function fxVoiceSave(){
   toast(r&&r.ok?'✓ Voice profile saved':'Save failed: '+esc((r&&r.error)||'?'),4000);
 }
 async function fxVoiceRebuild(){
-  var d=prompt('How many of your most-recent SENT emails should I learn from? (more = richer voice, slower)','150'); if(d===null) return;
+  var d=await promptM('How many of your most-recent SENT emails should I learn from? (more = richer voice, slower)','150'); if(d===null) return;
   d=parseInt(d,10)||150;
   busyOn('🎙 Learning your voice from ~'+d+' sent emails…','reading your sent mail + profiling your style — about 1-2 minutes');
   var r=null; try{ r=await(await fetch('/api/voice/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({depth:d})})).json(); }catch(e){}
@@ -21965,7 +21982,7 @@ async function fxVoiceRebuild(){
   fxLearnVoice();
 }
 async function fxVoiceOptimize(){
-  if(!confirm('Optimize your voice profile from the edits you made to past smart-reply drafts?\n\nThis sends the agent your current profile + those edits ONCE, learns your corrections, updates the profile, and clears the edit buffer.')) return;
+  if(!await confirmM('Optimize your voice profile from the edits you made to past smart-reply drafts?\n\nThis sends the agent your current profile + those edits ONCE, learns your corrections, updates the profile, and clears the edit buffer.')) return;
   busyOn('✨ Optimizing your voice…','learning from your edits to past drafts — about a minute');
   var r=null; try{ r=await(await fetch('/api/voice/optimize',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json(); }catch(e){}
   busyOff();
