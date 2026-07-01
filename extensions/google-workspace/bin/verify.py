@@ -27,6 +27,16 @@ if not creds.valid:
     store.store_credential(EMAIL, creds)  # persist refreshed access token
 print("AUTH OK  account:", EMAIL, "| token refreshed:", bool(creds.token))
 
+# --- scope visibility (CCR ccr-1782880284369): show what this token ACTUALLY authorizes + flag missing write
+#     services so the setup flow never assumes a capability the token doesn't have ---
+_sc = list(getattr(creds, "scopes", None) or [])
+_has = lambda sub: any(sub in s for s in _sc)
+print("SCOPES:", len(_sc), "| sheets:", _has("spreadsheets"), "docs:", _has("documents"),
+      "forms:", _has("forms.body"), "gmail.send:", _has("gmail.send"))
+for _svc, _sub in (("sheets", "spreadsheets"), ("docs", "documents"), ("forms", "forms.body")):
+    if not _has(_sub):
+        print("  note:", _svc, "NOT granted -- in-place editing / Forms will 403 until re-mint (run bin/enable-services.sh)")
+
 # --- Gmail: 3 most recent unread subjects ---
 print("\n[GMAIL] 3 most recent unread:")
 g = build("gmail", "v1", credentials=creds, cache_discovery=False)

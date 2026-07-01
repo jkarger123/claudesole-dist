@@ -741,14 +741,80 @@ def _google_access_token():
         except Exception:
             return None
 
+# ---- google scope-vs-perms drift (CCR ccr-1782880284369) + portable secret paths (CCR ccr-1782880284334) ----
+def _mcp_google_perms():
+    """The service:level tokens the LIVE deployment .mcp.json wires the 'google' MCP server for (what the agent's
+    tools expect). [] if not wired."""
+    try:
+        srv = (json.load(open(MCP_JSON)).get("mcpServers") or {}).get("google") or {}
+        args = srv.get("args") or []
+        if "--permissions" not in args: return []
+        out = []
+        for a in args[args.index("--permissions") + 1:]:
+            if isinstance(a, str) and ":" in a and not a.startswith("--"): out.append(a)
+            else: break
+        return out
+    except Exception: return []
+
+# a substring that MUST appear in a GRANTED scope for that wired service to actually work
+_SVC_SCOPE = {"gmail:readonly": "gmail.readonly", "gmail:organize": "gmail.modify", "gmail:drafts": "gmail.compose",
+              "gmail:send": "gmail.send", "gmail:full": "mail.google.com", "calendar:readonly": "calendar",
+              "calendar:full": "calendar", "drive:readonly": "drive", "drive:full": "drive",
+              "sheets:readonly": "spreadsheets", "sheets:full": "spreadsheets", "docs:readonly": "documents",
+              "docs:full": "documents", "forms:readonly": "forms", "forms:full": "forms.body"}
+def _google_scope_gaps():
+    """Services the .mcp.json wires the agent for but the MINTED TOKEN does NOT grant -> those tools 403 at
+    runtime until a re-mint. Returns [service, ...]; empty when the token covers everything configured."""
+    granted = _GOOGLE_TOK.get("scopes") or []
+    if not granted: return []
+    gaps = []
+    for svc in _mcp_google_perms():
+        need = _SVC_SCOPE.get(svc) or _SVC_SCOPE.get(svc.split(":")[0] + ":full")
+        if need and not any(need in s for s in granted): gaps.append(svc)
+    return gaps
+
+def _google_canonical_secrets():
+    """The ONE CC_HOME-relative secret location the DASHBOARD uses; the MCP must resolve the SAME or a drive move
+    split-brains the token store (CCR ccr-1782880284334)."""
+    return {"WORKSPACE_MCP_CREDENTIALS_DIR": GOOGLE_TOKENS_DIR,
+            "GOOGLE_CLIENT_SECRET_PATH": os.path.join(GOOGLE_SECRETS_DIR, "google_oauth.json")}
+
+def _heal_google_mcp_paths(apply=True):
+    """Portability self-heal: re-point the wired 'google' MCP env secret paths to the CURRENT CC_HOME (the same
+    paths the dashboard derives) so the two consumers never diverge after the deployment moves drives. Returns
+    {drifted, fixed, keys}. Idempotent -- only touches a path that actually differs."""
+    try:
+        if not os.path.isfile(MCP_JSON): return {"drifted": False, "fixed": False, "keys": []}
+        d = json.load(open(MCP_JSON))
+        srv = (d.get("mcpServers") or {}).get("google")
+        if not isinstance(srv, dict) or not isinstance(srv.get("env"), dict):
+            return {"drifted": False, "fixed": False, "keys": []}
+        env = srv["env"]; want = _google_canonical_secrets()
+        drift = [k for k, v in want.items() if k in env and env[k] != v]
+        if drift and apply:
+            for k in drift: env[k] = want[k]
+            tmp = MCP_JSON + ".tmp"; json.dump(d, open(tmp, "w"), indent=2)
+            try: os.chmod(tmp, 0o600)
+            except Exception: pass
+            os.replace(tmp, MCP_JSON)
+            print("[google] healed .mcp.json secret paths -> CC_HOME:", ", ".join(drift))
+        return {"drifted": bool(drift), "fixed": bool(drift and apply), "keys": drift}
+    except Exception as e:
+        return {"drifted": False, "fixed": False, "keys": [], "error": str(e)[:120]}
+
 def google_status():
     if not google_configured(): return {"configured": False}
     tok = _google_access_token()
     s = _GOOGLE_TOK.get("scopes", [])
+    gaps = _google_scope_gaps()
     return {"configured": bool(tok), "email": _GOOGLE_TOK.get("email"),
             "canRead": any("gmail.readonly" in x or "gmail.modify" in x for x in s),
             "canSend": any("gmail.send" in x or "gmail.compose" in x for x in s),
-            "canModify": any("gmail.modify" in x for x in s)}
+            "canModify": any("gmail.modify" in x for x in s),
+            "canSheets": any("spreadsheets" in x for x in s),
+            "canDocs": any("documents" in x for x in s),
+            "canForms": any("forms" in x for x in s),
+            "remint_needed": bool(gaps), "missing_services": gaps}
 
 def _g_api(method, url, params=None, body=None, raw=False, timeout=30):
     tok = _google_access_token()
@@ -5628,10 +5694,15 @@ def _ext_wire_mcp(eid, remove=False):
     try: d = json.load(open(MCP_JSON))
     except Exception: d = {}
     if not isinstance(d.get("mcpServers"), dict): d["mcpServers"] = {}
+    def _subst(o):   # expand the <DEPLOYMENT> path placeholder to THIS install root (CC_HOME) at wire time, so
+        if isinstance(o, str): return o.replace("<DEPLOYMENT>", CC_HOME)   # secret paths are correct + portable,
+        if isinstance(o, list): return [_subst(x) for x in o]              # never a frozen absolute (CCR ccr-1782880284334)
+        if isinstance(o, dict): return {k: _subst(v) for k, v in o.items()}
+        return o
     touched = []
     for name, cfg in servers.items():
         if remove: d["mcpServers"].pop(name, None)
-        else: d["mcpServers"][name] = cfg
+        else: d["mcpServers"][name] = _subst(cfg)
         touched.append(name)
     try: json.dump(d, open(MCP_JSON, "w"), indent=2)
     except Exception: return []
@@ -8252,6 +8323,15 @@ def doctor():
         _hk = os.path.join(STATE_DIR, "_mesh_hook_settings.json")
         if not (os.path.isfile(_hk) and "mesh_stop_hook" in _read(_hk)):
             issues.append({"sev": "warn", "path": "mesh", "msg": "chief mesh reply-forwarding hook is NOT wired (_mesh_hook_settings.json missing/incomplete) -- this chief's replies to peers would silently never be delivered; relaunch the chief to re-wire it"})
+    except Exception: pass
+    try:                                                       # google-workspace: scope drift + portable secret paths (CCRs 369/334)
+        if google_configured():
+            _gaps = _google_scope_gaps()
+            if _gaps:
+                issues.append({"sev": "warn", "path": "google", "msg": "google token is MISSING scope(s) for wired service(s): %s -- those tools will 403 at runtime. Re-mint to consent them: run extensions/google-workspace/bin/enable-services.sh (approve in browser), then restart." % ", ".join(_gaps)})
+            _heal = _heal_google_mcp_paths(apply=False)
+            if _heal.get("drifted"):
+                issues.append({"sev": "warn", "path": "google", "msg": "google MCP secret path(s) %s point OFF the current install root -- the agent's token store can split from the dashboard's after a drive move. Auto-heals to CC_HOME on boot; restart to apply." % ", ".join(_heal.get("keys", []))})
     except Exception: pass
     BUDGET = 200          # Anthropic guidance: CLAUDE.md adherence drops past ~200 lines -> keep it an index
     for ab, rel in iter_folders():
@@ -23142,6 +23222,10 @@ if __name__ == "__main__":
         try: regen_treemap(force=True)   # stamp the whole-tree module map into the root CLAUDE.md
         except Exception: pass
         try: seed_framework_blocks()     # stamp framework governance (CCR policy) into project nodes' CLAUDE.md
+        except Exception: pass
+        try:                             # portability: re-point the google MCP secret paths at THIS install root
+            _gh = _heal_google_mcp_paths(apply=True)   # (survives a drive move -- CCR ccr-1782880284334)
+            if _gh.get("fixed"): print("google: re-pointed MCP secret paths to CC_HOME (%s)" % ", ".join(_gh.get("keys", [])))
         except Exception: pass
         try:
             _t = _ensure_skip_permissions_accepted()   # console sessions open straight into skip-permissions

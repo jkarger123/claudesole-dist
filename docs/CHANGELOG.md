@@ -3,6 +3,24 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.94 -- 2026-06-30  (AFP CCRs: google scope-drift detection + PORTABLE secret paths -- google-workspace v2.2.2)
+- **CCR ccr-1782880284334 -- google secret paths are now PORTABLE (CC_HOME-relative), so a deployment can move
+  drives without split-braining the token store.** AFP hit this live: the wired `.mcp.json` froze ABSOLUTE
+  `/Users/.../secrets` paths at install, while the dashboard derives them CC_HOME-relative -- so moving CC_HOME
+  onto the SSD made the MCP read a stale off-SSD token while the dashboard read the SSD one. Fixes: (1)
+  `_ext_wire_mcp` now expands the `<DEPLOYMENT>` placeholder to the current install root at wire time (no frozen
+  absolute); (2) a boot self-heal re-points the google MCP's `WORKSPACE_MCP_CREDENTIALS_DIR` +
+  `GOOGLE_CLIENT_SECRET_PATH` to the SAME canonical CC_HOME paths the dashboard uses (idempotent; follows a drive
+  move automatically); (3) a Doctor check flags path drift. **This makes moving a node onto the SSD safe.**
+- **CCR ccr-1782880284369 -- token-scope vs mcp.json-perms DRIFT is now detected, and `mint --check` no longer
+  under-reports.** (1) `mint_token.py --check` reads the ACTUAL granted scopes from the stored token file and maps
+  them faithfully (gmail.send->gmail:send, spreadsheets->sheets:full, documents->docs:full, forms.body->forms:full)
+  instead of echoing the requested PERMS -- so it no longer claimed 'gmail:drafts' right after a mint that granted
+  send/sheets/docs/forms. (2) `google_status()` + Doctor now reconcile the token's granted scopes against the wired
+  `--permissions` and surface "RE-MINT NEEDED: run bin/enable-services.sh" with the exact missing services (they
+  were silently 403-ing). (3) the minter + verify.py now print the final on-disk scope set + granted perms.
+- google-workspace extension -> **v2.2.2**.
+
 ## 0.99.93 -- 2026-06-30  (BUG: extension Setup button opened an invisible session on scoped nodes)
 - **FIX -- Marketplace "Set up" now actually opens the setup-agent session on a scoped node (AFP).** The setup
   agent launches in the EXTENSION dir (under the install root), which is NOT under `PROJECT` on a node where
