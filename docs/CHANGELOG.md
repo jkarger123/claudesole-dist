@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.104 -- 2026-07-01  (warm transfer works on EVERY node: file unfiled root conversations, not just off-lane sub-folder drift)
+- **Drift/warm-transfer now fires on single-project + control-brain nodes**, not just agency trees with per-client
+  sub-folders. Before, the housekeeping drift sweep only watched conversations FILED in a sub-folder lane and
+  proposed a move when their topic drifted OUT of it -- so nodes whose work runs at the project ROOT (hptuners
+  control brain, carsearch, etc.) essentially never saw a transfer proposal. Now the sweep ALSO watches UNFILED
+  root conversations and proposes filing one into the specific home it clearly belongs in (e.g. root work about
+  firmware brick-gates -> `patches/`).
+- **High-precision + cost-bounded.** A root conversation is only proposed on a STRONG lexical/model route AND a
+  fresh model-confirm (`_confirm_file_llm`) that it squarely belongs there -- cross-cutting / platform-wide root
+  work is left put. Every examined root session stamps its cooldown (proposed or not) so it's re-examined at most
+  once per 6h, bounding subscription-model spend on nodes where most sessions live at root.
+- **Overseer still excluded** (ROLE=org): the unscoped Mission Control instance shares the tmux server and must not
+  manage individual conversations. **Off switch unchanged:** Settings -> "Warm transfer (the front desk)" (`handoff`).
+
 ## 0.99.103 -- 2026-07-01  (terminal: auto-copy-on-release toggle + a 'copied to clipboard' confirmation popup)
 - **Auto-copy toggle** (⧉ auto-copy in the terminal ⋯ menu, default ON, persisted per device): when ON and the
   origin is secure (https/localhost), releasing the mouse writes the selection straight to the clipboard and snaps

@@ -10134,7 +10134,7 @@ def context_settings():
         "scout": {"on": CC.get("scout", True) is not False, "label": "The Scout (proactive surfacing)",
             "doc": "Beyond the cited brief, a cheap index pass flags FRESH items relevant to what you're doing that you were NOT handed -- the email/file/call just out of view -- as pointers in the launch brief + the Scout panel. Solves 'the agent doesn't know what it doesn't know' without dumping the inbox. Off = only the explicit brief is injected."},
         "handoff": {"on": CC.get("handoff", True) is not False, "label": "Warm transfer (the front desk)",
-            "doc": "Every scoped agent is told to STAY IN ITS LANE and, when a conversation drifts out of scope, prepare a warm transfer -- a structured packet (goal/state/pointers) routed to the right home (created if none fits); you confirm with one click in the Transfers tab. The Chief acts as the triage front door. Keeps each scope's memory clean instead of tainting the folder you happened to launch in. Off = no drift-detection or handoff prompts."},
+            "doc": "Every scoped agent is told to STAY IN ITS LANE and, when a conversation drifts out of scope, prepare a warm transfer -- a structured packet (goal/state/pointers) routed to the right home (created if none fits); you confirm with one click in the Transfers tab. Housekeeping also watches server-side: it proposes moving a FILED conversation whose topic drifted off-lane, AND filing an UNFILED conversation running at the project root into the specific home it clearly belongs in (so single-project / control-brain nodes benefit too, not just agency trees) -- both high-precision + model-confirmed so platform-wide root work stays put. The Chief acts as the triage front door. Keeps each scope's memory clean instead of tainting the folder you happened to launch in. Off = no drift-detection or handoff prompts."},
         "reconcile": {"on": CC.get("reconcile", True) is not False, "label": "Reconcile + auto-archive idle conversations",
             "idle_hours": round(float(CC.get("idle_archive_sec") or _IDLE_ARCHIVE_SEC) / 3600.0, 1),
             "doc": "Many conversations in one folder converge on that folder's records: each meeting files its minutes (CC:NOTES), then idle + harvested + un-held conversations are auto-archived (always one-click resumable) so offices don't fill with zombies. Pin / Hold / agent self-hold keep one alive. Adjust the idle window + see everything in the Workspace hygiene panel (Transfers). Off = nothing auto-archives."},
@@ -10176,11 +10176,25 @@ def _confirm_drift_llm(rel, summ, topic, dest_name):
     a = _claude_text(q, model="claude-haiku-4-5", timeout=25)
     return bool(a and a.strip().lower().startswith("y"))
 
+def _confirm_file_llm(topic, dest_name, dest_summ):
+    """High-precision gate for FILING an UNFILED (project-root) conversation into a specific home: ask the cheap
+    subscription model whether the work CLEARLY belongs there. Fail-closed (no spam). Root work is frequently
+    cross-cutting/platform-wide and MUST stay at the root -- so we only file on a squarely-on-subject match."""
+    q = ("A work conversation is running UNFILED at the project root (not in any sub-folder). Its recent activity "
+         "is about: \"%s\".\nWould this work CLEARLY belong in the specific home '%s' (%s)? Answer yes ONLY if it is "
+         "squarely about that home's subject. Answer NO if it is cross-cutting, platform-wide, or general work that "
+         "legitimately lives at the root, or is only loosely related. When unsure, answer no. Answer ONLY yes or no."
+         % (topic[:200], dest_name or "that area", (dest_summ or "no summary")[:140]))
+    a = _claude_text(q, model="claude-haiku-4-5", timeout=25)
+    return bool(a and a.strip().lower().startswith("y"))
+
 def _drift_sweep():
     """SERVER-SIDE warm transfer: instead of waiting for an agent to notice it's off-lane (which it ~never does),
-    WE watch every live work conversation and PROPOSE a handoff when its topic has drifted out of the folder it
-    sits in. Deterministic-first (lexical drift + router); the `smart` model only confirms ambiguous cases. The
-    proposal lands in the Transfers tab for one-click confirm -- the platform observes, you decide."""
+    WE watch every live work conversation and PROPOSE a handoff. Two cases: (1) a conversation FILED in a sub-folder
+    whose topic has drifted OUT of that folder; (2) a conversation running UNFILED at the project root whose topic
+    clearly belongs in a specific home (so the control-brain / single-project nodes benefit too, not just agency
+    trees with per-client folders). Deterministic-first (lexical + router); the `smart` model only confirms
+    ambiguous cases. Proposals land in the Transfers tab for one-click confirm -- the platform observes, you decide."""
     # The unscoped OVERSEER (ROLE=org) shares the tmux server and sees EVERY node's sessions; it must NOT manage
     # individual conversations (it would scope them against the wrong project root -> garbage proposals). Each
     # project node sweeps its OWN sessions; the overseer only oversees the fleet.
@@ -10192,44 +10206,69 @@ def _drift_sweep():
     for s in _live_sessions():
         if s == CHIEF or s.startswith(("admin-", "ralph-", "chief")) or _is_service_session(s): continue
         rel = _session_scope(s)
-        if not rel: continue                                       # need a REAL sub-folder lane (skip None + root "") -- no lane = nothing to drift from
+        if rel is None: continue                                   # session isn't inside the project tree -> no basis to file it
+        unfiled = (rel == "")                                      # sitting at the project ROOT -> not yet in a home lane
         m = _smeta(s)
         if m.get("pin") or m.get("agent_hold"): continue
         rk = _norm_toks(m.get("recent_kw") or "")
-        stok = _norm_toks(os.path.basename(rel) + " " + (cand_sum.get(rel) or ""))
-        if not rk or not stok: continue
-        checked += 1
-        if len(rk & stok) > 0: continue                            # still on-lane
-        sup = _norm_toks(m.get("drift_suppress_topic") or "")      # operator declined this drift before ("keep it here")
+        if not rk: continue
+        if not unfiled:
+            stok = _norm_toks(os.path.basename(rel) + " " + (cand_sum.get(rel) or ""))
+            if not stok: continue
+            checked += 1
+            if len(rk & stok) > 0: continue                        # still on-lane
+        else:
+            checked += 1                                           # unfiled: no lane to be "on" -- always a filing candidate
+        sup = _norm_toks(m.get("drift_suppress_topic") or "")      # operator declined this drift/filing before ("keep it here")
         if sup and (len(rk & sup) / float(len(rk))) >= 0.5: continue
         if s in open_for: continue                                 # already an open proposal for this one
         if (time.time() - float(m.get("drift_proposed_ts") or 0)) < _DRIFT_REPROPOSE_SEC: continue
         topic = " ".join(sorted(rk))
-        routed = route(topic, exclude=rel)
+        routed = route(topic, exclude=(rel or None))
         dest = routed.get("destination"); dest_rel = (dest or {}).get("rel")
         if dest and dest_rel == rel: continue
-        # SAME-LINEAGE guard: never propose moving a conversation into its own ANCESTOR or descendant (e.g. a client
-        # folder 'Pipeline/solawave' "up" to the generic parent 'Pipeline'). That's not a transfer to a different
-        # home -- it's demoting specific work into the container above it. Real drift goes to a SEPARATE branch.
-        if dest_rel and (rel.startswith(dest_rel + "/") or dest_rel.startswith(rel + "/")): continue
-        if not dest and not routed.get("needs_new_home"): continue
-        conf = (dest or {}).get("confidence") or 0.0
-        # PRECISION: model-confirm EVERY auto proposal when `smart` is on (drift proposals are rare, so precision is
-        # worth one cheap call). This catches "still client/project work that just doesn't repeat the folder's
-        # proper-noun name." With smart OFF, only a STRONG lexical route proposes.
-        if CC.get("smart", True) is not False:
-            if not _confirm_drift_llm(rel, cand_sum.get(rel) or "", topic, (dest or {}).get("name") or ""):
+        if unfiled:
+            # UNFILED root work: only FILE into a concrete EXISTING home, on a STRONG + model-confirmed match. Much
+            # root work is legitimately platform-wide and must stay put, so we stamp drift_proposed_ts on EVERY
+            # examined root session (propose or not) -> each is re-examined at most once per cooldown, bounding the
+            # model spend on the control-brain nodes where most sessions run at root.
+            _smeta_set(s, drift_proposed_ts=time.time())
+            if not dest: continue                                  # no clear home -> leave it at root (never auto-invent a home for root work)
+            conf = (dest or {}).get("confidence") or 0.0
+            if conf < 0.6 and not routed.get("llm"): continue      # weak lexical route + no model pick -> not confident enough to move it
+            if CC.get("smart", True) is not False:
+                if not _confirm_file_llm(topic, (dest or {}).get("name") or "", (dest or {}).get("summary") or ""):
+                    continue
+            elif conf < 0.7:
                 continue
-        elif conf < 0.6:
-            continue
-        r = handoff_propose(from_session=s, to=None, goal=("work moved to: " + topic[:110]),
-                            summary=("Auto-detected by housekeeping: this conversation in '%s' is now working on '%s', "
-                                     "which is off-lane. Confirm to hand it to the right home." % (rel, topic[:140])),
-                            by="auto-housekeeping")
+            goal = "work belongs in: " + ((dest or {}).get("name") or dest_rel)
+            summary = ("Auto-detected by housekeeping: this conversation is running UNFILED at the project root but is "
+                       "working on '%s', which clearly belongs in '%s'. Confirm to file it there." % (topic[:140], dest_rel))
+            to_arg = dest_rel
+        else:
+            # SAME-LINEAGE guard: never propose moving a conversation into its own ANCESTOR or descendant (e.g. a client
+            # folder 'Pipeline/solawave' "up" to the generic parent 'Pipeline'). That's not a transfer to a different
+            # home -- it's demoting specific work into the container above it. Real drift goes to a SEPARATE branch.
+            if dest_rel and (rel.startswith(dest_rel + "/") or dest_rel.startswith(rel + "/")): continue
+            if not dest and not routed.get("needs_new_home"): continue
+            conf = (dest or {}).get("confidence") or 0.0
+            # PRECISION: model-confirm EVERY auto proposal when `smart` is on (drift proposals are rare, so precision is
+            # worth one cheap call). This catches "still client/project work that just doesn't repeat the folder's
+            # proper-noun name." With smart OFF, only a STRONG lexical route proposes.
+            if CC.get("smart", True) is not False:
+                if not _confirm_drift_llm(rel, cand_sum.get(rel) or "", topic, (dest or {}).get("name") or ""):
+                    continue
+            elif conf < 0.6:
+                continue
+            goal = "work moved to: " + topic[:110]
+            summary = ("Auto-detected by housekeeping: this conversation in '%s' is now working on '%s', "
+                       "which is off-lane. Confirm to hand it to the right home." % (rel, topic[:140]))
+            to_arg = None
+        r = handoff_propose(from_session=s, to=to_arg, goal=goal, summary=summary, by="auto-housekeeping")
         _smeta_set(s, drift_proposed_ts=time.time())
         if r.get("ok"):
             ho = r["handoff"]
-            proposed.append({"session": s, "from": rel,
+            proposed.append({"session": s, "from": (rel or "<root>"),
                              "to": ho.get("to_scope") or ("NEW: " + (ho.get("to_subject") or "?")), "topic": topic[:90]})
     return {"checked": checked, "proposed": proposed}
 
