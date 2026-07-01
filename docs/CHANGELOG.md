@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.96 -- 2026-07-01  (morning brief: all sources on by default; nav auto-organizes a stuck-flat sidebar)
+- **Morning Brief: ALL sources ON by default.** The default source set is now every registered source
+  (calendar, inbox, tasks, calls, doc-comments, slack, notes) instead of five -- so a fresh brief uses everything
+  it can, and each source degrades to nothing when its backend isn't set up. Future sources are auto-included.
+  (The **Brief lens/tab already exists** and shows today's brief + past briefs whenever the morning-brief
+  extension is enabled -- no change needed there; it was just buried under an un-organized nav, see below.)
+- **Nav sidebar auto-organizes even if it got stuck flat.** The one-time category migration only re-ran for
+  brand-new browsers, so a console whose sidebar stayed FLAT (no folders) kept its un-organized layout (a node's
+  nav "never got organized like Mission Control's"). Bumped the nav SEED VERSION: the default categories
+  (Google/Workspace/Agency/Team/Integrations/System + pinned daily-drivers) are now force-applied ONE more time
+  to any nav still stuck flat/legacy -- including one left in "flat" mode -- with NO manual action. A genuine
+  custom multi-category layout is preserved untouched (so Mission Control's own nav is unaffected). Takes effect
+  on the next page load; the nav "reset" link remains the instant manual option.
+
 ## 0.99.95 -- 2026-07-01  (google-workspace SETUP fixes so FUTURE installs never hit tonight's traps -- v2.2.3)
 - **SETUP.md now enables ALL SIX Cloud APIs + explains the scope-vs-API gate.** Step 2 previously enabled only
   Gmail/Calendar/Drive APIs, so a fresh install using sheets/docs/forms would 403 `SERVICE_DISABLED` even with the

@@ -30,7 +30,7 @@ def _cfg():
     c.setdefault("open_time", "8:00am"); c.setdefault("lead_minutes", 60)
     c.setdefault("days", "weekdays"); c.setdefault("horizon_days", 14)
     c.setdefault("length", "short"); c.setdefault("tone", "warm")
-    c.setdefault("sources", ["calendar", "gmail", "tasks", "granola", "drive_comments"])
+    c.setdefault("sources", list(SOURCES.keys()))   # ALL registered sources ON by default (each degrades to [] if its backend isn't set up); future sources auto-included
     # BUSINESS-HOURS awareness (Sarah): so the brief never counts evenings/weekends/non-working days as elapsed
     # time when judging "overdue"/"unanswered". work_days = which days I actually work; work_hours = my day.
     c.setdefault("work_days", "weekdays"); c.setdefault("work_hours", "9:00am-5:00pm")

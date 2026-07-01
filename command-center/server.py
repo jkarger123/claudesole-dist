@@ -22128,15 +22128,19 @@ function renderNav(){
     navBtns().forEach(function(b){b.classList.remove("grouped","ghide");b.removeAttribute("draggable");});
     applyNavOrder();paintNavMode();return;
   }
-  // DEFAULT = categorized + collapsed. Seed once; ALSO one-time MIGRATE older browsers that never got the
-  // categories (the bug: a node whose nav was still flat, or carried only the legacy "gGoogle" group, kept its
-  // old layout while only freshly-viewed nodes seeded). `_catseed` makes the default categories apply once on
-  // every node; genuine custom multi-group setups are preserved (just marked).
-  if(s.mode!=="flat"){
-    var _grps=(s.tree||[]).filter(function(n){return n.t==="grp";});
-    var _legacy=(_grps.length===0)||(_grps.length===1&&_grps[0].id==="gGoogle");   // flat or only the old Google group
-    if(!s.tree || (!s._catseed && _legacy)){ s.tree=navDefaultTree(); s.mode="manual"; s._catseed=1; navSave(s); }
-    else if(!s._catseed){ s._catseed=1; navSave(s); }   // already customized into categories -> keep, just mark
+  // DEFAULT = categorized + collapsed. Seed once per SEED VERSION, and re-migrate any nav STILL stuck flat/legacy
+  // (the recurring bug: a browser whose nav stayed flat -- or carried only the legacy "gGoogle" group -- kept its
+  // old layout while only freshly-viewed nodes seeded; that is why a node's nav "never got organized"). Bumping
+  // SEEDVER forces the current default categories onto every stuck-flat nav ONE more time. This runs even if the
+  // user was in "flat" mode, so an un-organized nav becomes categorized like Mission Control's with NO manual
+  // action. A genuine multi-category custom setup is preserved (only marked migrated), so it never clobbers work.
+  var SEEDVER=2;
+  var _grps=(s.tree||[]).filter(function(n){return n.t==="grp";});
+  var _hasCats=(_grps.length>=2)||(_grps.length===1&&_grps[0].id!=="gGoogle");   // a real, intentional category layout
+  if(!s.tree || (((s._catseed|0)<SEEDVER) && !_hasCats)){
+    s.tree=navDefaultTree(); s.mode="manual"; s._catseed=SEEDVER; navSave(s);   // stuck flat/legacy -> apply defaults
+  }else if((s._catseed|0)<SEEDVER){
+    s._catseed=SEEDVER; navSave(s);   // already has real categories -> keep the user's setup, just mark migrated
   }
   if(s.mode==="flat"||(s.mode!=="manual"&&!navHasGrp(s))){
     var nav=document.getElementById("lens");if(nav)nav.querySelectorAll(".navgroup").forEach(function(x){x.remove();});
