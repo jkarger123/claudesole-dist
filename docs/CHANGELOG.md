@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.97 -- 2026-07-01  (nav re-seed fix: catch legacy PARTIAL layouts, not just fully-flat ones)
+- **Nav auto-organize now also fixes a legacy PARTIAL layout** (v0.99.96 only caught fully-flat navs). A sidebar
+  with a couple of old folders (e.g. "Google" + "Utilities") but a TON of tabs left loose was wrongly treated as
+  a "real custom layout" and preserved -- so it stayed a cluster. The re-seed signal is now **loose non-pinned
+  tabs** (any non-daily-driver tab sitting outside a folder = not following the current scheme) rather than
+  folder count: SEED VERSION bumped to 3, and any nav that isn't a COMPLETE categorized layout re-seeds to the
+  current default categories. A layout where every non-pinned tab already lives in a folder is preserved untouched.
+  Headless-verified: a simulated "Google + Utilities + loose cluster" re-seeds to clean collapsed folders with
+  ONLY the pinned daily-drivers on top and zero visible loose non-pinned tabs.
+
 ## 0.99.96 -- 2026-07-01  (morning brief: all sources on by default; nav auto-organizes a stuck-flat sidebar)
 - **Morning Brief: ALL sources ON by default.** The default source set is now every registered source
   (calendar, inbox, tasks, calls, doc-comments, slack, notes) instead of five -- so a fresh brief uses everything

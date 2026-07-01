@@ -22134,13 +22134,15 @@ function renderNav(){
   // SEEDVER forces the current default categories onto every stuck-flat nav ONE more time. This runs even if the
   // user was in "flat" mode, so an un-organized nav becomes categorized like Mission Control's with NO manual
   // action. A genuine multi-category custom setup is preserved (only marked migrated), so it never clobbers work.
-  var SEEDVER=2;
+  var SEEDVER=3;   // v2 still preserved legacy partial layouts (e.g. "Google" + "Utilities" with a ton of tabs
+                   // left loose) -- re-seed those too. The right signal is LOOSE non-pinned tabs, not folder count.
   var _grps=(s.tree||[]).filter(function(n){return n.t==="grp";});
-  var _hasCats=(_grps.length>=2)||(_grps.length===1&&_grps[0].id!=="gGoogle");   // a real, intentional category layout
-  if(!s.tree || (((s._catseed|0)<SEEDVER) && !_hasCats)){
-    s.tree=navDefaultTree(); s.mode="manual"; s._catseed=SEEDVER; navSave(s);   // stuck flat/legacy -> apply defaults
+  var _loose=(s.tree||[]).filter(function(n){return n.t==="tab" && NAV_PINNED.indexOf(n.l)<0;}).length;  // non-daily-driver tabs left un-foldered = not following the current scheme
+  var _clean=(_grps.length>0)&&(_loose===0);   // a COMPLETE categorized layout (every non-pinned tab lives in a folder) -> treat as the user's own, preserve
+  if(!s.tree || (((s._catseed|0)<SEEDVER) && !_clean)){
+    s.tree=navDefaultTree(); s.mode="manual"; s._catseed=SEEDVER; navSave(s);   // flat / legacy / partial cluster -> apply the current default categories
   }else if((s._catseed|0)<SEEDVER){
-    s._catseed=SEEDVER; navSave(s);   // already has real categories -> keep the user's setup, just mark migrated
+    s._catseed=SEEDVER; navSave(s);   // already a complete categorized layout -> keep it, just mark migrated
   }
   if(s.mode==="flat"||(s.mode!=="manual"&&!navHasGrp(s))){
     var nav=document.getElementById("lens");if(nav)nav.querySelectorAll(".navgroup").forEach(function(x){x.remove();});
