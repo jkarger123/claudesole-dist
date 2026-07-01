@@ -8,7 +8,7 @@ preship gate (`command-center/preship.py`), so a ship that hand-rolls a dialog, 
 > Goal: sleek, modern, enterprise (think Linear / Vercel / Stripe), on a gold-on-dark brand. **Not** cartoony,
 > not overly friendly, no 20 variants of the same thing.
 
-## The 4 hard rules (the linter fails the ship on these)
+## The 6 hard rules (the linter fails the ship on these)
 
 1. **No native pop-ups.** Never `confirm()` / `prompt()` / `alert()`. Use the promise-based dialogs:
    `await confirmM(msg, {danger:true, ok:'Delete'})` · `await promptM(label, def)` (returns value or `null`) ·
@@ -23,6 +23,15 @@ preship gate (`command-center/preship.py`), so a ship that hand-rolls a dialog, 
 4. **No decorative chrome emoji.** No emoji at the START of a header/title/section-label/labeled-button/option.
    Headings and buttons are text. (FUNCTIONAL status emoji INSIDE data rows/badges are fine — 🟢/⚪ state,
    ⚠ warnings, ⏳ running, source/type icons. Icon-ONLY controls may keep a single glyph: 📎 ⏰ 🗑 ☰ 🔍.)
+5. **Every tab has help.** Any lens the dashboard renders (a `LENS=="x"` branch) MUST have an entry in the
+   `HELP` registry — `x:{t:'Title', sub:'one-liner', h:'<p>deep what/why/how</p>'}`. The persistent per-tab
+   help header (`paintLensHelp`, the slim bar under the title) reads it, and the deep `h` is the "ⓘ Learn"
+   inline panel + the topbar "?" modal. Add or rename a tab without its help and the ship FAILS. Extension tabs
+   supply theirs via `extension.json` `lens.help` ({sub,h} or a string). Keep `sub`/`h` accurate when a tab
+   changes — that's the whole point.
+6. **Icon-only buttons carry a tooltip.** A button whose visible label is a glyph or ≤2 letters MUST have a
+   `title=` (or `aria-label=`). Text buttons ("Save", "Run now") are self-describing and exempt. So a new
+   mystery-glyph control can't ship without a hover explanation.
 
 ## The components (use these, don't reinvent)
 
@@ -45,6 +54,7 @@ trailing `cc-acts`). `cc-item.accent` = left accent rail. Section labels: `cc-se
 
 ## Adding a new lens / feature / extension
 Build the body from `cc-head` + (`cc-list`/`cc-grid`/`cc-panel`). Reuse `cc-in`, `mini`/`btn`, `badge bdg-*`,
-`confirmM/promptM/alertM`, `toast`. Then run `python3 command-center/ui_lint.py` — green means it'll ship.
+`confirmM/promptM/alertM`, `toast`. **Add a `HELP` entry for the tab** (`t`/`sub`/`h`) — rule 5, enforced.
+Then run `python3 command-center/ui_lint.py` — green means it'll ship.
 If you genuinely need a new primitive, ADD it to the shared CSS + this doc (so the next feature reuses it),
 don't inline a one-off. Always verify headless before shipping (see docs + the screenshot tooling).

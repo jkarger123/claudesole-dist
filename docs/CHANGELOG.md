@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.111 -- 2026-07-01  (Built-in help on EVERY tab + hover-text discipline -- so a new owner can actually learn the tool)
+- **Persistent per-tab help header.** Every tab now shows a slim one-line explainer under its title, with an
+  "ⓘ Learn" toggle that expands an inline deep panel: WHAT the tab is, WHY you'd use it, and HOW to drive it
+  (including "ask your Chief of Staff to ...", e.g. starting a Ralph loop or an agent team). Built on the existing
+  `HELP` registry, now authored for all 48 built-in tabs in plain, non-technical language. The old auto-popup
+  help modal (only 8 tabs, fired once per tab) is retired in favor of the always-available header; the topbar "?"
+  still opens the full modal. Full-screen/immersive tabs (Gmail/Calendar/Drive/Sessions/Desktop) keep just the "?".
+- **Extension tabs get help too.** `extension.json` `lens.help` ({sub,h} or a string) flows into the same header,
+  so third-party tabs are documented the same way.
+- **Discipline baked into the ship gate (`ui_lint.py`):** (5) every rendered tab MUST have a HELP entry — add or
+  rename a tab without its help and the ship FAILS, so help can't drift out of sync with the tabs; (6) every
+  icon-only button (glyph / <=2-letter label) MUST carry a `title=`/`aria-label=`. Audited + fixed the existing
+  gaps (RSVP, refresh, download, dismiss, snooze, close, ralph-launch, module-link, idle-archive steppers). See
+  docs/DESIGN_SYSTEM.md (now 6 hard rules).
+
 ## 0.99.110 -- 2026-07-01  (HOTFIX: Morning Brief catch-up must only run where the operator enabled it)
 - **Regression from .109:** the new `_brief_catchup_loop` decided whether to (re)generate via `mb_should_catchup()`,
   which reads `morning_brief._cfg()` -- and `_cfg()` returns a FULL default config (8am / weekdays / all sources) on

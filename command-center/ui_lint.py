@@ -87,6 +87,47 @@ def lint(src):
                     continue
                 v.append((lineno(src, base + j), 'chrome-emoji',
                           f'decorative emoji {run!r} before text -> drop it (icon-only controls may keep a glyph)'))
+
+    # 5. HELP COVERAGE -- every built-in lens the dashboard can render MUST have an entry in the HELP registry, so
+    #    the persistent per-tab help header (paintLensHelp) is never blank. This is the discipline that keeps help
+    #    in lockstep with the tabs: add or rename a lens without adding its help and the ship FAILS here.
+    page = ''
+    for nm, s, e in spans:
+        if nm == 'PAGE': page = src[s:e]; break
+    if page:
+        hm = re.search(r'var HELP=\{', page)
+        help_keys = set()
+        if hm:
+            # keys look like `  ralph:{...` / `notes:{...` at an entry start (after { or , or newline)
+            hb = page[hm.end():]
+            depth = 1; i = 0
+            while i < len(hb) and depth > 0:      # walk to the matching close of the HELP object
+                c = hb[i]
+                if c == '{': depth += 1
+                elif c == '}': depth -= 1
+                i += 1
+            help_body = hb[:i]
+            help_keys = set(re.findall(r'(?:^|[,{\n])\s*([a-z][a-z0-9_]*)\s*:\s*\{', help_body))
+        # the lenses render() actually dispatches (LENS=="x" or LENS="x")
+        dispatched = set(re.findall(r'LENS\s*==?\s*"([a-z][a-z0-9_]*)"', page))
+        EXEMPT = {'correspondence'}   # sub-views that aren't a nav tab of their own
+        missing = sorted(dispatched - help_keys - EXEMPT)
+        for lens in missing:
+            v.append((0, 'missing-help', f'lens "{lens}" is rendered but has no HELP entry -> add HELP.{lens} = {{t,sub,h}}'))
+
+        # 6. TOOLTIP COVERAGE -- an ICON-ONLY button (its visible label is a glyph / <=2 letters) must carry a
+        #    title= (or aria-label). Text buttons ("Save", "Run now") are self-describing and exempt. This bakes
+        #    in "every control worth hovering has a tooltip" so a new mystery-glyph button fails the ship.
+        for bm in re.finditer(r'<button\b([^>]*)>(.*?)</button>', page, re.S):
+            attrs, label = bm.group(1), bm.group(2)
+            if 'title=' in attrs or 'aria-label=' in attrs:
+                continue
+            txt = re.sub(r'<[^>]+>', '', label)
+            txt = re.sub(r"'\+[^+]+\+'", '', txt).replace('&amp;', '&').strip()
+            letters = sum(ch.isalnum() for ch in txt)
+            if txt and letters <= 2 and len(txt) <= 6:
+                v.append((lineno(src, s + bm.start()), 'no-tooltip',
+                          f'icon-only button {txt!r} has no title= -> add a hover tooltip (docs/DESIGN_SYSTEM.md)'))
     return v
 
 def main():
