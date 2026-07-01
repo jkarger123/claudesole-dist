@@ -7901,7 +7901,18 @@ def term_scroll(name, action="up", n=3):
     if not in_mode and action == "down":
         return {"ok": True, "mode": "live"}                     # already live; nothing below
     sh([TMUX, "send-keys", "-t", nm, "-X", "-N", str(n), "scroll-" + ("up" if action == "up" else "down")])
-    if action == "up": _SCROLLED.add(nm)
+    if action == "up":
+        _SCROLLED.add(nm)
+        return {"ok": True, "mode": "copy"}
+    # scrolling DOWN: if we've reached the bottom of history, drop copy-mode so the
+    # browser snaps back to live (and hides the 'jump to live' pill) -- scroll_position 0 == live.
+    pos = sh([TMUX, "display-message", "-p", "-t", nm, "#{scroll_position}"])[1].strip()
+    try: at_bottom = int(pos) <= 0
+    except Exception: at_bottom = False
+    if at_bottom:
+        sh([TMUX, "send-keys", "-t", nm, "-X", "cancel"])      # snap to live
+        _SCROLLED.discard(nm)
+        return {"ok": True, "mode": "live"}
     return {"ok": True, "mode": "copy"}
 
 def _sel_tokens(col, row, edge=0, ticks=0):
@@ -14382,7 +14393,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #live.show{display:block}
 #selcopy{position:fixed;right:14px;bottom:14px;z-index:12;display:none;background:#e8c547;color:#15120a;font:700 12px -apple-system,sans-serif;border:0;border-radius:18px;padding:8px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);cursor:pointer}
 #selcopy.show{display:block}
-#cliptoast{position:fixed;left:50%;transform:translateX(-50%);top:14px;z-index:30;display:none;background:#16351f;color:#7ee787;border:1px solid rgba(46,160,67,.5);font:600 12.5px -apple-system,sans-serif;border-radius:18px;padding:9px 18px;box-shadow:0 8px 24px rgba(0,0,0,.55)}
+#cliptoast{position:fixed;left:50%;transform:translateX(-50%);top:14px;z-index:30;display:none;background:#e8c547;color:#15120a;border:0;font:700 12.5px -apple-system,sans-serif;border-radius:18px;padding:9px 18px;box-shadow:0 8px 24px rgba(0,0,0,.55)}
 #cliptoast.show{display:block;animation:ctpop .18s ease}
 @keyframes ctpop{from{opacity:0;transform:translateX(-50%) translateY(-6px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
 #copyov{position:fixed;inset:0;z-index:25;background:#0a0a0f;display:none;flex-direction:column}
@@ -14563,10 +14574,13 @@ let inMode=false,pending=0,draining=false,accY=0,lastY=0,startY=0,moved=false;
 const LINEPX=9,SPEED=2.6,WHEELPX=22;
 function liveBtn(show){const b=document.getElementById('live');if(b)b.classList.toggle('show',!!show);}
 function queueScroll(lines){if(term.hasSelection()){try{term.clearSelection();}catch(e){}}   // don't leave a frozen highlight over text that scrolled underneath it
-  pending+=lines;if(Math.abs(pending)>=1){inMode=true;liveBtn(true);}drain();}
+  pending+=lines;if(pending>=1){inMode=true;liveBtn(true);}drain();}   // only SHOW optimistically when scrolling UP into history; drain() confirms/hides from the server (no flashing on the way down)
 async function drain(){if(draining)return;draining=true;
   while(Math.abs(pending)>=1){const up=pending>0,n=Math.min(120,Math.round(Math.abs(pending)));pending-=up?n:-n;
-    try{await fetch('/api/term-scroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,action:up?'up':'down',n:n})});}catch(e){}}
+    try{const r=await fetch('/api/term-scroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,action:up?'up':'down',n:n})}).then(x=>x.json());
+      if(r&&r.mode==='live'){inMode=false;pending=0;liveBtn(false);break;}   // scrolled back to the bottom -> hide the pill
+      else if(r&&r.mode==='copy'){inMode=true;liveBtn(true);}                // still in history -> keep it shown (server truth, no flicker)
+    }catch(e){}}
   draining=false;}
 function toLive(){inMode=false;pending=0;liveBtn(false);fetch('/api/term-scroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,action:'bottom'})}).catch(()=>{});term.focus();}
 // DESKTOP wheel -> copy-mode scroll (must not reach Claude as arrow keys)

@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.108 -- 2026-07-01  (terminal scroll polish: 'jump to live' auto-hides at the bottom; copy toast is gold, not green)
+- **'Jump to live' pill now clears when you scroll back down to the bottom.** The pill only hid on an explicit tap
+  before -- manually wheeling/swiping all the way back to the live screen left `inMode` set, so the pill lingered
+  over live output. `term_scroll` now checks tmux `#{scroll_position}` after a scroll-DOWN: reaching the bottom
+  (position 0) drops copy-mode and returns `mode:"live"`, and the browser's `drain()` loop hides the pill on that
+  signal. (Tapping the pill still works as before.)
+- **Copy confirmation toast is now the standard gold**, matching the rest of the UI (the 'jump to live' / 'Copy
+  selection' pills and every accent). It was an off-palette GitHub green (`#16351f`/`#7ee787`); now `#e8c547` on
+  `#15120a`, same format as the pills.
+
 ## 0.99.107 -- 2026-07-01  (payload is now a pure function of the SESSION -- identical from any co-located dashboard; auto-compact headroom)
 - **Cross-instance payload parity.** Many ClaudeFather instances share ONE tmux server on a box (the source trio
   hptuners/overseer/carsearch + co-located tenant installs atem/homeassistant/shopos), and the unscoped overseer
