@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.99 -- 2026-07-01  (fleet auto-converges on ship -- the manual "force converge" step is GONE for good)
+- **The overseer now auto-converges the fleet the instant a ship lands -- no manual `/api/fleet-update`.** The
+  manual force-converge kept getting forgotten, leaving tenant nodes silently behind. `_fleet_converge_loop` now
+  WATCHES the dist mirror version and, the moment it advances past the last version the fleet was converged to (a
+  PERSISTED marker `_fleet_converged_ver`, so it survives an MC restart and doesn't depend on ship-step ordering),
+  converges every behind tenant within ~1-2 min. Runs ONLY on the overseer (ROLE==org) so co-located instances
+  don't race. The manual `POST /api/fleet-update` and the ~3h offline-backstop sweep remain. Tunables:
+  `fleet_watch_sec` (default 90), `fleet_converge_min` (backstop, default 180 min); kill-switch
+  `fleet_auto_converge:false`. MISSION_CONTROL.md updated: pushing the mirror is now the only required ship step.
+
 ## 0.99.98 -- 2026-07-01  (nav category notification: GOLD haze + "new since you looked" semantics)
 - **The collapsed-category notification is now a GOLD haze, not red** (matches the brand accent; red read as an
   error). Border/background/pulse/count-badge all use the accent.

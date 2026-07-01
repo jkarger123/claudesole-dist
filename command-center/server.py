@@ -12866,17 +12866,41 @@ def fleet_converge(force=False):
         res["ran"].append(rec)
     return res
 
+_FLEET_CONV_MARK = os.path.join(STATE_DIR, "_fleet_converged_ver")   # last dist version we converged the fleet to
+def _mirror_version():
+    """The dist mirror's manifest version (what a ship just published locally). None if unreadable."""
+    try: return (json.load(open(os.path.join(_dist_dir(), "claudesole.manifest.json"))) or {}).get("version")
+    except Exception: return None
+def _fleet_last_converged():
+    try: return (open(_FLEET_CONV_MARK).read().strip() or None)
+    except Exception: return None
+def _fleet_mark_converged(v):
+    try:
+        with open(_FLEET_CONV_MARK, "w") as f: f.write(str(v))
+    except Exception: pass
+
 def _fleet_converge_loop():
-    """MC-only backstop: even though every tenant self-updates (path A), MC sweeps the fleet periodically to
-    catch any node that couldn't self-converge (offline at release, self-update disabled, etc.). Off unless
-    this node is the overseer/source AND fleet_auto_converge isn't disabled."""
-    time.sleep(600)
+    """MC AUTO-converges the fleet the MOMENT a ship lands -- so a release propagates in ~1-2 min with NO manual
+    'fleet-update' step (that step kept getting forgotten -> nodes silently left behind). It WATCHES the dist
+    mirror version; the instant it differs from the version we last converged the fleet to (PERSISTED, so it
+    survives an MC restart and is independent of ship-step ordering), it converges every behind tenant. A slower
+    full sweep still backstops nodes that were offline at release. Runs ONLY on the overseer (the fleet hub) so
+    co-located instances don't each race a converge. Disable with cc.config fleet_auto_converge:false."""
+    time.sleep(120)
+    last_full = 0.0
     while True:
         try:
-            if _is_update_source() and CC.get("fleet_auto_converge", True) is not False:
-                fleet_converge(force=False)
-        except Exception: pass
-        time.sleep(max(1800, int(CC.get("fleet_converge_min", 180)) * 60))   # default 3h
+            if ROLE == "org" and CC.get("fleet_auto_converge", True) is not False:
+                mv = _mirror_version(); now = time.time()
+                if mv and mv != _fleet_last_converged():
+                    _aupd_log("MC auto-converge: mirror at v%s (fleet last on %s) -> converging now" % (mv, _fleet_last_converged()))
+                    fleet_converge(force=False); _fleet_mark_converged(mv); last_full = now
+                elif now - last_full >= max(3600, int(CC.get("fleet_converge_min", 180)) * 60):
+                    fleet_converge(force=False); last_full = now   # periodic backstop for nodes offline at release
+        except Exception as e:
+            try: _aupd_log("fleet auto-converge error: %s" % str(e)[:140])
+            except Exception: pass
+        time.sleep(max(60, int(CC.get("fleet_watch_sec", 90))))   # cheap version-file check; full converge only on change
 
 # ==== ROUTINES RUNNER: the control center's heartbeat ============================================
 # Executes due scheduled routines IN THIS NODE'S OWN SERVER CONTEXT (the tmux process has Full Disk Access),
