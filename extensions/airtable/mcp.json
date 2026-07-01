@@ -1,0 +1,14 @@
+{
+  "_comment": "TEMPLATE -- Path B (self-hosted, headless) wiring for the Airtable extension. The setup wiring helper (_ext_wire_mcp) copies this block into the DEPLOYMENT's .mcp.json; this file stays a placeholder template and is never the live config. Server: domdomegg/airtable-mcp-server (`npx -y airtable-mcp-server`), stdio. The PAT is a SECRET -- it is stored in the gitignored deployment env (.env.claudefather) as AIRTABLE_API_KEY and referenced here as ${AIRTABLE_API_KEY}; it is NEVER written into this template or committed.",
+  "_verified": "npm package: airtable-mcp-server ; command: npx -y airtable-mcp-server ; token env var: AIRTABLE_API_KEY (an Airtable Personal Access Token). Requires Node/npx on the host.",
+  "_scope_model": "Least privilege lives in the PAT itself (Airtable side), not a CLI flag: scope the token to data.records:read + data.records:write + schema.bases:read and grant only the specific base(s). Read-only? Mint the PAT with just data.records:read + schema.bases:read.",
+  "mcpServers": {
+    "airtable": {
+      "command": "npx",
+      "args": ["-y", "airtable-mcp-server"],
+      "env": {
+        "AIRTABLE_API_KEY": "${AIRTABLE_API_KEY}"
+      }
+    }
+  }
+}

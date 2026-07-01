@@ -88,6 +88,8 @@ deleted), accounts/keys never touched.
 
 ## Catalog index (one line each)
 **Integrations (MCP):**
+- `airtable` — read + EDIT Airtable bases in place (list bases/tables, schema, query, create/update/upsert
+  records); self-hosted MCP (`npx airtable-mcp-server`) + a Personal Access Token; respects 5 req/s/base.
 - `github` — repos, issues/PRs, CI status (GitHub official MCP; remote OAuth or local PAT).
 - `atlassian-jira-confluence` — Jira issues + Confluence pages (Atlassian Cloud).
 - `aws` — query AWS resources + docs, read-first.

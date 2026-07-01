@@ -56,8 +56,14 @@ refresh token at `secrets/tokens/<account>.json`. The PERMS above match `mcp.jso
 let the agent EDIT existing Sheets/Docs IN PLACE (not just create new files), and `forms:full` lets it create
 Google Forms. For **send** instead of drafts, swap `gmail:drafts` -> `gmail:send`.
 > **Already installed before v2.2.0?** Your token predates the sheets/docs/forms scopes -- the agent will
-> create-new-copies instead of editing in place, and Forms will 403. **Re-run the mint command above** (same
-> account) to re-consent with the new scopes, then the in-place edit + Forms tools work. No other change needed.
+> create-new-copies instead of editing in place, and Forms will 403. **One command turns it on** -- it patches
+> the LIVE `.mcp.json` AND re-mints in a single run (you just approve in the browser once, then restart):
+> ```
+> ACCOUNT=you@gmail.com bin/enable-services.sh                       # browser on this host
+> ACCOUNT=you@gmail.com bin/enable-services.sh --remote <ssh-host>   # browser on a remote host
+> ```
+> Run it -> open the ONE printed consent URL -> click Allow -> restart the node. Done. (An agent can stage this
+> line into the Admin shell for you via the sessions/sudo protocol; you hit enter + approve.)
 
 - **Remote operator (no browser on the Mac):** `--remote <host>` opens a reverse SSH tunnel
   (`ssh -N -R PORT:localhost:PORT <host>`) so the OAuth loopback callback reaches the operator's browser.

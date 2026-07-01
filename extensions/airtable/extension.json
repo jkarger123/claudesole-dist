@@ -1,0 +1,22 @@
+{
+  "id": "airtable",
+  "name": "Airtable",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "A",
+  "summary": "Read + EDIT Airtable bases in place: list bases/tables, query records, create/update/upsert rows, read schema -- via a self-hosted MCP + a Personal Access Token.",
+  "description": "Connects your Airtable bases so an agent can work them like a database: list bases and tables, read a table's schema, search/list records, and CREATE, UPDATE, or UPSERT rows IN PLACE (edit the existing base -- never a throwaway copy). Airtable is a spreadsheet-database agencies use as a light CRM / project tracker / content calendar (base -> table -> record -> field). Headless by design (Path B): a self-hosted MCP server (domdomegg/airtable-mcp-server via npx) authenticated with ONE Airtable Personal Access Token (PAT) stored in the deployment vault -- no browser OAuth, no re-auth. Least-privilege by default: the PAT is scoped to data.records:read/write + schema.bases:read and granted only the specific base(s) you choose. Respects Airtable's hard 5 requests/sec-per-base limit (the agent batches <=10 records/request and throttles bulk jobs). Setup is one question: create a PAT, grant your base, paste it. Great for 'reconcile this list', 'append these rows', 'update the status column', or pulling base data into a brief.",
+  "provides": [
+    "mcp:airtable"
+  ],
+  "requires": [
+    {
+      "key": "AIRTABLE_API_KEY",
+      "label": "An Airtable Personal Access Token (create at airtable.com/create/tokens with scopes data.records:read, data.records:write, schema.bases:read, and access to the specific base(s) you want the agent to touch). The setup agent walks you through it."
+    }
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true,
+  "agent_doc": "AGENT.md",
+  "default_category": "Integrations"
+}

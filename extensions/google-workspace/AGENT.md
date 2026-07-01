@@ -28,4 +28,7 @@ This node has Google Workspace: Gmail + Calendar + Drive, via a server-side OAut
   file (its cells / its text) and keep its ID + location -- do NOT create a new copy, export, or "modified"
   duplicate. Creating a new file loses their sharing, links, and history. Only create a new file when the user
   explicitly asks for a new one. If the Sheets/Docs/Forms tools 403 or aren't present, the token predates these
-  scopes -- tell the user to re-run the google-workspace setup (re-mint) to grant sheets/docs/forms, then retry.
+  scopes -- ACTIVATION is one command: STAGE `ACCOUNT=<their-account> extensions/google-workspace/bin/enable-services.sh`
+  into the project's Admin shell (POST /api/admin-stage, per docs/SESSIONS_AND_SUDO.md -- you have no TTY), and
+  tell the operator to hit enter, approve the ONE consent URL in their browser, then restart the node. That single
+  script patches the live .mcp.json AND re-mints the token -- no manual editing.

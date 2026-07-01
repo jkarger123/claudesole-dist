@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.92 -- 2026-06-30  (Sarah field-feedback batch 5: one-command Google activation + NEW Airtable extension)
+- **F/G1 activation is now ONE command (google-workspace v2.2.1).** New `bin/enable-services.sh` does BOTH steps
+  in a single run: idempotently adds the services (default `sheets:full docs:full forms:full`) to the LIVE
+  deployment `.mcp.json`, then re-mints the token so Google consents the new scopes (reuses gauth.sh -- prints one
+  consent URL, supports `--remote` for a remote browser). So an existing install activates in-place editing +
+  Forms by: `ACCOUNT=you@gmail.com bin/enable-services.sh` -> approve the ONE URL -> restart. An agent can STAGE
+  that single line into the Admin shell (sessions/sudo protocol); the operator hits enter + approves. AGENT.md +
+  SETUP.md now document this; `mint_token.py` default PERMS also updated so a bare re-mint grants all six services.
+  (Fresh installs already mint with all six -- no action needed.)
+- **G2 -- NEW `airtable` extension.** Read + EDIT Airtable bases IN PLACE (list bases/tables, read schema,
+  query records, create/update/upsert rows) via a self-hosted MCP (`domdomegg/airtable-mcp-server`, `npx`) authed
+  with ONE Personal Access Token in the vault (`AIRTABLE_API_KEY`) -- headless, no OAuth. Least-privilege PAT
+  (data.records:read/write + schema.bases:read, granted per-base); AGENT.md enforces edit-in-place + Airtable's
+  hard 5 req/s-per-base limit (batch <=10, throttle, prefer UPSERT). Appears in the Marketplace; dormant until
+  installed + a PAT is pasted. Ships extension.json + mcp.json + SETUP.md + AGENT.md + CLAUDE.md.
+
 ## 0.99.91 -- 2026-06-30  (Sarah field-feedback batch 4: daily brief reads full Drive comment THREADS -- C1)
 - **C1 -- the Morning Brief now reads full Google Drive comment THREADS + resolution state.** New read-only
   `drive_open_comments()` (server.py) fetches UNRESOLVED comments on recently-modified Docs/Sheets/Slides with

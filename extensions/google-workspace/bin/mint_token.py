@@ -24,7 +24,7 @@ SECRETS = os.environ.get("SECRETS_DIR") or os.path.normpath(os.path.join(HERE, "
 CLIENT = os.path.join(SECRETS, "google_oauth.json")
 CREDS_DIR = os.path.join(SECRETS, "tokens")
 PORT = int(os.environ.get("PORT", "8765"))
-PERMS = os.environ.get("PERMS", "gmail:drafts calendar:full drive:full").split()
+PERMS = os.environ.get("PERMS", "gmail:drafts calendar:full drive:full sheets:full docs:full forms:full").split()
 
 from auth.permissions import parse_permissions_arg, set_permissions, get_all_permission_scopes
 from auth.scopes import BASE_SCOPES
