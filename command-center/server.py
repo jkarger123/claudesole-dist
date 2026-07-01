@@ -197,7 +197,7 @@ def render_page():
     except Exception: _lenses = None
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
-        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(),
+        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "models": CC_MODELS, "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(),
         "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md", "MASTER_HANDOFF.md",
             "FILE_SYSTEM_GOVERNANCE.md", "TEXT2TUNE_ARCHITECTURE.md", "ENTERPRISE_MIGRATION.md",
             "BRIDGE_MIGRATION.md"]})
@@ -2018,6 +2018,7 @@ def tmux_sessions():
     code, o, _ = sh([TMUX, "list-sessions", "-F",
                      "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}"])
     cwds = _session_cwds()   # always -- also used to show WHERE each session is launched
+    _sm = _smeta_load()      # per-session metadata (once) -- carries the CONFIGURED model set at launch / via the picker
     res = []
     if code == 0:
         for ln in o.splitlines():
@@ -2047,7 +2048,7 @@ def tmux_sessions():
             res.append({"name": nm, "label": lbl, "kind": kind, "node": node, "mine": mine,
                         "loc": _session_loc(cwd), "cwd": cwd,
                         "created": float(p[1] or 0), "activity": float(p[2] or 0),
-                        "attached": p[3] != "0",
+                        "attached": p[3] != "0", "model": (_sm.get(nm) or {}).get("model"),
                         "protected": _protected(nm) or kind in ("chief", "service", "loop"),
                         "chief": is_chief, "is_admin": nm.startswith("admin-")})
     res.sort(key=lambda x: -x["activity"]); return res
@@ -2114,6 +2115,27 @@ def _last_usage(path):
         if m.get("role") == "assistant" and u:
             return (u.get("input_tokens", 0) or 0) + (u.get("cache_creation_input_tokens", 0) or 0) \
                    + (u.get("cache_read_input_tokens", 0) or 0)
+    return None
+
+def _last_model(path):
+    """The model string of the latest ASSISTANT turn in a transcript -> the session's CURRENT (actually-running)
+    model. None if the session hasn't produced an assistant turn yet (freshly launched)."""
+    if not path: return None
+    try:
+        sz = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if sz > 262144: fh.seek(sz - 262144)
+            txt = fh.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+    for ln in reversed(txt.splitlines()):
+        ln = ln.strip()
+        if not ln or '"model"' not in ln: continue
+        try: o = json.loads(ln)
+        except Exception: continue
+        m = o.get("message", {}) or {}
+        if m.get("role") == "assistant" and m.get("model"):
+            return m.get("model")
     return None
 
 def _parse_ts(ts):
@@ -2254,6 +2276,18 @@ def _model_label(model):
     for k in ("opus", "sonnet", "haiku", "fable"):
         if k in m: return k.capitalize()
     return model or "?"
+
+# ---- Selectable session models (the Sessions model picker). Config-overridable via cc.config "models" so a new
+# tier (or a renamed alias) needs NO core release. `id` is what we pass to Claude Code's /model (it accepts the
+# short alias); `default` resets a session to the account's default model. Keep in sync with _PRICING labels.
+CC_MODELS = CC.get("models") or [
+    {"id": "default", "label": "Default", "short": "Default"},
+    {"id": "opus",    "label": "Opus 4.8",   "short": "Opus"},
+    {"id": "sonnet",  "label": "Sonnet 4.6", "short": "Sonnet"},
+    {"id": "fable",   "label": "Fable 5",    "short": "Fable"},
+    {"id": "haiku",   "label": "Haiku 4.5",  "short": "Haiku"},
+]
+_MODEL_IDS = {m["id"] for m in CC_MODELS}
 
 _USAGE_CACHE = {"at": 0.0, "data": None}
 def usage_payload(ttl=20):
@@ -2423,7 +2457,9 @@ def token_usage_payload():
         used = _last_usage(tmap.get(s["name"]))
         if used is None: continue
         pct = 100.0 * (CTX_WINDOW - used) / CTX_WINDOW
-        sctx[s["name"]] = {"used": used, "window": CTX_WINDOW, "pct": max(0.0, min(100.0, pct))}
+        _mdl = _last_model(tmap.get(s["name"]))
+        sctx[s["name"]] = {"used": used, "window": CTX_WINDOW, "pct": max(0.0, min(100.0, pct)),
+                           "model": (_model_label(_mdl) if _mdl else None)}   # actually-running model (last turn)
     up = usage_payload()
     payload_by = {}                                  # PER-SESSION payload weight (the chip) = the exact total the
     for s in sess:                                   # context_package popup shows, cwd-anchored + cwd-cached. Only
@@ -4213,7 +4249,7 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
             seed_s = " " + _shlex.quote(_NEW_FOLDER_BRIEF)
         cl2 = "export CC_SESSION=" + _shlex.quote(name) + "; " + cl2   # so the agent can self-identify (cc-hold / cc-handoff)
         sh([TMUX, "new-session", "-d", "-s", name, "-c", wd, cl2 + seed_s])
-        try: _smeta_set(name, subject=(subj or None), active_ts=time.time())   # topic tag for relevance matching
+        try: _smeta_set(name, subject=(subj or None), active_ts=time.time(), model=(model or None))   # topic tag + the model it launched on
         except Exception: pass
     else:
         sub = ""
@@ -7755,7 +7791,7 @@ def session_bar():
     for t in ts: t.start()
     for t in ts: t.join()
     local = [{"name": s["name"], "label": s["label"], "kind": s.get("kind", "work"),
-              "node": s.get("node", ""), "mine": s.get("mine", True),
+              "node": s.get("node", ""), "mine": s.get("mine", True), "model": s.get("model"),
               "loc": s.get("loc", ""), "cwd": s.get("cwd", ""), "busy": busy.get(s["name"], False),
               "chief": s.get("chief", False), "attached": s.get("attached", False),
               "protected": bool(s.get("protected", False))} for s in sess]
@@ -7918,6 +7954,22 @@ def term_scroll(name, action="up", n=3):
         _SCROLLED.discard(nm)
         return {"ok": True, "mode": "live"}
     return {"ok": True, "mode": "copy"}
+
+def session_set_model(name, model):
+    """Switch a live session's model by typing `/model <id>` into its tmux pane (the same slash command a person
+    would). `default` resets to the account default. We record the choice in session-meta so the chip reflects it
+    immediately (the transcript catches up on the next turn). Cancels copy-mode first so the keys land at the prompt."""
+    nm = re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:48]
+    model = (model or "").strip().lower()
+    if not nm: return {"ok": False, "error": "no session"}
+    if model not in _MODEL_IDS: return {"ok": False, "error": "unknown model: " + model}
+    code, _, _ = sh([TMUX, "has-session", "-t", nm])
+    if code != 0: return {"ok": False, "error": "session not found"}
+    sh([TMUX, "send-keys", "-t", nm, "-X", "cancel"])          # drop copy-mode if the terminal was scrolled
+    sh([TMUX, "send-keys", "-t", nm, "/model " + model, "Enter"])
+    try: _smeta_set(name, model=(None if model == "default" else model))
+    except Exception: pass
+    return {"ok": True, "model": model}
 
 def _sel_tokens(col, row, edge=0, ticks=0):
     """copy-mode cursor moves that place the cursor at visible (col,row); an edge>0/<0 adds cursor-down/up
@@ -13662,6 +13714,7 @@ class H(BaseHTTPRequestHandler):
                 "jobs": load(JOBS, {"jobs": []}).get("jobs", [])}))
         if u.path == "/api/status": return self._s(200, json.dumps(all_status()))
         if u.path == "/api/sessions": return self._s(200, json.dumps(tmux_sessions()))
+        if u.path == "/api/models": return self._s(200, json.dumps({"models": CC_MODELS}))   # selectable models (for the /term picker)
         if u.path == "/api/token-usage": return self._s(200, json.dumps(token_usage_payload()))
         if u.path == "/api/pipeline":   return self._s(200, json.dumps(pipeline_payload()))
         if u.path == "/api/usage": return self._s(200, json.dumps(usage_payload()))
@@ -14031,6 +14084,7 @@ class H(BaseHTTPRequestHandler):
                 hops=body.get("hops", 0)), default=str))
         if u.path == "/api/handoff-accept":    return self._s(200, json.dumps(handoff_accept(body.get("id", ""), bool(body.get("force_new"))), default=str))
         if u.path == "/api/handoff-decline":   return self._s(200, json.dumps(handoff_decline(body.get("id", ""), body.get("reason", "")), default=str))
+        if u.path == "/api/session-model":     return self._s(200, json.dumps(session_set_model(body.get("name", ""), body.get("model", ""))))
         if u.path == "/api/session-hold":      return self._s(200, json.dumps(session_hold(body.get("name", ""), body.get("mode", "pin"), body.get("days", 2), body.get("by", "operator")), default=str))
         if u.path == "/api/session-active":    return self._s(200, json.dumps(sessions_active(body.get("sessions") or []), default=str))
         if u.path == "/api/session-archive":   return self._s(200, json.dumps(_archive_session(body.get("name", ""), "manual"), default=str))
@@ -14392,6 +14446,14 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #bar{position:fixed;top:0;right:0;z-index:9;background:#1a1a24;color:#a0a0b0;font:12px -apple-system,sans-serif;padding:4px 10px;border:1px solid #2a2a3a;border-radius:0 0 0 8px}
 #bar a{color:#e8c547;text-decoration:none;margin-left:10px}
 #bar button{background:#22222e;color:#fff;border:1px solid #2a2a3a;border-radius:6px;padding:3px 9px;margin-left:10px;cursor:pointer;font:inherit}
+#mdlbtn{font-weight:700}
+.mdlmenu-t{position:fixed;z-index:90;width:214px;background:#1c1c26;border:1px solid #2a2a3a;border-radius:11px;box-shadow:0 12px 34px rgba(0,0,0,.6);padding:5px}
+.mdlmenu-t .mh{font:700 10px/1 -apple-system,sans-serif;text-transform:uppercase;letter-spacing:.6px;color:#8a8a99;padding:6px 8px 5px}
+.mdlmenu-t button{display:flex;align-items:center;gap:9px;width:100%;text-align:left;background:transparent;color:#fff;border:0;border-radius:8px;padding:9px;margin:0;font:600 13px -apple-system,sans-serif;cursor:pointer}
+.mdlmenu-t button:hover{background:rgba(232,197,71,.14)}
+.mdlmenu-t button .d{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+.mdlmenu-t button .l{flex:1}
+.mdlmenu-t button .ck{color:#e8c547;font-weight:800}
 #cpbtn{display:none}                     /* copy panel is a touch-only affordance; desktop uses native drag-select + Ctrl+C (Claude Code in classic TUI mode -> the terminal owns the mouse) */
 @media(any-pointer:coarse){#cpbtn{display:inline-block}}
 #live{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;z-index:11;display:none;background:#e8c547;color:#15120a;font:700 12px -apple-system,sans-serif;border:0;border-radius:18px;padding:8px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);cursor:pointer}
@@ -14443,7 +14505,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid #2a2a3a;background:#22222e;color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px;font-family:inherit}
 #tdlg .tdlg-b.go{background:linear-gradient(135deg,#d6b23c,#c9a227);color:#15120a;border:none;font-weight:700}
 </style></head><body>
-<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button id="actog" onclick="toggleAutoCopy()" title="Auto-copy: when ON, whatever you have selected is copied to your clipboard the moment you release the mouse (no Ctrl+C needed). Needs a secure origin (https/localhost); on plain http a one-tap Copy chip is used instead.">&#9113; auto-copy</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
+<div id="bar"><span id="st">connecting...</span><button id="mdlbtn" onclick="mdlPickTerm(event)" title="the model this session runs -- click to change">Model</button><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button id="actog" onclick="toggleAutoCopy()" title="Auto-copy: when ON, whatever you have selected is copied to your clipboard the moment you release the mouse (no Ctrl+C needed). Needs a secure origin (https/localhost); on plain http a one-tap Copy chip is used instead.">&#9113; auto-copy</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
 <button id="live" onclick="toLive()">&#8595; jump to live</button><button id="selcopy" onclick="doSelCopy()">&#10697; Copy selection</button><div id="cliptoast"></div>
 <div id="copyov"><div id="copybar"><b>Selectable text</b><span id="copyst" style="color:#8a8a99">long-press to select, or</span><button onclick="copyAll()">&#10697; copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" style="border-color:#e8c547">&#10005; close</button></div><pre id="copybody"></pre></div>
 <div id="wrap">
@@ -14472,6 +14534,23 @@ const name=new URLSearchParams(location.search).get('name')||'';document.title='
 if(/^(chief-|ralph-)/.test(name)||name=='t2tbridge'||name=='t2tcrons'){document.querySelectorAll('#bar button').forEach(function(b){var t=(b.getAttribute('title')||'').toLowerCase();if(t.indexOf('end')>=0||t.indexOf('kill')>=0)b.remove();});}
 // MOBILE overflow menu (the ⋯ button): tuck secondary + destructive bar actions behind one tap.
 function toggleMore(){var m=document.getElementById('moremenu');if(m)m.classList.toggle('open');}
+// ---- MODEL picker (broken-out /term view): show + switch the model this session runs ----
+var MODELS_T=[{id:'default',label:'Default',short:'Default'}], MDL_CUR_T='';
+function mdlColorT(s){s=(s||'').toLowerCase();if(s.indexOf('opus')>=0)return '#e8c547';if(s.indexOf('sonnet')>=0)return '#58a6ff';if(s.indexOf('haiku')>=0)return '#3fb950';if(s.indexOf('fable')>=0)return '#bc8cff';return '#8a8a99';}
+function mdlShortT(id){if(!id)return 'Default';var m=MODELS_T.find(function(x){return x.id===id;});if(m)return m.short;var s=(''+id).toLowerCase();if(s.indexOf('opus')>=0)return 'Opus';if(s.indexOf('sonnet')>=0)return 'Sonnet';if(s.indexOf('haiku')>=0)return 'Haiku';if(s.indexOf('fable')>=0)return 'Fable';return id;}
+function paintMdlBtn(){var b=document.getElementById('mdlbtn');if(!b)return;var lbl=mdlShortT(MDL_CUR_T);var c=mdlColorT(MDL_CUR_T||lbl);b.innerHTML='<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:'+c+';margin-right:5px;vertical-align:middle"></span>'+lbl;b.style.borderColor=c+'66';b.style.color=c;}
+async function mdlInitT(){try{var m=await(await fetch('/api/models')).json();if(m&&m.models)MODELS_T=m.models;}catch(e){}
+  try{var s=await(await fetch('/api/sessions')).json();var me=(s||[]).find(function(x){return x.name===name;});if(me&&me.model)MDL_CUR_T=me.model;}catch(e){}
+  if(!MDL_CUR_T){try{var t=await(await fetch('/api/token-usage')).json();var c=(t.sessions||{})[name];if(c&&c.model)MDL_CUR_T=c.model;}catch(e){}}  // else the ACTUALLY-running model (last transcript turn)
+  paintMdlBtn();}
+function mdlCloseT(){var m=document.getElementById('mdlMenuT');if(m)m.remove();document.removeEventListener('click',mdlCloseT,true);}
+function mdlPickTerm(ev){ev.stopPropagation();mdlCloseT();var menu=document.createElement('div');menu.id='mdlMenuT';menu.className='mdlmenu-t';
+  menu.innerHTML='<div class="mh">Model for this session</div>'+MODELS_T.map(function(m){var on=(mdlShortT(m.id).toLowerCase()===mdlShortT(MDL_CUR_T).toLowerCase());return '<button title="switch this session to '+m.label+'" onclick="mdlSetTerm(\''+m.id+'\')"><span class="d" style="background:'+mdlColorT(m.id)+'"></span><span class="l">'+(m.label||m.short)+'</span>'+(on?'<span class="ck">&#10003;</span>':'')+'</button>';}).join('');
+  document.body.appendChild(menu);var r=document.getElementById('mdlbtn').getBoundingClientRect();menu.style.left=Math.max(8,Math.min(r.left,window.innerWidth-214))+'px';menu.style.top=(r.bottom+6)+'px';
+  setTimeout(function(){document.addEventListener('click',mdlCloseT,true);},0);}
+async function mdlSetTerm(id){mdlCloseT();MDL_CUR_T=(id==='default'?'':id);paintMdlBtn();
+  try{var r=await(await fetch('/api/session-model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,model:id})})).json();}catch(e){}
+  try{term&&term.focus&&term.focus();}catch(e){}}
 document.addEventListener('click',function(e){var m=document.getElementById('moremenu');if(!m||!m.classList.contains('open'))return;
   if(e.target&&e.target.closest&&e.target.closest('#more'))return;        // the toggle button handles itself
   if(e.target&&e.target.closest&&e.target.closest('.fontgrp'))return;     // A-/A+ are tapped repeatedly -> keep open
@@ -14569,6 +14648,7 @@ let rt;window.addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(fitN
 if(window.visualViewport){let vt;const onVV=()=>{clearTimeout(vt);vt=setTimeout(fitNow,60);};
   window.visualViewport.addEventListener('resize',onVV);window.visualViewport.addEventListener('scroll',onVV);}
 setTimeout(fitNow,200);
+try{mdlInitT();}catch(e){}   // populate the /term model button + picker
 // ---- SCROLL: wheel (desktop) + swipe (mobile) -> tmux copy-mode via the server -----------------------------
 // We intercept the gesture (preventDefault + stopPropagation) so it NEVER reaches Claude as arrow keys, then
 // drive tmux copy-mode server-side -- the only thing that can scroll the full history. Requests are coalesced
@@ -14951,6 +15031,17 @@ body.wk-dragging .wkdrop{display:flex;pointer-events:auto}
 /* remaining-context chip (per session) + token-totals strip (Sessions header) */
 .ctxchip{font:600 10.5px/1 ui-monospace,Menlo,monospace;border:1px solid;border-radius:6px;padding:2px 5px;margin-left:4px;white-space:nowrap;flex:0 0 auto}
 .plchip{font:600 10.5px/1 ui-monospace,Menlo,monospace;border:1px solid var(--line);border-radius:6px;padding:2px 5px;margin-left:4px;white-space:nowrap;flex:0 0 auto;color:var(--dim);cursor:pointer}
+/* MODEL chip + picker (pick which model a session runs) */
+.mdl-chip{display:inline-flex;align-items:center;gap:5px;font:700 10.5px/1 -apple-system,sans-serif;background:transparent;border:1px solid;border-radius:6px;padding:2px 7px 2px 6px;margin-left:4px;white-space:nowrap;flex:0 0 auto;cursor:pointer}
+.mdl-chip:hover{filter:brightness(1.15)}
+.mdl-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+.mdl-menu{position:fixed;z-index:80;width:210px;background:var(--card2,#22222e);border:1px solid var(--line);border-radius:11px;box-shadow:0 12px 34px rgba(0,0,0,.6);padding:5px;overflow:hidden}
+.mdl-menu .mdl-mh{font:700 10px/1 -apple-system,sans-serif;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);padding:6px 8px 5px}
+.mdl-opt{display:flex;align-items:center;gap:9px;width:100%;text-align:left;background:transparent;border:0;border-radius:8px;padding:8px 9px;font:600 13px -apple-system,sans-serif;color:var(--ink);cursor:pointer}
+.mdl-opt:hover{background:rgba(var(--accent-rgb),.14)}
+.mdl-opt.on{background:rgba(var(--accent-rgb),.10)}
+.mdl-opt .mdl-ol{flex:1;min-width:0}
+.mdl-opt .mdl-ck{color:var(--accent-light);font-weight:800}
 .plchip:hover{color:var(--accent);border-color:var(--accent)}
 .tkstrip{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:9px;padding-top:9px;border-top:1px solid var(--line);font-size:11.5px;color:var(--mut)}
 .tkstrip>span:first-child{font-weight:700;color:var(--ink)}
@@ -16899,6 +16990,50 @@ function ctxChip(name){const c=(TOKDATA.sessions||{})[name];if(!c)return '';cons
   var pl=(TOKDATA.payload_by_sess||{})[name]||TOKDATA.payload_tokens||0;
   var plb=pl?('<span class="plchip" title="Context package: ~'+fmtTok(pl)+' tokens go to this agent EVERY trip BEYOND your message (system briefing + CLAUDE.md + context brief + tools). Click to see exactly what\'s in the payload." onclick="event.stopPropagation();ctxPkgPopup(\''+esc(name)+'\')">&#128230; '+fmtTok(pl)+'</span>'):'';
   return '<span class="ctxchip" id="ctx_'+cssid(name)+'" title="context: '+fmtTok(c.used)+' / '+fmtTok(c.window)+' used · '+pct+'% free" style="color:'+col+';border-color:'+col+'55">'+pct+'%</span>'+plb;}
+// ---- MODEL chip + picker: show which model a session runs, and switch it (sends /model to the tmux pane) --------
+var MDL_OPT={};   // optimistic: name -> id just chosen via the picker (shown until the transcript's next turn confirms)
+function mdlList(){return (window.CC&&window.CC.models)||[{id:'default',label:'Default',short:'Default'}];}
+function mdlColor(s){s=(s||'').toLowerCase();
+  if(s.indexOf('opus')>=0)return '#e8c547'; if(s.indexOf('sonnet')>=0)return '#58a6ff';
+  if(s.indexOf('haiku')>=0)return '#3fb950'; if(s.indexOf('fable')>=0)return '#bc8cff'; return '#8b949e';}
+function mdlShort(id){if(!id)return 'Default';var m=mdlList().find(function(x){return x.id===id;});if(m)return m.short;
+  var s=(''+id).toLowerCase();if(s.indexOf('opus')>=0)return 'Opus';if(s.indexOf('sonnet')>=0)return 'Sonnet';
+  if(s.indexOf('haiku')>=0)return 'Haiku';if(s.indexOf('fable')>=0)return 'Fable';return id;}
+// current model to DISPLAY for a session: optimistic just-picked > configured (smeta, on the record) > actually-
+// running (last transcript turn, TOKDATA) > Default.
+function sessModelDisp(name, recModel){
+  if(MDL_OPT[name])return mdlShort(MDL_OPT[name]);
+  if(recModel)return mdlShort(recModel);
+  var c=(TOKDATA.sessions||{})[name]; if(c&&c.model)return c.model;   // 'Opus'/'Sonnet'/... from the live transcript
+  return 'Default';}
+function modelChip(name, recModel){
+  var disp=sessModelDisp(name, recModel); var col=mdlColor(disp);
+  return '<button class="mdl-chip" title="model: '+esc(disp)+' — click to change" onclick="event.stopPropagation();mdlPick(event,\''+esc(name)+'\')" style="color:'+col+';border-color:'+col+'66"><span class="mdl-dot" style="background:'+col+'"></span>'+esc(disp)+'</button>';}
+function closeMdlMenu(){var m=document.getElementById('mdlMenu');if(m)m.remove();document.removeEventListener('click',closeMdlMenu,true);}
+function mdlPick(ev, name){
+  ev.stopPropagation(); closeMdlMenu();
+  var curDisp=sessModelDisp(name, ((SESSDATA||[]).find(function(s){return s.name===name;})||{}).model);
+  var menu=document.createElement('div'); menu.className='mdl-menu'; menu.id='mdlMenu';
+  menu.innerHTML='<div class="mdl-mh">Model for this session</div>'+mdlList().map(function(m){
+    var on=(mdlShort(m.id).toLowerCase()===(''+curDisp).toLowerCase());
+    return '<button class="mdl-opt'+(on?' on':'')+'" title="switch this session to '+esc(m.label||m.short)+'" onclick="mdlSet(\''+esc(name)+'\',\''+m.id+'\')"><span class="mdl-dot" style="background:'+mdlColor(m.id)+'"></span><span class="mdl-ol">'+esc(m.label||m.short)+'</span>'+(on?'<span class="mdl-ck">✓</span>':'')+'</button>';
+  }).join('');
+  document.body.appendChild(menu);
+  var r=ev.target.closest('.mdl-chip,button').getBoundingClientRect();
+  var w=210; menu.style.left=Math.max(8,Math.min(r.left, window.innerWidth-w-8))+'px';
+  var top=r.bottom+5; if(top+220>window.innerHeight)top=Math.max(8,r.top-menu.offsetHeight-5); menu.style.top=top+'px';
+  setTimeout(function(){document.addEventListener('click',closeMdlMenu,true);},0);}
+async function mdlSet(name, id){
+  closeMdlMenu(); MDL_OPT[name]=id;
+  try{document.querySelectorAll('.mdl-chip').forEach(function(){});}catch(e){}
+  if(typeof loadSessions==='function')try{loadSessions(true);}catch(e){}   // optimistic repaint (MDL_OPT drives the chip)
+  toast('Switching '+esc(sbLbl?sbLbl({name:name}):name)+' to '+esc(mdlShort(id))+'…');
+  try{var r=await(await fetch('/api/session-model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,model:id})})).json();
+    if(r&&r.ok){toast('Model → '+esc(mdlShort(id))+'  (sent /model to the session)');}
+    else{toast('Failed: '+((r&&r.error)||'error'),4500); delete MDL_OPT[name];}
+  }catch(e){toast('Failed to switch model',4500); delete MDL_OPT[name];}
+  // let the transcript catch up, then drop the optimistic flag once the real model matches
+  setTimeout(function(){var c=(TOKDATA.sessions||{})[name]; if(c&&c.model&&c.model.toLowerCase()===mdlShort(id).toLowerCase())delete MDL_OPT[name]; if(typeof loadSessions==='function')loadSessions(true);},4000);}
 // Click the 📦 by a session's context % -> a popup of the EXACT payload for THAT session (everything sent each trip).
 async function ctxPkgPopup(name){
   showM('<h3 style="margin:0 0 6px">&#128230; Context package &mdash; '+e2(name)+'</h3><div class="meta sub" style="margin-bottom:10px">Everything sent to this agent on each trip, BEYOND your message. This is the "payload" — what makes a ClaudeFather agent start informed instead of blank.</div><div id="pkgPopOut" class="meta sub">assembling…</div><div style="margin-top:12px;text-align:right"><button class="mini" onclick="closeM()">Close</button></div>');
@@ -21489,7 +21624,7 @@ function ccWireDropzones(){
     })(ov,name);
   }
 }
-function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)
+function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)
   +'<span class="stbtns">'
   +'<button class="mini" title="give Claude a file (upload + hand the path to this session)" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
@@ -21511,7 +21646,7 @@ function renderFocus(s){
   return h;
 }
 // ===== WORKSPACE: split-pane columns. Drag a session up from the dock; resize the splitter; push panes down. =====
-function paneHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)
+function paneHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)
   +'<span class="stbtns">'
   +'<button class="mini panedown" title="push this session back down to the taskbar" onclick="paneDown(\''+esc(x.name)+'\')">&#11015;</button>'
   +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
@@ -21613,7 +21748,7 @@ function swapBig(n){focusBig(n);}
 function peek(){}
 function schedUnpeek(){}
 function locTag(x){var t=(x&&(x.loc||x.cwd))||'';if(!t)return '';return '<span class="locchip" title="launched from '+esc(x.cwd||t)+'">📍 '+esc(t)+'</span>';}
-function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="cursor:default"><h3>'+locTag(x)+'<span title="'+esc(x.name)+'">'+(x.attached?"🟢 ":"⚪ ")+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+badge(x.attached?"running":"paused")+'</h3>'
+function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="cursor:default"><h3>'+locTag(x)+'<span title="'+esc(x.name)+'">'+(x.attached?"🟢 ":"⚪ ")+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)+badge(x.attached?"running":"paused")+'</h3>'
   +'<div class="meta">active '+ago(now-x.activity)+' ago</div>'
   +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="openInSessions(\''+esc(x.name)+'\')">▶ open</button>'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
@@ -21622,7 +21757,7 @@ function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="c
   +'<button class="mini danger" onclick="endSess(\''+esc(x.name)+'\',true)" title="force kill">kill</button></div></div>';}
 function sessTile(x,i){const big=(SESSBIG==x.name);
   return '<div class="stile'+(big?' big':'')+'" data-name="'+esc(x.name)+'"'+(big?(' data-ccsess="'+esc(x.name)+'"'):'')+'>'
-    +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)
+    +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)
     +'<span class="stbtns" onclick="event.stopPropagation()">'
     +'<button class="mini" title="'+(big?'minimize':'maximize')+'" onclick="tileClick(\''+esc(x.name)+'\')">'+(big?'▒':'⤢')+'</button>'
     +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
@@ -21863,7 +21998,7 @@ var HELP={
  audit:{t:'Description Audit',sub:'Keeps your agents and skills clearly labeled so the assistant always picks the right one.',h:'<p><b>What:</b> a quality check on the one-line descriptions of every agent, skill, and team -- flagging any that are vague, too short, or overlap with another.</p><p><b>Why:</b> the assistant chooses which helper to use based only on these descriptions, so a fuzzy one means the wrong tool gets picked, or none at all.</p><p><b>How:</b> click Re-run to scan; each flagged item tells you what to fix. Rewrite the weak descriptions in the Agents, Skills, or Teams tabs.</p>'},
  portfolio:{t:'Portfolio',sub:'A bird\'s-eye health board of all the systems you oversee, with a line to each.',h:'<p><b>What:</b> the overseer view -- every child system you run, each with a green, amber, or red health light and its live stats.</p><p><b>Why:</b> you watch a whole fleet from one screen and can message any system\'s Chief of Staff (or all at once) without opening each one.</p><p><b>How:</b> click a card to open that system, use Message the chiefs to reach them, or Add a ClaudeFather to spin up a new one. This tab is for overseer-role nodes.</p>'},
  projects:{t:'Platform',sub:'A documented map of the ClaudeFather platform itself -- every part and what it does.',h:'<p><b>What:</b> a reference map of the software this control panel is built from -- its core, lifecycle, extensions, agents, and docs -- each with a summary and a link to its documentation.</p><p><b>Why:</b> it is the under-the-hood tour for when you want to understand how the platform is put together.</p><p><b>How:</b> browse the sections and click any CLAUDE.md or Architecture link to read the details.</p>'},
- sessions:{t:'Sessions',sub:'Your live agent terminals, arranged like a workspace you can split side by side.',h:'<p>The bar pinned at the bottom lists every live session, like a taskbar. <b>Drag a session up</b> into the main area to open it; drag a <b>second</b> up and the screen <b>splits</b> -- drag the divider to set the widths, and pull in as many as you want. A pane\'s collapse button pushes it back to the taskbar. A tile <b>pulses gold when it finishes</b>, so a done agent pulls you back even from another tab. On a phone, tap a tile to swap the full-screen pane.</p>'},
+ sessions:{t:'Sessions',sub:'Your live agent terminals, arranged like a workspace you can split side by side.',h:'<p>The bar pinned at the bottom lists every live session, like a taskbar. <b>Drag a session up</b> into the main area to open it; drag a <b>second</b> up and the screen <b>splits</b> -- drag the divider to set the widths, and pull in as many as you want. A pane\'s collapse button pushes it back to the taskbar. A tile <b>pulses gold when it finishes</b>, so a done agent pulls you back even from another tab. On a phone, tap a tile to swap the full-screen pane.</p><p>Each session shows a <b>model chip</b> (Opus / Sonnet / Fable / Haiku) -- click it to switch which model that agent runs; the same picker is in a broken-out session tab\'s top bar.</p>'},
  history:{t:'History',sub:'Every past conversation across your machines -- reopen or branch from any of them.',h:'<p><b>What:</b> a searchable log of your past agent conversations on each machine, with a preview of the last messages.</p><p><b>Why:</b> you never lose a thread -- pick up exactly where you left off, or branch a copy to try a different direction without disturbing the original.</p><p><b>How:</b> search or pick a machine, then Resume to continue a conversation or Fork to branch it into a new one.</p>'},
  tree:{t:'Conversation Tree',sub:'Your conversations grouped by the folder they started in, so you can find and reopen them.',h:'<p><b>What:</b> a family-tree view of your conversations, nested under the folder each was launched from, with branches (forks) grouped under their origin.</p><p><b>Why:</b> it shows how your work is organized and lets you jump back into any thread in its proper context.</p><p><b>How:</b> pick a time range, click a conversation for details, then Resume or Fork to jump back in.</p>'},
  tasks:{t:'Tasks',sub:'Your to-do list for the day, pulled together from your email, calls, and notes.',h:'<p><b>What:</b> your daily command center -- to-dos gathered from your mail, calls, and notes and sorted into Overdue, Today, and later.</p><p><b>Why:</b> the things people asked of you (and you promised) surface as suggestions so nothing slips; you decide what becomes a real task.</p><p><b>How:</b> click Scan email (free) or AI scan to find action items, Accept the ones that matter, and Start to put an agent on one. Add your own with the plus button.</p>'},
@@ -22754,7 +22889,7 @@ function sbRender(list){
       if(s.remote) return '<div class="sb-tile sb-remote" data-n="'+e2(s.name)+'" onclick="window.open(\''+esc(s.url)+'\',\'_blank\')" title="'+e2(sbLbl(s))+' — remote node; opens its dashboard in a new tab (a remote terminal can not be attached here)" style="opacity:.82;border-style:dashed">'
         +'<span class="sb-dot"></span><span class="sb-lbl">'+e2(sbLbl(s))+' ↗</span></div>';
       return '<div class="sb-tile" data-n="'+e2(s.name)+'" draggable="true" ondragstart="sbDragStart(event,\''+esc(s.name)+'\')" ondragend="sbDragEnd()" onmouseenter="sbHover(\''+esc(s.name)+'\',this)" onmouseleave="sbLeave()" onclick="sbClick(\''+esc(s.name)+'\')" title="'+e2(sbLbl(s))+' — drag up to split, or click to toggle in the workspace">'
-        +'<span class="sb-dot"></span><span class="sb-lbl">'+e2(sbLbl(s))+'</span></div>';
+        +'<span class="sb-dot"></span><span class="sb-lbl">'+e2(sbLbl(s))+'</span>'+modelChip(s.name,s.model)+'</div>';
     }).join('') : '<span class="sb-empty">'+(window.SB_UNSCOPED&&window.SB_SCOPE==='mine'?'no sessions here — click All nodes to see node sessions':'no sessions')+'</span>';
     bar.innerHTML=h; SB._sig=sig;
   }
@@ -22790,7 +22925,7 @@ function sbShowPanel(name,anchor){
     p.dataset.name=name;
     var _s=(SB.list||[]).find(function(x){return x.name===name;})||{name:name};
     var _loc=(_s.loc||_s.cwd)?'<span class="locchip" title="launched from '+e2(_s.cwd||_s.loc)+'">📍 '+e2(_s.loc||_s.cwd)+'</span>':'';
-    p.innerHTML='<div class="sb-pvh">'+_loc+'<b title="'+e2(name)+'">'+e2(_s.label||name)+'</b>'
+    p.innerHTML='<div class="sb-pvh">'+_loc+'<b title="'+e2(name)+'">'+e2(_s.label||name)+'</b>'+modelChip(name,_s.model)
       +'<span class="sb-pvbusy" id="sbPvBusy"></span>'
       +'<span class="sb-acts">'+acts+'<button class="mini go" title="open big in the Sessions tab" onclick="sbOpen(\''+esc(name)+'\')">⤢ Focus</button></span></div>'
       +'<iframe class="sb-pvframe" id="sbPvFrame" src="/term?name='+encodeURIComponent(name)+'" allow="clipboard-read; clipboard-write"></iframe>';

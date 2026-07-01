@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.112 -- 2026-07-01  (Per-session MODEL selection from the Sessions tab -- see it, switch it; Fable 5 included)
+- **Every session shows a model chip** (Opus / Sonnet / Fable / Haiku, color-coded) on its pane header, the
+  bottom taskbar tile, and the hover preview -- so you can tell at a glance what each agent is running. The chip
+  reads the ACTUALLY-running model from the session's latest transcript turn (falls back to the model it was
+  launched on / Default).
+- **Click the chip to switch** -- a picker sends `/model <id>` into that session's tmux pane (the same slash
+  command you'd type), records the choice so the chip updates immediately, and rejects unknown models. Works on
+  desktop and mobile, and in a **broken-out `/term` tab** (a Model button + picker in its top bar).
+- **Fable 5 is now a first-class choice.** The model list is config-overridable (`cc.config "models"`), so a new
+  tier needs no core release. New endpoints: `GET /api/models`, `POST /api/session-model`. Pricing/labels already
+  knew Fable; this adds the selection UI.
+
 ## 0.99.111 -- 2026-07-01  (Built-in help on EVERY tab + hover-text discipline -- so a new owner can actually learn the tool)
 - **Persistent per-tab help header.** Every tab now shows a slim one-line explainer under its title, with an
   "ⓘ Learn" toggle that expands an inline deep panel: WHAT the tab is, WHY you'd use it, and HOW to drive it
