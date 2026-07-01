@@ -3,6 +3,27 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.88 -- 2026-06-30  (Sarah field-feedback batch 1/4: UI friction + deliverables discipline + email hygiene)
+- **A1 -- graceful End now closes the window.** After a session's handoff finishes, the standalone /term tab
+  auto-returns to the dashboard (was: sat on a dead terminal you had to refresh/minimize -- Sarah's report). The
+  inline workspace pane VACATES the moment you hit End (pushed to the taskbar; the tile drops when the session
+  actually dies). Same for the taskbar blow-up End button. Embedded panes never redirect the iframe (guarded on
+  window.top===self); the parent reconciles them away.
+- **A2 -- basket clears after it's dropped into a session.** Dragging the whole basket into a session now empties
+  it afterward (save a reusable set as a "pack" BEFORE dragging). Saved packs are untouched.
+- **A3 -- deliverable "new file ready" card hides after an action.** Download now dismisses the card (Email already
+  did); only Preview keeps it open.
+- **B -- deliverables discipline (agent brief, chief + agent-tools).** (1) FORMAT: user-facing deliverables go out
+  in a shareable format -- Google Doc/Sheet, Word .docx, PDF, .xlsx, or plain .txt -- never a raw .md unless the
+  user asks; ask when the format is ambiguous. (2) SCOPE: only files the user SPECIFICALLY asked for go in
+  deliverables/ (each one notifies them); scratch/working files stay out, and never auto-email a file they didn't
+  ask for. Stops the "MD handoff" + "emailing every file" noise.
+- **E -- email replies stop inheriting signature images.** _gmail_attachments now excludes inline embedded images
+  (signature logos, tracking pixels, quoted-thread images -- Content-ID and/or Content-Disposition: inline), so a
+  sender's signature logo no longer shows as "1 attachment" or rides along on a reply. Genuine image attachments
+  (no Content-ID, marked attachment) still surface. The Google power-agent's AGENT.md now also forbids re-attaching
+  anything from the incoming message/thread on a reply.
+
 ## 0.99.87 -- 2026-06-30
 - FIX (Doctor false positive): "N secret(s) live OUTSIDE the central vault" fired on EVERY node for
   GOOGLE_CLIENT_SECRET_PATH -- which is a FILE PATH (where the Google OAuth client-secret lives), not a secret

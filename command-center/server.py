@@ -1059,12 +1059,26 @@ def gmail_labels():
     return {"labels": out, "email": _GOOGLE_TOK.get("email")}
 
 def _gmail_attachments(payload):
-    # flat list of real attachments (filename + size + attachmentId), skips inline body parts.
+    # Flat list of REAL, downloadable attachments (filename + size + attachmentId). Skips inline body parts AND
+    # inline EMBEDDED images -- email-signature logos, tracking pixels, quoted-thread images -- which Gmail exposes
+    # as parts with a filename + attachmentId but carry a `Content-ID` and/or `Content-Disposition: inline`. Those
+    # must NEVER surface as attachments: otherwise the Gmail lens shows a sender's signature logo as "1 attachment"
+    # and a reply built from that list re-attaches the sender's own signature image (Sarah's report). A genuine
+    # image attachment (a photo the sender chose to send) has no Content-ID and is marked `attachment`, so it stays.
     out = []
+    def _hdr(p, name):
+        for h in (p.get("headers") or []):
+            if (h.get("name") or "").lower() == name: return (h.get("value") or "")
+        return ""
+    def _is_inline(p):
+        disp = _hdr(p, "content-disposition").strip().lower()
+        if disp.startswith("inline"): return True                                  # explicitly inline (signatures/logos)
+        cid = _hdr(p, "content-id") or _hdr(p, "x-attachment-id")
+        return bool(cid) and (p.get("mimeType", "").lower().startswith("image/"))   # cid-referenced embedded image
     def walk(p):
         fn = p.get("filename") or ""
         bd = p.get("body", {}) or {}
-        if fn and bd.get("attachmentId"):
+        if fn and bd.get("attachmentId") and not _is_inline(p):
             out.append({"filename": fn, "mime": p.get("mimeType", ""),
                         "size": bd.get("size", 0), "attachmentId": bd.get("attachmentId")})
         for sub in (p.get("parts") or []): walk(sub)
@@ -4141,11 +4155,15 @@ def chief_open():
               "the canonical admin session, drops tmux copy-mode, and CONFIRMS the line landed -- do NOT hand-roll "
               "`tmux send-keys` against a guessed session name), then ask me to run it in the Sessions tab; "
               "protocol: see docs/SESSIONS_AND_SUDO.md in the ClaudeFather framework. "
-              "When you (or an agent) create a file FOR me (a report/export/doc I asked for), save it to the "
-              "relevant module folder's deliverables/ subdir -- that is THE way it reaches me: it then shows "
+              "When you (or an agent) create a file FOR me (a report/export/doc I SPECIFICALLY asked for), save it "
+              "to the relevant module folder's deliverables/ subdir -- that is THE way it reaches me: it then shows "
               "in that module's Files panel AND the top-level Files lens (newest first, open/download from any "
               "browser). On iCloud deployments those files auto-sync to my Apple devices (recent) and age off "
-              "to the SSD (older) -- you never manage that, just ALWAYS write outputs to deliverables/. "
+              "to the SSD (older) -- you never manage that, just ALWAYS write outputs to deliverables/. Only REAL "
+              "deliverables I asked for go there (each one notifies me) -- keep scratch/working files elsewhere and "
+              "never email me a file I did not ask for. Produce deliverables in a SHAREABLE format (a Google Doc/"
+              "Sheet, Word .docx, PDF, .xlsx, or plain .txt) -- never hand me a raw .md unless I ask for Markdown; "
+              "if the format is unclear, ASK (Word / PDF / plain text). "
               "You talk to the Chief of Staff of any OTHER ClaudeFather instance over the durable Comms mesh. "
               "When you receive a [message from X] turn, just REPLY NORMALLY -- your reply is delivered to X "
               "the instant you finish (a Stop hook forwards it automatically; you do NOT call any API to "
@@ -8852,7 +8870,17 @@ def _files_brief():
             "then shows in that module's Files panel + the top-level Files lens (and auto-syncs on iCloud "
             "deployments). Place it under the module the work BELONGS to, found via the Module map in the root "
             "CLAUDE.md -- NOT merely where you were launched; if you were started in the wrong place, save by "
-            "relevance. When you build something new (a tool, an area), give its folder a CLAUDE.md (an H1 title "
+            "relevance. "
+            "WHAT COUNTS AS A DELIVERABLE: ONLY a file the user SPECIFICALLY asked you to produce. Every file you "
+            "drop in `deliverables/` pops a 'new file ready' card for them, so do NOT put working notes, scratch, "
+            "intermediate drafts, or things you made on your own initiative there -- keep those in a scratch/ or "
+            "working dir. Never auto-email or 'hand over' a file the user did not ask for. "
+            "DELIVERABLE FORMAT: produce user-facing deliverables in a SHAREABLE format the recipient can open -- a "
+            "Google Doc/Sheet (via the Google Workspace tools), Word (.docx), PDF, a spreadsheet (.xlsx), or plain "
+            ".txt. Markdown (.md) is for internal/working notes ONLY -- never hand a raw `.md` to the user as the "
+            "finished deliverable unless they explicitly ask for Markdown. If the right format is ambiguous, ASK "
+            "(Word / PDF / plain text) before producing it. "
+            "When you build something new (a tool, an area), give its folder a CLAUDE.md (an H1 title "
             "+ ONE plain sentence describing it) so the platform + future agents recognize + can navigate it, and "
             "file any durable learning into that module's CC:NOTES. Keep each CLAUDE.md an INDEX (point to "
             "detail), never a dump -- the goal is a tree any newcomer instantly understands.")
@@ -14038,9 +14066,20 @@ function applyMouse(){fetch('/api/term-mouse',{method:'POST',headers:{'Content-T
   document.body.classList.toggle('selmode',!MOUSE);   // select mode -> let touch select text, not scroll
   const b=document.getElementById('mtog');if(b){b.textContent=MOUSE?'🖱 scroll':'✂ select';b.title=MOUSE?'wheel scrolls. Click to switch to Select (drag to highlight, Ctrl+C to copy).':'drag to select, Ctrl+C to copy. Click to switch back to Scroll (wheel).';b.style.borderColor=MOUSE?'#2a2a3a':'#e8c547';}}
 function toggleMouse(){MOUSE=!MOUSE;localStorage.setItem('hpcc_mouse',MOUSE?'scroll':'select');applyMouse();term.focus();}
-async function gracefulEnd(){if(!await confirmM('Gracefully end this session?\n\nClaude writes a handoff + updates the CLAUDE.md resume pointer, then closes (auto-finalizes within ~3 min). You can keep watching here.'))return;
+async function gracefulEnd(){if(!await confirmM('Gracefully end this session?\n\nClaude writes a handoff + updates the CLAUDE.md resume pointer, then closes (auto-finalizes within ~3 min). This tab returns to the dashboard once it is filed away.'))return;
   st.textContent=name+' - ending: writing handoff…';
-  fetch('/api/close-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,force:false})}).catch(()=>{});}
+  fetch('/api/close-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,force:false})}).catch(()=>{});
+  endWatch();}
+// After a graceful End, watch for the session to finish its handoff + file away, THEN leave -- so the window
+// never sits on a dead terminal you have to manually refresh/dismiss (Sarah's report). Only navigates when this
+// is a standalone /term tab; embedded as a workspace-pane iframe (window.top!=self) the parent dashboard
+// reconciles the pane away, so we don't redirect the iframe.
+function endWatch(){ if(endWatch._iv)return; endWatch._iv=setInterval(function(){
+  fetch('/api/session-exists?name='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(d){
+    if(d&&d.alive===false){ clearInterval(endWatch._iv); endWatch._iv=null; st.textContent=name+' - filed away';
+      if(window.top===window.self){ try{term.write('\r\n\x1b[36m[filed away -- resumable from the dashboard. Returning…]\x1b[0m\r\n');}catch(e){} setTimeout(function(){location.href='/#sessions';},1400); } }
+  }).catch(function(){});
+}, 4000); }
 async function killSess(){if(!await confirmM('Force-kill '+name+'?\n\nThis SKIPS the handoff -- no /endsession, no resume notes.'))return;
   fetch('/api/close-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,force:true})}).then(()=>{st.textContent='killed';setTimeout(()=>location.href='/#sessions',900);}).catch(()=>{});}
 async function compactSess(){if(!await confirmM('Compact this session?\n\nThe agent writes a FULL handoff -> runs /compact -> re-reads the handoff to restore its memory. Takes a few minutes -- watch it here, and avoid typing while it runs.'))return;
@@ -14057,7 +14096,8 @@ ws.onopen=()=>{st.textContent=name+' - connected';fitNow();term.focus();applyMou
 ws.onmessage=(e)=>term.write(new Uint8Array(e.data));
 ws.onclose=()=>{var det=function(){st.textContent=name+' - detached (session lives on)';term.write('\r\n\x1b[33m[detached - close this tab; the session keeps running]\x1b[0m\r\n');};
   fetch('/api/session-exists?name='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(d){
-    if(d&&d.alive===false){st.textContent=name+' - filed away';term.write('\r\n\x1b[36m[this conversation was filed away into its folder -- it is resumable from the dashboard. You can close this tab.]\x1b[0m\r\n');}
+    if(d&&d.alive===false){st.textContent=name+' - filed away';term.write('\r\n\x1b[36m[this conversation was filed away into its folder -- it is resumable from the dashboard.]\x1b[0m\r\n');
+      if(window.top===window.self){ term.write('\x1b[36m[returning to the dashboard…]\x1b[0m\r\n'); setTimeout(function(){location.href='/#sessions';},2200); } }
     else det();
   }).catch(det);};
 ws.onerror=()=>{st.textContent='connection error';};
@@ -21079,8 +21119,9 @@ function startSnaps(){if(SNAPTIMER)clearInterval(SNAPTIMER);
   doit();SNAPTIMER=setInterval(doit,2500);}
 function ago(s){s=Math.max(0,Math.floor(s));return s<60?s+"s":s<3600?Math.floor(s/60)+"m":Math.floor(s/3600)+"h";}
 async function endSess(n,force){if(force&&!await confirmM("Force-kill "+n+"?\n\nThis SKIPS the handoff -- no /endsession, no resume notes."))return;
-  if(!force)toast("Sending /endsession to "+esc(n)+" -- writes a handoff, updates the CLAUDE.md resume pointer, then closes.",6500);
+  if(!force)toast("Ending "+esc(n)+" -- writing a handoff + resume pointer, then filing it away. The pane closes now; watch it finish in the taskbar.",6500);
   await fetch("/api/close-session",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,force})});
+  try{ if(typeof PANES!=='undefined'&&PANES.indexOf(n)>=0&&typeof paneDown==='function') paneDown(n); }catch(e){}   // vacate the workspace immediately; the taskbar tile drops when the session actually dies
   setTimeout(loadSessions,force?700:3000);}
 // ---- History lens: past conversations across the fleet, with where each was launched + resume ----
 let HISTMACHINE="studio", HISTDATA=[], HISTLOADED=null;
@@ -22164,8 +22205,9 @@ function sbHide(){ var p=document.getElementById('sessprev'); if(p){p.style.disp
 function sbUsage(name){ sbHide(); if(typeof openInSessions==='function') openInSessions(name); if(typeof gotoLens==='function') gotoLens('usage'); }
 function sbNewTab(name){ window.open('/term?name='+encodeURIComponent(name),'_blank'); }
 async function sbExit(name){
-  if(typeof toast==='function') toast('Sending /endsession to '+esc(name)+' — writes a handoff, updates the CLAUDE.md resume pointer, then closes.',6500);
+  if(typeof toast==='function') toast('Ending '+esc(name)+' — writing a handoff + resume pointer, then filing it away. It drops from the taskbar when done.',6500);
   try{ await fetch('/api/close-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,force:false})}); }catch(e){}
+  try{ if(typeof PANES!=='undefined'&&PANES.indexOf(name)>=0&&typeof paneDown==='function') paneDown(name); }catch(e){}
   sbHide(); setTimeout(sbPoll,1200);
 }
 async function sbKill(name){
@@ -22357,7 +22399,8 @@ async function basketSendTo(session){
   toast('Sending basket ('+BASKET.length+') to '+esc(session)+'…',3500);
   try{
     var r=await(await fetch('/api/session-send-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:session,items:BASKET})})).json();
-    if(r&&r.ok){ var f=(r.failed||[]).length; toast('&#10148; Sent '+r.sent+' item(s) to '+esc(session)+(f?(' — '+f+' skipped'):'')+'. Review &amp; press Enter.',6500); }
+    if(r&&r.ok){ var f=(r.failed||[]).length; BASKET=[]; basketPersist();   // dropped into a session -> clear the basket (save a reusable set as a "pack" BEFORE dragging)
+      toast('&#10148; Sent '+r.sent+' item(s) to '+esc(session)+(f?(' — '+f+' skipped'):'')+'. Basket cleared. Review &amp; press Enter.',6500); }
     else toast('Basket send failed: '+((r||{}).error||'?'),6000);
   }catch(e){ toast('Basket send failed.',5000); }
 }
@@ -22761,7 +22804,7 @@ setInterval(()=>{fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;if(LENS=="
     var btns=document.createElement('div'); btns.className='cfd-btns';
 
     var dl=document.createElement('button'); dl.className='go'; dl.innerHTML='↓ Download';
-    dl.onclick=function(){ if(typeof dlFile==='function')dlFile(f.rel,f.name); else window.open('/api/file-get?b64='+b64u(f.rel),'_blank'); };
+    dl.onclick=function(){ if(typeof dlFile==='function')dlFile(f.rel,f.name); else window.open('/api/file-get?b64='+b64u(f.rel),'_blank'); dismiss(card); };   // any non-Preview action hides the card (Email already self-dismisses; Preview keeps it up)
     btns.appendChild(dl);
 
     var pv=document.createElement('button'); pv.innerHTML='\u{1F441} Preview';
