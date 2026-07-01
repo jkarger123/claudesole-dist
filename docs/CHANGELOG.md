@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.98 -- 2026-07-01  (nav category notification: GOLD haze + "new since you looked" semantics)
+- **The collapsed-category notification is now a GOLD haze, not red** (matches the brand accent; red read as an
+  error). Border/background/pulse/count-badge all use the accent.
+- **The haze now means "something NEW arrived since you last opened this folder", not "unread exists".** Before,
+  a folder holding permanently-unread email glowed forever, so the signal meant nothing. Now: opening a folder
+  ACKNOWLEDGES its current items (haze clears), and it only re-glows when something arrives ON TOP of that -- the
+  count badge shows the NEW count. If the count drops (you cleared some elsewhere) the acknowledged floor lowers
+  so a later arrival still registers. Per-device (navseen in the nav state). Headless-verified: glow is gold,
+  clears on open, re-glows only on a fresh arrival showing the new count.
+
 ## 0.99.97 -- 2026-07-01  (nav re-seed fix: catch legacy PARTIAL layouts, not just fully-flat ones)
 - **Nav auto-organize now also fixes a legacy PARTIAL layout** (v0.99.96 only caught fully-flat navs). A sidebar
   with a couple of old folders (e.g. "Google" + "Utilities") but a TON of tabs left loose was wrongly treated as

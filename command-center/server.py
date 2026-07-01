@@ -14500,10 +14500,10 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .lens .navgroup .ngname{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .lens .navgroup .ngct{font-size:10px;color:var(--dim);font-weight:700;flex:0 0 auto}
 /* a collapsed category with unread items inside glows + shows the summed count, so nothing is buried */
-.lens .navgroup .ngnotif{font-size:10px;font-weight:800;color:#fff;background:#f85149;border-radius:9px;padding:0 6px;flex:0 0 auto;min-width:16px;text-align:center;box-shadow:0 0 7px rgba(248,81,73,.7)}
-.lens .navgroup.glow{color:var(--near,#f2f3f7);border-color:rgba(248,81,73,.5);background:rgba(248,81,73,.08);animation:ngpulse 2.4s ease-in-out infinite}
-.lens .navgroup.glow .ngtog{color:#f85149}
-@keyframes ngpulse{0%,100%{box-shadow:0 0 0 0 rgba(248,81,73,.0)}50%{box-shadow:0 0 12px 0 rgba(248,81,73,.35)}}
+.lens .navgroup .ngnotif{font-size:10px;font-weight:800;color:#15120a;background:var(--accent-light);border-radius:9px;padding:0 6px;flex:0 0 auto;min-width:16px;text-align:center;box-shadow:0 0 8px rgba(var(--accent-rgb),.7)}
+.lens .navgroup.glow{color:var(--near,#f2f3f7);border-color:rgba(var(--accent-rgb),.55);background:rgba(var(--accent-rgb),.12);animation:ngpulse 2.4s ease-in-out infinite}
+.lens .navgroup.glow .ngtog{color:var(--accent-light)}
+@keyframes ngpulse{0%,100%{box-shadow:0 0 0 0 rgba(var(--accent-rgb),.0)}50%{box-shadow:0 0 14px 0 rgba(var(--accent-rgb),.4)}}
 .lens .navgroup .ngdel{opacity:0;color:var(--dim);flex:0 0 auto;font-size:11px}
 .lens .navgroup:hover .ngdel{opacity:.65}
 .lens .navgroup .ngdel:hover{color:#f85149;opacity:1}
@@ -22107,16 +22107,26 @@ function navNotif(lensId){
   var n=parseInt(bs.textContent,10);return isNaN(n)?1:n;
 }
 function paintNavNotif(){
-  var s=navState(),tree=(s&&s.tree)||[];
+  // The gold haze means "something NEW arrived since you last opened this folder", NOT "unread exists" -- else a
+  // folder with permanently-unread email would glow forever and the signal would lose meaning. We track a per-
+  // category ACKNOWLEDGED floor (navseen, set when you open the folder); glow only shows the count that arrived
+  // ON TOP of that floor. If the count drops (you cleared some elsewhere) we lower the floor so a later arrival
+  // still registers as new.
+  var s=navState(),tree=(s&&s.tree)||[],seen=s.navseen||{},changed=false;
   document.querySelectorAll("#lens .navgroup").forEach(function(hd){
-    var gn=tree.filter(function(n){return n.t==="grp"&&n.id===hd.dataset.g;})[0];if(!gn)return;
+    var gid=hd.dataset.g;
+    var gn=tree.filter(function(n){return n.t==="grp"&&n.id===gid;})[0];if(!gn)return;
     var total=(gn.items||[]).reduce(function(a,l){return a+navNotif(l);},0);
+    var base=seen[gid]||0;
+    if(total<base){ seen[gid]=total; base=total; changed=true; }   // count fell -> lower the acknowledged floor
+    var fresh=total-base;                                          // arrived on top of what you've already seen
     var collapsed=!hd.classList.contains("open");
-    hd.classList.toggle("glow",total>0&&collapsed);
+    hd.classList.toggle("glow",fresh>0&&collapsed);
     var nb=hd.querySelector(".ngnotif");
-    if(total>0&&collapsed){if(!nb){nb=document.createElement("span");nb.className="ngnotif";hd.insertBefore(nb,hd.querySelector(".ngct"));}nb.textContent=total>99?"99+":total;nb.style.display="inline-block";}
+    if(fresh>0&&collapsed){if(!nb){nb=document.createElement("span");nb.className="ngnotif";hd.insertBefore(nb,hd.querySelector(".ngct"));}nb.textContent=fresh>99?"99+":fresh;nb.style.display="inline-block";}
     else if(nb){nb.style.display="none";}
   });
+  if(changed){ s.navseen=seen; navSave(s); }
 }
 // ---- render
 function renderNav(){
@@ -22188,7 +22198,13 @@ function paintNavMode(){
 function navToggleRank(){var s=navState();s.autorank=!s.autorank;navSave(s);renderNav();}
 function navAuto(){var s=navState();delete s.mode;delete s.order;delete s.tree;delete s.autorank;navSave(s);renderNav();}
 async function navNewCat(){var s=navState();if(!s.tree||!s.tree.length)s.tree=seedTree();var nm=await promptM("New category name:","Less used");if(nm===null)return;s.tree.push({t:"grp",id:"g"+Date.now(),name:(nm.trim()||"Group"),collapsed:false,items:[]});s.mode="manual";navSave(s);renderNav();}
-function navToggleGrp(gid){var s=navState();(s.tree||[]).forEach(function(n){if(n.t==="grp"&&n.id===gid)n.collapsed=!n.collapsed;});navSave(s);renderNav();}
+function navToggleGrp(gid){var s=navState();var opening=false;
+  (s.tree||[]).forEach(function(n){if(n.t==="grp"&&n.id===gid){opening=(n.collapsed===true);n.collapsed=!n.collapsed;}});
+  if(opening){   // opened the folder -> acknowledge everything in it now; the gold haze stays clear until something NEW arrives on top
+    var gn=(s.tree||[]).filter(function(n){return n.t==="grp"&&n.id===gid;})[0];
+    if(gn){var total=(gn.items||[]).reduce(function(a,l){return a+navNotif(l);},0);s.navseen=s.navseen||{};s.navseen[gid]=total;}
+  }
+  navSave(s);renderNav();}
 async function navRenameGrp(gid){var s=navState();var n=(s.tree||[]).filter(function(x){return x.t==="grp"&&x.id===gid;})[0];if(!n)return;var nm=await promptM("Category name:",n.name);if(nm===null)return;n.name=nm.trim()||n.name;navSave(s);renderNav();}
 function navDelGrp(gid){var s=navState();var t=s.tree||[];for(var i=0;i<t.length;i++){if(t[i].t==="grp"&&t[i].id===gid){var freed=(t[i].items||[]).map(function(l){return{t:"tab",l:l};});t.splice.apply(t,[i,1].concat(freed));break;}}if(!navHasGrp(s))s.mode="manual";navSave(s);renderNav();}
 // ---- drag/drop (delegated; handles tabs AND category headers)
