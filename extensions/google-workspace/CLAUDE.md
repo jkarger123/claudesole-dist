@@ -46,6 +46,11 @@ Two separate runtimes read it; neither is part of this extension's code:
 ## Scope / permission model (`workspace-mcp --permissions service:level`, cumulative; least privilege)
 - gmail: `readonly` -> `organize` -> `drafts` (DEFAULT, compose only) -> `send` -> `full`.
 - calendar: `readonly` -> `full`.  drive: `readonly` -> `full`.
+- sheets: `readonly` -> `full` (DEFAULT `full` = in-place cell read/write). docs: `readonly` -> `full` (DEFAULT
+  `full` = in-place text insert/replace). forms: `readonly` -> `full` (DEFAULT `full` = create/edit forms).
+- ONLY services listed in `--permissions` register their tools + request scopes -> **adding a service requires a
+  token re-mint** (re-run `bin/gauth.sh` with the matching PERMS) or the new tools 403. sheets/docs/forms were
+  added in extension v2.2.0; a pre-2.2.0 install must re-mint to edit files in place / use Forms.
 - DRAFT-FIRST is the safe default. Auto-SEND is a deliberate one-flag upgrade: `gmail:drafts` -> `gmail:send`
   in BOTH `mcp.json` perms AND the minted token's scopes (re-run `gauth.sh` with `PERMS="gmail:send ..."`).
   The dashboard's `google_status()` derives `canRead/canSend/canModify` from the token's actual scopes.

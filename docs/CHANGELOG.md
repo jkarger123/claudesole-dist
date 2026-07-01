@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.90 -- 2026-06-30  (Sarah field-feedback batch 3: Google in-place Sheets/Docs editing + Forms -- google-workspace v2.2.0)
+- **F -- the Google agent can now EDIT existing Sheets/Docs IN PLACE (not just create new files).** Root cause:
+  workspace-mcp only registers tools for services listed in `--permissions`, and the template listed only
+  gmail/calendar/drive -- so Sheets/Docs had NO tools and the agent worked around it by creating a new copy
+  (Sarah's "it can only create new files"). Added `sheets:full docs:full` to `mcp.json`; AGENT.md now instructs
+  the agent to edit the SAME file (keep its ID/sharing/links), never spawn a duplicate. Enables the overnight
+  use case: walk a contact sheet, research emails for the bounced rows, write them back into that sheet.
+- **G1 -- Google Forms.** Added `forms:full` so the agent can create/edit Google Forms + read responses.
+- google-workspace extension -> **v2.2.0** (summary/description/provides advertise sheets/docs/forms; SETUP.md +
+  CLAUDE.md scope model updated).
+- **ACTIVATION (per node, one-time human step): re-mint the token to consent the new scopes.** Shipping the
+  template does NOT change a running node's LIVE `.mcp.json` or its already-minted token. To turn F/G1 on for a
+  node: (1) add `sheets:full docs:full forms:full` to that deployment's `.mcp.json` google args, (2) re-run
+  `extensions/google-workspace/bin/gauth.sh` with `PERMS="gmail:drafts calendar:full drive:full sheets:full
+  docs:full forms:full"` (re-consent in the browser), (3) restart. Until then the new tools 403. See SETUP.md.
+
 ## 0.99.89 -- 2026-06-30  (Sarah field-feedback batch 2: client/Granola matching + daily-brief tone & business hours)
 - **D -- client + Granola auto-matching now matches a folder NAME against a sender/attendee DOMAIN LABEL.** A
   `Clients/Avonler` folder now auto-matches abe@avonler.com (and @mail.avonler.com) with zero config -- both in

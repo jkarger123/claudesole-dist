@@ -48,12 +48,16 @@ The extension ships the tools under `bin/` -- use them, don't hand-roll the flow
 
 ```
 cd extensions/google-workspace
-ACCOUNT=you@gmail.com PERMS="gmail:drafts calendar:full drive:full" bin/gauth.sh          # local browser
-ACCOUNT=you@gmail.com PERMS="gmail:drafts calendar:full drive:full" bin/gauth.sh --remote <operator-ssh-host>   # remote browser
+ACCOUNT=you@gmail.com PERMS="gmail:drafts calendar:full drive:full sheets:full docs:full forms:full" bin/gauth.sh          # local browser
+ACCOUNT=you@gmail.com PERMS="gmail:drafts calendar:full drive:full sheets:full docs:full forms:full" bin/gauth.sh --remote <operator-ssh-host>   # remote browser
 ```
 `gauth.sh` starts the minter **unbuffered**, prints ONE consent URL, waits for approval, and stores the
-refresh token at `secrets/tokens/<account>.json`. For **send** instead of drafts, use `PERMS="gmail:send
-calendar:full drive:full"`.
+refresh token at `secrets/tokens/<account>.json`. The PERMS above match `mcp.json` -- `sheets:full docs:full`
+let the agent EDIT existing Sheets/Docs IN PLACE (not just create new files), and `forms:full` lets it create
+Google Forms. For **send** instead of drafts, swap `gmail:drafts` -> `gmail:send`.
+> **Already installed before v2.2.0?** Your token predates the sheets/docs/forms scopes -- the agent will
+> create-new-copies instead of editing in place, and Forms will 403. **Re-run the mint command above** (same
+> account) to re-consent with the new scopes, then the in-place edit + Forms tools work. No other change needed.
 
 - **Remote operator (no browser on the Mac):** `--remote <host>` opens a reverse SSH tunnel
   (`ssh -N -R PORT:localhost:PORT <host>`) so the OAuth loopback callback reaches the operator's browser.
@@ -95,12 +99,21 @@ my calendar today?" / "Most recently modified Drive doc?")
   (free/busy across multiple attendees with work-hour preferences).
 - **Drive**: structured search, read/download content, metadata, **permissions** (check before sharing),
   create + copy files.
+- **Sheets / Docs**: read + EDIT existing spreadsheets and documents IN PLACE (read a range, update/append
+  cells, insert/replace text) -- so "modify this sheet" edits the SAME file, keeping its ID/sharing/links,
+  instead of spawning a new copy.
+- **Forms**: create + edit Google Forms (questions, sections) and read responses.
 
 ## Scope model (least privilege; `--permissions service:level`, cumulative)
 - gmail: `readonly` -> `organize` (labels+modify) -> `drafts` (compose) -> `send` -> `full`. Default `drafts`.
 - calendar: `readonly` -> `full` (calendar + calendar.events).
 - drive: `readonly` -> `full` (drive + drive.file).
-Request only what the use case needs; start read/draft, upgrade deliberately.
+- sheets: `readonly` -> `full` (read + write cell values). Default `full` (in-place editing).
+- docs: `readonly` -> `full` (read + insert/replace text). Default `full` (in-place editing).
+- forms: `readonly` -> `full` (create/edit forms + read responses). Default `full`.
+Request only what the use case needs; start read/draft, upgrade deliberately. **Only services listed in
+`--permissions` register their tools** -- so adding a service means re-minting the token (re-consent) with a
+matching `PERMS`, or the new tools 403.
 
 ## Gotchas (these cost real time on the first install -- bake them in)
 - **Unbuffered stdout:** the auth lib prints the consent URL with a plain `print()`; under nohup/pipes it
