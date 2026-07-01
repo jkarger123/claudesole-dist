@@ -8357,15 +8357,17 @@ def _authored_lines(txt):
 
 _AT_IMPORT_LIMIT = 150_000     # Claude Code refuses to import a CLAUDE.md @path over ~150k chars (the warning the operator hit)
 def _stray_at_imports(txt, base_dir):
-    """Claude Code reads '@path' in a CLAUDE.md as an IMPORT directive. A BARE @path (NOT inside backticks/code)
-    that resolves to a LARGE file -- e.g. a curl arg written as '@_dist/portal.html', a build artifact -- makes
-    Claude Code load that whole file into context on launch ('over the 150k-char limit' + bloat). Return the bare
-    @paths that resolve to an oversized existing file. Backticked/fenced @paths are NOT imported (ignored); non-file
-    @tokens (@media, @4, user@host) resolve to nothing and are skipped -- so this only fires on the real footgun."""
-    bare = re.sub(r"```.*?```", "", txt, flags=re.S)     # drop fenced code
-    bare = re.sub(r"`[^`]*`", "", bare)                  # drop inline code
+    """Claude Code reads '@path' in a CLAUDE.md as an IMPORT directive. A @path that resolves to a LARGE file
+    -- e.g. a curl arg written as '@_dist/portal.html', a build artifact -- makes Claude Code load that whole
+    file into context on launch ('over the 150k-char limit' + bloat). Return the @paths that resolve to an
+    oversized existing file. ONLY a fenced ``` code block is import-safe: Claude Code STILL imports an @path
+    inside an INLINE `code span` (observed live -- a backticked curl example pulled a 1.3MB portal.html into
+    context), so we strip ONLY fenced blocks before scanning, NOT inline code. Non-file @tokens (@media, @4,
+    user@host) resolve to nothing and are skipped -- so this only fires on the real footgun."""
+    bare = re.sub(r"```.*?```", "", txt, flags=re.S)     # strip ONLY fenced blocks (the sole import-safe wrapper);
+                                                          # inline `code spans` are NOT safe -- CC imports them too
     out = []
-    for m in re.finditer(r"(?<![\w`])@([\w./~-]+\.[A-Za-z0-9]{1,6})", bare):   # bare @path WITH a file extension
+    for m in re.finditer(r"(?<!\w)@([\w./~-]+\.[A-Za-z0-9]{1,6})", bare):   # @path WITH a file extension
         rel = m.group(1)
         try:
             p = os.path.normpath(os.path.join(base_dir, rel))
@@ -8409,7 +8411,7 @@ def doctor():
         if depth >= 2 and "CC:BEGIN" in txt:
             issues.append({"sev": "warn", "path": label, "msg": "sub-tool doc carries a managed CC block (an ancestor already delivers it) - should be hand content only"})
         for rel_imp, sz in _stray_at_imports(txt, ab):
-            issues.append({"sev": "warn", "path": label, "msg": "stray '@%s' import (%.1fMB): Claude Code reads @path in a CLAUDE.md as an IMPORT and will load this whole file into context on launch (the 'over the 150k-char limit' warning). Wrap it in backticks or drop the @ if it's a command arg, not a real import." % (rel_imp, sz / 1048576.0)})
+            issues.append({"sev": "warn", "path": label, "msg": "stray '@%s' import (%.1fMB): Claude Code reads @path in a CLAUDE.md as an IMPORT and will load this whole file into context on launch (the 'over the 150k-char limit' warning). Move it INTO a fenced ``` code block (inline `backticks` do NOT protect it -- Claude Code imports those too), or drop the @ if it's a command arg, not a real import." % (rel_imp, sz / 1048576.0)})
     for b in managed_overview()["blocks"]:
         if b["present"] != b["targets"] or b["insync"] != b["present"]:
             issues.append({"sev": "warn", "path": "block:" + b["id"], "msg": "%d/%d targets present, %d in-sync - re-Apply in the Docs lens" % (b["present"], b["targets"], b["insync"])})
@@ -9478,21 +9480,29 @@ def context_package(session=None, subject=None):
             "note": "A system prompt we add at launch (no turn): file-placement rules, locked-core/extend guidance, and a focus-routed context brief."})
     except Exception: pass
     try:
-        chain = [PROJECT]
-        if cwd and os.path.realpath(cwd) != os.path.realpath(PROJECT):
-            rel = os.path.relpath(cwd, PROJECT)
-            if not rel.startswith(".."):
-                acc = PROJECT
-                for part in rel.split(os.sep):
-                    acc = os.path.join(acc, part); chain.append(acc)
+        # Anchor the CLAUDE.md cascade on the SESSION'S OWN tree -- walk UP from its cwd collecting every
+        # CLAUDE.md-bearing dir -- NOT the VIEWING instance's PROJECT constant. The unscoped overseer sees
+        # other nodes' sessions whose cwd sits OUTSIDE its PROJECT; the old `relpath('..')` guard then silently
+        # dropped the entire intermediate cascade, so the SAME chat showed a different (wrong, truncated) payload
+        # from the overseer vs its home node. Walking up from cwd mirrors exactly what Claude Code auto-loads,
+        # so the payload now reads identically from ANY dashboard (co-located instances share the filesystem).
+        start = os.path.realpath(cwd or PROJECT)
+        ups = []; d = start
+        while True:
+            ups.append(d)
+            parent = os.path.dirname(d)
+            if parent == d: break
+            d = parent
+        cascade = [x for x in ups if os.path.isfile(os.path.join(x, "CLAUDE.md"))]   # cwd-first, walking up
+        root = cascade[-1] if cascade else start                                     # topmost CLAUDE.md = this tree's root
         seen = set()
-        for d in chain:
+        for d in reversed(cascade):                                                  # display order: root -> cwd
             cm = os.path.join(d, "CLAUDE.md")
-            if os.path.isfile(cm) and cm not in seen:
-                seen.add(cm); t = _read(cm)
-                lbl = "CLAUDE.md (project root)" if os.path.realpath(d) == os.path.realpath(PROJECT) else ("CLAUDE.md (" + os.path.relpath(d, PROJECT) + ")")
-                comps.append({"id": "claudemd:" + lbl, "label": lbl, "tokens": _toklen(t), "content": t[:8000],
-                    "note": "Auto-loaded by Claude Code (the cascading CLAUDE.md; the root carries the whole-tree module map)."})
+            if cm in seen: continue
+            seen.add(cm); t = _read(cm)
+            lbl = "CLAUDE.md (project root)" if os.path.realpath(d) == os.path.realpath(root) else ("CLAUDE.md (" + os.path.relpath(d, root) + ")")
+            comps.append({"id": "claudemd:" + lbl, "label": lbl, "tokens": _toklen(t), "content": t[:8000],
+                "note": "Auto-loaded by Claude Code (the cascading CLAUDE.md; the root carries the whole-tree module map)."})
     except Exception: pass
     try:
         if subj:

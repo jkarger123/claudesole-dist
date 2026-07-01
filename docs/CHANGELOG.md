@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.105 -- 2026-07-01  (two context-accuracy fixes: catch inline-backtick @imports; payload cascade anchored on the session's own tree)
+- **Doctor now catches the `@import` footgun even inside inline `backticks`.** A bare `@path` in a CLAUDE.md
+  (e.g. a `curl --data-binary @_dist/portal.html` example) is parsed by Claude Code as a MEMORY IMPORT and pulls
+  the whole file into context ("over the 150.0k-char limit" warning). The detector previously stripped inline
+  code spans before scanning, assuming backticks protect them -- but they do NOT: only a FENCED ``` block is
+  import-safe (observed live: a backticked curl example imported a 1.3 MB built portal.html). `_stray_at_imports`
+  now strips ONLY fenced blocks, and the Doctor advice is corrected ("move INTO a fenced block, inline backticks
+  do not protect it"). Prevents the context-poisoning on every node + every future install, automatically.
+- **Payload / Context-package panel now reads identically from any dashboard.** It walked the CLAUDE.md cascade
+  from the VIEWING instance's `PROJECT` root, so the unscoped Mission Control overseer -- whose own root differs
+  from a tenant's tree -- dropped the entire intermediate cascade (the `relpath('..')` guard), showing the SAME
+  chat as ~5k/3-parts from the overseer vs ~36k/6-parts from its home node. Now the cascade is anchored on the
+  SESSION'S OWN cwd (walk up collecting every CLAUDE.md-bearing dir), mirroring exactly what Claude Code
+  auto-loads -- so the payload is accurate and consistent whether viewed from the node or the overseer.
+
 ## 0.99.104 -- 2026-07-01  (warm transfer works on EVERY node: file unfiled root conversations, not just off-lane sub-folder drift)
 - **Drift/warm-transfer now fires on single-project + control-brain nodes**, not just agency trees with per-client
   sub-folders. Before, the housekeeping drift sweep only watched conversations FILED in a sub-folder lane and
