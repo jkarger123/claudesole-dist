@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.95 -- 2026-07-01  (google-workspace SETUP fixes so FUTURE installs never hit tonight's traps -- v2.2.3)
+- **SETUP.md now enables ALL SIX Cloud APIs + explains the scope-vs-API gate.** Step 2 previously enabled only
+  Gmail/Calendar/Drive APIs, so a fresh install using sheets/docs/forms would 403 `SERVICE_DISABLED` even with the
+  scopes granted (a granted OAuth scope authorizes access, but the Cloud PROJECT must ALSO have that API turned
+  ON -- two separate gates). Added Sheets/Docs/Forms with direct activation URLs + the explicit rule:
+  `SERVICE_DISABLED` -> enable the API; missing scope -> re-mint (don't conflate).
+- **Corrected the restart semantics** (was misleading in tonight's v0.99.90/.94 docs). The Path-B google agent
+  spawns its stdio MCP FRESH per launch, so new tools appear on the agent's NEXT launch -- NO whole-node restart
+  needed (bouncing the node can kill the setup session itself). SETUP.md gained a "Restart semantics" note; AGENT.md
+  updated to match + to route a `SERVICE_DISABLED` 403 to "enable the API," not "re-mint."
+- Docs-only extension change (google-workspace -> **v2.2.3**); the remaining hardening (split-brain guard,
+  SERVICE_DISABLED live-probe in verify/Doctor, diagnostics naming their token file, gauth --remote preflight, a
+  bin/doctor.sh health check) is specced in extensions/google-workspace/HARDENING_TODO.md for a follow-up batch.
+
 ## 0.99.94 -- 2026-06-30  (AFP CCRs: google scope-drift detection + PORTABLE secret paths -- google-workspace v2.2.2)
 - **CCR ccr-1782880284334 -- google secret paths are now PORTABLE (CC_HOME-relative), so a deployment can move
   drives without split-braining the token store.** AFP hit this live: the wired `.mcp.json` froze ABSOLUTE

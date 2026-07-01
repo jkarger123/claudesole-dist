@@ -30,5 +30,8 @@ This node has Google Workspace: Gmail + Calendar + Drive, via a server-side OAut
   explicitly asks for a new one. If the Sheets/Docs/Forms tools 403 or aren't present, the token predates these
   scopes -- ACTIVATION is one command: STAGE `ACCOUNT=<their-account> extensions/google-workspace/bin/enable-services.sh`
   into the project's Admin shell (POST /api/admin-stage, per docs/SESSIONS_AND_SUDO.md -- you have no TTY), and
-  tell the operator to hit enter, approve the ONE consent URL in their browser, then restart the node. That single
-  script patches the live .mcp.json AND re-mints the token -- no manual editing.
+  tell the operator to hit enter + approve the ONE consent URL. That single script patches the live .mcp.json AND
+  re-mints -- no manual editing. NOTE: the new tools appear on your NEXT launch (Path B spawns the MCP fresh each
+  launch), so just start a fresh google-agent session to use them -- no whole-node restart needed. And if a
+  Sheets/Docs/Forms call 403s `SERVICE_DISABLED` (not a scope error), the fix is enabling that API in the Google
+  Cloud project (SETUP.md step 2), NOT a re-mint.

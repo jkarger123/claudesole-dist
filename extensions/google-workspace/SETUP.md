@@ -1,6 +1,7 @@
 # Google Workspace -- setup walkthrough
 
-Brief for the **setup agent**. Goal: the user ends with Gmail + Calendar + Drive fully authorized AND the
+Brief for the **setup agent**. Goal: the user ends with Gmail + Calendar + Drive + Sheets + Docs + Forms fully
+authorized (both the Cloud APIs ENABLED and the OAuth scopes granted -- two separate gates, see step 2) AND the
 **Google agent** (agents/google) ready to drive them, integrated with their clients + the Calls module.
 ASCII only. Be patient + concrete. Verified end-to-end on a real install (carsearch, 2026-06-23); the exact
 wiring + tools below are what actually worked -- prefer them over improvising.
@@ -32,7 +33,21 @@ account** (not the operator's personal Google login). That shapes the choice:
 
 ## Google Cloud Console (verified steps, with the non-obvious bits)
 1. Create / choose a **project**.
-2. Enable the **Gmail API + Google Calendar API + Google Drive API**.
+2. Enable the Google APIs the extension uses. **A granted OAuth scope is NOT enough by itself -- the Cloud
+   PROJECT must ALSO have each API turned ON, or calls 403 with `SERVICE_DISABLED` even though the scope is
+   granted** (this bit a live node: all 21 scopes minted, but Sheets still 403'd until the Sheets API was enabled
+   in the project). Enable:
+   - **Gmail API + Google Calendar API + Google Drive API** (always).
+   - **Google Sheets API + Google Docs API + Google Forms API** -- needed for in-place Sheets/Docs editing +
+     creating Forms (the default `PERMS` below request these; enable them now so those tools don't 403 later).
+   Direct activation URLs -- replace `<PROJECT#>` with your project number (shown in the Console URL and next to
+   the OAuth client_id):
+   - Sheets: `https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=<PROJECT#>`
+   - Docs:   `https://console.developers.google.com/apis/api/docs.googleapis.com/overview?project=<PROJECT#>`
+   - Forms:  `https://console.developers.google.com/apis/api/forms.googleapis.com/overview?project=<PROJECT#>`
+   After clicking Enable, Google takes ~2-3 min to propagate. If a call still 403s `SERVICE_DISABLED` after that,
+   the API isn't enabled in the project yet -- that is a DIFFERENT problem from a missing OAuth scope (which needs
+   a re-mint). Don't conflate them: `SERVICE_DISABLED` -> enable the API (URL above); missing scope -> re-mint.
 3. **OAuth consent screen -> External**, and **stay in "Testing"** -- do NOT "Publish to production"
    (publishing forces Google verification for the sensitive Gmail/Drive scopes).
 4. **Add the controlled account as a Test user** -- it MUST be the exact account the agent will drive
@@ -62,8 +77,16 @@ Google Forms. For **send** instead of drafts, swap `gmail:drafts` -> `gmail:send
 > ACCOUNT=you@gmail.com bin/enable-services.sh                       # browser on this host
 > ACCOUNT=you@gmail.com bin/enable-services.sh --remote <ssh-host>   # browser on a remote host
 > ```
-> Run it -> open the ONE printed consent URL -> click Allow -> restart the node. Done. (An agent can stage this
-> line into the Admin shell for you via the sessions/sudo protocol; you hit enter + approve.)
+> Run it -> open the ONE printed consent URL -> click Allow. Done. (An agent can stage this line into the Admin
+> shell for you via the sessions/sudo protocol; you hit enter + approve.) The new tools appear on the google
+> agent's **next launch** -- see "Restart semantics" below; you do NOT need to bounce the whole node.
+
+### Restart semantics (don't over-restart)
+The Path-B google agent spawns its own stdio MCP **fresh on every launch**, so after you enable an API, re-mint,
+or edit `.mcp.json --permissions`, the new tools are picked up **the next time the agent launches** -- just start
+a new google-agent session (or relaunch it). You do NOT need a global node restart; only a long-lived / attached
+session that's already running won't see the change until it's relaunched. (Bouncing the whole node can kill the
+very session doing the setup, so avoid it.)
 
 - **Remote operator (no browser on the Mac):** `--remote <host>` opens a reverse SSH tunnel
   (`ssh -N -R PORT:localhost:PORT <host>`) so the OAuth loopback callback reaches the operator's browser.
