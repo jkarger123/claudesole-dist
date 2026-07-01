@@ -21,6 +21,11 @@ both) to see if it is behind. Newest first.
 - **Self-heal catch-up loop.** A new bounded sweep re-attempts a missed/failed brief when the scheduled time has
   passed and there's still none for today -- a transient 8am failure (slow/limited synthesis, a restart mid-run) now
   lands the brief late instead of losing the whole day.
+- **Also: Ralph loop taskbar scoping.** A running Ralph loop leaked onto EVERY co-located source-trio node's session
+  taskbar (hptuners' loop showed on carsearch etc.). `RALPHDIR` is `CC_HOME/data/ralph`, and the trio share one
+  checkout -> one `CC_HOME`, so the old "does this loop's dir exist in RALPHDIR" ownership test was true on every
+  trio node. Now a loop is owned by the node whose PROJECT its recorded `cwd` (loop.json) belongs to -- the same
+  `_session_in_project` test as any other session -- so it shows only on its real owner.
 
 ## 0.99.108 -- 2026-07-01  (terminal scroll polish: 'jump to live' auto-hides at the bottom; copy toast is gold, not green)
 - **'Jump to live' pill now clears when you scroll back down to the bottom.** The pill only hid on an explicit tap
