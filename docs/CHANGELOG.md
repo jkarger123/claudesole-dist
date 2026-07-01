@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.91 -- 2026-06-30  (Sarah field-feedback batch 4: daily brief reads full Drive comment THREADS -- C1)
+- **C1 -- the Morning Brief now reads full Google Drive comment THREADS + resolution state.** New read-only
+  `drive_open_comments()` (server.py) fetches UNRESOLVED comments on recently-modified Docs/Sheets/Slides with
+  the WHOLE thread (opening comment + every reply + times); a new `drive_comments` brief source hands the model
+  the full back-and-forth marked "STILL OPEN". Resolved threads are dropped entirely. Fixes Sarah's report: the
+  brief had read only the FIRST comment, missed the resolving replies, and wrongly chastised her -- now it has
+  the full context (and with batch 2's assistant tone + business-hours it won't scold or miscount elapsed time).
+  Enabled by default; degrades to nothing when Google isn't configured. **This completes Cluster C.**
+
 ## 0.99.90 -- 2026-06-30  (Sarah field-feedback batch 3: Google in-place Sheets/Docs editing + Forms -- google-workspace v2.2.0)
 - **F -- the Google agent can now EDIT existing Sheets/Docs IN PLACE (not just create new files).** Root cause:
   workspace-mcp only registers tools for services listed in `--permissions`, and the template listed only

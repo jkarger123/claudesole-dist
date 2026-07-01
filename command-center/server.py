@@ -1530,6 +1530,41 @@ def drive_content(fid):
         except Exception: return {"error": "binary content"}
     return {"text": text[:200000], "name": f.get("name", ""), "mime": mime}
 
+_GAPPS_DOCLIKE = ("application/vnd.google-apps.document", "application/vnd.google-apps.spreadsheet",
+                  "application/vnd.google-apps.presentation")
+def drive_open_comments(days=7, max_files=15):
+    """UNRESOLVED comment threads on recently-modified Google Docs/Sheets/Slides, each with its FULL thread
+    (opening comment + every reply) + creation times. Read-only. Powers the Morning Brief so it can mention a
+    genuinely-OPEN comment WITH context and never re-flag one that was already answered/resolved (Sarah: the
+    brief read only the first comment, missed the resolving replies, and wrongly chastised her). Resolved
+    threads are dropped entirely. Returns [] when Google isn't configured (source degrades, never crashes)."""
+    if not google_configured(): return []
+    since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(max(0, time.time() - float(days) * 86400)))
+    typeq = " or ".join("mimeType='%s'" % m for m in _GAPPS_DOCLIKE)
+    q = "modifiedTime > '%sZ' and trashed=false and (%s)" % (since, typeq)
+    fl = _g_api("GET", DRIVE_BASE, params={"q": q, "orderBy": "modifiedTime desc", "pageSize": int(max_files),
+                "fields": "files(id,name,mimeType,modifiedTime)"})
+    files = (fl or {}).get("files", []) if isinstance(fl, dict) else []
+    out = []
+    for f in files[:int(max_files)]:
+        fid = f.get("id")
+        if not fid: continue
+        cr = _g_api("GET", DRIVE_BASE + "/" + fid + "/comments",
+                    params={"pageSize": 100, "fields": "comments(content,resolved,author/displayName,"
+                            "createdTime,modifiedTime,replies(content,author/displayName,createdTime))"})
+        for c in ((cr or {}).get("comments", []) if isinstance(cr, dict) else []):
+            if c.get("resolved"): continue                      # already handled -> never surface it
+            replies = c.get("replies") or []
+            out.append({"file": f.get("name") or "a file", "fileId": fid,
+                        "author": (c.get("author") or {}).get("displayName") or "someone",
+                        "content": (c.get("content") or "")[:400],
+                        "created": c.get("createdTime") or "", "modified": c.get("modifiedTime") or "",
+                        "reply_count": len(replies),
+                        "replies": [{"author": (r.get("author") or {}).get("displayName") or "",
+                                     "content": (r.get("content") or "")[:300],
+                                     "created": r.get("createdTime") or ""} for r in replies[:12]]})
+    return out
+
 # ---- Dashboard/API authentication (CCR ccr-1782162511858). OFF by default (open) so existing deployments
 # keep working until an operator sets a token; /api/doctor warns loudly while it is off. Enable by setting
 # cc.config `auth_token` (or env CC_AUTH_TOKEN). When on, EVERY request needs a valid credential: a browser
@@ -8682,6 +8717,7 @@ except Exception as _e: print("[zoom] init failed:", _e)
 try:
     morning_brief.init({"CC": CC, "PROJECT": PROJECT, "STATE_DIR": STATE_DIR, "secret": _deploy_env,
                         "calendar_events": calendar_events, "gmail_list": gmail_list,
+                        "drive_open_comments": drive_open_comments,   # unresolved Doc/Sheet comment THREADS (full + resolution-aware)
                         "context_assemble": (context.assemble if context else None),
                         # lambda: voice_profile_get is defined LATER in the file than this init call site,
                         # so reference it lazily (resolved at generate-time, not module-exec time).

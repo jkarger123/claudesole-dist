@@ -30,7 +30,7 @@ def _cfg():
     c.setdefault("open_time", "8:00am"); c.setdefault("lead_minutes", 60)
     c.setdefault("days", "weekdays"); c.setdefault("horizon_days", 14)
     c.setdefault("length", "short"); c.setdefault("tone", "warm")
-    c.setdefault("sources", ["calendar", "gmail", "tasks", "granola"])
+    c.setdefault("sources", ["calendar", "gmail", "tasks", "granola", "drive_comments"])
     # BUSINESS-HOURS awareness (Sarah): so the brief never counts evenings/weekends/non-working days as elapsed
     # time when judging "overdue"/"unanswered". work_days = which days I actually work; work_hours = my day.
     c.setdefault("work_days", "weekdays"); c.setdefault("work_hours", "9:00am-5:00pm")
@@ -103,6 +103,26 @@ def _src_gmail(cfg):
         snip = (m.get("snippet") or "")[:200]
         out.append({"label": subj, "text": "From %s: %s -- %s" % (frm[:60], subj, snip),
                     "ts": m.get("date") or m.get("ts") or "", "ref": "gmail"})
+    return out
+
+
+@source("drive_comments", "Doc comments")
+def _src_drive_comments(cfg):
+    """OPEN (unresolved) comment threads on recent Docs/Sheets/Slides, with the WHOLE thread so the brief has
+    the resolution context and never re-flags a comment that was already answered (Sarah). Server side already
+    drops resolved threads; here we hand the model the full back-and-forth + reply count, explicitly marked OPEN."""
+    cs = _call("drive_open_comments", 7) or []
+    out = []
+    for c in cs[:20]:
+        if not isinstance(c, dict): continue
+        thread = "%s commented on \"%s\": %s" % (c.get("author", "someone"), c.get("file", "a file"),
+                                                 (c.get("content") or "")[:220])
+        for r in (c.get("replies") or [])[:8]:
+            thread += " || reply from %s: %s" % (r.get("author", ""), (r.get("content") or "")[:160])
+        n = c.get("reply_count", 0)
+        thread += " [STILL OPEN/unresolved%s]" % (", %d repl%s so far" % (n, "y" if n == 1 else "ies") if n else ", no replies yet")
+        out.append({"label": ("comment on " + (c.get("file") or "a file"))[:80], "text": thread,
+                    "ts": c.get("created") or "", "ref": "drive"})
     return out
 
 
