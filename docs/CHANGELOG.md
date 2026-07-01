@@ -3,6 +3,24 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.89 -- 2026-06-30  (Sarah field-feedback batch 2: client/Granola matching + daily-brief tone & business hours)
+- **D -- client + Granola auto-matching now matches a folder NAME against a sender/attendee DOMAIN LABEL.** A
+  `Clients/Avonler` folder now auto-matches abe@avonler.com (and @mail.avonler.com) with zero config -- both in
+  email folder-matching (`_match_folders`, +2 "folder name matches sender domain") and Granola call-matching
+  (`match_client` fallback via `_alias_matches`). 'Big Sky' collapses to match @bigsky.com. Precise: skips
+  free-mail (never matches a client by 'gmail') + TLD-ish labels; no unanchored substrings. Also: manual "assign
+  to folder" no longer LEARNS a free-mail domain (would have matched all gmail senders to that client). Known
+  long-tail: a folder named after a PERSON with a different company domain still needs one manual file (which then
+  learns the domain) or dossier-derivation -- tracked for a follow-up.
+- **C2 -- daily brief tone: assistant, not manager.** The brief now writes as your trusted ASSISTANT reporting TO
+  you, never a boss: no scolding/lecturing, never "don't let this slip again", never implies you failed to do
+  something (was "my chief of staff", which drifted managerial -- Sarah's report).
+- **C3 -- daily brief respects business hours.** New configurable `work_days` + `work_hours` (Settings row in the
+  Brief lens; default Mon-Fri, 9-5). The brief now measures "overdue/unanswered/stale" in BUSINESS time only --
+  never counts nights, weekends, or non-working days -- so a Friday-evening item is not "days old" Monday morning.
+  (C1, reading full Google Drive comment THREADS + resolution so a handled comment isn't re-flagged, is a separate
+  in-progress capability -- next batch.)
+
 ## 0.99.88 -- 2026-06-30  (Sarah field-feedback batch 1/4: UI friction + deliverables discipline + email hygiene)
 - **A1 -- graceful End now closes the window.** After a session's handoff finishes, the standalone /term tab
   auto-returns to the dashboard (was: sat on a dead terminal you had to refresh/minimize -- Sarah's report). The

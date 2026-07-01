@@ -4510,7 +4510,8 @@ def brief_config_save(patch):
     try: cfg = json.load(open(_CC_CONFIG)) if os.path.isfile(_CC_CONFIG) else {}
     except Exception: cfg = {}
     mb = dict(cfg.get("morning_brief") or {})
-    for k in ("open_time", "lead_minutes", "days", "horizon_days", "length", "tone", "sources", "voice", "enabled"):
+    for k in ("open_time", "lead_minutes", "days", "horizon_days", "length", "tone", "sources", "voice", "enabled",
+              "work_days", "work_hours"):
         if k in patch: mb[k] = patch[k]
     cfg["morning_brief"] = mb
     try:
@@ -10466,6 +10467,27 @@ def _addrs(*vals):
         for m in _ADDR_RE.findall(v or ""): out.append(m.lower())
     return out
 
+# Free-mail providers never identify a client -- must not be learned as a folder domain or matched by label.
+# TLD-ish tokens are the non-identifying parts of a domain. Both mirror granola.py; keep them in sync.
+_FREE_MAIL = {"gmail.com", "googlemail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com",
+              "me.com", "mac.com", "aol.com", "proton.me", "protonmail.com", "live.com", "msn.com"}
+_TLDISH = {"com", "net", "org", "io", "co", "ai", "app", "dev", "www", "us", "uk", "gov", "edu", "biz",
+           "info", "me", "tv", "email", "mail"}
+
+def _name_domain_label_hit(deslug, pdoms):
+    """True if a de-slugged client-folder name equals a significant label of any participant domain -- so a
+    folder 'Avonler' matches abe@avonler.com (or @mail.avonler.com), and 'Big Sky' matches @bigsky.com, even
+    when nothing was wired (Sarah's miss). Mirrors granola's name<->domain-label matching so EMAIL and CALLS
+    agree. Skips free-mail + TLD-ish labels so a client is never matched by 'gmail'/'com'."""
+    cands = {c for c in (deslug, (deslug or "").replace(" ", "")) if len(c) >= 3}
+    if not cands: return False
+    for dom in pdoms:
+        if dom in _FREE_MAIL: continue
+        for lab in dom.split("."):
+            if lab and lab not in _TLDISH and lab in cands:
+                return True
+    return False
+
 def _match_folders(headers, links=None):
     """SHARED matcher (generalizes granola.match_client to email headers). headers={from,to,cc,subject,
     snippet}. Drops own/exclude-domain participants FIRST (precedence floor), then scores each folder:
@@ -10495,13 +10517,17 @@ def _match_folders(headers, links=None):
             if kw and kw.lower() in hay: score += 1; reasons.append('subject "' + kw + '"')
         deslug = re.sub(r"[-_]+", " ", os.path.basename(rel)).lower().strip()
         if deslug and deslug in subj: score += 1; reasons.append("name in subject")
+        if deslug and _name_domain_label_hit(deslug, pdoms): score += 2; reasons.append("folder name matches sender domain")
         if score > 0: ranked.append({"rel": rel, "name": f["name"], "score": score, "reasons": reasons})
-    # include folders with no registry entry but a name-in-subject hit (so unconfigured folders still suggest)
+    # include folders with no registry entry but a name-in-subject OR name-matches-sender-domain hit (so an
+    # unconfigured client folder still auto-suggests -- e.g. 'Avonler' for an @avonler.com sender)
     for f in folders:
         if f["rel"] in d["folders"]: continue
         deslug = re.sub(r"[-_]+", " ", os.path.basename(f["rel"])).lower().strip()
-        if deslug and deslug in subj:
-            ranked.append({"rel": f["rel"], "name": f["name"], "score": 1, "reasons": ["name in subject"]})
+        r = 0; why = []
+        if deslug and deslug in subj: r += 1; why.append("name in subject")
+        if deslug and _name_domain_label_hit(deslug, pdoms): r += 2; why.append("folder name matches sender domain")
+        if r: ranked.append({"rel": f["rel"], "name": f["name"], "score": r, "reasons": why})
     ranked.sort(key=lambda x: -x["score"])
     return ranked
 
@@ -10680,8 +10706,8 @@ def mail_assign(rel, thread_id, learn_domain=False, subject="", sender=""):
             dom = ""
             for a in _addrs(sender):
                 dom = a.split("@")[-1]; break
-            if dom and dom not in own and dom not in fe["domains"]:
-                fe["domains"].append(dom); learned = dom
+            if dom and dom not in own and dom not in _FREE_MAIL and dom not in fe["domains"]:
+                fe["domains"].append(dom); learned = dom   # never learn a free-mail domain -> would match all gmail senders to this client
         fe["updated"] = int(time.time())
         save(MAIL_LINKS, d)
     # durable, agent-visible record (client_map dated-notes convention) -- best-effort
@@ -16945,6 +16971,11 @@ async function loadBrief(){
     +'<input id="bfLead" value="'+(c.lead_minutes||60)+'" style="'+COMMS_INP+';width:48px;padding:2px 6px"> min · horizon '
     +'<input id="bfHor" value="'+(c.horizon_days||14)+'" style="'+COMMS_INP+';width:44px;padding:2px 6px"> days '
     +'<button class="mini" onclick="briefCfg({open_time:document.getElementById(\'bfOpen\').value,lead_minutes:+document.getElementById(\'bfLead\').value,horizon_days:+document.getElementById(\'bfHor\').value})">save</button></div>';
+  h+='<div class="meta sub" style="margin:6px 0">Working days '
+    +'<select id="bfWDays" style="'+COMMS_INP+';padding:2px 6px">'+[['weekdays','Mon–Fri'],['all','Every day']].map(function(o){return '<option value="'+o[0]+'"'+((c.work_days||'weekdays')==o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+'</select>'
+    +' · hours <input id="bfWHrs" value="'+esc(c.work_hours||'9:00am-5:00pm')+'" style="'+COMMS_INP+';width:150px;padding:2px 6px"> '
+    +'<button class="mini" onclick="briefCfg({work_days:document.getElementById(\'bfWDays\').value,work_hours:document.getElementById(\'bfWHrs\').value})">save</button>'
+    +' <span class="sub">— the brief judges “overdue/unanswered” in business time only (never counts nights, weekends, or non-working days)</span></div>';
   h+='<div class="meta sub" style="margin:6px 0">Sources: '+src.map(function(s){return '<label style="margin-right:10px"><input type="checkbox" '+(s.enabled?'checked':'')+' onchange="briefToggleSrc(\''+s.name+'\',this.checked)"> '+esc(s.label)+'</label>';}).join('')+'</div>';
   h+='<div class="meta sub" style="margin:6px 0">Voice: <label><input type="checkbox" '+(v.enabled?'checked':'')+' onchange="briefVoice({enabled:this.checked})"> on</label> · '
     +'<select onchange="briefVoice({provider:this.value})" style="'+COMMS_INP+';padding:2px 6px">'+['elevenlabs','openai','say'].map(function(p){return '<option value="'+p+'"'+(v.provider==p?' selected':'')+'>'+p+'</option>';}).join('')+'</select>'

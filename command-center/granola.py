@@ -250,9 +250,9 @@ def match_client(meeting):
         for a in ([slug] + list(aliases or [])):
             if _alias_matches(a, title, domains):
                 return by_slug[slug.lower()]
-    for nm, p in dirs:                          # fuzzy fallback: folder name as a whole word in the title
-        words = re.sub(r"[-_]+", " ", nm).strip()
-        if words and _word_in(words, title):
+    for nm, p in dirs:                          # fuzzy fallback: folder name as a whole word in the title OR an
+        words = re.sub(r"[-_]+", " ", nm).strip()   # attendee email-domain label (so 'Avonler' matches @avonler.com)
+        if words and (_alias_matches(words, title, domains) or _alias_matches(words.replace(" ", ""), title, domains)):
             return (nm, p)
     return (None, None)
 

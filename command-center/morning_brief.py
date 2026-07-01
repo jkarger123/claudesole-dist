@@ -31,6 +31,9 @@ def _cfg():
     c.setdefault("days", "weekdays"); c.setdefault("horizon_days", 14)
     c.setdefault("length", "short"); c.setdefault("tone", "warm")
     c.setdefault("sources", ["calendar", "gmail", "tasks", "granola"])
+    # BUSINESS-HOURS awareness (Sarah): so the brief never counts evenings/weekends/non-working days as elapsed
+    # time when judging "overdue"/"unanswered". work_days = which days I actually work; work_hours = my day.
+    c.setdefault("work_days", "weekdays"); c.setdefault("work_hours", "9:00am-5:00pm")
     v = dict(c.get("voice") or {})
     v.setdefault("enabled", True); v.setdefault("provider", "openai"); v.setdefault("voice_id", "")
     v.setdefault("autoplay", True); c["voice"] = v
@@ -181,20 +184,40 @@ def _voice_profile():
         return ""
 
 
+def _work_clause(cfg):
+    """Tell the brief to reason about elapsed time in BUSINESS hours only (Sarah: a Friday-evening comment is
+    not 'days old' on Monday). Uses configurable work_days + work_hours."""
+    wd = cfg.get("work_days", "weekdays")
+    days = ("Monday through Friday (I do NOT work weekends)" if wd == "weekdays"
+            else "every day" if wd == "all" else str(wd))
+    hrs = cfg.get("work_hours", "9:00am-5:00pm")
+    now = time.strftime("%A %-I:%M%p")
+    return ("=== MY WORKING TIME (reason about elapsed time in BUSINESS hours ONLY) ===\n"
+            "It is now %s. My working days are %s; my working hours are %s. When you judge whether anything is "
+            "'overdue', 'unanswered', 'sitting', 'stale', or 'ignored', count ONLY business time within those "
+            "days and hours -- NEVER count evenings, nights, weekends, or non-working days. Something that "
+            "arrived late on a Friday or after hours is NOT 'days old' the next working morning; treat it as just "
+            "arrived. Never imply I was slow, dropped something, or let anything slip based on non-working time.\n\n"
+            % (now, days, hrs))
+
 def _brief_prompt(blocks, cfg, style=""):
     when = time.strftime("%A, %B %-d")
     length = "2 short paragraphs" if cfg.get("length") == "short" else "3 paragraphs"
-    tone = "warm and personal, like a sharp chief of staff" if cfg.get("tone") == "warm" else "crisp and businesslike"
+    tone = "warm and personal" if cfg.get("tone") == "warm" else "crisp and businesslike"
     return (style +
-            "You are my chief of staff writing my MORNING BRIEF for %s. Voice: %s. Write %s of flowing prose "
-            "(NO headers, NO bullet lists, NO markdown) that I'll hear read aloud as I start work. Cover, in "
-            "this order and only where there's real signal: (1) the SHAPE of today -- my meetings and the 2-3 "
-            "things that actually matter; (2) what's COMING UP over the next week or two worth prepping for; "
-            "(3) any watch-outs or prep (e.g. a call where last time we discussed X, or a task going overdue). "
-            "Be specific and cite real names/times from the data. Do NOT invent anything not in the data. If a "
-            "section has nothing real, skip it. Keep it tight -- this is spoken, not a report.\n\n"
+            "You are MY trusted assistant writing my MORNING BRIEF for %s. You work FOR me and report TO me: be "
+            "helpful and %s, like a sharp assistant briefing the person they support. You are NOT my manager -- "
+            "never take a scolding, lecturing, or bossy tone, never say things like 'don't let this slip again', "
+            "and never imply I failed to do something. Surface what's there plainly and let me decide what matters. "
+            "Write %s of flowing prose (NO headers, NO bullet lists, NO markdown) that I'll hear read aloud as I "
+            "start work. Cover, in this order and only where there's real signal: (1) the SHAPE of today -- my "
+            "meetings and the 2-3 things that actually matter; (2) what's COMING UP over the next week or two worth "
+            "prepping for; (3) any watch-outs or prep (e.g. a call where last time we discussed X, or a task with a "
+            "real upcoming deadline). Be specific and cite real names/times from the data. Do NOT invent anything "
+            "not in the data. If a section has nothing real, skip it. Keep it tight -- this is spoken, not a "
+            "report.\n\n%s"
             "=== MY DATA (grouped by source; newest-ish first) ===\n%s\n=== END DATA ===\n"
-            "Now write the brief as plain spoken prose." % (when, tone, length, blocks))
+            "Now write the brief as plain spoken prose." % (when, tone, length, _work_clause(cfg), blocks))
 
 
 def _synthesize(blocks, cfg, style=""):
