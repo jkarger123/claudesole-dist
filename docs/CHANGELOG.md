@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.107 -- 2026-07-01  (payload is now a pure function of the SESSION -- identical from any co-located dashboard; auto-compact headroom)
+- **Cross-instance payload parity.** Many ClaudeFather instances share ONE tmux server on a box (the source trio
+  hptuners/overseer/carsearch + co-located tenant installs atem/homeassistant/shopos), and the unscoped overseer
+  sees ALL their sessions -- but a session's payload (its enabled tools especially) is a property of the NODE that
+  launched it, so computing it against the VIEWER gave a different number per dashboard. Each instance now
+  publishes a tiny descriptor (`/tmp/cf-instances/<id>.json`: project_root + local port) at boot; `context_package`
+  resolves a session's OWNING instance by cwd and, when it's a different co-located node, PROXIES the payload to it
+  (localhost, short timeout, falls back to local). So the popup + the per-session chip read IDENTICALLY whether
+  viewed from the node or Mission Control. The chip's computation is NON-BLOCKING (warms in a background thread,
+  never stalls the Sessions poll; a transient miss retries in 20s instead of caching wrong for 5m).
+- **Auto-compact default lowered 95% -> 90%.** At 95% the graceful handoff-write (which itself burns context) was
+  peaking a huge session to 99% before `/compact` ran -- a near-miss with Claude Code's own hard-limit compaction.
+  90% gives the handoff room to finish first. Per-node `autocompact_pct` overrides still win.
+
 ## 0.99.106 -- 2026-07-01  (the per-session payload CHIP now shows the real per-trip weight, matching the popup, on every dashboard)
 - The little context-package chip on each session was a single **node-level baseline** (`_payload_baseline` =
   system briefing + ROOT CLAUDE.md + tools), the SAME number on every session and ignoring the per-session cwd

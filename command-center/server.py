@@ -2443,24 +2443,31 @@ def _payload_baseline():
     _PAYLOAD_BASE["ts"] = now
     return _PAYLOAD_BASE["tok"]
 
-_PAYLOAD_SESS = {}   # realpath(cwd) -> (ts, tokens): per-session payload weight, cached BY CWD (all sessions in
-                     # one folder share the identical CLAUDE.md cascade), so the Sessions poll stays cheap.
+_PAYLOAD_SESS = {}       # realpath(cwd) -> (ts, tokens): per-session payload weight, cached BY CWD (all sessions
+                         # in one folder share the identical CLAUDE.md cascade), so the Sessions poll stays cheap.
+_PAYLOAD_WARMING = set()  # cwds whose (possibly cross-instance) computation is in flight -- dedupe warm threads
 def _payload_tokens_for_session(name):
     """The REAL per-session chip number = the SAME total the context_package popup shows (system briefing + the
-    CLAUDE.md cascade walked from THIS session's cwd + enabled tools). Anchored on the session's own cwd (not the
-    viewing instance's PROJECT), so the chip is accurate AND identical whether viewed from the node or the
-    overseer. Cached by cwd (TTL 5m). Falls back to the node baseline if the cwd can't be resolved."""
+    CLAUDE.md cascade from THIS session's cwd + the OWNING node's enabled tools). NON-BLOCKING: the Sessions poll
+    must never wait on the (possibly cross-instance, proxied) computation, so on a cold/expired cache we return a
+    fast fallback NOW and WARM the exact value in a background thread -> the chip converges to the right number
+    within a poll cycle, identical whether viewed from the node or the overseer. Cached by cwd (TTL 5m)."""
     now = time.time()
     cwd = (_pane_cwd(name) if name else None) or None
     key = os.path.realpath(cwd) if cwd else "<root>"
-    c = _PAYLOAD_SESS.get(key)
-    if c and now - c[0] < 300: return c[1]
-    tok = 0
-    try: tok = context_package(name, None).get("total_tokens", 0)
-    except Exception: pass
-    if not tok: tok = _payload_baseline()
-    _PAYLOAD_SESS[key] = (now, tok)
-    return tok
+    c = _PAYLOAD_SESS.get(key)                                   # (ts, tok, good): a REAL value holds 5m; a
+    if c and now - c[0] < (300 if c[2] else 20): return c[1]     # fallback (proxy/cwd miss) expires in 20s -> retries
+    if key not in _PAYLOAD_WARMING:                              # kick a one-shot background warm (no duplicates)
+        _PAYLOAD_WARMING.add(key)
+        def _warm(nm=name, k=key):
+            try:
+                t = 0
+                try: t = context_package(nm, None).get("total_tokens", 0)
+                except Exception: pass
+                _PAYLOAD_SESS[k] = (time.time(), t or _payload_baseline(), bool(t))
+            finally: _PAYLOAD_WARMING.discard(k)
+        threading.Thread(target=_warm, daemon=True).start()
+    return c[1] if c else _payload_baseline()                    # stale value if we have one, else the node baseline
 
 # ---- Pipeline Live-View -------------------------------------------------------
 # A GENERIC "where is the run right now" lens. Any node whose pipeline writes the standard contract to
@@ -9488,6 +9495,58 @@ def _toklen(s):
     """Rough token estimate (~4 chars/token) -- good enough for the context-package size bars."""
     return max(0, len(s or "")) // 4
 
+# --- Co-located instance ownership: many ClaudeFather instances share ONE tmux server on this Mac (the source
+# trio hptuners/overseer/carsearch + the co-located tenant installs atem/homeassistant/shopos). The unscoped
+# overseer SEES every one of their sessions, but a session's payload (enabled tools especially) is a property of
+# the NODE that launched it -- so computing it against the VIEWER gave a different answer per dashboard. Each
+# instance publishes a tiny descriptor (project_root + local port); a viewer resolves a session's OWNING instance
+# by cwd and defers the payload to it, so the popup + chip read IDENTICALLY everywhere. Shared via /tmp (same Mac).
+_COLO_DIR = "/tmp/cf-instances"
+def _colo_publish():
+    try:
+        os.makedirs(_COLO_DIR, exist_ok=True)
+        p = os.path.join(_COLO_DIR, re.sub(r"[^A-Za-z0-9_-]", "", INSTANCE_ID or "main") + ".json")
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        os.write(fd, json.dumps({"id": INSTANCE_ID, "project_root": os.path.realpath(PROJECT), "port": PORT, "ts": int(time.time())}).encode())
+        os.close(fd)
+    except Exception: pass
+
+def _owning_instance(cwd):
+    """The co-located instance whose project_root is the LONGEST prefix of cwd. None when THIS instance owns it
+    (compute locally) or none is found. Lets a viewer defer a session's payload to the node that actually runs it."""
+    if not cwd: return None
+    try: rp = os.path.realpath(cwd)
+    except Exception: return None
+    best = None; blen = -1; now = time.time()
+    try:
+        for fn in os.listdir(_COLO_DIR):
+            if not fn.endswith(".json"): continue
+            try: d = json.load(open(os.path.join(_COLO_DIR, fn)))
+            except Exception: continue
+            if now - float(d.get("ts") or 0) > 30 * 86400: continue          # ignore long-dead descriptors
+            pr = d.get("project_root") or ""
+            try: pr = os.path.realpath(pr) if pr else ""
+            except Exception: pr = ""
+            if pr and (rp == pr or rp.startswith(pr.rstrip("/") + "/")) and len(pr) > blen:
+                best, blen = d, len(pr)
+    except Exception: pass
+    if not best or best.get("id") == INSTANCE_ID or not best.get("port") or int(best.get("port") or 0) == PORT:
+        return None
+    return best
+
+def _proxy_context_package(port, sess):
+    """Fetch a session's payload FROM its owning co-located node (localhost) so the viewer shows the node's own
+    truth. Short timeout + fail to None (caller falls back to local computation) so it never hangs the poll."""
+    try:
+        import urllib.request, urllib.parse
+        url = "http://127.0.0.1:%d/api/context-package?session=%s" % (int(port), urllib.parse.quote(sess or ""))
+        req = urllib.request.Request(url, headers={"Cookie": "cc_auth=%s" % (AUTH_TOKEN or "3673")})
+        with urllib.request.urlopen(req, timeout=1.8) as r:
+            d = json.loads(r.read().decode())
+            if isinstance(d, dict) and d.get("ok"): d["owner_port"] = int(port); return d
+    except Exception: pass
+    return None
+
 def context_package(session=None, subject=None):
     """DEMYSTIFY THE PAYLOAD: everything (beyond your message) that goes to an agent on a trip -- the system
     briefing ClaudeFather injects, the CLAUDE.md chain Claude Code auto-loads, the cited context brief, and the
@@ -9495,6 +9554,10 @@ def context_package(session=None, subject=None):
     framework loads (Claude Code's own base system prompt + the running conversation aren't visible here)."""
     sess = re.sub(r"[^A-Za-z0-9_-]", "", session or "")[:64]
     cwd = (_pane_cwd(sess) if sess else None) or None
+    owner = _owning_instance(cwd)                    # session runs on a DIFFERENT co-located node -> ask IT (so
+    if owner:                                        # tools/config reflect the owning node, identical from any dashboard)
+        prox = _proxy_context_package(owner.get("port"), sess)
+        if prox: return prox
     subj = (subject or (os.path.basename(cwd.rstrip("/")) if cwd else "") or "").strip()
     comps = []
     try:
@@ -23429,8 +23492,8 @@ _AUTOCOMPACT_LAST = {}    # session name -> ts of last auto-fire (cooldown, so w
                           # post-compact context measurement still lags on the last assistant turn)
 def _autocompact_on():    return CC.get("autocompact", True) is not False
 def _autocompact_pct():
-    try: return max(50.0, min(99.0, float(CC.get("autocompact_pct", 95))))
-    except Exception: return 95.0
+    try: return max(50.0, min(99.0, float(CC.get("autocompact_pct", 90))))
+    except Exception: return 90.0
 def _autocompact_scan():
     if not _autocompact_on(): return
     thresh = _autocompact_pct()
@@ -23568,6 +23631,8 @@ if __name__ == "__main__":
     try: _vault_materialize_google()   # re-hydrate google_oauth.json + tokens/ from the vault for the external MCP server (vault stays source of truth)
     except Exception: pass
     try: _onboard_first_boot()         # if provisioning queued onboarding, run it once -> structures the project + hands to the CoS
+    except Exception: pass
+    try: _colo_publish()               # publish this instance's {project_root, port} so co-located viewers resolve payload ownership
     except Exception: pass
     threading.Thread(target=_context_backfill_loop, daemon=True).start()   # CONTEXT LAYER: ingest existing surfaces into the store (idempotent, every 15 min)
     threading.Thread(target=_housekeeping_loop, daemon=True).start()        # HOUSEKEEPING: regen module map + Doctor sweep + surface new issues (hourly, idempotent)
