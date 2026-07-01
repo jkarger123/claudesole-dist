@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.106 -- 2026-07-01  (the per-session payload CHIP now shows the real per-trip weight, matching the popup, on every dashboard)
+- The little context-package chip on each session was a single **node-level baseline** (`_payload_baseline` =
+  system briefing + ROOT CLAUDE.md + tools), the SAME number on every session and ignoring the per-session cwd
+  cascade -- so it read ~8k on a node and a flat ~5k for every session on the overseer, while the click-through
+  popup (correctly, after 0.99.105) showed ~36k. Now `token-usage` returns `payload_by_sess` -- a PER-SESSION
+  weight computed with the same cwd-anchored cascade as the popup (`_payload_tokens_for_session`, cached by cwd
+  so the Sessions poll stays light) -- and the chip renders its own session's number. Chip == popup, and both are
+  consistent whether viewed from the node or Mission Control (the only residual cross-dashboard delta is the
+  per-node 'enabled tools' line, which genuinely differs by which extensions each instance has enabled).
+
 ## 0.99.105 -- 2026-07-01  (two context-accuracy fixes: catch inline-backtick @imports; payload cascade anchored on the session's own tree)
 - **Doctor now catches the `@import` footgun even inside inline `backticks`.** A bare `@path` in a CLAUDE.md
   (e.g. a `curl --data-binary @_dist/portal.html` example) is parsed by Claude Code as a MEMORY IMPORT and pulls

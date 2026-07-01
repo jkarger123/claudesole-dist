@@ -2422,21 +2422,45 @@ def token_usage_payload():
         pct = 100.0 * (CTX_WINDOW - used) / CTX_WINDOW
         sctx[s["name"]] = {"used": used, "window": CTX_WINDOW, "pct": max(0.0, min(100.0, pct))}
     up = usage_payload()
+    payload_by = {}                                  # PER-SESSION payload weight (the chip) = the exact total the
+    for s in sess:                                   # context_package popup shows, cwd-anchored + cwd-cached. Only
+        nm = s["name"]                               # for sessions we render a chip for (those with context data).
+        if nm in sctx: payload_by[nm] = _payload_tokens_for_session(nm)
     return {"totals": up["totals"], "sessions": sctx, "spark": [b["tok"] for b in up["series"]["24h"]],
-            "payload_tokens": _payload_baseline(),   # ~node-level 'payload' weight for the per-session chip (cheap, cached)
+            "payload_tokens": _payload_baseline(),   # node-level fallback (a session with no resolvable cwd)
+            "payload_by_sess": payload_by,           # {session -> real per-trip payload weight}: matches the popup + is consistent across dashboards
             "series": {k: [b["tok"] for b in v] for k, v in up["series"].items()}}   # per-range tok buckets for the strip's range selector
 
 _PAYLOAD_BASE = {"ts": 0.0, "tok": 0}
 def _payload_baseline():
-    """Cheap node-level estimate of the per-trip 'payload' weight (system briefing + root CLAUDE.md + enabled
-    tools) for the per-session context chip. Cached ~5 min so the Sessions poll stays light; the EXACT
-    per-session breakdown is computed on click via context_package()."""
+    """Cheap node-level FALLBACK estimate of the per-trip 'payload' weight (system briefing + root CLAUDE.md +
+    enabled tools) -- used only for a session with no resolvable cwd. The real per-session chip uses
+    _payload_tokens_for_session(). Cached ~5 min so the Sessions poll stays light."""
     now = time.time()
     if now - _PAYLOAD_BASE["ts"] < 300 and _PAYLOAD_BASE["tok"]: return _PAYLOAD_BASE["tok"]
     try: _PAYLOAD_BASE["tok"] = context_package(None, None).get("total_tokens", 0)
     except Exception: pass
     _PAYLOAD_BASE["ts"] = now
     return _PAYLOAD_BASE["tok"]
+
+_PAYLOAD_SESS = {}   # realpath(cwd) -> (ts, tokens): per-session payload weight, cached BY CWD (all sessions in
+                     # one folder share the identical CLAUDE.md cascade), so the Sessions poll stays cheap.
+def _payload_tokens_for_session(name):
+    """The REAL per-session chip number = the SAME total the context_package popup shows (system briefing + the
+    CLAUDE.md cascade walked from THIS session's cwd + enabled tools). Anchored on the session's own cwd (not the
+    viewing instance's PROJECT), so the chip is accurate AND identical whether viewed from the node or the
+    overseer. Cached by cwd (TTL 5m). Falls back to the node baseline if the cwd can't be resolved."""
+    now = time.time()
+    cwd = (_pane_cwd(name) if name else None) or None
+    key = os.path.realpath(cwd) if cwd else "<root>"
+    c = _PAYLOAD_SESS.get(key)
+    if c and now - c[0] < 300: return c[1]
+    tok = 0
+    try: tok = context_package(name, None).get("total_tokens", 0)
+    except Exception: pass
+    if not tok: tok = _payload_baseline()
+    _PAYLOAD_SESS[key] = (now, tok)
+    return tok
 
 # ---- Pipeline Live-View -------------------------------------------------------
 # A GENERIC "where is the run right now" lens. Any node whose pipeline writes the standard contract to
@@ -16775,7 +16799,7 @@ function sparkSVG(arr,w,h,gid){w=w||128;h=h||28;gid=gid||'sg';if(!arr||!arr.leng
 function cssid(name){return (name||'').replace(/[^A-Za-z0-9]/g,'_');}
 function ctxCol(pct){return pct<10?'#f85149':(pct<20?'#d29922':'#3fb950');}
 function ctxChip(name){const c=(TOKDATA.sessions||{})[name];if(!c)return '';const pct=Math.round(c.pct);const col=ctxCol(pct);
-  var pl=TOKDATA.payload_tokens||0;
+  var pl=(TOKDATA.payload_by_sess||{})[name]||TOKDATA.payload_tokens||0;
   var plb=pl?('<span class="plchip" title="Context package: ~'+fmtTok(pl)+' tokens go to this agent EVERY trip BEYOND your message (system briefing + CLAUDE.md + context brief + tools). Click to see exactly what\'s in the payload." onclick="event.stopPropagation();ctxPkgPopup(\''+esc(name)+'\')">&#128230; '+fmtTok(pl)+'</span>'):'';
   return '<span class="ctxchip" id="ctx_'+cssid(name)+'" title="context: '+fmtTok(c.used)+' / '+fmtTok(c.window)+' used · '+pct+'% free" style="color:'+col+';border-color:'+col+'55">'+pct+'%</span>'+plb;}
 // Click the 📦 by a session's context % -> a popup of the EXACT payload for THAT session (everything sent each trip).
