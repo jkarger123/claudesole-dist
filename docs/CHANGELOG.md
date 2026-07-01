@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.93 -- 2026-06-30  (BUG: extension Setup button opened an invisible session on scoped nodes)
+- **FIX -- Marketplace "Set up" now actually opens the setup-agent session on a scoped node (AFP).** The setup
+  agent launches in the EXTENSION dir (under the install root), which is NOT under `PROJECT` on a node where
+  `PROJECT != CC_HOME` (e.g. AFP, whose project is the agency tree). `tmux_sessions()` scope-filtered it out, so
+  the session was created but invisible -- the workspace then reconciled that pane away and fell back to the
+  session already open (Sarah: "it's just the same session it was already on"). Now an `ext-*` session is always
+  treated as in-scope for the node that launched it (same exception the chief + Ralph loops already had). Affects
+  every extension's Set up button on any scoped node, including the new airtable one.
+
 ## 0.99.92 -- 2026-06-30  (Sarah field-feedback batch 5: one-command Google activation + NEW Airtable extension)
 - **F/G1 activation is now ONE command (google-workspace v2.2.1).** New `bin/enable-services.sh` does BOTH steps
   in a single run: idempotently adds the services (default `sheets:full docs:full forms:full`) to the LIVE

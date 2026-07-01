@@ -2,6 +2,7 @@
 
 <!-- CC:CHILDREN auto-managed by the Command Center; do not hand-edit -->
 **Sub-tools in this folder** (you can launch into any of these; file a learning to the one it belongs to):
+- `airtable/` -- A ClaudeFather integration extension (extension.json id airtable) that lets an agent read + EDIT Airtable
 - `google-workspace/` -- A ClaudeFather integration extension (extension.json id google-workspace). It does two things:
 - `granola/` -- Turn Granola call transcripts into REVIEWED updates to the agency tree: a dated note in the matched
 - `incident-commander/payload/` -- I am the Incident Commander for this ClaudeFather. Scoped agent-tool: my own dir, this charter, tools/,

@@ -1965,6 +1965,11 @@ def tmux_sessions():
             if not mine and nm.startswith("ralph-"):        # a Ralph loop THIS node owns (its dir is in our RALPHDIR)
                 _ln = _rname(nm[len("ralph-"):])            # -> show it in Sessions so you can watch it live, even
                 mine = bool(_ln and os.path.isdir(os.path.join(RALPHDIR, _ln)))   # though its cwd is the engine dir
+            if not mine and nm.startswith("ext-"):          # this node's OWN extension-setup session runs in the
+                mine = True                                 # extension dir (under the install root, NOT under PROJECT)
+                                                            # -> a scoped node (PROJECT != CC_HOME, e.g. AFP) would
+                                                            # otherwise hide it, so the Setup button opened an invisible
+                                                            # session and the pane fell back to the existing one.
             if SCOPE_SESSIONS and not mine: continue        # a scoped node never shows another project's sessions
             kind = _session_kind(nm)
             lbl = _session_label(nm); node = ""
