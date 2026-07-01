@@ -2028,9 +2028,12 @@ def tmux_sessions():
             cwd = cwds.get(nm, "")
             is_chief = (nm == globals().get("CHIEF"))
             mine = is_chief or _session_in_project(cwd)     # belongs to THIS console (its chief + its project work)
-            if not mine and nm.startswith("ralph-"):        # a Ralph loop THIS node owns (its dir is in our RALPHDIR)
-                _ln = _rname(nm[len("ralph-"):])            # -> show it in Sessions so you can watch it live, even
-                mine = bool(_ln and os.path.isdir(os.path.join(RALPHDIR, _ln)))   # though its cwd is the engine dir
+            if not mine and nm.startswith("ralph-"):        # a Ralph loop -> owned by the node whose PROJECT it runs
+                _ln = _rname(nm[len("ralph-"):])            # ON (loop.json records that cwd). RALPHDIR is CC_HOME/
+                _lcwd = _rjson(os.path.join(RALPHDIR, _ln, "loop.json")).get("cwd", "") if _ln else ""  # data/ralph,
+                mine = bool(_lcwd and _session_in_project(_lcwd))    # SHARED across co-located trio nodes, so the old
+                                                            # dir-exists test claimed EVERY node's loop -> it leaked
+                                                            # onto every trio node's taskbar. cwd-in-project scopes it.
             if not mine and nm.startswith("ext-"):          # this node's OWN extension-setup session runs in the
                 mine = True                                 # extension dir (under the install root, NOT under PROJECT)
                                                             # -> a scoped node (PROJECT != CC_HOME, e.g. AFP) would
@@ -8912,6 +8915,7 @@ try:
                         # lambda: voice_profile_get is defined LATER in the file than this init call site,
                         # so reference it lazily (resolved at generate-time, not module-exec time).
                         "voice_profile": (lambda: voice_profile_get()),   # write the brief in the owner's VoiceMatch style
+                        "notify": (lambda m: notify_send(m)),   # fail-loud: a failed/empty scheduled brief pings the operator
                         "notes_recent": (lambda: notebook.recent_notes() if notebook else [])})  # notebook -> brief source
 except Exception as _e: print("[morning_brief] init failed:", _e)
 try:
@@ -23541,6 +23545,21 @@ def _autocompact_loop():
         except Exception: pass
         time.sleep(60)
 
+def _brief_catchup_loop():
+    """SELF-HEAL a missed/failed Morning Brief: if today is a scheduled brief day, the time has passed, and there's
+    still no brief for today, re-attempt (bounded, deduped). A transient 8am failure (a slow/limited synthesis, a
+    process restart mid-generation) no longer silently costs the whole day -- the brief lands late instead."""
+    if not morning_brief: return
+    time.sleep(300)
+    while True:
+        try:
+            if morning_brief.mb_should_catchup():
+                print("[morning_brief] catch-up: no brief for today past scheduled time -> regenerating")
+                morning_brief.mb_generate()
+        except Exception as _e:
+            print("[morning_brief] catch-up error:", _e)
+        time.sleep(1200)   # every 20 min
+
 if __name__ == "__main__":
     print("%s Command Center on http://0.0.0.0:%d  (tailnet http://%s:%d)" % (BRAND, PORT, STUDIO_TS, PORT))
     # Lock secret-bearing per-deployment files to owner-only (0600) -- fast + security-critical, so it stays
@@ -23637,6 +23656,7 @@ if __name__ == "__main__":
     threading.Thread(target=_license_activate_loop, daemon=True).start() # LICENSE: a sold box auto-activates from its configured activation server on boot if unlicensed
     threading.Thread(target=_fleet_converge_loop, daemon=True).start() # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     threading.Thread(target=_routines_loop, daemon=True).start()       # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts
+    threading.Thread(target=_brief_catchup_loop, daemon=True).start()  # SELF-HEAL: re-attempt a missed/failed Morning Brief so a transient 8am failure doesn't silently cost the day
     _ensure_opnote_worker()                                            # OPERATOR NOTES: drain any queued human-to-human notes (durable across restart)
     threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
     threading.Thread(target=_gmail_sync_loop, daemon=True).start()      # keep recently-viewed Gmail lists warm (cache + outage fallback)

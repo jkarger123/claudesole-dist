@@ -3,6 +3,25 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.109 -- 2026-07-01  (Morning Brief FAIL-LOUD + self-heal: a missed/failed brief can no longer fail silently)
+- **Root cause of a silently-missed brief.** The scheduled routine fires `cc-brief`, which POSTed `/api/brief-generate`
+  and got an instant `{"started":true}` (generation is a detached background thread), so `cc-brief` exited 0 and the
+  routine logged **"ok"** -- even when `mb_generate` then produced nothing. And `mb_generate` only PERSISTED state at
+  the very end (after slow synthesis+TTS), so a failure/timeout/process-kill mid-generation saved nothing and left
+  YESTERDAY's brief showing, with no error and no alert. Observed live: routine "ok" at 08:00 while the module's own
+  `last_run` never advanced past the prior day.
+- **`mb_generate` is now fail-loud.** It writes a `running` checkpoint UP FRONT (so `last_run` advances immediately and
+  a hang/kill shows as a stuck `running`, never a phantom `ok`), wraps everything in try/except, and EVERY exit path
+  (empty sources / synthesis-failure sentinel / exception) persists `last_status`+`last_error` and **alerts the
+  operator** (Telegram/notify, newly injected). A failed synthesis is no longer saved AS a brief. A concurrency guard
+  stops overlapping generations from piling up.
+- **`cc-brief` now VERIFIES the outcome.** After kicking off generation it polls to a terminal status and exits
+  non-zero if today's brief wasn't produced -- so the scheduled routine marks itself blocked and fires its failure
+  alert instead of reporting a phantom success.
+- **Self-heal catch-up loop.** A new bounded sweep re-attempts a missed/failed brief when the scheduled time has
+  passed and there's still none for today -- a transient 8am failure (slow/limited synthesis, a restart mid-run) now
+  lands the brief late instead of losing the whole day.
+
 ## 0.99.108 -- 2026-07-01  (terminal scroll polish: 'jump to live' auto-hides at the bottom; copy toast is gold, not green)
 - **'Jump to live' pill now clears when you scroll back down to the bottom.** The pill only hid on an explicit tap
   before -- manually wheeling/swiping all the way back to the live screen left `inMode` set, so the pill lingered

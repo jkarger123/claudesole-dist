@@ -312,37 +312,92 @@ def _tts(text, cfg):
 
 
 # ---- generate: the routine + the lens call this --------------------------------------------------------
+def _alert(kind, msg):
+    """Ping the operator when a scheduled brief fails/empties -- so a missed brief is NEVER silent. The server
+    injects `notify` (Telegram/in-process notify_send) at init; no-op if not wired (e.g. tests)."""
+    fn = _CTX.get("notify")
+    if not callable(fn): return
+    try: fn("Morning Brief %s -- %s" % (kind, (msg or "")[:240]))
+    except Exception: pass
+
+
 def mb_generate():
+    """Assemble -> synthesize -> voice the brief. FAIL-LOUD: every exit persists last_status/last_error and a
+    failure alerts the operator. A 'running' checkpoint is written up front so last_run advances immediately and
+    a hang/process-kill shows as a stuck 'running' -- never a phantom 'ok' with yesterday's brief still showing.
+    (Silent failure was the root cause of a missed brief: fire-and-forget thread + persist-only-at-end hid it.)"""
     cfg = _cfg()
     st = _load_state()
-    st["last_run"] = int(time.time())
-    sel = [s for s in (cfg.get("sources") or []) if s in SOURCES]
-    blocks, used, src_errors = [], [], []
-    for name in sel:
-        try:
-            items = SOURCES[name]["fn"](cfg) or []           # one bad source must NEVER kill the whole brief
-        except Exception as e:
-            src_errors.append("%s: %s" % (name, str(e)[:80])); continue
-        if not items: continue
-        used.append({"source": name, "count": len(items)})
-        lines = "\n".join("- " + (i.get("text") or "") for i in items[:25])
-        blocks.append("## %s\n%s" % (SOURCES[name]["label"], lines))
-    if not blocks:
-        st["last_status"] = "empty"; st["last_error"] = "no data from the selected sources (check Google/Granola setup + sources)"
-        _save_state(st); return {"ok": False, "error": st["last_error"]}
-    text = _synthesize("\n\n".join(blocks), cfg, _voice_profile())
-    audio_fn, prov = _tts(text, cfg)
-    brief = {"id": "mb-%d" % int(time.time()), "ts": int(time.time()),
-             "date": time.strftime("%Y-%m-%d"), "text": text, "sources_used": used,
-             "audio": audio_fn, "voice_provider": prov if audio_fn else None,
-             "voice_note": (None if audio_fn else prov),
-             "voice_fallback": _LAST_TTS_FALLBACK or None,
-             "src_errors": src_errors or None, "unread": True}   # unread -> the dashboard surfaces it on open
-    st["briefs"].insert(0, brief); st["briefs"] = st["briefs"][:60]
-    st["last_status"] = "ok"; st["last_error"] = ""
-    _save_state(st)
-    return {"ok": True, "id": brief["id"], "audio": bool(audio_fn), "voice": prov, "sources_used": used,
-            "chars": len(text)}
+    # concurrency guard: a slow synthesis + a catch-up sweep (or a manual retry) must not run two at once
+    if st.get("last_status") == "running" and (int(time.time()) - int(st.get("last_run", 0) or 0)) < 600:
+        return {"ok": False, "error": "already generating (started %ds ago)" % (int(time.time()) - int(st.get("last_run", 0) or 0))}
+    st["last_run"] = int(time.time()); st["last_status"] = "running"; st["last_error"] = ""
+    _save_state(st)                                          # CHECKPOINT up front (survives a mid-synthesis kill)
+    try:
+        sel = [s for s in (cfg.get("sources") or []) if s in SOURCES]
+        blocks, used, src_errors = [], [], []
+        for name in sel:
+            try:
+                items = SOURCES[name]["fn"](cfg) or []       # one bad source must NEVER kill the whole brief
+            except Exception as e:
+                src_errors.append("%s: %s" % (name, str(e)[:80])); continue
+            if not items: continue
+            used.append({"source": name, "count": len(items)})
+            lines = "\n".join("- " + (i.get("text") or "") for i in items[:25])
+            blocks.append("## %s\n%s" % (SOURCES[name]["label"], lines))
+        if not blocks:
+            err = "no data from the selected sources (%s)" % ("; ".join(src_errors) if src_errors else "all empty -- check Google/Granola setup + sources")
+            st["last_status"] = "empty"; st["last_error"] = err; _save_state(st)
+            _alert("no data", err); return {"ok": False, "error": err}
+        text = _synthesize("\n\n".join(blocks), cfg, _voice_profile())
+        if not text or text.lstrip().startswith("(brief synthesis"):   # _synthesize's failure/timeout sentinel
+            err = (text or "empty synthesis").strip().strip("()")       # -> don't save garbage AS a real brief
+            st["last_status"] = "failed"; st["last_error"] = err; _save_state(st)
+            _alert("synthesis failed", err); return {"ok": False, "error": err}
+        audio_fn, prov = _tts(text, cfg)
+        brief = {"id": "mb-%d" % int(time.time()), "ts": int(time.time()),
+                 "date": time.strftime("%Y-%m-%d"), "text": text, "sources_used": used,
+                 "audio": audio_fn, "voice_provider": prov if audio_fn else None,
+                 "voice_note": (None if audio_fn else prov),
+                 "voice_fallback": _LAST_TTS_FALLBACK or None,
+                 "src_errors": src_errors or None, "unread": True}   # unread -> the dashboard surfaces it on open
+        st["briefs"].insert(0, brief); st["briefs"] = st["briefs"][:60]
+        st["last_status"] = "ok"; st["last_error"] = ""
+        _save_state(st)
+        return {"ok": True, "id": brief["id"], "audio": bool(audio_fn), "voice": prov, "sources_used": used,
+                "chars": len(text)}
+    except Exception as e:
+        import traceback
+        err = ("%s | %s" % (e, (traceback.format_exc().splitlines() or [""])[-1]))[:220]
+        st["last_status"] = "error"; st["last_error"] = err
+        try: _save_state(st)
+        except Exception: pass
+        _alert("errored", err)
+        return {"ok": False, "error": err}
+
+
+def mb_should_catchup():
+    """True when today is a scheduled brief day, the scheduled time has passed, there's still no brief for today,
+    and nothing is mid-generation / recently attempted. The server's catch-up sweep calls this so a failed or
+    missed 8am brief SELF-HEALS instead of silently costing the whole day."""
+    import datetime as _d
+    cfg = _cfg(); st = _load_state()
+    when = schedule_when(cfg)
+    if not when: return False
+    now = _d.datetime.now()
+    wds = when.get("weekdays")
+    if wds is not None:
+        raw = wds if isinstance(wds, (list, tuple)) else [wds]
+        targets = set((int(x) + 6) % 7 for x in raw)         # launchd Sun=0 -> python Mon=0..Sun=6
+        if now.weekday() not in targets: return False
+    sched = now.replace(hour=int(when.get("hour", 8)), minute=int(when.get("minute", 0)), second=0, microsecond=0)
+    if now < sched: return False                             # not time yet today
+    briefs = st.get("briefs", [])
+    if briefs and briefs[0].get("date") == time.strftime("%Y-%m-%d"): return False   # already have today's
+    age = int(time.time()) - int(st.get("last_run", 0) or 0)
+    if st.get("last_status") == "running" and age < 600: return False   # a generation is in flight
+    if age < 900: return False                               # a recent attempt just happened -> don't hammer
+    return True
 
 
 def mb_state():

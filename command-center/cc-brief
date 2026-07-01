@@ -3,7 +3,7 @@
 Resolves port + auth from cc.config (or $CC_CONFIG) and POSTs /api/brief-generate so generation runs
 IN the server process (which has the Google/Granola/context accessors + Full Disk Access). Stdlib only.
 """
-import json, os, sys, urllib.request
+import json, os, sys, time, urllib.request
 
 cfgp = os.environ.get("CC_CONFIG") or os.path.join(
     os.environ.get("CC_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cc.config.json")
@@ -13,11 +13,40 @@ except Exception as e:
     print("cc-brief: cannot read cc.config (%s): %s" % (cfgp, e)); sys.exit(1)
 port = c.get("port") or int(os.environ.get("HPCC_PORT") or 8799)
 tok = c.get("auth_token") or ""
-req = urllib.request.Request("http://127.0.0.1:%s/api/brief-generate" % port, data=b"{}",
-                             headers={"Content-Type": "application/json",
-                                      **({"Cookie": "cc_auth=" + tok} if tok else {})}, method="POST")
+hdr = {"Content-Type": "application/json", **({"Cookie": "cc_auth=" + tok} if tok else {})}
+base = "http://127.0.0.1:%s" % port
+
+
+def _get(path):
+    req = urllib.request.Request(base + path, headers=hdr)
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode())
+
+
+# Kick off generation (runs in the server process -> has Google/context accessors + Full Disk Access).
 try:
-    with urllib.request.urlopen(req, timeout=240) as r:
+    req = urllib.request.Request(base + "/api/brief-generate", data=b"{}", headers=hdr, method="POST")
+    with urllib.request.urlopen(req, timeout=30) as r:
         print(r.read().decode())
 except Exception as e:
-    print("cc-brief: generate failed: %s" % e); sys.exit(1)
+    print("cc-brief: generate kickoff failed: %s" % e); sys.exit(1)
+
+# Generation is async (synthesis + TTS are slow). POLL to a TERMINAL status so the scheduled routine actually
+# knows whether a brief was PRODUCED -- otherwise a failed/empty/killed run looks like success (exit 0) and no
+# alert ever fires. Non-zero exit here -> the routine marks itself blocked + sends its failure alert.
+today = time.strftime("%Y-%m-%d")
+deadline = time.time() + 420   # ~7 min: covers synthesis (<=180s) + TTS fallbacks, with headroom
+last = {}
+while time.time() < deadline:
+    time.sleep(12)
+    try: last = _get("/api/brief")
+    except Exception: continue
+    t = last.get("today") or {}
+    status = last.get("last_status")
+    if t.get("date") == today and status == "ok":
+        print("cc-brief: brief for %s ready (%s)" % (today, t.get("audio") or "no audio")); sys.exit(0)
+    if status in ("empty", "failed", "error"):
+        print("cc-brief: generation %s -- %s" % (status, last.get("last_error") or "")); sys.exit(2)
+    # status == 'running' (or stale) -> keep waiting
+print("cc-brief: timed out waiting for today's brief (last_status=%s, error=%s)" % (
+    last.get("last_status"), last.get("last_error") or "")); sys.exit(3)
