@@ -23545,15 +23545,30 @@ def _autocompact_loop():
         except Exception: pass
         time.sleep(60)
 
+def _brief_is_enabled_here():
+    """The brief AUTO-RUNS only on a node where the OPERATOR set it up -- signalled by the 'Morning Brief' routine
+    existing + enabled in THIS node's registry (brief_config_save creates it). Never trust morning_brief._cfg()
+    defaults for this: _cfg() returns a full 8am/weekdays/all-sources config on EVERY node, so gating on it would
+    (and did, in .109) auto-generate a hallucinated brief on every node that never asked for one."""
+    try:
+        r = next((x for x in _routines_reg() if x.get("name") == "Morning Brief"), None)
+        if not r: return False
+        if r.get("enabled") is False: return False
+        if str(r.get("status", "")).lower() in ("paused", "disabled", "halted"): return False
+        return True
+    except Exception:
+        return False
+
 def _brief_catchup_loop():
     """SELF-HEAL a missed/failed Morning Brief: if today is a scheduled brief day, the time has passed, and there's
     still no brief for today, re-attempt (bounded, deduped). A transient 8am failure (a slow/limited synthesis, a
-    process restart mid-generation) no longer silently costs the whole day -- the brief lands late instead."""
+    process restart mid-generation) no longer silently costs the whole day -- the brief lands late instead.
+    GATED on _brief_is_enabled_here() so it ONLY runs where the operator actually configured the brief."""
     if not morning_brief: return
     time.sleep(300)
     while True:
         try:
-            if morning_brief.mb_should_catchup():
+            if _brief_is_enabled_here() and morning_brief.mb_should_catchup():
                 print("[morning_brief] catch-up: no brief for today past scheduled time -> regenerating")
                 morning_brief.mb_generate()
         except Exception as _e:

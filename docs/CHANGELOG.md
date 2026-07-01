@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.110 -- 2026-07-01  (HOTFIX: Morning Brief catch-up must only run where the operator enabled it)
+- **Regression from .109:** the new `_brief_catchup_loop` decided whether to (re)generate via `mb_should_catchup()`,
+  which reads `morning_brief._cfg()` -- and `_cfg()` returns a FULL default config (8am / weekdays / all sources) on
+  EVERY node, even ones where nobody ever set up a brief. So the catch-up sweep auto-generated a brief on every node,
+  and with no real personal data the synthesis model HALLUCINATED a plausible-sounding brief (invented customers etc).
+- **Fix:** catch-up is now gated on `_brief_is_enabled_here()` -- true only when THIS node has the "Morning Brief"
+  routine (which `brief_config_save` creates when the operator configures the brief), enabled + not paused. A node on
+  default config never auto-generates. (The manual "Generate now" button is unchanged -- that's explicit user intent.)
+- Operational cleanup on ship: the bogus auto-generated briefs on non-configured nodes were wiped.
+
 ## 0.99.109 -- 2026-07-01  (Morning Brief FAIL-LOUD + self-heal: a missed/failed brief can no longer fail silently)
 - **Root cause of a silently-missed brief.** The scheduled routine fires `cc-brief`, which POSTed `/api/brief-generate`
   and got an instant `{"started":true}` (generation is a detached background thread), so `cc-brief` exited 0 and the
