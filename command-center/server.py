@@ -14246,6 +14246,9 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #live.show{display:block}
 #selcopy{position:fixed;right:14px;bottom:14px;z-index:12;display:none;background:#e8c547;color:#15120a;font:700 12px -apple-system,sans-serif;border:0;border-radius:18px;padding:8px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);cursor:pointer}
 #selcopy.show{display:block}
+#cliptoast{position:fixed;left:50%;transform:translateX(-50%);top:14px;z-index:30;display:none;background:#16351f;color:#7ee787;border:1px solid rgba(46,160,67,.5);font:600 12.5px -apple-system,sans-serif;border-radius:18px;padding:9px 18px;box-shadow:0 8px 24px rgba(0,0,0,.55)}
+#cliptoast.show{display:block;animation:ctpop .18s ease}
+@keyframes ctpop{from{opacity:0;transform:translateX(-50%) translateY(-6px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
 #copyov{position:fixed;inset:0;z-index:25;background:#0a0a0f;display:none;flex-direction:column}
 #copyov.show{display:flex}
 #copybar{display:flex;align-items:center;gap:10px;padding:9px 12px;background:#1a1a24;border-bottom:1px solid #2a2a3a;color:#a0a0b0;font:12px -apple-system,sans-serif;flex:0 0 auto}
@@ -14288,8 +14291,8 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid #2a2a3a;background:#22222e;color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px;font-family:inherit}
 #tdlg .tdlg-b.go{background:linear-gradient(135deg,#d6b23c,#c9a227);color:#15120a;border:none;font-weight:700}
 </style></head><body>
-<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
-<button id="live" onclick="toLive()">&#8595; jump to live</button><button id="selcopy" onclick="doSelCopy()">&#10697; Copy selection</button>
+<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button id="actog" onclick="toggleAutoCopy()" title="Auto-copy: when ON, whatever you have selected is copied to your clipboard the moment you release the mouse (no Ctrl+C needed). Needs a secure origin (https/localhost); on plain http a one-tap Copy chip is used instead.">&#9113; auto-copy</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
+<button id="live" onclick="toLive()">&#8595; jump to live</button><button id="selcopy" onclick="doSelCopy()">&#10697; Copy selection</button><div id="cliptoast"></div>
 <div id="copyov"><div id="copybar"><b>Selectable text</b><span id="copyst" style="color:#8a8a99">long-press to select, or</span><button onclick="copyAll()">&#10697; copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" style="border-color:#e8c547">&#10005; close</button></div><pre id="copybody"></pre></div>
 <div id="wrap">
 <div id="t"></div>
@@ -14372,7 +14375,7 @@ function toggleTg(){fetch('/api/telegram-session',{method:'POST',headers:{'Conte
 function skPaint(s){var b=document.getElementById('skbtn');if(!b)return;if(!s||!s.installed){b.style.display='none';return;}b.style.display='';var n=(s.on&&s.num)?(' #'+s.num):'';b.innerHTML='&#128172; Slack'+n+': '+(s.on?'on':'off');b.style.color=s.on?'#36c5f0':'#8a8a99';b.title=s.configured?('Slack '+(s.on?('ON'+(s.num?(' as #'+s.num):'')+' -- your team is pinged in a channel thread when this finishes/blocks; reply in-thread to interact'):'off')+' for this session'):'Slack not set up -- install + Set up the Slack extension and set a comms_channel';}
 function skState(){fetch('/api/slack-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(skPaint).catch(()=>{});}
 function toggleSk(){fetch('/api/slack-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(function(cur){if(!cur.configured){st.textContent='Slack not set up -- install the Slack extension + set a comms_channel, then toggle';return;}fetch('/api/slack-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:!cur.on})}).then(r=>r.json()).then(function(s){skPaint(s);st.textContent=name+' - Slack '+(s.on?'ON (team channel + reply-in-thread)':'off');});});}
-ws.onopen=()=>{st.textContent=name+' - connected';fitNow();term.focus();applyMouse();tgState();skState();};
+ws.onopen=()=>{st.textContent=name+' - connected';fitNow();term.focus();applyMouse();applyAutoCopy();tgState();skState();};
 ws.onmessage=(e)=>term.write(new Uint8Array(e.data));
 ws.onclose=()=>{var det=function(){st.textContent=name+' - detached (session lives on)';term.write('\r\n\x1b[33m[detached - close this tab; the session keeps running]\x1b[0m\r\n');};
   fetch('/api/session-exists?name='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(d){
@@ -14391,7 +14394,7 @@ function ccCopy(t){try{if(navigator.clipboard&&window.isSecureContext){navigator
 term.attachCustomKeyEventHandler((e)=>{
   if(e.type==='keydown'&&(e.ctrlKey||e.metaKey)&&!e.altKey&&(e.key==='v'||e.key==='V'))return false;                       // paste: handled below
   if(e.type==='keydown'&&(e.ctrlKey||e.metaKey)&&!e.altKey&&(e.key==='c'||e.key==='C')&&selActive){ccCopy(_selText);selFlash(_selText.length);selReturnLive();return false;}  // copy the tmux copy-mode selection + clear + back to live
-  if(e.type==='keydown'&&(e.ctrlKey||e.metaKey)&&!e.altKey&&(e.key==='c'||e.key==='C')&&term.hasSelection()){ccCopy(term.getSelection());return false;}  // copy selection, don't send SIGINT
+  if(e.type==='keydown'&&(e.ctrlKey||e.metaKey)&&!e.altKey&&(e.key==='c'||e.key==='C')&&term.hasSelection()){var _s=term.getSelection();ccCopy(_s);clipToast(_s.length);return false;}  // copy selection, don't send SIGINT
   return true;
 });
 (term.textarea||document).addEventListener('paste',(e)=>{
@@ -14462,22 +14465,28 @@ function selCell(x,y){const scr=term.element.querySelector('.xterm-screen')||ter
 // each wait for the previous, so exactly one term-select is in flight at a time, always ordered.
 let selChain=Promise.resolve();
 function selSend(action,c){const p=selChain.then(()=>fetch('/api/term-select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({name:name,action:action},c||{}))}).then(r=>r.json()).catch(()=>null));selChain=p.catch(()=>null);return p;}
-function selFlash(n){const old=st.textContent;st.textContent='✓ copied '+n+' chars';setTimeout(function(){if(st.textContent.indexOf('copied')>=0)st.textContent=old;},1700);}
+// Confirmation popup shown whenever text actually lands on the clipboard (Ctrl+C, the chip, or auto-copy).
+function clipToast(n){var t=document.getElementById('cliptoast');if(!t)return;t.textContent='✓ Copied '+n+' chars to clipboard';t.classList.remove('show');void t.offsetWidth;t.classList.add('show');clearTimeout(clipToast._t);clipToast._t=setTimeout(function(){t.classList.remove('show');},1800);}
+function selFlash(n){clipToast(n);}
 function selChip(show){const b=document.getElementById('selcopy');if(b)b.classList.toggle('show',!!show);}
+// Auto-copy toggle: ON = releasing the mouse copies the selection to the clipboard automatically (secure
+// origins only -- plain http can't). Persisted per device; default ON.
+let AUTOCOPY=localStorage.getItem('hpcc_autocopy')!=='off';
+function applyAutoCopy(){var b=document.getElementById('actog');if(b){b.innerHTML=(AUTOCOPY?'☑':'☐')+' auto-copy';b.style.color=AUTOCOPY?'#7ee787':'#8a8a99';}}
+function toggleAutoCopy(){AUTOCOPY=!AUTOCOPY;localStorage.setItem('hpcc_autocopy',AUTOCOPY?'on':'off');applyAutoCopy();term.focus();}
 let _selText='',selActive=false;
 // Finish a selection: clear the highlight, leave copy-mode, and snap back to the live screen. Called after a
-// copy (Ctrl+C / the chip) or a plain click on the terminal -- so a selection never lingers until you manually
-// hit 'jump to live'.
+// copy (Ctrl+C / the chip / auto-copy) or a plain click on the terminal -- so a selection never lingers.
 function selReturnLive(){selActive=false;selChip(false);inMode=false;liveBtn(false);
   fetch('/api/term-select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,action:'cancel'})}).catch(()=>{});term.focus();}
-// Deliver the selection to the clipboard. A programmatic write only works from a user gesture OR a secure
-// (https/localhost) origin -- and ours fires in an async callback after the server round-trip. So: on a secure
-// origin try the async clipboard API; if that's unavailable or blocked, pop a one-tap '⎘ Copy' chip whose
-// CLICK (a real gesture) does the copy. The text stays in hand (_selText) so Ctrl+C can also copy it.
+// Called on mouse release with the selection text. If auto-copy is ON and the origin is secure, write it to the
+// clipboard now, confirm, and snap back to live. Otherwise leave the '⎘ Copy' chip -- a click (or Ctrl+C) copies
+// it (that's a user gesture, so it works even on plain http). The text stays in hand (_selText) either way.
 function ccDeliver(t){_selText=t;selActive=true;const b=document.getElementById('selcopy');if(b)b.innerHTML='&#10697; Copy '+t.length+' chars';
-  if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(function(){selFlash(t.length);selChip(false);}).catch(function(){selChip(true);});}
-  else{selChip(true);}}
-function doSelCopy(){if(_selText){ccCopy(_selText);selFlash(_selText.length);}selReturnLive();}
+  if(AUTOCOPY&&navigator.clipboard&&window.isSecureContext){
+    navigator.clipboard.writeText(t).then(function(){clipToast(t.length);selReturnLive();}).catch(function(){selChip(true);});
+  } else { selChip(true); }}
+function doSelCopy(){if(_selText){ccCopy(_selText);clipToast(_selText.length);}selReturnLive();}
 let dsel=null,dTimer=null,dLast=null,dMoveBusy=false;
 el.addEventListener('mousedown',(e)=>{if(e.button!==0)return;e.preventDefault();e.stopPropagation();selChip(false);
   dsel={x0:e.clientX,y0:e.clientY,active:false};dLast={x:e.clientX,y:e.clientY};term.focus();},{capture:true});

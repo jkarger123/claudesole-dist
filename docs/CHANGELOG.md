@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.103 -- 2026-07-01  (terminal: auto-copy-on-release toggle + a 'copied to clipboard' confirmation popup)
+- **Auto-copy toggle** (⧉ auto-copy in the terminal ⋯ menu, default ON, persisted per device): when ON and the
+  origin is secure (https/localhost), releasing the mouse writes the selection straight to the clipboard and snaps
+  back to live -- no Ctrl+C needed. On plain http (browsers block programmatic clipboard writes off a gesture) it
+  falls back to the one-tap ⎘ Copy chip; Ctrl+C always works. Toggle OFF = never auto-write (chip / Ctrl+C only).
+- **Copied-to-clipboard confirmation popup** (`#cliptoast`): a small green "✓ Copied N chars to clipboard" pops at
+  the top on EVERY successful copy -- auto-copy, the ⎘ Copy chip, Ctrl/Cmd+C of a drag selection, or Ctrl+C of an
+  on-screen selection. No more guessing whether it landed.
+
 ## 0.99.102 -- 2026-07-01  (session terminal: real scroll + native select/copy; graceful-End vacates the pane)
 - **Graceful End now vacates the pane immediately.** The in-terminal ⏏ End only knew how to navigate a standalone
   /term tab; embedded as a workspace pane it sat forever on the '[filed away]' screen. New `leaveNow()` posts a
