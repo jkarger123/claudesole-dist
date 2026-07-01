@@ -12388,9 +12388,35 @@ def _fw_fingerprint(home):
             with open(p, "rb") as f: out[rel] = hashlib.sha256(f.read()).hexdigest()
         except Exception: out[rel] = None   # missing file is itself a drift signal
     return out
+def _parse_clock(s):
+    """'9:00am' / '5pm' / '17:30' -> minutes since midnight, or None."""
+    m = re.match(r"^\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*$", str(s or "").lower())
+    if not m: return None
+    h = int(m.group(1)); mi = int(m.group(2) or 0); ap = m.group(3)
+    if ap == "pm" and h != 12: h += 12
+    if ap == "am" and h == 12: h = 0
+    return (h % 24) * 60 + mi
+
+def _in_business_hours():
+    """True if THIS node is currently inside its configured BUSINESS HOURS -- the window during which auto-updates
+    (the node's own self-update AND the overseer's auto-converge push) are DEFERRED so the operator isn't disrupted
+    mid-workday. A MANUAL fleet-update always overrides this. Config: cc.config `business_hours`
+    {days:'weekdays'|'all', start, end}; absent -> node is always updatable. Uses the NODE's own local clock, so
+    each node's timezone is correct."""
+    bh = CC.get("business_hours") or {}
+    if not bh: return False
+    start = _parse_clock(bh.get("start", "9:00am")); end = _parse_clock(bh.get("end", "5:00pm"))
+    if start is None or end is None: return False
+    import datetime as _dt
+    now = _dt.datetime.now()
+    if str(bh.get("days", "weekdays")).lower() == "weekdays" and now.weekday() >= 5: return False   # Mon=0..Sun=6
+    mins = now.hour * 60 + now.minute
+    return (start <= mins < end) if start <= end else (mins >= start or mins < end)   # normal or overnight window
+
 def fw_fingerprint():
     """Node-side: this deployment's framework version + core-file hashes (read from its own CC_HOME)."""
-    return {"id": INSTANCE_ID, "version": _manifest_version(), "running_version": BOOT_VERSION, "home": CC_HOME, "files": _fw_fingerprint(CC_HOME)}
+    return {"id": INSTANCE_ID, "version": _manifest_version(), "running_version": BOOT_VERSION, "home": CC_HOME,
+            "quiet_now": _in_business_hours(), "files": _fw_fingerprint(CC_HOME)}
 def _dist_dir():
     return os.path.expanduser(CC.get("dist_dir") or OFFICIAL_DIST_DIR)
 
@@ -12417,6 +12443,7 @@ def drift_report():
             node["version"] = fp.get("version")
             node["running_version"] = fp.get("running_version") or fp.get("version")   # what code is ACTUALLY running
             node["home"] = fp.get("home")
+            node["quiet_now"] = bool(fp.get("quiet_now"))   # node is inside its business hours -> auto-updates deferred
             files = fp.get("files", {}) or {}
             rv = node["running_version"]
             # files synced but the process hasn't re-exec'd yet -> running code is behind its own on-disk files
@@ -12797,6 +12824,8 @@ def _autoupdate_tick():
     _UPDATE_STATE["behind"] = behind
     if not behind:
         _UPDATE_STATE["msg"] = "current (v%s)" % local; return
+    if _in_business_hours():   # behind, but don't self-update mid-workday -> wait until after business hours (a manual update overrides)
+        _UPDATE_STATE["msg"] = "behind v%s -- deferred until after business hours" % latest; return
     # behind -> overlay the latest framework ONCE per target version (cc-update.sh git-clones the URL)
     if _UPDATE_STATE.get("staged") != latest:
         sh_path = os.path.join(CC_HOME, "cc-update.sh")
@@ -12829,11 +12858,13 @@ def _autoupdate_loop():
             except Exception: pass
         time.sleep(max(300, int(CC.get("auto_update_check_min", 30)) * 60))
 
-def fleet_converge(force=False):
+def fleet_converge(force=False, auto=False):
     """Mission Control: converge every TENANT node to the dist's latest in one operation. Refreshes the
     local dist mirror (git pull) so a push can't ship stale code, then for each behind (or all, if force)
     reachable tenant: superadmin cc_update (from the fresh local mirror) + a separate safe restart.
-    SKIPS co-located source nodes (same CC_HOME as MC) so the authoring checkout is never overwritten."""
+    SKIPS co-located source nodes (same CC_HOME as MC) so the authoring checkout is never overwritten.
+    auto=True (the automatic on-ship path) additionally DEFERS a node that is inside its BUSINESS HOURS, so a
+    release doesn't restart it mid-workday; a MANUAL fleet-update (auto=False) pushes regardless."""
     res = {"mirror": "", "ran": [], "skipped": []}
     mirror = _dist_dir()
     try:
@@ -12851,6 +12882,8 @@ def fleet_converge(force=False):
             res["skipped"].append({"id": nid, "why": "unreachable"}); continue
         if status in ("current", "ahead") and not force:
             res["skipped"].append({"id": nid, "why": status}); continue
+        if auto and not force and n.get("quiet_now"):   # inside its business hours -> don't restart it mid-workday
+            res["skipped"].append({"id": nid, "why": "business hours -- deferred (converges after hours, or on a manual update)"}); continue
         upd = superadmin_send(nid, "cc_update", {"upstream": mirror})
         ok = bool(upd.get("ok") and (upd.get("result") or {}).get("ok"))
         rec = {"id": nid, "from": status, "update": ok, "stale_process": bool(n.get("stale_process"))}
@@ -12894,9 +12927,9 @@ def _fleet_converge_loop():
                 mv = _mirror_version(); now = time.time()
                 if mv and mv != _fleet_last_converged():
                     _aupd_log("MC auto-converge: mirror at v%s (fleet last on %s) -> converging now" % (mv, _fleet_last_converged()))
-                    fleet_converge(force=False); _fleet_mark_converged(mv); last_full = now
+                    fleet_converge(force=False, auto=True); _fleet_mark_converged(mv); last_full = now
                 elif now - last_full >= max(3600, int(CC.get("fleet_converge_min", 180)) * 60):
-                    fleet_converge(force=False); last_full = now   # periodic backstop for nodes offline at release
+                    fleet_converge(force=False, auto=True); last_full = now   # periodic backstop for nodes offline at release
         except Exception as e:
             try: _aupd_log("fleet auto-converge error: %s" % str(e)[:140])
             except Exception: pass

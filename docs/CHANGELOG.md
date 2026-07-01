@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.100 -- 2026-07-01  (auto-updates DEFER during a node's business hours -- don't restart Sarah mid-workday)
+- **Auto-updates now skip a node during its BUSINESS HOURS** so a release never restarts it mid-workday (AFP =
+  Sarah's node). New per-node cc.config `business_hours` {days:'weekdays'|'all', start, end}; the node reports
+  `quiet_now` in its fingerprint (computed on its OWN clock, so timezone is correct). BOTH auto paths honor it:
+  the node's own 30-min self-update defers, and the overseer's auto-converge (auto=True) skips a node reporting
+  quiet_now. A deferred node converges automatically after hours (its self-update / the backstop sweep). A
+  **MANUAL** `/api/fleet-update` (or the "Update all behind" button) IGNORES business hours -- that's the explicit
+  override ("unless I tell it to"). No `business_hours` set -> node is always updatable (unchanged for other nodes).
+  AFP configured to weekdays 8am-6pm (adjustable in its cc.config).
+
 ## 0.99.99 -- 2026-07-01  (fleet auto-converges on ship -- the manual "force converge" step is GONE for good)
 - **The overseer now auto-converges the fleet the instant a ship lands -- no manual `/api/fleet-update`.** The
   manual force-converge kept getting forgotten, leaving tenant nodes silently behind. `_fleet_converge_loop` now
