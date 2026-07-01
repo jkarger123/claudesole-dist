@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "79fcc42550b5fc284e8a71fa506915a6235062633a60c580a0da2b3f278b3181",
+      "claudesole.manifest.json": "e629f204f15fe721efb141a52ba6565ca507ba548da9514109ee9518f6b92099",
       "command-center/cc-brief": "566b5d91b27874cfbe6a55228d5021011df3fcb3ca6a084926e8b040a31e15ec",
       "command-center/cc-handoff": "9194f8a409f322c9835615cdb014dc9e626a469611ea127b1e9e7a6bf4db2532",
       "command-center/cc-hold": "a756f97be0fef2e0b764324f6830c1c63859347e009f04e8e4a6b8e5ccf9a3fc",
@@ -46,7 +46,7 @@
       "command-center/preship.py": "5500f8d04923413e8d91352d4d6b61c3aa4eefb906fcbefd6954a159aabc439f",
       "command-center/ralph_runner.py": "7d26a8d8bca83ba6f52c8ab45aae1c5643233e5cf94c6293b8f6f14b6c169f3b",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "04a861b46f4f9365ce8bd872dab92ae0c4a03e815045e2592e331755dd0e10c6",
+      "command-center/server.py": "04d3c02d75c4de422b17af7c2443573ba34c35facfa02c5a733f14775cfecf48",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/ui_lint.py": "3c387f23beea315423f8e030e8396519b5182fa252d883a2ea03465e78b943f0",
@@ -117,9 +117,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1782885446,
+    "generated": 1782889725,
     "v": 1,
-    "version": "0.99.101"
+    "version": "0.99.102"
   },
-  "sig": "9nb5y22VMZ0rGixbQeRdQRNPGGhuq+NgrwYnaQ3ZKGClY+wCzTAF/qLwXql2xYlQtGG4m0IDl3rm+B9fYKTIDw=="
+  "sig": "3ra4gYbuxDcJaER38trpTNEi+kkH1MgVdJeXXhTn5q4EEGwB4luvQ6bH3riXPQHNLiZrPIwWEOucB6SnOWG+Cg=="
 }

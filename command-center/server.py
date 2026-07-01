@@ -7873,6 +7873,67 @@ def term_scroll(name, action="up", n=3):
     if action == "up": _SCROLLED.add(nm)
     return {"ok": True, "mode": "copy"}
 
+def _sel_tokens(col, row, edge=0, ticks=0):
+    """copy-mode cursor moves that place the cursor at visible (col,row); an edge>0/<0 adds cursor-down/up
+    ticks so holding at the bottom/top edge auto-scrolls through history (native copy-mode behavior)."""
+    cmds = [["top-line"]]
+    if row > 0: cmds.append(["-N", str(row), "cursor-down"])
+    cmds.append(["start-of-line"])
+    if col > 0: cmds.append(["-N", str(col), "cursor-right"])
+    if edge < 0 and ticks > 0: cmds.append(["-N", str(ticks), "cursor-up"])
+    elif edge > 0 and ticks > 0: cmds.append(["-N", str(ticks), "cursor-down"])
+    return cmds
+
+def _sel_run(nm, cmds):
+    """Run several copy-mode commands in ONE tmux invocation (';' separates commands) -> one round-trip/move."""
+    args = [TMUX]
+    for i, c in enumerate(cmds):
+        if i: args.append(";")
+        args += ["send-keys", "-t", nm, "-X"] + c
+    sh(args)
+
+def term_select(name, action, col=0, row=0, edge=0, ticks=0):
+    """Drive tmux copy-mode SELECTION from a browser drag: 'begin' anchors the selection at (col,row), 'move'
+    extends it (with native edge auto-scroll through the full history), 'copy' lifts the selection to the
+    browser clipboard. The only way to select MORE than the visible screen on the live terminal -- the history
+    lives in tmux and Claude Code owns the mouse, so we position tmux's own copy cursor by command."""
+    nm = re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:48]
+    if not nm: return {"ok": False}
+    try: col = max(0, min(600, int(col))); row = max(0, min(400, int(row)))
+    except Exception: col = row = 0
+    try: ticks = max(0, min(24, int(ticks)))
+    except Exception: ticks = 0
+    try: edge = int(edge)
+    except Exception: edge = 0
+    if action == "begin":
+        in_mode = sh([TMUX, "display-message", "-p", "-t", nm, "#{pane_in_mode}"])[1].strip() == "1"
+        if not in_mode: sh([TMUX, "copy-mode", "-t", nm])
+        sh([TMUX, "send-keys", "-t", nm, "-X", "clear-selection"])
+        _sel_run(nm, _sel_tokens(col, row))
+        sh([TMUX, "send-keys", "-t", nm, "-X", "begin-selection"])
+        _SCROLLED.add(nm)
+        return {"ok": True}
+    if action == "move":
+        _sel_run(nm, _sel_tokens(col, row, edge, ticks))
+        return {"ok": True}
+    if action == "copy":
+        sh([TMUX, "send-keys", "-t", nm, "-X", "copy-selection-no-clear"])   # copy to buffer, KEEP the highlight + stay put (no yank to live)
+        return {"ok": True, "text": sh([TMUX, "show-buffer"])[1]}
+    if action == "cancel":
+        sh([TMUX, "send-keys", "-t", nm, "-X", "cancel"]); _SCROLLED.discard(nm)
+        return {"ok": True}
+    return {"ok": False}
+
+def term_capture(name):
+    """Dump a session's FULL tmux scrollback (start-of-history -> visible) as plain text, so the browser's
+    '⎘ copy' panel can show real, selectable text for ANY amount -- not just the repainted visible window
+    (xterm only ever holds the visible screen; the history lives in tmux). -J joins wrapped lines."""
+    nm = re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:48]
+    if not nm: return {"ok": False, "text": ""}
+    code, out, err = sh([TMUX, "capture-pane", "-p", "-J", "-S", "-15000", "-t", nm])   # last ~15k lines: plenty, stays light
+    if code != 0: return {"ok": False, "text": ""}
+    return {"ok": True, "text": out.rstrip("\n")}
+
 # ---- past conversations (across the fleet) + resume --------------------------
 SCAN = os.path.join(BASE, "scan_projects.py")
 PAST_CACHE = {}                                  # machine -> (epoch, list)
@@ -13527,6 +13588,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/session-exists":        # broken-out /term tab: was the session FILED AWAY or just detached?
             _nm = re.sub(r"[^A-Za-z0-9_-]", "", (q.get("name", [""])[0] or ""))[:64]
             return self._s(200, json.dumps({"alive": bool(_nm) and sh([TMUX, "has-session", "-t", _nm])[0] == 0}))
+        if u.path == "/api/term-capture":          # full tmux scrollback as selectable text (the '⎘ copy' panel)
+            return self._s(200, json.dumps(term_capture(q.get("name", [""])[0])))
         if u.path == "/api/system":  # self-describing capability map (runtime + surfaces) -- for UI gating + agents
             return self._s(200, json.dumps(system_info(), default=str))
         if u.path == "/api/browser/commands":  # the desktop browser polls for agent-queued commands (Browser v2)
@@ -13730,6 +13793,9 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"ok": bool(nm), "mouse": "on" if on else "off"}))
         if u.path == "/api/term-scroll":    # touch-swipe -> tmux copy-mode scroll (mobile has no wheel)
             return self._s(200, json.dumps(term_scroll(body.get("name", ""), body.get("action", "up"), body.get("n", 3))))
+        if u.path == "/api/term-select":    # browser drag -> tmux copy-mode selection (select across history, then copy)
+            return self._s(200, json.dumps(term_select(body.get("name", ""), body.get("action", "move"),
+                body.get("col", 0), body.get("row", 0), body.get("edge", 0), body.get("ticks", 0))))
         if u.path == "/api/session-upload":   # drag-drop / tap-to-attach a file -> save + hand its path to the session
             return self._s(200, json.dumps(session_upload(
                 body.get("session", ""), body.get("filename", ""), body.get("mime", ""),
@@ -14178,6 +14244,8 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 @media(any-pointer:coarse){#cpbtn{display:inline-block}}
 #live{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;z-index:11;display:none;background:#e8c547;color:#15120a;font:700 12px -apple-system,sans-serif;border:0;border-radius:18px;padding:8px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);cursor:pointer}
 #live.show{display:block}
+#selcopy{position:fixed;right:14px;bottom:14px;z-index:12;display:none;background:#e8c547;color:#15120a;font:700 12px -apple-system,sans-serif;border:0;border-radius:18px;padding:8px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);cursor:pointer}
+#selcopy.show{display:block}
 #copyov{position:fixed;inset:0;z-index:25;background:#0a0a0f;display:none;flex-direction:column}
 #copyov.show{display:flex}
 #copybar{display:flex;align-items:center;gap:10px;padding:9px 12px;background:#1a1a24;border-bottom:1px solid #2a2a3a;color:#a0a0b0;font:12px -apple-system,sans-serif;flex:0 0 auto}
@@ -14186,7 +14254,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 /* on-screen key bar: iPhone keyboards have no arrow keys, so Claude's option menus are unanswerable -- these send the real key sequences. Touch devices only. */
 #keybar{display:none;gap:3px;padding:5px;background:#15151c;border-top:1px solid #2a2a3a;flex:0 0 auto}
 #compose{display:none;gap:6px;padding:5px 5px calc(5px + env(safe-area-inset-bottom));background:#12121a;border-top:1px solid #2a2a3a;align-items:center;flex:0 0 auto}
-@media(any-pointer:coarse){#keybar,#compose{display:flex}#live{bottom:132px}}
+@media(any-pointer:coarse){#keybar,#compose{display:flex}#live{bottom:132px}#selcopy{bottom:132px}}
 #keybar button{flex:1;min-width:0;background:#22222e;color:#fff;border:1px solid #3a3a4a;border-radius:8px;padding:11px 0;font:15px -apple-system,sans-serif;cursor:pointer}
 #keybar button:active{background:#34344a}
 #compose input{flex:1;min-width:0;background:#0a0a0f;color:#fff;border:1px solid #3a3a4a;border-radius:9px;padding:11px;font:16px -apple-system,sans-serif}
@@ -14220,8 +14288,8 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid #2a2a3a;background:#22222e;color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px;font-family:inherit}
 #tdlg .tdlg-b.go{background:linear-gradient(135deg,#d6b23c,#c9a227);color:#15120a;border:none;font-weight:700}
 </style></head><body>
-<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Show the text as selectable plain text so you can copy it (needed on mobile - the terminal itself is a canvas and can't be selected by touch)">&#10697; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><button id="mtog" onclick="toggleMouse()">scroll</button><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
-<button id="live" onclick="toLive()">&#8595; jump to live</button>
+<div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
+<button id="live" onclick="toLive()">&#8595; jump to live</button><button id="selcopy" onclick="doSelCopy()">&#10697; Copy selection</button>
 <div id="copyov"><div id="copybar"><b>Selectable text</b><span id="copyst" style="color:#8a8a99">long-press to select, or</span><button onclick="copyAll()">&#10697; copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" style="border-color:#e8c547">&#10005; close</button></div><pre id="copybody"></pre></div>
 <div id="wrap">
 <div id="t"></div>
@@ -14265,15 +14333,23 @@ function setFont(d){FS=Math.max(8,Math.min(28,Math.round((FS+d)*2)/2));
 const ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws?name='+encodeURIComponent(name));
 ws.binaryType='arraybuffer';const st=document.getElementById('st');
 function sendResize(){try{ws.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}));}catch(e){}}
-let MOUSE=localStorage.getItem('hpcc_mouse')!=='select';   // true=scroll(wheel), false=select(drag+copy)
-function applyMouse(){fetch('/api/term-mouse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:MOUSE})}).catch(()=>{});
-  document.body.classList.toggle('selmode',!MOUSE);   // select mode -> let touch select text, not scroll
-  const b=document.getElementById('mtog');if(b){b.textContent=MOUSE?'🖱 scroll':'✂ select';b.title=MOUSE?'wheel scrolls. Click to switch to Select (drag to highlight, Ctrl+C to copy).':'drag to select, Ctrl+C to copy. Click to switch back to Scroll (wheel).';b.style.borderColor=MOUSE?'#2a2a3a':'#e8c547';}}
-function toggleMouse(){MOUSE=!MOUSE;localStorage.setItem('hpcc_mouse',MOUSE?'scroll':'select');applyMouse();term.focus();}
+// Scroll is driven server-side via tmux copy-mode (see below): the history lives in tmux (xterm only ever
+// shows the repainted visible window) AND Claude Code itself grabs mouse reporting -- so a raw wheel reaches
+// Claude as ARROW KEYS. We intercept the gesture in JS instead. tmux's own mouse stays OFF so it doesn't
+// double-handle. Copy uses the full-history '⎘ copy' panel (real selectable text, desktop + mobile).
+function applyMouse(){fetch('/api/term-mouse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:false})}).catch(()=>{});}
 async function gracefulEnd(){if(!await confirmM('Gracefully end this session?\n\nClaude writes a handoff + updates the CLAUDE.md resume pointer, then closes (auto-finalizes within ~3 min). This tab returns to the dashboard once it is filed away.'))return;
   st.textContent=name+' - ending: writing handoff…';
   fetch('/api/close-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,force:false})}).catch(()=>{});
-  endWatch();}
+  leaveNow();}
+// Leave the terminal view the MOMENT an end/kill is issued -- the handoff (graceful) keeps writing in the
+// background and the taskbar tile shows it wrap up. Embedded as a workspace pane -> ask the parent dashboard
+// to vacate the pane now (postMessage). Standalone /term tab -> return to the dashboard. Fixes the bug where a
+// gracefully-ended pane sat forever on the '[filed away]' screen (only the standalone case ever navigated).
+function leaveNow(){
+  if(window.top!==window.self){ try{window.parent.postMessage({type:'cf-session-dead',name:name},'*');}catch(e){} }
+  else { setTimeout(function(){location.href='/#sessions';}, 400); }
+}
 // After a graceful End, watch for the session to finish its handoff + file away, THEN leave -- so the window
 // never sits on a dead terminal you have to manually refresh/dismiss (Sarah's report). Only navigates when this
 // is a standalone /term tab; embedded as a workspace-pane iframe (window.top!=self) the parent dashboard
@@ -14285,7 +14361,7 @@ function endWatch(){ if(endWatch._iv)return; endWatch._iv=setInterval(function()
   }).catch(function(){});
 }, 4000); }
 async function killSess(){if(!await confirmM('Force-kill '+name+'?\n\nThis SKIPS the handoff -- no /endsession, no resume notes.'))return;
-  fetch('/api/close-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,force:true})}).then(()=>{st.textContent='killed';setTimeout(()=>location.href='/#sessions',900);}).catch(()=>{});}
+  fetch('/api/close-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,force:true})}).then(()=>{st.textContent='killed';leaveNow();}).catch(()=>{});}
 async function compactSess(){if(!await confirmM('Compact this session?\n\nThe agent writes a FULL handoff -> runs /compact -> re-reads the handoff to restore its memory. Takes a few minutes -- watch it here, and avoid typing while it runs.'))return;
   st.textContent=name+' - compact: starting…';
   fetch('/api/compact-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(r=>{if(!r||!r.ok){st.textContent='compact failed: '+((r||{}).error||'?');return;}compactPoll();}).catch(()=>{st.textContent='compact request failed';});}
@@ -14301,7 +14377,7 @@ ws.onmessage=(e)=>term.write(new Uint8Array(e.data));
 ws.onclose=()=>{var det=function(){st.textContent=name+' - detached (session lives on)';term.write('\r\n\x1b[33m[detached - close this tab; the session keeps running]\x1b[0m\r\n');};
   fetch('/api/session-exists?name='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(d){
     if(d&&d.alive===false){st.textContent=name+' - filed away';term.write('\r\n\x1b[36m[this conversation was filed away into its folder -- it is resumable from the dashboard.]\x1b[0m\r\n');
-      if(window.top===window.self){ term.write('\x1b[36m[returning to the dashboard…]\x1b[0m\r\n'); setTimeout(function(){location.href='/#sessions';},2200); } }
+      leaveNow(); }
     else det();
   }).catch(det);};
 ws.onerror=()=>{st.textContent='connection error';};
@@ -14314,6 +14390,7 @@ function ccCopy(t){try{if(navigator.clipboard&&window.isSecureContext){navigator
   const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.left='-9999px';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta);term.focus();}
 term.attachCustomKeyEventHandler((e)=>{
   if(e.type==='keydown'&&(e.ctrlKey||e.metaKey)&&!e.altKey&&(e.key==='v'||e.key==='V'))return false;                       // paste: handled below
+  if(e.type==='keydown'&&(e.ctrlKey||e.metaKey)&&!e.altKey&&(e.key==='c'||e.key==='C')&&selActive){ccCopy(_selText);selFlash(_selText.length);selReturnLive();return false;}  // copy the tmux copy-mode selection + clear + back to live
   if(e.type==='keydown'&&(e.ctrlKey||e.metaKey)&&!e.altKey&&(e.key==='c'||e.key==='C')&&term.hasSelection()){ccCopy(term.getSelection());return false;}  // copy selection, don't send SIGINT
   return true;
 });
@@ -14337,45 +14414,98 @@ let rt;window.addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(fitN
 if(window.visualViewport){let vt;const onVV=()=>{clearTimeout(vt);vt=setTimeout(fitNow,60);};
   window.visualViewport.addEventListener('resize',onVV);window.visualViewport.addEventListener('scroll',onVV);}
 setTimeout(fitNow,200);
-// TOUCH SCROLLING: on desktop the mouse wheel drives tmux copy-mode (scrolls the full 100k history).
-// A phone has no wheel, so a vertical SWIPE is translated into the same tmux copy-mode scroll. Scroll
-// requests are COALESCED into a pending line count (never dropped) and drained by a single sender, so a
-// fast swipe moves many lines in one round-trip instead of one-line-at-a-time. A tap jumps to live+typing.
-let inMode=false, accY=0, lastY=0, startY=0, moved=false, pending=0, draining=false;
-const LINEPX=9;          // px of swipe per scroll step
-const SPEED=2.6;         // lines scrolled per step -> swipe feels fast (raise to go faster)
+// ---- SCROLL: wheel (desktop) + swipe (mobile) -> tmux copy-mode via the server -----------------------------
+// We intercept the gesture (preventDefault + stopPropagation) so it NEVER reaches Claude as arrow keys, then
+// drive tmux copy-mode server-side -- the only thing that can scroll the full history. Requests are coalesced
+// so a fast gesture moves many lines per round-trip. Type, or tap '↓ jump to live', to snap back to the live
+// screen (a keystroke auto-cancels copy-mode server-side).
+const el=document.getElementById('t');
+let inMode=false,pending=0,draining=false,accY=0,lastY=0,startY=0,moved=false;
+const LINEPX=9,SPEED=2.6,WHEELPX=22;
 function liveBtn(show){const b=document.getElementById('live');if(b)b.classList.toggle('show',!!show);}
-function queueScroll(lines){pending+=lines;if(pending>0){inMode=true;liveBtn(true);}drain();}
+function queueScroll(lines){if(term.hasSelection()){try{term.clearSelection();}catch(e){}}   // don't leave a frozen highlight over text that scrolled underneath it
+  pending+=lines;if(Math.abs(pending)>=1){inMode=true;liveBtn(true);}drain();}
 async function drain(){if(draining)return;draining=true;
-  while(Math.abs(pending)>=1){
-    const up=pending>0, n=Math.min(120,Math.round(Math.abs(pending)));
-    pending-=up?n:-n;
-    try{await fetch('/api/term-scroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,action:up?'up':'down',n:n})});}catch(e){}
-  }
+  while(Math.abs(pending)>=1){const up=pending>0,n=Math.min(120,Math.round(Math.abs(pending)));pending-=up?n:-n;
+    try{await fetch('/api/term-scroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,action:up?'up':'down',n:n})});}catch(e){}}
   draining=false;}
 function toLive(){inMode=false;pending=0;liveBtn(false);fetch('/api/term-scroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,action:'bottom'})}).catch(()=>{});term.focus();}
-const el=document.getElementById('t');
-// touch-scroll ONLY in scroll mode; in select mode (!MOUSE) get out of the way so drag selects text
-el.addEventListener('touchstart',(e)=>{if(!MOUSE||e.touches.length!==1)return;startY=lastY=e.touches[0].clientY;accY=0;moved=false;},{passive:true,capture:true});
-el.addEventListener('touchmove',(e)=>{if(!MOUSE||e.touches.length!==1)return;
-  const y=e.touches[0].clientY, dy=y-lastY; lastY=y;
+// DESKTOP wheel -> copy-mode scroll (must not reach Claude as arrow keys)
+el.addEventListener('wheel',(e)=>{e.preventDefault();e.stopPropagation();
+  accY+=e.deltaY*(e.deltaMode===1?16:1);
+  const steps=Math.trunc(accY/WHEELPX);
+  if(steps!==0){accY-=steps*WHEELPX;queueScroll(-steps*SPEED);}   // wheel up -> older(up); wheel down -> newer(down)
+},{passive:false,capture:true});
+// MOBILE swipe -> the same copy-mode scroll (a phone has no wheel). A tap snaps back to live + opens the keyboard.
+el.addEventListener('touchstart',(e)=>{if(e.touches.length!==1)return;startY=lastY=e.touches[0].clientY;accY=0;moved=false;},{passive:true,capture:true});
+el.addEventListener('touchmove',(e)=>{if(e.touches.length!==1)return;
+  const y=e.touches[0].clientY,dy=y-lastY;lastY=y;
   if(Math.abs(y-startY)>8)moved=true;
   if(!moved)return;
-  e.preventDefault(); e.stopPropagation();         // we own the gesture -> page/xterm don't also act on it
-  accY+=dy;
-  const steps=Math.trunc(accY/LINEPX);
+  e.preventDefault();e.stopPropagation();
+  accY+=dy;const steps=Math.trunc(accY/LINEPX);
   if(steps!==0){accY-=steps*LINEPX;queueScroll(steps*SPEED);}   // swipe down(+) -> older(up); swipe up(-) -> newer(down)
 },{passive:false,capture:true});
-el.addEventListener('touchend',(e)=>{
-  if(!MOUSE)return;
-  if(!moved){if(inMode){toLive();}else{term.focus();}}          // tap = back to live + open keyboard
-},{passive:true,capture:true});
-// COPY: the terminal is a <canvas>, so its text can't be selected by touch. This pulls the buffer text
-// into a plain selectable panel where mobile long-press select + OS copy work (and a one-tap copy-all).
+el.addEventListener('touchend',()=>{if(!moved){if(inMode){toLive();}else{term.focus();}}},{passive:true,capture:true});
+// ---- DESKTOP DRAG-SELECT: drive tmux's OWN copy-mode selection from the mouse ------------------------------
+// Selecting across history isn't possible in xterm (it only holds the visible window), so a drag drives tmux
+// copy-mode: mousedown anchors, drag extends (auto-scrolling past the top/bottom edge through the full
+// history, exactly like native tmux), and on release we copy the selection to the browser clipboard. We own
+// the mouse (block xterm's own screen-only selection) and listen on the document so a drag can leave the pane.
+function selCell(x,y){const scr=term.element.querySelector('.xterm-screen')||term.element;const r=scr.getBoundingClientRect();
+  const cols=term.cols||80,rows=term.rows||24,cw=r.width/cols,ch=r.height/rows;
+  let col=Math.floor((x-r.left)/cw),row=Math.floor((y-r.top)/ch),edge=0,ticks=0;
+  if(y<r.top){edge=-1;ticks=Math.min(8,Math.ceil((r.top-y)/ch)+1);}else if(y>r.bottom){edge=1;ticks=Math.min(8,Math.ceil((y-r.bottom)/ch)+1);}
+  col=Math.max(0,Math.min(cols-1,col));row=Math.max(0,Math.min(rows-1,row));return {col:col,row:row,edge:edge,ticks:ticks};}
+// SERIAL queue: begin -> move(s) -> copy MUST reach the server in order. Fired as concurrent requests they
+// race tmux's copy-mode state (copy can run before the anchor is even set -> empty selection). Chaining makes
+// each wait for the previous, so exactly one term-select is in flight at a time, always ordered.
+let selChain=Promise.resolve();
+function selSend(action,c){const p=selChain.then(()=>fetch('/api/term-select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({name:name,action:action},c||{}))}).then(r=>r.json()).catch(()=>null));selChain=p.catch(()=>null);return p;}
+function selFlash(n){const old=st.textContent;st.textContent='✓ copied '+n+' chars';setTimeout(function(){if(st.textContent.indexOf('copied')>=0)st.textContent=old;},1700);}
+function selChip(show){const b=document.getElementById('selcopy');if(b)b.classList.toggle('show',!!show);}
+let _selText='',selActive=false;
+// Finish a selection: clear the highlight, leave copy-mode, and snap back to the live screen. Called after a
+// copy (Ctrl+C / the chip) or a plain click on the terminal -- so a selection never lingers until you manually
+// hit 'jump to live'.
+function selReturnLive(){selActive=false;selChip(false);inMode=false;liveBtn(false);
+  fetch('/api/term-select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,action:'cancel'})}).catch(()=>{});term.focus();}
+// Deliver the selection to the clipboard. A programmatic write only works from a user gesture OR a secure
+// (https/localhost) origin -- and ours fires in an async callback after the server round-trip. So: on a secure
+// origin try the async clipboard API; if that's unavailable or blocked, pop a one-tap '⎘ Copy' chip whose
+// CLICK (a real gesture) does the copy. The text stays in hand (_selText) so Ctrl+C can also copy it.
+function ccDeliver(t){_selText=t;selActive=true;const b=document.getElementById('selcopy');if(b)b.innerHTML='&#10697; Copy '+t.length+' chars';
+  if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(function(){selFlash(t.length);selChip(false);}).catch(function(){selChip(true);});}
+  else{selChip(true);}}
+function doSelCopy(){if(_selText){ccCopy(_selText);selFlash(_selText.length);}selReturnLive();}
+let dsel=null,dTimer=null,dLast=null,dMoveBusy=false;
+el.addEventListener('mousedown',(e)=>{if(e.button!==0)return;e.preventDefault();e.stopPropagation();selChip(false);
+  dsel={x0:e.clientX,y0:e.clientY,active:false};dLast={x:e.clientX,y:e.clientY};term.focus();},{capture:true});
+document.addEventListener('mousemove',(e)=>{if(!dsel)return;e.stopPropagation();dLast={x:e.clientX,y:e.clientY};   // block xterm from forwarding a mouse-report byte (which would cancel copy-mode via the keystroke path)
+  if(!dsel.active){if(Math.abs(e.clientX-dsel.x0)+Math.abs(e.clientY-dsel.y0)<4)return;
+    dsel.active=true;inMode=true;liveBtn(true);
+    selSend('begin',selCell(dsel.x0,dsel.y0));
+    dTimer=setInterval(function(){if(!dsel||!dsel.active||dMoveBusy)return;dMoveBusy=true;   // coalesce: only the latest cursor, one in flight
+      selSend('move',selCell(dLast.x,dLast.y)).then(function(){dMoveBusy=false;});},45);}
+  e.preventDefault();},{capture:true});
+document.addEventListener('mouseup',(e)=>{if(!dsel)return;e.stopPropagation();const wasActive=dsel.active;dsel=null;   // block the mouse-UP report too -- that's the one that was tearing down the selection on release
+  if(dTimer){clearInterval(dTimer);dTimer=null;}
+  if(wasActive){e.preventDefault();
+    selSend('move',selCell(dLast.x,dLast.y));                 // final exact position (chained after any in-flight move)
+    selSend('copy').then(function(r){   // copy is enqueued LAST -> selection is intact; stay in copy-mode so the highlight + position hold
+      if(r&&r.ok&&r.text){ccDeliver(r.text);inMode=true;liveBtn(true);}});}
+  else{if(selActive){selReturnLive();}else{term.focus();}}},{capture:true});   // a plain click while a selection is up = dismiss it + back to live
+// COPY: the terminal is a <canvas> so its text can't be selected directly. This pulls the session's text into
+// a plain selectable panel where native drag-select (desktop) or long-press select (mobile) + copy work on ANY
+// amount -- and it loads the FULL tmux history (not just the visible screen), so you can copy far more than one
+// screenful. A one-tap 'copy all' grabs everything. Falls back to the on-screen buffer if the fetch fails.
 function termAllText(){const b=term.buffer.active,out=[];for(let i=0;i<b.length;i++){const ln=b.getLine(i);out.push(ln?ln.translateToString(true):'');}
   while(out.length&&!out[out.length-1].trim())out.pop();return out.join('\n');}
-function showCopy(){const el=document.getElementById('copybody');el.textContent=termAllText()||'(nothing on screen yet)';
-  document.getElementById('copyov').classList.add('show');el.scrollTop=el.scrollHeight;}
+function showCopy(){const cb=document.getElementById('copybody');cb.textContent='loading full history…';
+  document.getElementById('copyov').classList.add('show');
+  fetch('/api/term-capture?name='+encodeURIComponent(name)).then(r=>r.json()).then(d=>{
+    cb.textContent=(d&&d.ok&&d.text)?d.text:(termAllText()||'(nothing yet)');cb.scrollTop=cb.scrollHeight;
+  }).catch(()=>{cb.textContent=termAllText()||'(nothing yet)';cb.scrollTop=cb.scrollHeight;});}
 function hideCopy(){document.getElementById('copyov').classList.remove('show');term.focus();}
 function copyAll(){ccCopy(document.getElementById('copybody').textContent);const s=document.getElementById('copyst');if(s)s.textContent='copied!';setTimeout(()=>{if(s)s.textContent='long-press to select, or';},1500);}
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.getElementById('copyov').classList.contains('show'))hideCopy();});
@@ -16568,6 +16698,12 @@ function paneDown(name){ var up=PANES.filter(function(n){return n!=name;});
   if(!up.length){ var nx=(SESSDATA.find(function(x){return x.name!=name&&!x.protected;})||SESSDATA.find(function(x){return x.name!=name;})); up=nx?[nx.name]:[]; }
   panesSet(up); loadSessions(true); }
 function paneToggle(name){ (PANES.indexOf(name)>=0 && !wkMobile()) ? paneDown(name) : paneUp(name); }
+// A terminal pane (the /term iframe) that just ended/killed/was-filed-away asks us to vacate its pane NOW,
+// instead of waiting for the next loadSessions reconcile -- fixes a gracefully-ended pane sitting on the
+// '[filed away]' screen. paneDown re-renders; loadSessions then drops the taskbar tile once tmux is gone.
+window.addEventListener('message',function(e){ var d=(e&&e.data)||{};
+  if(d&&d.type==='cf-session-dead'&&d.name){ try{ if(PANES.indexOf(d.name)>=0) paneDown(d.name); }catch(_){}
+    try{ if(typeof loadSessions==='function') setTimeout(function(){loadSessions(true);},600); }catch(_){}} });
 function wkMarkDock(){ var b=document.getElementById('sessbar'); if(!b)return; b.querySelectorAll('.sb-tile').forEach(function(t){ t.classList.toggle('up', LENS==='sessions' && PANES.indexOf(t.getAttribute('data-n'))>=0); }); }
 function fmtTok(n){n=n||0;return n>=1e9?(n/1e9).toFixed(n>=1e10?0:1)+'B':n>=1e6?(n/1e6).toFixed(n>=1e7?0:1)+'M':n>=1e3?Math.round(n/1e3)+'K':''+n;}
 function fmtUSD(n){n=n||0;return n>=1e6?'$'+(n/1e6).toFixed(2)+'M':n>=1e3?'$'+(n/1e3).toFixed(1)+'k':'$'+n.toFixed(2);}

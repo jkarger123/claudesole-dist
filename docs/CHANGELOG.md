@@ -3,6 +3,27 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.102 -- 2026-07-01  (session terminal: real scroll + native select/copy; graceful-End vacates the pane)
+- **Graceful End now vacates the pane immediately.** The in-terminal ⏏ End only knew how to navigate a standalone
+  /term tab; embedded as a workspace pane it sat forever on the '[filed away]' screen. New `leaveNow()` posts a
+  `cf-session-dead` message to the parent dashboard, which drops the pane at once (the handoff still finishes in
+  the background); a matching listener in PAGE calls `paneDown`. Force-kill uses the same path.
+- **Terminal scroll finally works like a terminal, with NO scroll/select mode toggle** (removed). The history
+  lives in tmux (xterm only ever holds the repainted visible window) AND Claude Code grabs mouse reporting -- so a
+  raw wheel reached Claude as arrow keys. Now the wheel (desktop) and swipe (mobile) are intercepted in JS and
+  drive tmux copy-mode server-side (`/api/term-scroll`), scrolling the full history. '↓ jump to live' + typing snap back.
+- **Native drag-to-select across the full history** (`/api/term-select`): a mouse drag drives tmux's OWN copy-mode
+  selection -- anchor on mousedown, extend on drag, AUTO-SCROLL past the top/bottom edge through the whole
+  scrollback (not just the visible screen). We fully own the mouse during a drag (stopPropagation) so xterm can't
+  forward mouse-report bytes that were tearing down copy-mode on release. Requests are serialized (concurrent ones
+  raced tmux's copy-mode state) + coalesced.
+- **Copy that actually lands + returns to live.** On release the selection is copied to a buffer (kept, via
+  `copy-selection-no-clear`). Ctrl/Cmd+C (a real gesture -> works on plain http), the ⎘ Copy chip, or a secure-origin
+  auto-write deliver it to the clipboard; then the highlight clears and the pane snaps back to live. A plain click
+  dismisses a selection. Ctrl+C used to fall through to SIGINT -- it now copies the tmux selection.
+- **⎘ select & copy panel loads the FULL history** (`/api/term-capture`, ~15k lines) as real selectable text, so
+  drag-past-edge selection works there too (desktop + mobile) -- not just the on-screen buffer.
+
 ## 0.99.101 -- 2026-07-01  (fix serif-default font in the session-terminal confirm popups)
 - **The session-terminal pages now use the UI sans font in their popups.** The browser-terminal PAGE and
   RALPH_PAGE never set a `font-family` on `body`, so their `confirmM` dialog (e.g. "Compact this session?") and
