@@ -14168,7 +14168,7 @@ class H(BaseHTTPRequestHandler):
 
 TERM_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude session</title>
 <link rel="stylesheet" href="/static/xterm.css">
-<style>html,body{margin:0;height:100%;background:#0a0a0f;overflow:hidden}#wrap{display:flex;flex-direction:column;height:100vh;height:100dvh;width:100vw}#t{flex:1;min-height:0;padding:4px}
+<style>html,body{margin:0;height:100%;background:#0a0a0f;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}button,input,select,textarea{font-family:inherit}#wrap{display:flex;flex-direction:column;height:100vh;height:100dvh;width:100vw}#t{flex:1;min-height:0;padding:4px}
 #t,#t *{touch-action:none}
 body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;user-select:text}
 #bar{position:fixed;top:0;right:0;z-index:9;background:#1a1a24;color:#a0a0b0;font:12px -apple-system,sans-serif;padding:4px 10px;border:1px solid #2a2a3a;border-radius:0 0 0 8px}
@@ -14217,7 +14217,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #tdlg .tdlg-box:before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:linear-gradient(135deg,#d6b23c,#c9a227)}
 #tdlg .tdlg-msg{color:#fff;font-size:13.5px;line-height:1.6;white-space:pre-line}
 #tdlg .tdlg-btns{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
-#tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid #2a2a3a;background:#22222e;color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px}
+#tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid #2a2a3a;background:#22222e;color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px;font-family:inherit}
 #tdlg .tdlg-b.go{background:linear-gradient(135deg,#d6b23c,#c9a227);color:#15120a;border:none;font-weight:700}
 </style></head><body>
 <div id="bar"><span id="st">connecting...</span><button id="cpbtn" onclick="showCopy()" title="Show the text as selectable plain text so you can copy it (needed on mobile - the terminal itself is a canvas and can't be selected by touch)">&#10697; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><button id="mtog" onclick="toggleMouse()">scroll</button><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
@@ -14412,7 +14412,7 @@ RALPH_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="vi
 <link rel="stylesheet" href="/static/xterm.css">
 <style>
 :root{--bg:#0a0a0f;--bg2:#12121a;--card:#1a1a24;--ink:#ffffff;--mut:#a0a0b0;--line:#2a2a3a;--accent:#c9a227;--accent-light:#e8c547;--ok:#22c55e;--grad:linear-gradient(135deg,#d6b23c,#c9a227);--glow:0 10px 28px rgba(0,0,0,.5)}
-*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:14px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;-webkit-text-size-adjust:100%}
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:14px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;-webkit-text-size-adjust:100%}button,input,select,textarea{font-family:inherit}
 header{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#12121a,#0a0a0f);flex-wrap:wrap}
 header a{color:var(--accent-light);text-decoration:none;font-weight:700}
 .badge{font-size:10px;font-weight:700;padding:3px 8px;border-radius:7px;text-transform:uppercase;letter-spacing:.3px}
@@ -14438,7 +14438,7 @@ header a{color:var(--accent-light);text-decoration:none;font-weight:700}
 #tdlg .tdlg-box:before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:linear-gradient(135deg,#d6b23c,#c9a227)}
 #tdlg .tdlg-msg{color:#fff;font-size:13.5px;line-height:1.6;white-space:pre-line}
 #tdlg .tdlg-btns{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
-#tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid #2a2a3a;background:#22222e;color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px}
+#tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid #2a2a3a;background:#22222e;color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px;font-family:inherit}
 #tdlg .tdlg-b.go{background:linear-gradient(135deg,#d6b23c,#c9a227);color:#15120a;border:none;font-weight:700}
 </style></head><body>
 <header>

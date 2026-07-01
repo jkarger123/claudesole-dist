@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.101 -- 2026-07-01  (fix serif-default font in the session-terminal confirm popups)
+- **The session-terminal pages now use the UI sans font in their popups.** The browser-terminal PAGE and
+  RALPH_PAGE never set a `font-family` on `body`, so their `confirmM` dialog (e.g. "Compact this session?") and
+  toolbar buttons fell back to the browser default serif (Times) -- visibly off vs the rest of the dashboard.
+  Fix: set the `-apple-system,...,sans-serif` stack on both pages' `html,body`, add `button,input,select,textarea
+  {font-family:inherit}` (form elements don't inherit font by default), and `font-family:inherit` on `.tdlg-b`.
+  The main dashboard PAGE was already correct (cc-* design system). Pure CSS; no behavior change.
+
 ## 0.99.100 -- 2026-07-01  (auto-updates DEFER during a node's business hours -- don't restart Sarah mid-workday)
 - **Auto-updates now skip a node during its BUSINESS HOURS** so a release never restarts it mid-workday (AFP =
   Sarah's node). New per-node cc.config `business_hours` {days:'weekdays'|'all', start, end}; the node reports
