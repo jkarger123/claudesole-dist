@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.122 -- 2026-07-02  (Fix: "Resume failed: unknown machine" on installs with an empty machine registry)
+- Resuming/forking a past conversation looked up its machine in `_machines.json` BEFORE the local-resume branch,
+  so the LOCAL host ("studio") had to be a registered machine. On a fresh install or a tenant with no/empty
+  `_machines.json` (e.g. shopos), every local resume failed with "unknown machine". Fixed: the local host is
+  always a valid resume target (it's whatever runs this server) and needs no registry entry; only REMOTE (ssh)
+  machines are looked up. Resume + fork now work on any node out of the box.
+
 ## 0.99.121 -- 2026-07-02  (Email Archive: smart -- Ask-your-email + facets + threads, token-bounded)
 - Turned the archive from keyword FTS into a genuinely smart tool over 21k+ emails WITHOUT stuffing the corpus
   into an LLM. Two layers:

@@ -8201,14 +8201,17 @@ def resume_session(machine, sid, cwd, fork=False, label=""):
     if (label or "").strip() and (label or "").strip() != "(no opening message)":
         _SESSLABEL[name] = (label.strip()[:46]) + (" · fork" if fork else "")   # clean title immediately (until the agent self-names)
     fk = " --fork-session" if fork else ""
-    mm = {m["id"]: m for m in load(MACHINES, {"machines": []}).get("machines", [])}.get(machine)
-    if not mm:
-        return {"ok": False, "error": "unknown machine"}
     if machine == "studio":
+        # The LOCAL host is always a valid resume target -- it's whatever machine runs this server. It does NOT
+        # need a _machines.json entry (a fresh install / a tenant like shopos may have an empty machine registry;
+        # requiring "studio" to be registered made every local resume there fail with "unknown machine").
         wd = cwd if (cwd and os.path.isdir(cwd)) else PROJECT
         sh([TMUX, "new-session", "-d", "-s", name, "-c", wd,
             _CC_PATH + _CC_ENVP + 'claude --resume %s%s --dangerously-skip-permissions %s' % (sid, fk, CC_TITLE_FLAG)])
     else:
+        mm = {m["id"]: m for m in load(MACHINES, {"machines": []}).get("machines", [])}.get(machine)
+        if not mm:                                  # only REMOTE (ssh) machines must be in the registry
+            return {"ok": False, "error": "unknown machine"}
         alias = mm.get("alias") or mm["ssh"]
         wd = cwd if (cwd and re.match(r"^[A-Za-z]:[\\/][\w\\/ .:-]*$", cwd)) else "C:\\hptuners"
         inner = ('ssh -t %s "cd /d %s && \\"%%APPDATA%%\\npm\\claude.cmd\\" --resume %s%s --dangerously-skip-permissions"'
