@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.115 -- 2026-07-02  (allowlist deliverable_gdoc + housekeeping_eod for remote config-set)
+- Add `deliverable_gdoc`, `housekeeping_eod`, `housekeeping_eod_hour` to `SA_ALLOWED_KEYS` so Mission Control can
+  toggle the Google-Doc delivery + end-of-day housekeeping on a node via a signed superadmin `set_config` (they're
+  per-node feature flags; nothing runs until flipped).
+
 ## 0.99.114 -- 2026-07-01  (Deliver agent output as GOOGLE DOCS, + self-healing Google token vault re-sync)
 - **Agent .md deliverables can now land as native Google Docs** (opt-in `cc.config deliverable_gdoc` + Google
   connected). A background sweep converts each new `.md` in a deliverables/ folder to a Google Doc via Drive

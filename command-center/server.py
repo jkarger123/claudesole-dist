@@ -401,7 +401,8 @@ SA_NODE_KEY = os.environ.get("MESH_SUPERADMIN_NODE_KEY") or CC.get("superadmin_n
 SA_SKEW = 300                  # max clock skew (s) tolerated on the issued timestamp
 SA_ALLOWED_KEYS = ("mesh_auth_enforce", "mesh_reply_sla", "subscription_monthly", "pipeline_stale_sec",
                    "deliverables_root", "storage_mode", "account_wallet", "fleet_share", "fleet_view", "side_label",
-                   "extension_routine_host", "switch_proof_n")
+                   "extension_routine_host", "switch_proof_n", "deliverable_gdoc", "housekeeping_eod",
+                   "housekeeping_eod_hour")
 _SA_SEEN = {}                  # nonce -> exp_ts (single-use replay cache)
 _SA_LOCK = threading.Lock()
 # PUBLIC-KEY superadmin (the "every install is auto-under my superadmin" model): MC holds an Ed25519 PRIVATE
