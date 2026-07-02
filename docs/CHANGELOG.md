@@ -3,6 +3,27 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.126 -- 2026-07-02  (Access guarantees documented + MESH_ENFORCE fleet-wide + approvals audit + last fleet literals)
+- **THE ACCESS GUARANTEES documented** (docs/ACCESS_RECOVERY.md): the six structural invariants that mean
+  the operator can ALWAYS get back in (operator login is its own code path; break-glass needs only a
+  terminal; the superadmin DOWN channel is signature-authed and NOT mesh-gated; every auth knob has a
+  remote rollback; credential changes are never silent; worst-case mesh blast radius is chatter, not
+  access) -- plus a STANDING GATE: any auth-touching ship ends with a 3-point recovery verification.
+- **MESH_ENFORCE flipped fleet-wide** (catalog C2, executed under the access protocol): all 8 nodes
+  verified carrying the identical family badge FIRST (hash-compare); local trio flipped + verified
+  (unbadged 403 / badged 200 / operator login 200); 4 tenants flipped via signed set_config + safe
+  restart with post-enforce superadmin ping proven; AFP staged via set_config only (applies at her own
+  deferred restart -- zero disruption). Unbadged mesh traffic is now rejected fleet-wide.
+- **Automatic prompt approvals: audit surface + operator switch** (item 1.12 / catalog C3):
+  `/api/autoapprove-log` + a Settings panel showing the full audit trail of every auto-accepted
+  permission prompt, with a live-applied ON/OFF toggle (cc.config auto_accept_prompts). Previously the
+  audit log existed but nothing surfaced it and disabling meant hand-editing config.
+- **Last fleet-specific literals out of the framework** (item 1.3 / catalog B3): remote machines'
+  project root now comes from the machine registry entry (`root` key; generic `%USERPROFILE%` default)
+  instead of a hardcoded `C:\hptuners` in both remote-launch paths; the Backup lens 3-2-1 cards render
+  from `cc.config backup_tiers` (+ the node's own project path) instead of hardcoded Mac-Studio/T490
+  rows. This fleet's values moved into per-node state/config where they belong.
+
 ## 0.99.125 -- 2026-07-02  (The node watches its own health: daemon supervisor + headless-login preflight)
 - **Daemon supervisor** (plan item 1.11 / catalog D4): all ~28 background loops now launch via
   `_daemon(name, fn)` instead of bare `threading.Thread` -- a loop that RAISES is respawned with

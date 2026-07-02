@@ -198,7 +198,7 @@ def render_page():
     except Exception: _lenses = None
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
-        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "models": CC_MODELS, "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(),
+        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "models": CC_MODELS, "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(), "backupTiers": CC.get("backup_tiers") or [],
         "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md", "MASTER_HANDOFF.md",
             "FILE_SYSTEM_GOVERNANCE.md", "TEXT2TUNE_ARCHITECTURE.md", "ENTERPRISE_MIGRATION.md",
             "BRIDGE_MIGRATION.md"]})
@@ -4299,8 +4299,9 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
             c = next((x for x in load(COMPS, {"components": []}).get("components", []) if x["id"] == cid), None)
             if c and c.get("path"): sub = "\\" + c["path"].replace("/", "\\")
         alias = m.get("alias") or m["ssh"]
+        mroot = (m.get("root") or "%USERPROFILE%").rstrip("\\")   # per-machine project root from the registry (set "root" on the machine entry); generic default
         # bare `claude` -> claude.exe = "Access is denied" over SSH; use the claude.cmd full path
-        inner = 'ssh -t %s "cd /d C:\\hptuners%s && \\"%%APPDATA%%\\npm\\claude.cmd\\" --dangerously-skip-permissions"' % (alias, sub)
+        inner = 'ssh -t %s "cd /d %s%s && \\"%%APPDATA%%\\npm\\claude.cmd\\" --dangerously-skip-permissions"' % (alias, mroot, sub)
         sh([TMUX, "new-session", "-d", "-s", name, inner])
     # Auto-accept the "trust this folder?" safety prompt that Claude shows on first launch in a new dir
     # (--dangerously-skip-permissions does NOT bypass it). The default highlighted choice is "Yes, I
@@ -8249,7 +8250,7 @@ def resume_session(machine, sid, cwd, fork=False, label=""):
         if not mm:                                  # only REMOTE (ssh) machines must be in the registry
             return {"ok": False, "error": "unknown machine"}
         alias = mm.get("alias") or mm["ssh"]
-        wd = cwd if (cwd and re.match(r"^[A-Za-z]:[\\/][\w\\/ .:-]*$", cwd)) else "C:\\hptuners"
+        wd = cwd if (cwd and re.match(r"^[A-Za-z]:[\\/][\w\\/ .:-]*$", cwd)) else ((mm.get("root") or "%USERPROFILE%").rstrip("\\"))   # per-machine root from the registry; generic default
         inner = ('ssh -t %s "cd /d %s && \\"%%APPDATA%%\\npm\\claude.cmd\\" --resume %s%s --dangerously-skip-permissions"'
                  % (alias, wd, sid, fk))
         sh([TMUX, "new-session", "-d", "-s", name, inner])
@@ -13808,6 +13809,7 @@ def settings_get():
             "tier": "grandfather" if ROLE == "org" else "father",
             "type": "agency" if is_agency() else "project",
             "browser_act": bool(CC.get("browser_act")),
+            "auto_accept": CC.get("auto_accept_prompts") is not False,
             "config_path": _CC_CONFIG, "port": PORT}
 def settings_save(body):
     tier, typ = body.get("tier"), body.get("type")
@@ -13833,6 +13835,11 @@ def settings_save(body):
         if bool(cfg.get("browser_act")) != v:
             cfg["browser_act"] = v; CC["browser_act"] = v   # applied LIVE (the browser_queue gate reads CC), persisted below
             changed.append("browser_act=" + str(v))
+    if "auto_accept" in body:
+        v = bool(body.get("auto_accept"))
+        if (cfg.get("auto_accept_prompts") is not False) != v:
+            cfg["auto_accept_prompts"] = v; CC["auto_accept_prompts"] = v   # applied LIVE (the scan loop reads CC each pass)
+            changed.append("auto_accept_prompts=" + str(v))
     if not changed: return {"ok": True, "changed": [], "note": "No changes."}
     try:
         tmp = _CC_CONFIG + ".tmp"
@@ -14196,6 +14203,12 @@ class H(BaseHTTPRequestHandler):
             return self._s(403, json.dumps({"instances": [], "roll": {}, "n": 0, "role": ROLE, "gated": True, "error": "portfolio is ClaudeGrandfather (overseer) only"}))
         if u.path == "/api/peers":         return self._s(200, json.dumps({"peers": peers(), "self": INSTANCE_ID}))
         if u.path == "/api/daemons":       return self._s(200, json.dumps(daemons_status(), default=str))
+        if u.path == "/api/autoapprove-log":   # audit trail of auto-accepted permission prompts (catalog C3)
+            try:
+                tail = open(_AUTOAPPROVE_LOG, errors="ignore").read()[-8000:] if os.path.isfile(_AUTOAPPROVE_LOG) else ""
+            except Exception as e:
+                tail = "(unreadable: %s)" % str(e)[:80]
+            return self._s(200, json.dumps({"ok": True, "enabled": CC.get("auto_accept_prompts") is not False, "tail": tail}))
         if u.path == "/api/agency":        return self._s(200, json.dumps(agency_model()))
         if u.path == "/api/mesh":          return self._s(200, json.dumps(mesh_inbox()))
         if u.path == "/api/granola":       return self._s(200, json.dumps(granola.gr_proposals()))
@@ -22180,8 +22193,8 @@ function renderBackup(){if(!BACKUP)return;const b=BACKUP,st=b.state||{},lv=b.liv
     +'</div></div>';
   h+='<div class="card" style="cursor:default"><h3><span>3-2-1 backup posture</span></h3><div class="bk321">'
     +bk321('☁️','GitHub (off-site, private)',esc(lv.remote||''),pushOk!==false)
-    +bk321('💽','Mac Studio SSD','/Volumes/Samsung990PRO — live working tree',true)
-    +bk321('💻','T490 source-of-truth','C:\\hptuners (ssh lstuner)',true)+'</div>'
+    +bk321('💽','Local working tree',esc((window.CC&&window.CC.project)||''),true)
+    +(((window.CC&&window.CC.backupTiers)||[]).map(function(t){return bk321(t.icon||'🗄️',esc(t.title||''),esc(t.desc||''),t.ok!==false);}).join(''))+'</div>'
     +'<div class="ucsub" style="margin-top:9px">Guarded by a deny-by-default .gitignore + a secret-scan gate that ABORTS any backup containing a real key or a &gt;95MB file (the public Supabase anon key is allowed; it is meant to be public).</div></div>';
   h+='<div class="card" style="cursor:default"><h3><span>Recent commits</span> <span class="sub">'+(b.recent||[]).length+'</span></h3><div class="convscroll">'
     +((b.recent||[]).map(c=>'<div class="sess"><span class="lbl"><code style="color:var(--accent-light)">'+esc(c.h)+'</code> '+esc(c.msg)+'</span><span class="sub">'+esc(c.when)+'</span></div>').join('')||'<div class="meta">none</div>')+'</div></div>';
@@ -23133,6 +23146,12 @@ async function loadSettings(){
   h+='<div class="cc-panel"><div class="cc-p-h"><b>Browser control</b> <span class="cc-p-sub">'+(s.browser_act?'act-for-me is ON — agents may click/type in the desktop browser':'act-for-me is OFF — agents can only show pages (open/scroll/highlight)')+'</span></div>'
     +'<div class="cc-p-note">Agents can always <b>show</b> you pages in the desktop browser (open, scroll, highlight, screenshot). Letting them <b>act</b> (click and type) needs this server-side switch AND the desktop app\'s own toggle — both must be on. Applies immediately, no restart.</div>'
     +'<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:6px"><input type="checkbox" id="set_browseract"'+(s.browser_act?' checked':'')+' onchange="browserActSave(this.checked)"> allow agents to click + type in the desktop browser</label></div>';
+  let aal={};try{aal=await(await fetch("/api/autoapprove-log")).json();}catch(e){}
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Automatic prompt approvals</b> <span class="cc-p-sub">'+(s.auto_accept?'ON — stalled permission prompts are auto-accepted (audited below)':'OFF — sessions wait for a human on every prompt')+'</span></div>'
+    +'<div class="cc-p-note">Claude Code shows a hard "Do you want to proceed?" prompt for some commands even in skip-permissions mode. When ON, the Command Center auto-selects Yes for its own trusted sessions so autonomous work never dies on a stalled prompt — and logs <b>every</b> accept below. Turn OFF to require a human at each prompt. Applies immediately.</div>'
+    +'<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:6px"><input type="checkbox" id="set_autoaccept"'+(s.auto_accept?' checked':'')+' onchange="autoAcceptSave(this.checked)"> auto-accept stalled permission prompts (audited)</label>'
+    +'<div class="cc-p-h" style="margin-top:11px"><b>Audit trail</b> <span class="cc-p-sub">every auto-accept, newest last</span></div>'
+    +'<pre style="max-height:180px;overflow:auto;background:#0d0d14;border:1px solid var(--line);border-radius:9px;padding:9px;font-size:11.5px;margin-top:5px">'+e2((aal.tail||"").trim()||"(no auto-accepts recorded yet)")+'</pre></div>';
   let peers=[];try{const pr=await(await fetch("/api/peers")).json();peers=(pr&&pr.peers)||[];}catch(e){}
   h+='<div class="cc-panel"><div class="cc-p-h"><b>Mesh peers</b> <span class="cc-p-sub">the other ClaudeFather nodes this node can reach</span></div>'
     +'<div class="cc-p-note">The address book for chief-to-chief messages, fleet drift, and operator Notes. Adding a peer here writes <code>peers.json</code> on THIS node only — add this node on the other side too so they can reach back. Trust still comes from tokens; an entry is just an address.</div>'
@@ -23148,6 +23167,11 @@ async function loadSettings(){
 async function browserActSave(on){
   try{const r=await(await fetch("/api/settings-save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({browser_act:!!on})})).json();
     if(r&&r.ok)toast(on?'Act-for-me enabled — agents may click/type in the desktop browser.':'Act-for-me disabled.',4000);
+    else toast("Failed: "+((r||{}).error||"?"),5000);}catch(e){toast("Request failed");}
+}
+async function autoAcceptSave(on){
+  try{const r=await(await fetch("/api/settings-save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auto_accept:!!on})})).json();
+    if(r&&r.ok)toast(on?'Auto-accept ON — every accept is logged to the audit trail.':'Auto-accept OFF — sessions will wait for a human on each prompt.',4500);
     else toast("Failed: "+((r||{}).error||"?"),5000);}catch(e){toast("Request failed");}
 }
 async function peerAdd(){
