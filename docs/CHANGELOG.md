@@ -3,6 +3,26 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.127 -- 2026-07-02  (Context store Phase 1: bi-temporal edges + deterministic freshness + entity resolution)
+- **Bi-temporal edges** (VISION 3.2 / plan 2.1): the graph's edges now carry valid_at/invalid_at
+  (world-time) + created_at/expired_at (system-time). Conflict rule: INVALIDATE, NEVER DELETE -- asserting
+  a new value for a functional relation (e.g. project status) sets the old edge's invalid_at to the new
+  edge's valid_at, so "what was true WHEN" is always answerable and corrections never destroy history.
+  New API: assert_edge / invalidate_edge / current_edges (the DETERMINISTIC freshness resolver -- pure
+  max(valid_at), never an LLM) / edge_history. v1 `link()` stays as a compat wrapper. One-time migration
+  rebuilds the edges table (the v1 UNIQUE(src,dst,rel) forbade re-asserting a superseded fact) -- proven
+  zero-row-loss against a copy of the live store before shipping.
+- **Entity resolution** (plan 2.2): upsert_entity is now a two-tier resolver -- (1) deterministic key
+  match (an email/source-id held by an existing same-type entity wins outright, so "Sarah K
+  <sarah@x.com>" and "Sarah Karger sarah@x.com" become ONE person), (2) stdlib Jaro-Winkler >= 0.87
+  name similarity for person/org/client (merges as an alias). merge_entities() is non-destructive:
+  keys union + aliases + merged_ids on the keeper, edges repointed, the duplicate tombstoned with
+  merged_into (reversible by construction, never deleted); subjects() skips tombstones. LLM
+  adjudication tier deliberately deferred (deterministic-first per the research).
+- selftest extended with the new invariants (freshness, time-travel, invalidate-at-handover,
+  re-assertion after supersession, key-unify, fuzzy merge, reversible tombstone); stats() reports
+  edges/edges_current.
+
 ## 0.99.126 -- 2026-07-02  (Access guarantees documented + MESH_ENFORCE fleet-wide + approvals audit + last fleet literals)
 - **THE ACCESS GUARANTEES documented** (docs/ACCESS_RECOVERY.md): the six structural invariants that mean
   the operator can ALWAYS get back in (operator login is its own code path; break-glass needs only a

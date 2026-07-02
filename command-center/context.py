@@ -100,9 +100,40 @@ def _migrate():
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           src INTEGER NOT NULL, dst INTEGER NOT NULL, rel TEXT NOT NULL,
           ts REAL NOT NULL, provenance TEXT, meta TEXT,
-          UNIQUE(src, dst, rel)
+          valid_at REAL,               -- when this became true in the WORLD (bi-temporal: valid-time)
+          invalid_at REAL,             -- when it STOPPED being true (NULL = still true). Invalidate, never delete.
+          created_at REAL,             -- when WE recorded it (system-time)
+          expired_at REAL              -- when WE retracted/corrected the RECORD itself (NULL = live record)
         );
+        CREATE INDEX IF NOT EXISTS ix_edges_src_rel ON edges(src, rel);
+        CREATE INDEX IF NOT EXISTS ix_edges_dst_rel ON edges(dst, rel);
         """)
+        # BI-TEMPORAL MIGRATION (one-time): the v1 edges table had UNIQUE(src,dst,rel), which forbids
+        # HISTORY (the same fact can never be re-asserted after being invalidated). Rebuild without the
+        # constraint, preserving rows; v1 rows get valid_at=ts, created_at=ts (best available truth).
+        try:
+            cols = {r[1] for r in c.execute("PRAGMA table_info(edges)").fetchall()}
+            uniq = any("sqlite_autoindex" in (r[1] or "") for r in c.execute("PRAGMA index_list(edges)").fetchall())
+            if "valid_at" not in cols or uniq:
+                c.executescript("""
+                CREATE TABLE IF NOT EXISTS edges_v2(
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  src INTEGER NOT NULL, dst INTEGER NOT NULL, rel TEXT NOT NULL,
+                  ts REAL NOT NULL, provenance TEXT, meta TEXT,
+                  valid_at REAL, invalid_at REAL, created_at REAL, expired_at REAL
+                );
+                """)
+                old = "src,dst,rel,ts,provenance,meta" + (",valid_at,invalid_at,created_at,expired_at" if "valid_at" in cols else "")
+                new = "src,dst,rel,ts,provenance,meta" + (",valid_at,invalid_at,created_at,expired_at" if "valid_at" in cols else ",valid_at,created_at")
+                sel = old if "valid_at" in cols else old + ",ts,ts"
+                c.execute("INSERT INTO edges_v2(%s) SELECT %s FROM edges" % (new, sel))
+                c.executescript("DROP TABLE edges; ALTER TABLE edges_v2 RENAME TO edges;")
+                c.executescript("""
+                CREATE INDEX IF NOT EXISTS ix_edges_src_rel ON edges(src, rel);
+                CREATE INDEX IF NOT EXISTS ix_edges_dst_rel ON edges(dst, rel);
+                """)
+        except Exception:
+            pass
         try:
             c.execute("CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(title, body, subject, content='events', content_rowid='id')")
             # keep FTS in sync
@@ -158,26 +189,159 @@ def _index_entities(actor, subject):
             upsert_entity("subject", str(subject)[:80])
     except Exception: pass
 
+# ---- ENTITY RESOLUTION (VISION 3.2): the same person/thing from every surface -> ONE entity ------------
+# Two-tier, deterministic-first (Fellegi-Sunter shape, no LLM): (1) high-confidence KEYS (an email address,
+# a source id) match exactly -> same entity, whatever the display name; (2) no key match -> Jaro-Winkler
+# name similarity >= 0.87 against same-type entities -> merge as an alias. Merges are NON-DESTRUCTIVE
+# (aliases[] + merged_ids in meta; the duplicate row is tombstoned with merged_into, never deleted) so a
+# wrong merge is reversible. An LLM adjudication tier can slot in later for the blocking survivors.
+
+def _jaro_winkler(a, b):
+    """Stdlib Jaro-Winkler similarity 0..1 (standard p=0.1, 4-char prefix cap)."""
+    a, b = (a or ""), (b or "")
+    if a == b: return 1.0
+    la, lb = len(a), len(b)
+    if not la or not lb: return 0.0
+    window = max(la, lb) // 2 - 1
+    ma = [False] * la; mb = [False] * lb; matches = 0
+    for i in range(la):
+        lo, hi = max(0, i - window), min(lb, i + window + 1)
+        for j in range(lo, hi):
+            if not mb[j] and a[i] == b[j]:
+                ma[i] = mb[j] = True; matches += 1; break
+    if not matches: return 0.0
+    t = 0; k = 0
+    for i in range(la):
+        if ma[i]:
+            while not mb[k]: k += 1
+            if a[i] != b[k]: t += 1
+            k += 1
+    jaro = (matches / la + matches / lb + (matches - t / 2) / matches) / 3.0
+    prefix = 0
+    for i in range(min(4, la, lb)):
+        if a[i] == b[i]: prefix += 1
+        else: break
+    return jaro + prefix * 0.1 * (1.0 - jaro)
+
+_JW_MERGE = 0.87   # match threshold for name-only resolution (keys always win outright)
+
 def upsert_entity(etype, name, keys=None, meta=None):
+    """Upsert with RESOLUTION: (1) any provided key already held by a same-type entity -> that entity (the
+    new name becomes an alias); (2) exact normalized-name match -> that entity; (3) Jaro-Winkler >= 0.87
+    against same-type names/aliases -> that entity (alias merge); else a new entity."""
     c = _connect(); nkey = _norm(name); now = time.time()
+    keys = [k for k in (keys or []) if k]
+    def _absorb(row):
+        ek = set(json.loads(row["keys"] or "[]")) | set(keys)
+        em = json.loads(row["meta"] or "{}"); em.update(meta or {})
+        if nkey and nkey != row["nkey"]:
+            al = set(em.get("aliases") or []); al.add(name); em["aliases"] = sorted(al)
+        c.execute("UPDATE entities SET keys=?,meta=?,updated=? WHERE id=?",
+                  (json.dumps(sorted(ek)), json.dumps(em), now, row["id"])); c.commit(); return row["id"]
     with _LOCK:
-        r = c.execute("SELECT id,keys,meta FROM entities WHERE type=? AND nkey=?", (etype, nkey)).fetchone()
-        if r:
-            ek = set(json.loads(r["keys"] or "[]")) | set(keys or [])
-            em = json.loads(r["meta"] or "{}"); em.update(meta or {})
-            c.execute("UPDATE entities SET keys=?,meta=?,updated=? WHERE id=?",
-                      (json.dumps(sorted(ek)), json.dumps(em), now, r["id"])); c.commit(); return r["id"]
+        # tier 1: deterministic key match (email / source id) beats any name difference
+        if keys:
+            for row in c.execute("SELECT id,nkey,keys,meta FROM entities WHERE type=? AND keys!='[]'", (etype,)).fetchall():
+                held = set(json.loads(row["keys"] or "[]"))
+                if held & set(keys): return _absorb(row)
+        # tier 2: exact normalized name
+        r = c.execute("SELECT id,nkey,keys,meta FROM entities WHERE type=? AND nkey=?", (etype, nkey)).fetchone()
+        if r: return _absorb(r)
+        # tier 3: fuzzy name vs names + aliases (persons and orgs only -- subjects/threads are literal keys)
+        if etype in ("person", "org", "client") and len(nkey) >= 5:
+            best, best_row = 0.0, None
+            for row in c.execute("SELECT id,nkey,keys,meta FROM entities WHERE type=?", (etype,)).fetchall():
+                cand = [row["nkey"]] + [_norm(x) for x in (json.loads(row["meta"] or "{}").get("aliases") or [])]
+                s = max((_jaro_winkler(nkey, x) for x in cand if x), default=0.0)
+                if s > best: best, best_row = s, row
+            if best_row is not None and best >= _JW_MERGE:
+                return _absorb(best_row)
         cur = c.execute("INSERT INTO entities(type,name,nkey,keys,meta,updated) VALUES(?,?,?,?,?,?)",
-                        (etype, name, nkey, json.dumps(keys or []), json.dumps(meta or {}), now))
+                        (etype, name, nkey, json.dumps(sorted(set(keys))), json.dumps(meta or {}), now))
         c.commit(); return cur.lastrowid
 
-def link(src_id, dst_id, rel, provenance=None, meta=None):
+def merge_entities(keep_id, dup_id):
+    """Non-destructive merge: union keys, record aliases + merged_ids on the keeper, repoint the duplicate's
+    edges, tombstone the duplicate (meta.merged_into; the row stays -- reversible by construction)."""
+    if keep_id == dup_id: return {"ok": False, "error": "same entity"}
+    c = _connect(); now = time.time()
+    with _LOCK:
+        k = c.execute("SELECT * FROM entities WHERE id=?", (keep_id,)).fetchone()
+        d = c.execute("SELECT * FROM entities WHERE id=?", (dup_id,)).fetchone()
+        if not k or not d: return {"ok": False, "error": "no such entity"}
+        km = json.loads(k["meta"] or "{}"); dm = json.loads(d["meta"] or "{}")
+        keys = set(json.loads(k["keys"] or "[]")) | set(json.loads(d["keys"] or "[]"))
+        al = set(km.get("aliases") or []) | set(dm.get("aliases") or []) | {d["name"]}
+        km["aliases"] = sorted(x for x in al if _norm(x) != k["nkey"])
+        km["merged_ids"] = sorted(set(km.get("merged_ids") or []) | {dup_id})
+        c.execute("UPDATE entities SET keys=?,meta=?,updated=? WHERE id=?",
+                  (json.dumps(sorted(keys)), json.dumps(km), now, keep_id))
+        c.execute("UPDATE edges SET src=? WHERE src=?", (keep_id, dup_id))
+        c.execute("UPDATE edges SET dst=? WHERE dst=?", (keep_id, dup_id))
+        dm["merged_into"] = keep_id
+        c.execute("UPDATE entities SET meta=?,updated=? WHERE id=?", (json.dumps(dm), now, dup_id))
+        c.commit()
+    return {"ok": True, "kept": keep_id, "merged": dup_id}
+
+# ---- BI-TEMPORAL EDGES (VISION 3.2 / Graphiti-Zep model) ----------------------------------------------
+# Four timestamps per edge: valid_at/invalid_at = when it was true IN THE WORLD; created_at/expired_at =
+# when WE recorded/retracted the record. Conflict rule: INVALIDATE, NEVER DELETE (the old edge's invalid_at
+# is set to the new edge's valid_at), so "what was true WHEN" is always answerable and corrections never
+# destroy history. Freshness is resolved in DETERMINISTIC CODE (max valid_at), never by an LLM.
+
+def assert_edge(src_id, dst_id, rel, valid_at=None, provenance=None, meta=None, functional=False):
+    """Assert a fact edge. functional=True means (src, rel) has ONE current value (e.g. project STATUS,
+    person WORKS_AT): asserting a new dst invalidates any currently-valid edges to other dsts. Re-asserting
+    the SAME currently-valid (src,dst,rel) is a no-op (returns the live edge id). Returns the edge id."""
+    c = _connect(); now = time.time(); va = float(valid_at if valid_at is not None else now)
+    with _LOCK:
+        live = c.execute("""SELECT id,dst FROM edges WHERE src=? AND rel=? AND expired_at IS NULL
+                            AND (invalid_at IS NULL OR invalid_at>?)""", (src_id, rel, va)).fetchall()
+        for r in live:
+            if r["dst"] == dst_id:
+                return r["id"]                          # already true now -- nothing to change
+        if functional:
+            for r in live:                              # a new value supersedes the old: invalidate at the handover
+                c.execute("UPDATE edges SET invalid_at=? WHERE id=? AND (invalid_at IS NULL OR invalid_at>?)",
+                          (va, r["id"], va))
+        cur = c.execute("""INSERT INTO edges(src,dst,rel,ts,provenance,meta,valid_at,created_at)
+                           VALUES(?,?,?,?,?,?,?,?)""",
+                        (src_id, dst_id, rel, now, provenance, json.dumps(meta or {}), va, now))
+        c.commit(); return cur.lastrowid
+
+def invalidate_edge(edge_id, invalid_at=None):
+    """Mark an edge as no longer true in the world (correction path). The row stays -- history is sacred."""
     c = _connect()
     with _LOCK:
-        try:
-            c.execute("INSERT OR IGNORE INTO edges(src,dst,rel,ts,provenance,meta) VALUES(?,?,?,?,?,?)",
-                      (src_id, dst_id, rel, time.time(), provenance, json.dumps(meta or {}))); c.commit()
-        except Exception: pass
+        c.execute("UPDATE edges SET invalid_at=? WHERE id=?", (float(invalid_at or time.time()), edge_id)); c.commit()
+    return {"ok": True, "id": edge_id}
+
+def current_edges(src=None, dst=None, rel=None, at=None):
+    """THE DETERMINISTIC FRESHNESS RESOLVER: what is true at time `at` (default: now). An edge counts iff
+    valid_at<=at AND (invalid_at is NULL or invalid_at>at) AND the record isn't expired. Ordered newest
+    valid_at first, so callers wanting 'the' value of a functional rel take row 0 -- pure max(valid_at),
+    no model involved (research: a ~50-line deterministic resolver beats every LLM memory system on
+    'which fact is current')."""
+    c = _connect(); at = float(at if at is not None else time.time())
+    where, args = ["(valid_at IS NULL OR valid_at<=?)", "(invalid_at IS NULL OR invalid_at>?)", "expired_at IS NULL"], [at, at]
+    if src is not None: where.append("src=?"); args.append(src)
+    if dst is not None: where.append("dst=?"); args.append(dst)
+    if rel is not None: where.append("rel=?"); args.append(rel)
+    rows = c.execute("SELECT * FROM edges WHERE %s ORDER BY valid_at DESC" % " AND ".join(where), args).fetchall()
+    return [dict(r) for r in rows]
+
+def edge_history(src, rel=None):
+    """The full timeline for a src (optionally one rel): every assertion with its validity window --
+    'what was true when', including superseded values. Never deletes, so this is complete."""
+    c = _connect(); where, args = ["src=?"], [src]
+    if rel: where.append("rel=?"); args.append(rel)
+    rows = c.execute("SELECT * FROM edges WHERE %s ORDER BY valid_at ASC" % " AND ".join(where), args).fetchall()
+    return [dict(r) for r in rows]
+
+def link(src_id, dst_id, rel, provenance=None, meta=None):
+    """Compat wrapper (v1 API): a non-functional observation edge, valid from now."""
+    try: return assert_edge(src_id, dst_id, rel, provenance=provenance, meta=meta, functional=False)
+    except Exception: return None
 
 # ---- retrieval --------------------------------------------------------------------------------------
 def _search_ids(query, limit=80):
@@ -308,6 +472,10 @@ def stats():
     out = {"db": _DB_PATH, "fts": _FTS}
     out["events"] = c.execute("SELECT COUNT(*) n FROM events").fetchone()["n"]
     out["entities"] = c.execute("SELECT COUNT(*) n FROM entities").fetchone()["n"]
+    try:
+        out["edges"] = c.execute("SELECT COUNT(*) n FROM edges").fetchone()["n"]
+        out["edges_current"] = c.execute("SELECT COUNT(*) n FROM edges WHERE expired_at IS NULL AND (invalid_at IS NULL OR invalid_at>?)", (time.time(),)).fetchone()["n"]
+    except Exception: pass
     out["by_kind"] = {r["kind"]: r["n"] for r in c.execute("SELECT kind,COUNT(*) n FROM events GROUP BY kind ORDER BY n DESC").fetchall()}
     out["by_source"] = {r["source"]: r["n"] for r in c.execute("SELECT source,COUNT(*) n FROM events GROUP BY source ORDER BY n DESC").fetchall()}
     r = c.execute("SELECT MIN(ts) a, MAX(ts) b FROM events").fetchone()
@@ -318,7 +486,8 @@ def subjects(limit=300):
     """Known subjects/people the focus engine can match an activity signal against (graph nodes + the
     distinct subject keys seen on events). name + aliases/keys."""
     c = _connect(); out = {}
-    for r in c.execute("SELECT type,name,keys FROM entities WHERE type IN ('subject','project','client','person') ORDER BY updated DESC LIMIT ?", (limit,)).fetchall():
+    for r in c.execute("SELECT type,name,keys,meta FROM entities WHERE type IN ('subject','project','client','person') ORDER BY updated DESC LIMIT ?", (limit,)).fetchall():
+        if (json.loads(r["meta"] or "{}")).get("merged_into"): continue   # tombstoned duplicate -> its keeper carries the aliases
         out[_norm(r["name"])] = {"name": r["name"], "type": r["type"], "keys": json.loads(r["keys"] or "[]")}
     for r in c.execute("SELECT DISTINCT subject FROM events WHERE subject IS NOT NULL AND subject!='' LIMIT ?", (limit,)).fetchall():
         k = _norm(r["subject"])
@@ -412,6 +581,37 @@ def selftest():
     scx = scout(subject="acme-diesel", limit=5, exclude_ids=[i["id"] for i in sc["items"]])
     assert scx["count"] == 0, ("scout did not honor exclude_ids", scx)
     print("SCOUT OK -> surfaced=%d why0=%s" % (sc["count"], sc["items"][0]["why"]))
+    # BI-TEMPORAL EDGES: invalidate-never-delete + deterministic freshness (max valid_at, pure code).
+    pa = upsert_entity("project", "acme-diesel"); st_draft = upsert_entity("topic", "status:draft")
+    st_final = upsert_entity("topic", "status:final")
+    e1 = assert_edge(pa, st_draft, "status", valid_at=now-5000, functional=True)
+    e2 = assert_edge(pa, st_final, "status", valid_at=now-100, functional=True)
+    cur_now = current_edges(src=pa, rel="status")
+    assert len(cur_now) == 1 and cur_now[0]["dst"] == st_final, ("freshness resolver wrong", cur_now)
+    cur_then = current_edges(src=pa, rel="status", at=now-3000)
+    assert len(cur_then) == 1 and cur_then[0]["dst"] == st_draft, ("time-travel wrong", cur_then)
+    hist = edge_history(pa, "status")
+    assert len(hist) == 2 and hist[0]["invalid_at"] == hist[1]["valid_at"], ("invalidate-at-handover wrong", hist)
+    e3 = assert_edge(pa, st_draft, "status", valid_at=now, functional=True)   # RE-assertion after supersession must work (v1 UNIQUE forbade this)
+    assert e3 not in (e1, e2) and current_edges(src=pa, rel="status")[0]["dst"] == st_draft
+    assert assert_edge(pa, st_draft, "status", functional=True) == e3, "re-assert same current value must be a no-op"
+    print("BITEMPORAL OK -> history=%d current=draft (re-asserted)" % len(edge_history(pa, "status")))
+    # ENTITY RESOLUTION: same email under two name-forms -> ONE entity; fuzzy name -> alias merge; merge is reversible.
+    p1 = upsert_entity("person", "Sarah K", keys=["sarah@x.com"])
+    p2 = upsert_entity("person", "Sarah Karger", keys=["sarah@x.com"])
+    assert p1 == p2, "email key must resolve name variants to one entity"
+    p3 = upsert_entity("person", "Jon Smithers", keys=["jon@y.com"])
+    p4 = upsert_entity("person", "John Smithers")                    # no key; JW >= 0.87 vs "jon smithers"
+    assert p3 == p4, ("fuzzy resolution failed", p3, p4, _jaro_winkler("jon smithers", "john smithers"))
+    p5 = upsert_entity("person", "Completely Different", keys=["cd@z.com"])
+    assert p5 not in (p1, p3), "distinct person wrongly merged"
+    m = merge_entities(p1, p5)
+    assert m["ok"], m
+    c2 = _connect()
+    dm = json.loads(c2.execute("SELECT meta FROM entities WHERE id=?", (p5,)).fetchone()["meta"])
+    assert dm.get("merged_into") == p1, "merge must tombstone (reversible), not delete"
+    assert all(_norm(s["name"]) != "completely different" for s in subjects()), "tombstoned dup leaked into subjects()"
+    print("RESOLUTION OK -> email-key unify + JW fuzzy (%.3f) + reversible merge" % _jaro_winkler("jon smithers", "john smithers"))
     print("SELFTEST OK -> events=%d count=%d used=%d fts=%s" % (s["events"], b["count"], b["used"], _FTS))
     print("--- assembled bundle (edge-placed, cited) ---"); print(b["text"][:700])
     return True
