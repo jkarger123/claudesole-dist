@@ -403,7 +403,7 @@ SA_SKEW = 300                  # max clock skew (s) tolerated on the issued time
 SA_ALLOWED_KEYS = ("mesh_auth_enforce", "mesh_reply_sla", "subscription_monthly", "pipeline_stale_sec",
                    "deliverables_root", "storage_mode", "account_wallet", "fleet_share", "fleet_view", "side_label",
                    "extension_routine_host", "switch_proof_n", "deliverable_gdoc", "housekeeping_eod",
-                   "housekeeping_eod_hour")
+                   "housekeeping_eod_hour", "email_archive_mbox", "email_archive_db")
 _SA_SEEN = {}                  # nonce -> exp_ts (single-use replay cache)
 _SA_LOCK = threading.Lock()
 # PUBLIC-KEY superadmin (the "every install is auto-under my superadmin" model): MC holds an Ed25519 PRIVATE
@@ -11693,6 +11693,22 @@ def _send_granola(d):
     return {"ok": True, "filename": "granola-" + re.sub(r"[^A-Za-z0-9_-]", "", mid)[:40] + ".md",
             "mime": "text/markdown", "data": "# Call transcript\n\n" + tx, "note": "(call transcript)"}
 
+def _send_emailarc(d):
+    """An archived email (Email Archive extension) -- pull the FULL message from the local index by id and inject
+    it as a readable .md. So an agent session receives the whole email (headers + body) as clean context."""
+    if not email_archive: return {"error": "the email archive is not available on this node"}
+    rid = d.get("id")
+    if rid in (None, ""): return {"error": "no email id"}
+    try: r = email_archive.mb_get(rid)
+    except Exception as e: return {"error": "lookup failed: " + str(e)[:80]}
+    if not isinstance(r, dict) or not r.get("ok"): return {"error": (r or {}).get("error") or "email not found"}
+    m = r.get("message") or {}
+    subj = m.get("subject") or "email"
+    md = ("Subject: %s\nFrom: %s\nTo: %s\nDate: %s\n\n%s\n" % (subj, m.get("sender", ""), m.get("recipients", ""),
+          m.get("date_str", ""), (m.get("body") or "").strip()))
+    return {"ok": True, "filename": (_sanitize_filename(subj)[:60] or "email") + ".md", "mime": "text/markdown",
+            "data": md, "note": "(archived email from %s)" % (m.get("sender", "") or "?")}
+
 def _send_entity(d):
     """GENERIC, self-contained draggable -- the framework primitive behind 'drag a <whatever> into a Claude
     session'. The descriptor carries its OWN content, so ANY lens/extension can make ANY item draggable with
@@ -11728,6 +11744,7 @@ def _send_note(d):
             "mime": "text/markdown", "data": "\n".join(md)}
 register_sendable("note", _send_note)
 register_sendable("granola", _send_granola)
+register_sendable("emailarc", _send_emailarc)   # an archived email -> full message injected as .md (Email Archive extension)
 def _send_upload(d):
     """A file the user dropped INTO the basket from their computer -- already saved under the uploads dir by
     /api/basket-upload. Inject its path in place (bounds-checked to the uploads root; secret-clean)."""
@@ -21157,8 +21174,8 @@ function emSnip(s){ var e=esc(s||''); return e.split('CCHLA').join('<mark>').spl
 function emRender(){
   var box=document.getElementById('emres'); if(!box)return; var r=EMAILA.res||{}, rows=r.results||[];
   if(r.ok===false){ box.innerHTML=empty('Search unavailable: '+esc(r.error||'error')); return; }
-  box.innerHTML='<div class="sub" style="margin-bottom:9px">'+rows.length+' match'+(rows.length===1?'':'es')+' for "'+esc(EMAILA.q)+'"</div>'
-    +rows.map(function(m){ return '<div class="emrow" onclick="emOpen('+m.rowid+')" title="open this email">'
+  box.innerHTML='<div class="sub" style="margin-bottom:9px">'+rows.length+' match'+(rows.length===1?'':'es')+' for "'+esc(EMAILA.q)+'" &middot; <span style="opacity:.8">click to read &middot; drag any result into a Claude session (or the Basket)</span></div>'
+    +rows.map(function(m){ return '<div class="emrow" '+ssAttr({kind:'emailarc',id:m.rowid,name:(m.subject||'email')})+' onclick="emOpen('+m.rowid+')" title="click to read — or drag into a session to hand the agent this email">'
       +'<div class="emsubj">'+esc(m.subject||'(no subject)')+'</div>'
       +'<div class="emmeta">'+esc((m.sender||'').slice(0,64))+' &middot; '+esc(m.date_str||'')+'</div>'
       +'<div class="emsnip">'+emSnip(m.snip)+'</div></div>';

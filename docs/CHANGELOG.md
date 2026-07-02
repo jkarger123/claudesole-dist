@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.120 -- 2026-07-02  (Email Archive: fully functional -- draggable results + an agent CLI)
+- Rounded the email-archive extension out from a lens into a first-class capability agents + people can both use:
+  - **Draggable results.** Every result row is now a sendable -- drag it onto a Claude session (or the Basket) to
+    hand the agent the FULL email (headers + body). New `emailarc` resolver (`register_sendable`) fetches the
+    message from the local index by id; `ssAttr` on the row; declared in extension.json `draggables`.
+  - **Agent CLI `cc-email`** (on the session PATH): `cc-email search "<query>" [limit]` / `get <id>` / `stats` --
+    so an agent can find + pull an archived email into context without the dashboard. Read-only; FTS5 query syntax.
+  - **`AGENT.md`** so an enabled node's agents know the tool exists, when to reach for it, and how (CLI + drag).
+  - Allowlisted `email_archive_mbox` + `email_archive_db` for superadmin `set_config` (remote node configuration).
+- Verified: CLI search/get/stats against the real 21,606-msg index; resolver + draggable wired; ast/lint/preship green.
+
 ## 0.99.119 -- 2026-07-02  (#8 reframed: end-of-day DIGEST + quiet filing, no more re-proposing declined moves)
 - The first end-of-day pass (.116) re-surfaced work the operator had DECLINED to move -- which quietly re-nagged
   the exact move they'd said no to, in tension with #7 ("a declined move is final"). Reframed to what was actually

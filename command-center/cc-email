@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""cc-email -- agent + operator CLI for the Email Archive (the 'email-archive' extension).
+
+Search the operator's archived (exported) email and pull a full message as context, from the terminal -- no
+dashboard needed. Resolves the index path from cc.config exactly like the server (email_archive_db / STATE_DIR).
+Read-only.
+
+  cc-email search "<query>" [limit]   ranked matches -> "id | date | from | subject" + a snippet line
+  cc-email get <id>                    the FULL message (headers + body) -- paste it into your working context
+  cc-email stats                       index status + message count
+
+Query = SQLite FTS5 syntax: bare words AND together; "quote phrases"; OR / NOT supported (e.g.
+  cc-email search "invoice shipping" 10        cc-email search '"purchase order" OR PO'
+To hand a whole email to a Claude session: `cc-email get <id>` and include it, or (in the dashboard) drag a
+result row onto the session -- both deliver the same headers+body markdown.
+"""
+import sys, os, json
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BASE)
+import email_archive
+
+
+def _load_cc():
+    p = os.environ.get("CC_CONFIG")
+    if not p:
+        home = os.environ.get("CC_HOME") or os.path.dirname(BASE)
+        p = os.path.join(home, "cc.config.json")
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    cc = _load_cc()
+    email_archive.init({"CC": cc, "STATE_DIR": cc.get("state_dir") or BASE})
+    cmd = args[0]
+
+    if cmd == "stats":
+        s = email_archive.mb_stats()
+        if not s.get("ready"):
+            print("index not ready: " + str(s.get("error", "?")))
+            return 1
+        print("ready: %s messages indexed" % format(s.get("count", 0), ","))
+        return 0
+
+    if cmd == "search":
+        if len(args) < 2:
+            print('usage: cc-email search "<query>" [limit]')
+            return 2
+        q = args[1]
+        lim = int(args[2]) if len(args) > 2 and args[2].isdigit() else 30
+        r = email_archive.mb_search(q, lim)
+        if not r.get("ok"):
+            print("search failed: " + str(r.get("error", "?")))
+            return 1
+        res = r.get("results", [])
+        if not res:
+            print("no matches for " + repr(q))
+            return 0
+        for m in res:
+            print("%s | %s | %s | %s" % (m.get("rowid"), (m.get("date_str") or "")[:24],
+                                         (m.get("sender") or "")[:34], (m.get("subject") or "")[:64]))
+            snip = (m.get("snip") or "").replace("CCHLA", "[").replace("CCHLB", "]").replace("\n", " ").strip()
+            if snip:
+                print("    " + snip[:200])
+        print("\n(%d shown -- `cc-email get <id>` for the full message)" % len(res))
+        return 0
+
+    if cmd == "get":
+        if len(args) < 2:
+            print("usage: cc-email get <id>")
+            return 2
+        r = email_archive.mb_get(args[1])
+        if not r.get("ok"):
+            print("not found: " + str(r.get("error", "?")))
+            return 1
+        m = r.get("message", {})
+        print("Subject: %s" % m.get("subject", ""))
+        print("From: %s" % m.get("sender", ""))
+        print("To: %s" % m.get("recipients", ""))
+        print("Date: %s" % m.get("date_str", ""))
+        if m.get("labels"):
+            print("Labels: %s" % m.get("labels"))
+        print()
+        print(m.get("body") or "(no text body)")
+        return 0
+
+    print("unknown command: " + cmd)
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -20,5 +20,9 @@
     "email_archive_mbox": {"label": "Path to the .mbox export (Gmail Takeout Mail)", "required": true},
     "email_archive_db": {"label": "Path for the search index (SQLite); defaults under the node state dir", "required": false}
   },
-  "provides": ["lens:email-archive"]
+  "provides": ["lens:email-archive", "sendable:emailarc", "cli:cc-email"],
+  "draggables": [
+    {"kind": "emailarc", "label": "Archived email", "note": "Drag any search result onto a Claude session (or into the Basket) to hand the agent the full email -- headers + body -- as context. Resolved server-side from the local index by id."}
+  ],
+  "agent_cli": "cc-email search \"<query>\" [limit] | cc-email get <id> | cc-email stats"
 }
