@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.118 -- 2026-07-02  (#4 Terminal selection rebuilt: smooth client-side highlight, no flicker)
+- The browser terminal's drag-to-select drove tmux copy-mode on EVERY mouse-move (~45ms), re-rendering the pane
+  each tick -> a distracting flicker while you tried to see what you were selecting. Rebuilt: a drag now draws a
+  SMOOTH client-side highlight overlay (linear text-selection shape) and reads the selected text straight from
+  xterm's OWN buffer on release -- ZERO server round-trips, zero flicker, instant copy. Dragging PAST the top/bottom
+  edge (to grab MORE than one screen) transparently hands off to the old tmux copy-mode auto-scroll path, so the
+  select-across-history power feature is preserved. Verified in headless Chrome: exact single- + multi-line text
+  extraction and a real simulated drag. auto-copy + the "select & copy" full-history overlay are unchanged.
+
 ## 0.99.117 -- 2026-07-02  (#5 Email Archive extension: instant full-text search over an exported mbox)
 - New **email-archive** extension: point it at a Gmail Takeout `.mbox` and get an instant, searchable lens over
   years of old email. `command-center/email_archive.py` (stdlib: `mailbox` + `sqlite3` FTS5) builds a one-time

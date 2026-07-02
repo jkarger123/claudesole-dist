@@ -14752,6 +14752,8 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #live.show{display:block}
 #selcopy{position:fixed;right:14px;bottom:14px;z-index:12;display:none;background:#e8c547;color:#15120a;font:700 12px -apple-system,sans-serif;border:0;border-radius:18px;padding:8px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);cursor:pointer}
 #selcopy.show{display:block}
+#selov{position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:6;display:none}
+#selov i{position:absolute;background:rgba(120,170,255,.32);border-radius:1px}
 #cliptoast{position:fixed;left:50%;transform:translateX(-50%);top:14px;z-index:30;display:none;background:#e8c547;color:#15120a;border:0;font:700 12.5px -apple-system,sans-serif;border-radius:18px;padding:9px 18px;box-shadow:0 8px 24px rgba(0,0,0,.55)}
 #cliptoast.show{display:block;animation:ctpop .18s ease}
 @keyframes ctpop{from{opacity:0;transform:translateX(-50%) translateY(-6px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
@@ -15004,7 +15006,7 @@ function toggleAutoCopy(){AUTOCOPY=!AUTOCOPY;localStorage.setItem('hpcc_autocopy
 let _selText='',selActive=false;
 // Finish a selection: clear the highlight, leave copy-mode, and snap back to the live screen. Called after a
 // copy (Ctrl+C / the chip / auto-copy) or a plain click on the terminal -- so a selection never lingers.
-function selReturnLive(){selActive=false;selChip(false);inMode=false;liveBtn(false);
+function selReturnLive(){selActive=false;selChip(false);inMode=false;liveBtn(false);if(typeof clearSel==='function')clearSel();
   fetch('/api/term-select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,action:'cancel'})}).catch(()=>{});term.focus();}
 // Called on mouse release with the selection text. If auto-copy is ON and the origin is secure, write it to the
 // clipboard now, confirm, and snap back to live. Otherwise leave the '⎘ Copy' chip -- a click (or Ctrl+C) copies
@@ -15014,23 +15016,46 @@ function ccDeliver(t){_selText=t;selActive=true;const b=document.getElementById(
     navigator.clipboard.writeText(t).then(function(){clipToast(t.length);selReturnLive();}).catch(function(){selChip(true);});
   } else { selChip(true); }}
 function doSelCopy(){if(_selText){ccCopy(_selText);clipToast(_selText.length);}selReturnLive();}
-let dsel=null,dTimer=null,dLast=null,dMoveBusy=false;
-el.addEventListener('mousedown',(e)=>{if(e.button!==0)return;e.preventDefault();e.stopPropagation();selChip(false);
-  dsel={x0:e.clientX,y0:e.clientY,active:false};dLast={x:e.clientX,y:e.clientY};term.focus();},{capture:true});
-document.addEventListener('mousemove',(e)=>{if(!dsel)return;e.stopPropagation();dLast={x:e.clientX,y:e.clientY};   // block xterm from forwarding a mouse-report byte (which would cancel copy-mode via the keystroke path)
-  if(!dsel.active){if(Math.abs(e.clientX-dsel.x0)+Math.abs(e.clientY-dsel.y0)<4)return;
-    dsel.active=true;inMode=true;liveBtn(true);
-    selSend('begin',selCell(dsel.x0,dsel.y0));
-    dTimer=setInterval(function(){if(!dsel||!dsel.active||dMoveBusy)return;dMoveBusy=true;   // coalesce: only the latest cursor, one in flight
-      selSend('move',selCell(dLast.x,dLast.y)).then(function(){dMoveBusy=false;});},45);}
+// --- client-side selection overlay: a SMOOTH highlight drawn in the browser as you drag (no server round-trip,
+//     no pane re-render -> zero flicker). Text is read straight from xterm's buffer on release. ------------------
+function _selScreen(){return term.element.querySelector('.xterm-screen')||term.element;}
+function selOv(){var o=document.getElementById('selov');if(!o){o=document.createElement('div');o.id='selov';_selScreen().appendChild(o);}return o;}
+function _cellDims(){var r=_selScreen().getBoundingClientRect();return {cw:r.width/(term.cols||80),ch:r.height/(term.rows||24),w:r.width};}
+function drawSel(a,b){                                          // draw the linear text-selection shape (first line -> full middle -> last line)
+  var s=a,e=b;if(a.row>b.row||(a.row===b.row&&a.col>b.col)){s=b;e=a;}
+  var d=_cellDims(),cw=d.cw,ch=d.ch,W=d.w,h='';
+  function rect(t,l,w){return '<i style="top:'+(t*ch)+'px;left:'+l+'px;width:'+Math.max(0,w)+'px;height:'+ch+'px"></i>';}
+  if(s.row===e.row){h=rect(s.row,s.col*cw,(e.col-s.col+1)*cw);}
+  else{h+=rect(s.row,s.col*cw,W-s.col*cw);for(var r=s.row+1;r<e.row;r++)h+=rect(r,0,W);h+=rect(e.row,0,(e.col+1)*cw);}
+  var o=selOv();o.innerHTML=h;o.style.display='block';
+}
+function clearSel(){var o=document.getElementById('selov');if(o){o.innerHTML='';o.style.display='none';}}
+function bufText(a,b){                                          // extract the selected text from xterm's OWN buffer (the visible screen)
+  var s=a,e=b;if(a.row>b.row||(a.row===b.row&&a.col>b.col)){s=b;e=a;}
+  var buf=term.buffer.active,base=buf.viewportY||0,out=[];
+  for(var r=s.row;r<=e.row;r++){var line=buf.getLine(base+r);if(!line){out.push('');continue;}
+    var c0=(r===s.row)?s.col:0,c1=(r===e.row)?(e.col+1):term.cols;
+    out.push(line.translateToString(false,c0,c1));}
+  return out.join('\n').replace(/[ \t]+(\n|$)/g,'$1');
+}
+let dsel=null,dTimer=null,dLast=null,dMoveBusy=false,dTmux=false;
+el.addEventListener('mousedown',(e)=>{if(e.button!==0)return;e.preventDefault();e.stopPropagation();selChip(false);clearSel();
+  dsel={x0:e.clientX,y0:e.clientY,a:null,active:false};dLast={x:e.clientX,y:e.clientY};dTmux=false;term.focus();},{capture:true});
+document.addEventListener('mousemove',(e)=>{if(!dsel)return;e.stopPropagation();dLast={x:e.clientX,y:e.clientY};   // own the mouse (block xterm's mouse-report byte)
+  if(!dsel.active){if(Math.abs(e.clientX-dsel.x0)+Math.abs(e.clientY-dsel.y0)<4){e.preventDefault();return;}
+    dsel.active=true;dsel.a=selCell(dsel.x0,dsel.y0);}
+  var c=selCell(dLast.x,dLast.y);
+  if(!dTmux&&c.edge!==0){                                       // dragged PAST the edge -> hand off to tmux copy-mode (select BEYOND the visible screen, auto-scroll through history)
+    dTmux=true;clearSel();inMode=true;liveBtn(true);selSend('begin',dsel.a);
+    dTimer=setInterval(function(){if(!dsel||!dTmux||dMoveBusy)return;dMoveBusy=true;selSend('move',selCell(dLast.x,dLast.y)).then(function(){dMoveBusy=false;});},45);}
+  else if(!dTmux){drawSel(dsel.a,c);}                           // stay in the browser: smooth client-side highlight, no server touch
   e.preventDefault();},{capture:true});
-document.addEventListener('mouseup',(e)=>{if(!dsel)return;e.stopPropagation();const wasActive=dsel.active;dsel=null;   // block the mouse-UP report too -- that's the one that was tearing down the selection on release
+document.addEventListener('mouseup',(e)=>{if(!dsel)return;e.stopPropagation();var wasActive=dsel.active,a=dsel.a,tmux=dTmux,last=dLast;dsel=null;
   if(dTimer){clearInterval(dTimer);dTimer=null;}
   if(wasActive){e.preventDefault();
-    selSend('move',selCell(dLast.x,dLast.y));                 // final exact position (chained after any in-flight move)
-    selSend('copy').then(function(r){   // copy is enqueued LAST -> selection is intact; stay in copy-mode so the highlight + position hold
-      if(r&&r.ok&&r.text){ccDeliver(r.text);inMode=true;liveBtn(true);}});}
-  else{if(selActive){selReturnLive();}else{term.focus();}}},{capture:true});   // a plain click while a selection is up = dismiss it + back to live
+    if(tmux){selSend('move',selCell(last.x,last.y));selSend('copy').then(function(r){if(r&&r.ok&&r.text){ccDeliver(r.text);inMode=true;liveBtn(true);}});}
+    else{var t=bufText(a,selCell(last.x,last.y));if(t&&t.trim()){ccDeliver(t);}else{clearSel();term.focus();}}}   // client path: read from xterm's buffer, copy, done (overlay stays to show what was grabbed; clears on next action)
+  else{clearSel();if(selActive){selReturnLive();}else{term.focus();}}},{capture:true});   // a plain click dismisses a live selection
 // COPY: the terminal is a <canvas> so its text can't be selected directly. This pulls the session's text into
 // a plain selectable panel where native drag-select (desktop) or long-press select (mobile) + copy work on ANY
 // amount -- and it loads the FULL tmux history (not just the visible screen), so you can copy far more than one
