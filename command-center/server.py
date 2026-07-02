@@ -30,6 +30,7 @@ clips   = _opt_import("clips")     # CAPTURE SPINE: Capture -> Triage -> Apply (
 substack = _opt_import("substack") # Substack -> READ (RSS track) + DRAFT (headless-claude co-writer); no publish API
 morning_brief = _opt_import("morning_brief")  # MORNING BRIEF: scheduled, voice-read daily brief from your sources
 notebook = _opt_import("notebook")            # NOTEBOOK: speak/write a note -> structured tasks + context event
+email_archive = _opt_import("email_archive")  # EMAIL ARCHIVE: full-text search over an exported (mbox) email history
 try:   # Ed25519 for asymmetric superadmin (public-key). Optional: nodes without it fall back to HMAC + a doctor warning.
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
     from cryptography.hazmat.primitives import serialization as _crypto_ser
@@ -9091,6 +9092,8 @@ try:
                    "context_ingest": (context.ingest_event if context else None),
                    "task_add": (lambda *a, **k: task_add(*a, **k))})    # task_add is defined later -> lazy
 except Exception as _e: print("[notebook] init failed:", _e)
+try: email_archive.init({"CC": CC, "STATE_DIR": STATE_DIR, "secret": _deploy_env})
+except Exception as _e: print("[email_archive] init failed:", _e)
 try: substack.init({"CC": CC, "STATE_DIR": STATE_DIR})
 except Exception as _e: print("[substack] init failed:", _e)
 def _substack_dir():
@@ -13985,6 +13988,12 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/status": return self._s(200, json.dumps(all_status()))
         if u.path == "/api/sessions": return self._s(200, json.dumps(tmux_sessions()))
         if u.path == "/api/models": return self._s(200, json.dumps({"models": CC_MODELS}))   # selectable models (for the /term picker)
+        if u.path == "/api/email-stats":                                                     # EMAIL ARCHIVE extension
+            return self._s(200, json.dumps(email_archive.mb_stats() if email_archive else {"ok": False, "error": "not available"}))
+        if u.path == "/api/email-search":
+            return self._s(200, json.dumps(email_archive.mb_search(q.get("q", [""])[0], int((q.get("limit", ["60"])[0]) or 60)) if email_archive else {"ok": False, "error": "not available"}))
+        if u.path == "/api/email-get":
+            return self._s(200, json.dumps(email_archive.mb_get(q.get("id", ["0"])[0]) if email_archive else {"ok": False, "error": "not available"}))
         if u.path == "/api/token-usage": return self._s(200, json.dumps(token_usage_payload()))
         if u.path == "/api/pipeline":   return self._s(200, json.dumps(pipeline_payload()))
         if u.path == "/api/usage": return self._s(200, json.dumps(usage_payload()))
@@ -15269,6 +15278,13 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .histm{font:12px/1.5 -apple-system,sans-serif;color:var(--mut);background:#0a0a0f;border:1px solid var(--line);border-left:2px solid var(--accent);border-radius:8px;padding:7px 10px;word-break:break-word}
 .histm-r{font:700 10px/1 -apple-system,sans-serif;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);margin-right:6px}
 .histm mark{background:rgba(232,197,71,.28);color:var(--ink);border-radius:2px;padding:0 1px}
+/* Email Archive lens */
+.emrow{padding:11px 13px;border:1px solid var(--line);border-radius:10px;margin-bottom:9px;cursor:pointer;background:var(--card2,#22222e)}
+.emrow:hover{border-color:var(--accent);background:rgba(var(--accent-rgb),.06)}
+.emrow .emsubj{font-weight:650;font-size:13.5px;color:var(--ink);margin-bottom:2px;word-break:break-word}
+.emrow .emmeta{font-size:11.5px;color:var(--dim);margin-bottom:4px}
+.emrow .emsnip{font-size:12.5px;line-height:1.5;color:var(--mut);word-break:break-word}
+.emrow .emsnip mark{background:rgba(232,197,71,.3);color:var(--ink);border-radius:2px;padding:0 1px}
 /* History mini-terminal preview: a peek at a conversation's last lines, styled like a term pane */
 .mtwrap{margin-top:9px;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#0a0a0f}
 .mtbar{display:flex;align-items:center;gap:5px;padding:5px 9px;background:var(--card2);border-bottom:1px solid var(--line)}
@@ -16855,6 +16871,7 @@ function render(){
   else if(LENS=="vault"){loadVault();return;}
   else if(LENS=="affiliate"){loadAffiliate();return;}
   else if(LENS=="aisearch"){loadAisearch();return;}
+  else if(LENS=="email-archive"){loadEmailArchive();return;}
   else if(LENS=="substack"){loadSubstack();return;}
   else if(LENS=="agency"){loadAgency();return;}
   else if(LENS=="calls"){loadCalls();return;}
@@ -21045,6 +21062,54 @@ async function loadNotes(){
 }
 var NB={notes:[],hasVoice:false,rec:null,chunks:[],q:""};
 async function nbSearch(){var i=document.getElementById("nbSearch");NB.q=i?i.value:"";var f=i&&document.activeElement===i;var p=i?i.selectionStart:0;await loadNotebook();var i2=document.getElementById("nbSearch");if(i2&&f){i2.focus();try{i2.setSelectionRange(p,p);}catch(e){}}}
+// ---- Email Archive lens (email-archive extension): full-text search over an exported (mbox) email history ----
+let EMAILA={q:'',res:null}, _emT=null;
+async function loadEmailArchive(){
+  var g=document.getElementById('grid'); var st;
+  try{ st=await(await fetch('/api/email-stats')).json(); }catch(e){ st={ok:false,error:'not reachable'}; }
+  var sub = (st&&st.ready)
+    ? ('search '+(st.count||0).toLocaleString()+' archived emails'+((st.oldest_ts&&st.newest_ts)?(' · '+new Date(st.oldest_ts*1000).getFullYear()+'–'+new Date(st.newest_ts*1000).getFullYear()):''))
+    : (esc((st&&st.error)||'index not built yet'));
+  g.innerHTML='<div class="modstack"><div class="cc-head"><span class="cc-h-t">Email Archive</span><span class="cc-h-sub">'+sub+'</span></div>'
+    +'<div class="card" style="cursor:default">'
+    +'<input id="emq" class="cc-in" placeholder="Search your old email — a sender, a subject, a product, anything in the body…" style="width:100%;font-size:15px" oninput="emSearch()" value="'+esc(EMAILA.q)+'">'
+    +'<div id="emres" style="margin-top:14px">'+((st&&st.ready)?empty('Type to search '+(st.count||0).toLocaleString()+' emails — results are instant.'):empty((st&&st.error)?('Not ready: '+esc(st.error)):'Index not available.'))+'</div>'
+    +'</div></div>';
+  var i=document.getElementById('emq'); if(i){ i.focus(); if(EMAILA.q&&EMAILA.res)emRender(); }
+}
+function emSearch(){
+  var q=(document.getElementById('emq')||{value:''}).value.trim(); EMAILA.q=q;
+  var box=document.getElementById('emres'); if(!box)return;
+  if(q.length<2){ box.innerHTML=empty('Type at least 2 characters.'); return; }
+  box.innerHTML=empty('Searching…'); clearTimeout(_emT);
+  _emT=setTimeout(async function(){
+    let r; try{ r=await(await fetch('/api/email-search?q='+encodeURIComponent(q))).json(); }catch(e){ r={ok:false,error:'search failed'}; }
+    if((document.getElementById('emq')||{value:''}).value.trim()!==q)return;
+    EMAILA.res=r; emRender();
+  },250);
+}
+function emSnip(s){ var e=esc(s||''); return e.split('CCHLA').join('<mark>').split('CCHLB').join('</mark>'); }
+function emRender(){
+  var box=document.getElementById('emres'); if(!box)return; var r=EMAILA.res||{}, rows=r.results||[];
+  if(r.ok===false){ box.innerHTML=empty('Search unavailable: '+esc(r.error||'error')); return; }
+  box.innerHTML='<div class="sub" style="margin-bottom:9px">'+rows.length+' match'+(rows.length===1?'':'es')+' for "'+esc(EMAILA.q)+'"</div>'
+    +rows.map(function(m){ return '<div class="emrow" onclick="emOpen('+m.rowid+')" title="open this email">'
+      +'<div class="emsubj">'+esc(m.subject||'(no subject)')+'</div>'
+      +'<div class="emmeta">'+esc((m.sender||'').slice(0,64))+' &middot; '+esc(m.date_str||'')+'</div>'
+      +'<div class="emsnip">'+emSnip(m.snip)+'</div></div>';
+    }).join('')||empty('No emails match "'+esc(EMAILA.q)+'".');
+}
+async function emOpen(id){
+  var r; try{ r=await(await fetch('/api/email-get?id='+encodeURIComponent(id))).json(); }catch(e){ toast('Could not open email',3000); return; }
+  if(!r.ok){ toast(r.error||'not found',3500); return; } var m=r.message||{};
+  showM('<div style="max-width:780px;width:88vw;max-height:84vh;display:flex;flex-direction:column">'
+    +'<h2 style="margin:0 0 6px;font-size:18px">'+esc(m.subject||'(no subject)')+'</h2>'
+    +'<div class="sub">From '+esc(m.sender||'')+'</div>'
+    +'<div class="sub">To '+esc((m.recipients||'').slice(0,140))+'</div>'
+    +'<div class="sub" style="margin-bottom:10px">'+esc(m.date_str||'')+(m.labels?(' &middot; '+esc(m.labels)):'')+'</div>'
+    +'<pre style="white-space:pre-wrap;overflow:auto;flex:1;background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:15px;margin:0;color:var(--ink);font:13px/1.55 -apple-system,sans-serif">'+esc(m.body||'(no text body)')+'</pre>'
+    +'<div class="row" style="margin-top:11px;justify-content:flex-end"><button class="btn" onclick="closeM()">Close</button></div></div>');
+}
 async function loadNotebook(){
   var box=document.getElementById("grid");if(!box)return;
   var url="/api/note-list"+(NB.q?("?q="+encodeURIComponent(NB.q)):"");

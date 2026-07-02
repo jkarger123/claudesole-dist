@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "6e66e4083b35df905fbe92e26ec103ef819c5f3cf7d1fc50ef4b4f2474c59f63",
+      "claudesole.manifest.json": "59efb983dc80a466c2d99af3ad13b74191dda066ce78445bf5919daadc853298",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
       "command-center/cc-handoff": "9194f8a409f322c9835615cdb014dc9e626a469611ea127b1e9e7a6bf4db2532",
       "command-center/cc-hold": "a756f97be0fef2e0b764324f6830c1c63859347e009f04e8e4a6b8e5ccf9a3fc",
@@ -36,6 +36,7 @@
       "command-center/cc-task": "2cc1e34814177c8db4b924999c28ed68b260d35f4ebaee434f200e3659c864e1",
       "command-center/clips.py": "24eaca65a8dd372a27e605e8bc66c50602ecb872349048aee4a990a6480e5438",
       "command-center/context.py": "2870cc44461a3ad6d585c497aed2036dbc61f04b3807f1f8662c1b7fd83d529b",
+      "command-center/email_archive.py": "98b080a61e1752f90c8bbd133ab97893e9a5e8f02dba879facf565021dab048b",
       "command-center/focus.py": "9556fea4498d2119487350c36033c906339db918bf9569cc91e7eda13b9a1879",
       "command-center/git-backup.sh": "01c2b4d56022ac1b998b58f3d8d16508e25f337373160aa5a3750c3dce270c6a",
       "command-center/granola.py": "25c9fbdb87f8f81961a699528e0821304e953a43626400821a9627f7afb97322",
@@ -46,7 +47,7 @@
       "command-center/preship.py": "5500f8d04923413e8d91352d4d6b61c3aa4eefb906fcbefd6954a159aabc439f",
       "command-center/ralph_runner.py": "7d26a8d8bca83ba6f52c8ab45aae1c5643233e5cf94c6293b8f6f14b6c169f3b",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "bf45c48b95bdbf834e72d62eb63cedd083996b43b85fb02f554dd6f48f4e0ffa",
+      "command-center/server.py": "c1f464b63700792172ea7c7f16608283acc089c3d16490c938df1c5d16062049",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/ui_lint.py": "0cabb923f1edd1a5f9808e4e04329c46334483b3da38fcf4adba2e3e9b476132",
@@ -69,6 +70,7 @@
       "extensions/brave-search/mcp.json": "2ce5444da424d6c359ca88457e63306c4cf371e2d6043e80185f532234719b38",
       "extensions/cloudflare/extension.json": "a74ae66326e5c24067a0ace72b7371f05b343c0875a555f6b96622ce5cae1b55",
       "extensions/cloudflare/mcp.json": "3216c032b71c16cc043bce893344ca721717e6058146335885ad6f1d7e5f697a",
+      "extensions/email-archive/extension.json": "e1ba673cd777d71b231ef3cd69b4cca7d27eeb4da2856df1da30dfd02382e8cf",
       "extensions/figma/extension.json": "7205df100a21a795350bd1dcc3c95a0c62a09542e3fa3907799f99de75fcba1f",
       "extensions/filesystem/extension.json": "a82f3a2fdc523d12f871cb6e319512a3a09b3ef572bda9f2fe2192011efef42b",
       "extensions/filesystem/mcp.json": "fd14e8d40a26ba387d83fe3a7d2703198edc110f45b7bc4474857859e1be6d64",
@@ -117,9 +119,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1782970350,
+    "generated": 1782971682,
     "v": 1,
-    "version": "0.99.116"
+    "version": "0.99.117"
   },
-  "sig": "g9j0apfx/efHkX9nZ7pp2nKKfmqJWOmRVIzmnpqfRxz2Tzcx/uYT2Tcalmh+mwQ2mnm6arIERgH2ps0u7XuaAA=="
+  "sig": "ynv9Ue1s7rubr8Qj0HCvv3RRksjJuJlA7bBIc8djdgGHwzCHb8xenokr9ij3JJe9VJzqBHamFroLSRNfWOS8Ag=="
 }

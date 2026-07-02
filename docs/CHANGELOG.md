@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.117 -- 2026-07-02  (#5 Email Archive extension: instant full-text search over an exported mbox)
+- New **email-archive** extension: point it at a Gmail Takeout `.mbox` and get an instant, searchable lens over
+  years of old email. `command-center/email_archive.py` (stdlib: `mailbox` + `sqlite3` FTS5) builds a one-time
+  local index and serves ranked, highlighted-snippet search + a message reader. Benchmarked on a real 7.2 GB /
+  **21,606-message** export: index build ~2 min, search **~40 ms**. Read-only; the archive never leaves the node.
+- Wiring: helper `email_archive.init()` + `GET /api/email-stats|email-search|email-get`; `loadEmailArchive()` lens
+  (search box -> results -> reader), install-gated via `_ext_lenses` (nav button only where installed); config
+  `email_archive_mbox` + `email_archive_db`. Verified end-to-end in headless Chrome (nav button, 60-hit search with
+  highlights, reader). See `extensions/email-archive/SETUP.md`.
+
 ## 0.99.116 -- 2026-07-02  (#8 End-of-day housekeeping: a once-a-day thorough tidy that sorts even DECLINED work)
 - New opt-in **end-of-day housekeeping** (`cc.config housekeeping_eod`). Once a day -- at `housekeeping_eod_hour`
   (default 6pm) OR after the node's been ~2h idle in the afternoon, whichever comes first -- it runs a thorough
