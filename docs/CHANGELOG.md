@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.114 -- 2026-07-01  (Deliver agent output as GOOGLE DOCS, + self-healing Google token vault re-sync)
+- **Agent .md deliverables can now land as native Google Docs** (opt-in `cc.config deliverable_gdoc` + Google
+  connected). A background sweep converts each new `.md` in a deliverables/ folder to a Google Doc via Drive
+  import (formatting preserved), drops a `<name>.gdoc` pointer beside it, and hides the raw markdown. The Doc
+  flows through the SAME delivery path as any file: it shows in Files (and the 'new deliverable' popup) with
+  **Open in Google Docs**, **Download .docx** (server-side Drive export), and an inline **text Preview**. New:
+  `_drive_import_as_gdoc`, `_gdoc_export`, `GET /api/gdoc-export?id=&fmt=docx|txt|pdf`. Verified end-to-end
+  (create -> Files card -> export) in headless Chrome.
+- **Self-healing Google token vault re-sync (real bug).** A re-mint (`bin/gauth.sh`) writes a fresh token FILE,
+  but the server reads the VAULT first and the env-import SKIPS an already-present key -- so every re-mint
+  silently kept the server on the dead vaulted token (Google looked "not configured" despite a good file).
+  `_google_vault_resync()` now pushes any fresher token FILE into the vault on boot AND on a refresh failure
+  (then retries once) -- so a re-mint takes effect immediately, no restart, and this can't strand a node again.
+
 ## 0.99.113 -- 2026-07-01  (Sarah/AFP feedback wave 1: brief date-accuracy, full-text session search, sticky decline)
 - **Morning Brief is no longer date-blind.** The calendar + email sources captured each item's date in a `ts`
   field, but `mb_generate` fed ONLY each item's text to the writer -- the dates were dropped, so the brief

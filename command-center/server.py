@@ -722,24 +722,57 @@ def google_configured():
     if not _google_has_token(): return False
     return "google-workspace" in _ext_installed()
 
+def _google_vault_resync():
+    """SELF-HEAL for the re-mint gap: `bin/gauth.sh` writes a fresh token FILE but not the vault, and the server
+    reads vault-FIRST -- so after a re-mint the server would keep using the dead vaulted token forever (the import
+    also SKIPS an existing key). Here: if a live token FILE differs from the vaulted copy, push the FILE into the
+    vault (a re-mint is authoritative). Returns the accounts synced. Cheap; called on boot + on a refresh failure."""
+    try:
+        raw = _vault_local("google_tokens"); vault = json.loads(raw) if raw else {}
+    except Exception: vault = {}
+    if not isinstance(vault, dict): vault = {}
+    changed = []
+    try: files = [f for f in os.listdir(GOOGLE_TOKENS_DIR) if f.endswith(".json")]
+    except Exception: files = []
+    for fn in files:
+        acct = fn[:-5]
+        try: fd = json.load(open(os.path.join(GOOGLE_TOKENS_DIR, fn)))
+        except Exception: continue
+        if not isinstance(fd, dict) or not fd.get("refresh_token"): continue
+        if (vault.get(acct) or {}).get("refresh_token") != fd.get("refresh_token"):
+            vault[acct] = fd; changed.append(acct)
+    if changed:
+        try:
+            if not vault_set("google_tokens", json.dumps(vault), label="google_tokens", scope=["*"]).get("ok"):
+                return []
+        except Exception:
+            return []
+    return changed
+
 def _google_access_token():
-    """Refresh-token -> short-lived access token, cached until ~90s before expiry. Thread-safe."""
+    """Refresh-token -> short-lived access token, cached until ~90s before expiry. Thread-safe. On a refresh
+    failure it resyncs the vault from any fresher token FILE (a re-mint) and retries once -- so a re-mint takes
+    effect WITHOUT a restart."""
     with _GOOGLE_LOCK:
         now = time.time()
         if _GOOGLE_TOK["access"] and now < _GOOGLE_TOK["exp"] - 90:
             return _GOOGLE_TOK["access"]
         acct, d = _google_token_load()
         if not d: return None
-        try:
-            data = urllib.parse.urlencode({"client_id": d["client_id"], "client_secret": d["client_secret"],
-                "refresh_token": d["refresh_token"], "grant_type": "refresh_token"}).encode()
-            req = urllib.request.Request(d.get("token_uri", "https://oauth2.googleapis.com/token"), data=data)
-            r = json.loads(urllib.request.urlopen(req, timeout=GOOGLE_TOKEN_TIMEOUT).read())
-            _GOOGLE_TOK.update(access=r["access_token"], exp=now + int(r.get("expires_in", 3600)),
-                               email=acct, scopes=d.get("scopes", []))
-            return _GOOGLE_TOK["access"]
-        except Exception:
-            return None
+        for attempt in (1, 2):
+            try:
+                data = urllib.parse.urlencode({"client_id": d["client_id"], "client_secret": d["client_secret"],
+                    "refresh_token": d["refresh_token"], "grant_type": "refresh_token"}).encode()
+                req = urllib.request.Request(d.get("token_uri", "https://oauth2.googleapis.com/token"), data=data)
+                r = json.loads(urllib.request.urlopen(req, timeout=GOOGLE_TOKEN_TIMEOUT).read())
+                _GOOGLE_TOK.update(access=r["access_token"], exp=now + int(r.get("expires_in", 3600)),
+                                   email=acct, scopes=d.get("scopes", []))
+                return _GOOGLE_TOK["access"]
+            except Exception:
+                if attempt == 1 and _google_vault_resync():   # a re-mint's fresh FILE token -> pull into vault, retry once
+                    acct, d = _google_token_load()
+                    if d: continue
+                return None
 
 # ---- google scope-vs-perms drift (CCR ccr-1782880284369) + portable secret paths (CCR ccr-1782880284334) ----
 def _mcp_google_perms():
@@ -2816,8 +2849,15 @@ def all_deliverables(limit=300):
         try: st = os.stat(ap)
         except Exception: return
         seen.add(rp)
-        out.append({"name": os.path.basename(ap), "rel": os.path.relpath(ap, PROJECT), "module": module,
-                    "size": st.st_size, "mtime": st.st_mtime, "tier": tier})
+        rec = {"name": os.path.basename(ap), "rel": os.path.relpath(ap, PROJECT), "module": module,
+               "size": st.st_size, "mtime": st.st_mtime, "tier": tier}
+        if ap.endswith(".gdoc"):        # a delivered Google Doc: surface it as one (open/download/preview via Drive)
+            try:
+                p = json.load(open(ap))
+                rec["gdoc"] = True; rec["gdoc_id"] = p.get("gdoc_id"); rec["gdoc_link"] = p.get("link", "")
+                rec["name"] = (p.get("name") or rec["name"][:-5]) + " (Google Doc)"
+            except Exception: pass
+        out.append(rec)
     # hot / local: every deliverables/ dir under the project (follow the iCloud symlink to read its files)
     for root, dirs, files in os.walk(PROJECT):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "deliverables")]
@@ -11236,6 +11276,97 @@ def _drive_multipart_upload(name, parents, data, mime):
     except Exception as e:
         return {"error": str(e)[:160]}
 
+def _drive_import_as_gdoc(name, data, src_mime="text/markdown", parents=None):
+    """Upload bytes to Drive CONVERTING them to a native Google DOC (Drive import: media in src_mime, target
+    mimeType = google-apps.document). markdown/html keep their formatting (headings/bold/lists). Returns the
+    created file resource {id,name,webViewLink,...} or {error}. Used to deliver .md agent output as a Google Doc."""
+    tok = _google_access_token()
+    if not tok: return {"error": "google not configured / token expired"}
+    boundary = "ccgdoc" + secrets.token_hex(8)
+    meta = {"name": name, "mimeType": "application/vnd.google-apps.document"}
+    if parents: meta["parents"] = parents if isinstance(parents, list) else [parents]
+    pre = ("--%s\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n%s\r\n--%s\r\nContent-Type: %s\r\n\r\n"
+           % (boundary, json.dumps(meta), boundary, src_mime)).encode()
+    payload = pre + (data if isinstance(data, bytes) else data.encode("utf-8")) + ("\r\n--%s--\r\n" % boundary).encode()
+    req = urllib.request.Request(
+        "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,webViewLink",
+        data=payload, method="POST")
+    req.add_header("Authorization", "Bearer " + tok)
+    req.add_header("Content-Type", "multipart/related; boundary=" + boundary)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read() or "{}")
+    except urllib.error.HTTPError as e:
+        try: msg = json.loads(e.read()).get("error", {}).get("message", "")
+        except Exception: msg = ""
+        return {"error": "drive import %d%s" % (e.code, (": " + msg[:140]) if msg else "")}
+    except Exception as e:
+        return {"error": str(e)[:160]}
+
+_GDOC_EXPORT_MIME = {
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pdf": "application/pdf", "txt": "text/plain", "html": "text/html",
+}
+def _gdoc_export(doc_id, fmt="docx"):
+    """Export a Google Doc to bytes in `fmt` (docx=download, txt=preview, pdf/html). Returns (bytes, mime) or
+    (None, error)."""
+    tok = _google_access_token()
+    if not tok: return None, "google not configured"
+    mime = _GDOC_EXPORT_MIME.get(fmt)
+    if not mime: return None, "bad format"
+    if not re.match(r"^[A-Za-z0-9_-]{10,}$", doc_id or ""): return None, "bad id"
+    req = urllib.request.Request("https://www.googleapis.com/drive/v3/files/%s/export?mimeType=%s"
+                                 % (doc_id, urllib.parse.quote(mime)), method="GET")
+    req.add_header("Authorization", "Bearer " + tok)
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            return resp.read(), mime
+    except Exception as e:
+        return None, str(e)[:140]
+
+# ---- Deliver agent .md output as a Google DOC ----------------------------------------------------------------
+# When cc.config `deliverable_gdoc` is on AND Google is connected, a background sweep converts each NEW .md that
+# lands in a deliverables/ folder into a native Google Doc, drops a `<name>.gdoc` pointer beside it (so it shows
+# in Files + the 'new deliverable' popup with preview + a .docx download), and hides the raw .md (leading dot).
+_GDOC_SWEEP_SEEN = set()          # realpaths already handled this process (belt-and-suspenders vs the on-disk pointer)
+def _deliverable_gdoc_once(limit=6):
+    if not CC.get("deliverable_gdoc"): return
+    try:
+        if not _google_access_token(): return          # no live Google token -> leave the .md as-is
+    except Exception: return
+    done = 0
+    for root, dirs, files in os.walk(PROJECT):
+        if done >= limit: break
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules",)]
+        if os.path.basename(root) != "deliverables": continue
+        for fn in list(files):
+            if done >= limit: break
+            if not fn.lower().endswith(".md") or fn.startswith("."): continue
+            md = os.path.join(root, fn); rp = os.path.realpath(md)
+            base = fn[:-3]
+            if os.path.exists(os.path.join(root, base + ".gdoc")) or rp in _GDOC_SWEEP_SEEN: continue
+            _GDOC_SWEEP_SEEN.add(rp)
+            try:
+                with open(md, "rb") as fh: data = fh.read()
+            except Exception: continue
+            res = _drive_import_as_gdoc(base, data, "text/markdown")
+            if not isinstance(res, dict) or res.get("error") or not res.get("id"):
+                print("[gdoc] convert failed for %s: %s" % (fn, (res or {}).get("error"))); continue
+            ptr = {"gdoc_id": res["id"], "name": base, "link": res.get("webViewLink", ""),
+                   "converted_from": fn, "ts": int(time.time())}
+            try:
+                with open(os.path.join(root, base + ".gdoc"), "w") as fh: json.dump(ptr, fh, indent=2)
+                os.rename(md, os.path.join(root, "." + fn + ".src"))   # hide the raw markdown (leading dot -> excluded from listings)
+                print("[gdoc] delivered %s as a Google Doc (%s)" % (base, res["id"])); done += 1
+            except Exception as e:
+                print("[gdoc] pointer write failed for %s: %s" % (fn, e))
+def _deliverable_gdoc_loop():
+    time.sleep(60)
+    while True:
+        try: _deliverable_gdoc_once()
+        except Exception as _e: print("[gdoc] sweep error:", _e)
+        time.sleep(45)
+
 def _save_attachment_bytes(rel, mid, att_id, filename, size=0, mime=""):
     """Fetch attachment bytes (reuse gmail_attachment_bytes) + write into the folder's deliverables/ --
     PATH SAFE (projpath + _path_has_secret), size-guarded, collision/dedup-prefixed. Optional Drive mirror."""
@@ -14023,6 +14154,17 @@ class H(BaseHTTPRequestHandler):
             _disp = "inline" if (q.get("inline", [""])[0] in ("1", "true")) else "attachment"
             self.send_header("Content-Disposition", '%s; filename="%s"' % (_disp, os.path.basename(ab).replace('"', '')))
             self.end_headers(); self.wfile.write(b); return
+        if u.path == "/api/gdoc-export":   # export a delivered Google Doc: fmt=docx (download) | txt (preview) | pdf | html
+            did = q.get("id", [""])[0]; fmt = q.get("fmt", ["docx"])[0]
+            if fmt not in _GDOC_EXPORT_MIME: return self._s(400, "bad format")
+            b, mime = _gdoc_export(did, fmt)
+            if b is None: return self._s(502, "export failed: " + str(mime))
+            dl = re.sub(r"[^A-Za-z0-9 ._-]", "", q.get("name", ["document"])[0])[:80] or "document"
+            ext = {"docx": ".docx", "pdf": ".pdf", "txt": ".txt", "html": ".html"}.get(fmt, "")
+            self.send_response(200); self.send_header("Content-Type", mime); self.send_header("Content-Length", str(len(b)))
+            _disp = "inline" if (q.get("inline", [""])[0] in ("1", "true")) else "attachment"
+            self.send_header("Content-Disposition", '%s; filename="%s%s"' % (_disp, dl, ext))
+            self.end_headers(); self.wfile.write(b); return
         if u.path == "/api/ralph-previous": return self._s(200, json.dumps(ralph_previous()))
         if u.path == "/api/ralph-detail": return self._s(200, json.dumps(ralph_detail(q.get("name", [""])[0])))
         if u.path == "/api/managed-block":
@@ -16748,7 +16890,7 @@ async function loadModules(rel){
     let MODFILES=[]; try{MODFILES=await(await fetch("/api/module-files?rel="+encodeURIComponent(MODREL))).json();}catch(e){MODFILES=[];}
     if(MODFILES.length){
       const TIER={icloud:['&#9729; iCloud','#58a6ff','recent -- synced to your Apple devices, opens in iCloud'],ssd:['&#128452; SSD','#c9a227','archived (>90d) on the SSD, off iCloud -- still opens from here'],local:['',''," "]};
-      const frow=f=>{const t=TIER[f.tier]||['',''];const url='/api/file-get?b64='+b64u(f.rel);return '<div class="sess"><span class="lbl" title="tap to view/download"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600">📄 '+esc(f.name)+'</a>'+pvBtn(f.rel,f.name)+(t[0]?(' <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'):'')+' <span class="sub">· '+fmtBytes(f.size)+' · '+new Date(f.mtime*1000).toLocaleString()+(f.sub?(' · '+esc(f.sub)):'')+'</span></span>'
+      const frow=f=>{const t=TIER[f.tier]||['',''];const url=fileOpenHref(f);return '<div class="sess"><span class="lbl" title="tap to view/download"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600">📄 '+esc(f.name)+'</a>'+pvBtn(f.rel,f.name,f)+fileDlBtn(f)+(t[0]?(' <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'):'')+' <span class="sub">· '+fmtBytes(f.size)+' · '+new Date(f.mtime*1000).toLocaleString()+(f.sub?(' · '+esc(f.sub)):'')+'</span></span>'
         +'<button class="mini go" title="download to THIS device" onclick="dlFile(\''+esc(f.rel)+'\',\''+esc(f.name)+'\')">&#8595; Download</button></div>';};
       h+='<div class="card" style="cursor:default;grid-column:1/-1"><h3><span>&#128193; Files made for you in this folder <span class="sub">('+MODFILES.length+')</span></span></h3>'
         +'<div class="convscroll">'+MODFILES.map(frow).join("")+'</div>'
@@ -17505,7 +17647,26 @@ function previewModal(b64,name){
   if(isPvTxt(name))fetch(url,{cache:'no-store'}).then(function(r){return r.text();}).then(function(t){var e=document.getElementById('pvBody');if(e)e.textContent=(t||'').slice(0,300000);}).catch(function(){var e=document.getElementById('pvBody');if(e)e.textContent='(could not load)';});
   if(isPvOffice(name))fetch('/api/file-preview?b64='+b64,{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;var ct=r.headers.get('content-type')||'';return r.blob().then(function(bl){return{ct:ct,bl:bl};});}).then(function(o){var e=document.getElementById('pvBody');if(!e)return;if(o.ct.indexOf('image')>=0){e.innerHTML='<img src="'+URL.createObjectURL(o.bl)+'" style="max-width:100%;display:block;margin:auto">';}else{o.bl.text().then(function(htm){e.innerHTML='<div style="background:#fff;color:#111;padding:22px;border-radius:6px">'+htm+'</div>';});}}).catch(function(){var e=document.getElementById('pvBody');if(e)e.innerHTML='<div style="padding:30px;color:#c9d1d9">No preview available for this type — use Download.</div>';});
 }
-function pvBtn(rel,name){return canPreview(name)?(' <button class="mini" data-pvr="'+b64u(rel)+'" data-pvn="'+esc(name)+'" onclick="previewFile(this)" title="Preview">\u{1F441} Preview</button>'):'';}
+function pvBtn(rel,name,f){
+  if(f&&f.gdoc)return ' <button class="mini" onclick="pvGdoc(\''+esc(f.gdoc_id||'')+'\',\''+esc((name||'').replace(/ \(Google Doc\)$/,'').replace(/\x27/g,''))+'\',\''+esc(f.gdoc_link||'')+'\')" title="Preview the Google Doc">\u{1F441} Preview</button>';
+  return canPreview(name)?(' <button class="mini" data-pvr="'+b64u(rel)+'" data-pvn="'+esc(name)+'" onclick="previewFile(this)" title="Preview">\u{1F441} Preview</button>'):'';}
+// A delivered Google Doc: the primary link OPENS it in Google Docs; download is a server-side .docx export.
+function gdocDl(f){return '/api/gdoc-export?fmt=docx&id='+encodeURIComponent(f.gdoc_id||'')+'&name='+encodeURIComponent((f.name||'document').replace(/ \(Google Doc\)$/,''));}
+function fileOpenHref(f){return (f&&f.gdoc)?((f.gdoc_link||gdocDl(f))):('/api/file-get?b64='+b64u(f.rel));}
+function fileDlBtn(f){return (f&&f.gdoc)?(' <a class="mini" href="'+gdocDl(f)+'" title="download as Word (.docx)">⬇ .docx</a>'):'';}
+function pvGdoc(id,name,link){
+  var ov=document.createElement('div');ov.id='pvOverlay';
+  ov.style.cssText='position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;padding:18px';
+  ov.onclick=function(e){if(e.target===ov)ov.remove();};
+  ov.innerHTML='<div style="background:var(--card,#15151c);border:1px solid var(--line,#2a2a35);border-radius:14px;max-width:820px;width:92vw;max-height:88vh;display:flex;flex-direction:column;overflow:hidden">'
+    +'<div style="display:flex;align-items:center;gap:10px;padding:12px 15px;border-bottom:1px solid var(--line,#2a2a35)"><b style="flex:1;min-width:0">\u{1F4C4} '+esc(name)+'</b>'
+    +(link?('<a class="mini go" href="'+esc(link)+'" target="_blank" rel="noopener" title="edit in Google Docs">Open in Google Docs</a>'):'')
+    +'<a class="mini" href="/api/gdoc-export?fmt=docx&id='+encodeURIComponent(id)+'&name='+encodeURIComponent(name)+'" title="download as Word">⬇ .docx</a>'
+    +'<button class="mini" title="close" onclick="document.getElementById(\'pvOverlay\').remove()">✕</button></div>'
+    +'<pre id="pvBody" style="white-space:pre-wrap;overflow:auto;padding:18px;margin:0;color:#c9d1d9;text-align:left;flex:1">Loading preview…</pre></div>';
+  document.body.appendChild(ov);
+  fetch('/api/gdoc-export?fmt=txt&id='+encodeURIComponent(id)).then(function(r){return r.ok?r.text():Promise.reject();}).then(function(t){var b=document.getElementById('pvBody');if(b)b.textContent=t||'(empty document)';}).catch(function(){var b=document.getElementById('pvBody');if(b)b.textContent='Preview unavailable.';});
+}
 async function loadFiles(){document.getElementById("grid").innerHTML=empty("Loading files…");clearInterval(window.FILESTIMER);
   if(FILESMODE=='browse'){return loadBrowse(BROWSEREL);}
   try{FILES=await(await fetch('/api/files')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load files.");return;}
@@ -17532,7 +17693,7 @@ function renderFiles(){
     fs.forEach(f=>{const g=fileGroup(f.mtime);if(g!==lastG){h+='<div class="card" style="cursor:default;grid-column:1/-1;background:transparent;border:none;padding:8px 2px 0"><b style="font-size:14px;color:#e8c547">'+g+'</b></div>';lastG=g;}
       const t=TIER[f.tier]||TIER.local;
       h+='<div class="card" '+ssAttr({kind:'deliverable',id:f.rel,name:f.name})+' style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
-        +'<span style="flex:1;min-width:220px"><a href="/api/file-get?b64='+b64u(f.rel)+'" target="_blank" rel="noopener" style="color:inherit;font-weight:700" title="tap to view/download">&#128196; '+esc(f.name)+'</a>'+pvBtn(f.rel,f.name)+' <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'
+        +'<span style="flex:1;min-width:220px"><a href="'+fileOpenHref(f)+'" target="_blank" rel="noopener" style="color:inherit;font-weight:700" title="tap to view/download">&#128196; '+esc(f.name)+'</a>'+pvBtn(f.rel,f.name,f)+fileDlBtn(f)+' <span class="badge" style="background:'+t[1]+'22;color:'+t[1]+'" title="'+t[2]+'">'+t[0]+'</span>'
         +'<div class="sub" style="margin-top:2px">'+(f.module?('&#128194; '+esc(f.module)+' &middot; '):'')+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</div></span>'
         +ssBtn()
         +'<button class="mini go" title="download to THIS device (works on your phone)" onclick="dlFile(\''+esc(f.rel)+'\',\''+esc(f.name)+'\')">&#8595; Download</button>'
@@ -17547,7 +17708,7 @@ function renderBrowse(){const b=BROWSE||{};
   if(!b.ok){h+=empty('Could not browse: '+esc(b.error||'?'));document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';return;}
   if(BROWSEREL!==''){h+='<div class="card" style="cursor:pointer;grid-column:1/-1" onclick="loadBrowse(\''+esc(b.parent||'')+'\')"><b>&#11014; ..</b> <span class="sub">up a level</span></div>';}
   (b.dirs||[]).forEach(d=>{h+='<div class="card" style="cursor:pointer;grid-column:1/-1" onclick="loadBrowse(\''+esc(d.rel)+'\')"><b>&#128193; '+esc(d.name)+'</b> <span class="sub">folder</span></div>';});
-  (b.files||[]).forEach(f=>{const url='/api/file-get?b64='+b64u(f.rel);h+='<div class="card" '+ssAttr({kind:'deliverable',id:f.rel,name:f.name})+' style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="flex:1;min-width:200px"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600" title="tap to view/download">&#128196; '+esc(f.name)+'</a>'+pvBtn(f.rel,f.name)+' <span class="sub">&middot; '+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</span></span>'
+  (b.files||[]).forEach(f=>{const url=fileOpenHref(f);h+='<div class="card" '+ssAttr({kind:'deliverable',id:f.rel,name:f.name})+' style="cursor:default;grid-column:1/-1"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="flex:1;min-width:200px"><a href="'+url+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600" title="tap to view/download">&#128196; '+esc(f.name)+'</a>'+pvBtn(f.rel,f.name,f)+fileDlBtn(f)+' <span class="sub">&middot; '+fmtBytes(f.size)+' &middot; '+new Date(f.mtime*1000).toLocaleString()+'</span></span>'
     +ssBtn()
     +'<button class="mini go" title="download to THIS device" onclick="dlFile(\''+esc(f.rel)+'\',\''+esc(f.name)+'\')">&#8595; Download</button>'
     +'</div></div>';});
@@ -23998,11 +24159,14 @@ if __name__ == "__main__":
     threading.Thread(target=_fleet_converge_loop, daemon=True).start() # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     threading.Thread(target=_routines_loop, daemon=True).start()       # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts
     threading.Thread(target=_brief_catchup_loop, daemon=True).start()  # SELF-HEAL: re-attempt a missed/failed Morning Brief so a transient 8am failure doesn't silently cost the day
+    threading.Thread(target=_deliverable_gdoc_loop, daemon=True).start()  # DELIVER agent .md output as Google Docs (opt-in cc.config deliverable_gdoc + Google connected)
     _ensure_opnote_worker()                                            # OPERATOR NOTES: drain any queued human-to-human notes (durable across restart)
     threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
     threading.Thread(target=_gmail_sync_loop, daemon=True).start()      # keep recently-viewed Gmail lists warm (cache + outage fallback)
     threading.Thread(target=_gc_sync_loop, daemon=True).start()         # same for Calendar/Drive (resilient cache)
     threading.Thread(target=_warm_default_views, daemon=True).start()   # boot-warm the UI's default views + prime the OAuth token (non-blocking)
+    try: _google_vault_resync()        # heal the re-mint gap: push any fresher token FILE (a re-mint) into the vault the server reads first
+    except Exception: pass
     try: _vault_materialize_google()   # re-hydrate google_oauth.json + tokens/ from the vault for the external MCP server (vault stays source of truth)
     except Exception: pass
     try: _onboard_first_boot()         # if provisioning queued onboarding, run it once -> structures the project + hands to the CoS
