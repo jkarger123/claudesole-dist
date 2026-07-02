@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.113 -- 2026-07-01  (Sarah/AFP feedback wave 1: brief date-accuracy, full-text session search, sticky decline)
+- **Morning Brief is no longer date-blind.** The calendar + email sources captured each item's date in a `ts`
+  field, but `mb_generate` fed ONLY each item's text to the writer -- the dates were dropped, so the brief
+  couldn't tell which day a call/reply referred to (it collapsed a Jul-8 reschedule into "today"). Now every
+  calendar/email item is PREFIXED with its real date (`Wed Jul 8 3:00pm -- Client call`; `arrived Jun 30 -- ...`)
+  via a robust date parser, and the prompt carries a hard date-precision rule (never assume "today"; tie a reply
+  to the specific dated event; flag ambiguity instead of guessing). `morning_brief.py`.
+- **Session search now searches the FULL transcript, with snippet previews.** The History filter only matched a
+  session's title + last ~30 lines, so "find where I discussed X" failed unless X was at the very start/end. New
+  `transcript_search` (`GET /api/transcript-search`) full-text-scans this node's `~/.claude/projects` transcripts
+  (fast byte-level pre-filter -> only real candidates parsed), and the History lens renders matching sessions with
+  highlighted snippet previews + resume/fork. Node-local, stdlib.
+- **A declined folder-move is now final.** The dashboard drift-sweep already suppressed a declined transfer; the
+  in-session agent guidance now matches it: if the operator says no to a move suggestion, DROP IT and don't re-raise
+  unless the conversation later shifts to a genuinely new topic -- if they insist on staying, respect it.
+
 ## 0.99.112 -- 2026-07-01  (Per-session MODEL selection from the Sessions tab -- see it, switch it; Fable 5 included)
 - **Every session shows a model chip** (Opus / Sonnet / Fable / Haiku, color-coded) on its pane header, the
   bottom taskbar tile, and the hover preview -- so you can tell at a glance what each agent is running. The chip

@@ -8061,6 +8061,80 @@ def past_conversations(machine, limit=150, force=False):
     PAST_CACHE[machine] = (now, data)
     return data
 
+def _transcript_text(o):
+    """Searchable text from ONE transcript JSON line -> (text, role). Only user/assistant message TEXT (tool_use/
+    tool_result blocks are large/noisy -> skipped, mirroring scan_projects' peek policy)."""
+    m = o.get("message") or {}
+    role = m.get("role") or o.get("type") or ""
+    if role not in ("user", "assistant"): return "", role
+    c = m.get("content")
+    if isinstance(c, str): return c, role
+    parts = []
+    if isinstance(c, list):
+        for b in c:
+            if isinstance(b, dict) and b.get("type") == "text" and b.get("text"):
+                parts.append(b["text"])
+    return " ".join(parts), role
+
+def transcript_search(query, machine="studio", limit=40, per=3):
+    """FULL-TEXT search across THIS node's ~/.claude/projects transcripts (the whole conversation, not just the
+    title + last lines the old History filter saw). Returns matching sessions newest-first, each with a few
+    snippet previews around the match + id/cwd/label to open/resume. Node-local, stdlib, bounded: a fast byte-level
+    pre-filter skips every transcript that can't contain the query, so only real candidates are parsed."""
+    q = (query or "").strip().lower()
+    if len(q) < 2: return {"ok": False, "error": "type at least 2 characters", "results": []}
+    if machine != "studio":
+        return {"ok": False, "error": "full-text transcript search runs on the local node", "results": []}
+    root = os.path.expanduser("~/.claude/projects")
+    files = []
+    try:
+        for dp, _dn, fns in os.walk(root):
+            for fn in fns:
+                if fn.endswith(".jsonl") and not fn.startswith("."):
+                    p = os.path.join(dp, fn)
+                    try: files.append((os.path.getmtime(p), p))
+                    except Exception: continue
+    except Exception:
+        return {"ok": False, "error": "no transcripts found", "results": []}
+    files.sort(reverse=True); files = files[:400]        # freshest 400 transcripts (bounded)
+    qb = q.encode("utf-8"); results = []; scanned = 0
+    for mt, p in files:
+        try:
+            with open(p, "rb") as fh: raw = fh.read()
+        except Exception: continue
+        if qb not in raw.lower(): continue               # FAST SKIP: file can't contain the query -> never parse it
+        scanned += 1
+        lines = raw.decode("utf-8", "replace").splitlines()
+        cwd = ""; label = ""; matches = []
+        for ln in lines[:60]:                             # metadata from the head: cwd + first real user message
+            if cwd and label: break
+            ln = ln.strip()
+            if not ln: continue
+            try: o = json.loads(ln)
+            except Exception: continue
+            if not cwd: cwd = o.get("cwd") or ""
+            if not label:
+                txt, role = _transcript_text(o)
+                t = txt.strip()
+                if role == "user" and t and not t.startswith("<") and not t.startswith("Caveat:"):
+                    label = t.replace("\n", " ")[:100]
+        for ln in lines:                                  # the matches themselves
+            if len(matches) >= per: break
+            if q not in ln.lower(): continue
+            try: o = json.loads(ln)
+            except Exception: continue
+            txt, role = _transcript_text(o)
+            i = txt.lower().find(q)
+            if i < 0: continue
+            a = max(0, i - 110); b = min(len(txt), i + len(q) + 110)
+            snip = ("..." if a > 0 else "") + txt[a:b].replace("\n", " ").strip() + ("..." if b < len(txt) else "")
+            matches.append({"role": role, "snippet": snip})
+        if matches:
+            results.append({"id": os.path.basename(p)[:-6], "cwd": cwd, "mtime": mt,
+                            "label": label or "(no opening message)", "matches": matches})
+        if len(results) >= limit: break
+    return {"ok": True, "results": results, "q": query, "scanned": scanned}
+
 def resume_session(machine, sid, cwd, fork=False, label=""):
     """Re-open a past conversation as a fresh tmux session. fork=True branches it (claude --fork-session)
        into an independent copy sharing the original's history -- the only safe way to run two off one
@@ -10275,7 +10349,12 @@ def _handoff_authority(subject=None):
             "idle, file durable decisions/learnings to THIS folder's records with `cc-note \"<one-line learning>\"` -- "
             "many conversations in a folder converge on its CC:NOTES, so filing yours is what makes the next one "
             "start informed. If you're mid-task and stepping away, `cc-hold` keeps this conversation from "
-            "auto-archiving (idle conversations are archived ~4h, always one-click resumable)." % (subject or "this scope"))
+            "auto-archiving (idle conversations are archived ~4h, always one-click resumable). "
+            "A DECLINED MOVE IS FINAL: if you suggest moving/refiling and the operator says no or wants to stay "
+            "here, DROP IT immediately and keep working right here -- do NOT nag or re-raise it. Only bring it up "
+            "again if the conversation LATER shifts to a genuinely DIFFERENT new topic (not the same one they "
+            "already chose to keep). If they insist on staying in a folder you think is wrong, respect it -- it's "
+            "their call; end-of-day housekeeping can tidy filing later without interrupting them." % (subject or "this scope"))
 
 def _cc_config_set(updates):
     """Persist toggle(s) into cc.config.json (0600) + update the live CC. Used by the Context tab controls."""
@@ -13811,6 +13890,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"ok": True, "ingested": _context_backfill(), "stats": context.stats()}, default=str))
         if u.path == "/api/past":
             return self._s(200, json.dumps(past_conversations(q.get("machine", ["studio"])[0], force=("force" in q))))
+        if u.path == "/api/transcript-search":   # HISTORY: full-text search across this node's session transcripts
+            return self._s(200, json.dumps(transcript_search(q.get("q", [""])[0], q.get("machine", ["studio"])[0])))
         if u.path == "/api/managed": return self._s(200, json.dumps(managed_overview()))
         if u.path == "/api/doctor": return self._s(200, json.dumps(doctor()))
         if u.path == "/api/ralph": return self._s(200, json.dumps(ralph_list()))
@@ -14982,6 +15063,10 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .histhead{grid-column:1/-1;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px}
 .histcount{margin-left:auto;white-space:nowrap}
 #histlist{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,520px),1fr));gap:14px;align-items:start}
+.histmatches{margin-top:9px;display:flex;flex-direction:column;gap:7px}
+.histm{font:12px/1.5 -apple-system,sans-serif;color:var(--mut);background:#0a0a0f;border:1px solid var(--line);border-left:2px solid var(--accent);border-radius:8px;padding:7px 10px;word-break:break-word}
+.histm-r{font:700 10px/1 -apple-system,sans-serif;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);margin-right:6px}
+.histm mark{background:rgba(232,197,71,.28);color:var(--ink);border-radius:2px;padding:0 1px}
 /* History mini-terminal preview: a peek at a conversation's last lines, styled like a term pane */
 .mtwrap{margin-top:9px;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#0a0a0f}
 .mtbar{display:flex;align-items:center;gap:5px;padding:5px 9px;background:var(--card2);border-bottom:1px solid var(--line)}
@@ -21814,10 +21899,15 @@ function mtRender(prev){
   }).join("\n");
   return '<div class="mtwrap"><div class="mtbar"><i class="mtd1"></i><i class="mtd2"></i><i class="mtd3"></i><span>last messages</span></div><pre class="mtbody">'+body+'</pre></div>';
 }
+let HISTSEARCH={q:'',res:null}, _histT=null;
 function renderHist(){
-  const q=(document.getElementById("search")||{value:""}).value.toLowerCase();
-  const rows=HISTDATA.filter(c=>!q||((c.label||"")+" "+(c.cwd||"")+" "+(c.preview||"")).toLowerCase().includes(q));
-  const msg=document.getElementById("histmsg"); if(msg)msg.textContent=rows.length+(q?" of "+HISTDATA.length:"")+" past conversations"+(q?" matching":" (newest first)");
+  const q=(document.getElementById("search")||{value:""}).value.trim();
+  // 2+ chars on the local node -> real FULL-TEXT search of the whole transcript (not just title + tail).
+  if(HISTMACHINE==="studio" && q.length>=2){ histSearch(q); return; }
+  HISTSEARCH.res=null;
+  const ql=q.toLowerCase();
+  const rows=HISTDATA.filter(c=>!ql||((c.label||"")+" "+(c.cwd||"")+" "+(c.preview||"")).toLowerCase().includes(ql));
+  const msg=document.getElementById("histmsg"); if(msg)msg.textContent=rows.length+(ql?" of "+HISTDATA.length:"")+" past conversations"+(ql?" matching":" (newest first)");
   const list=document.getElementById("histlist"); if(!list)return;
   list.innerHTML=rows.map(c=>
     '<div class="card" style="cursor:default"><h3><span>'+esc(c.label||"(no opening message)")+'</span></h3>'+
@@ -21825,9 +21915,32 @@ function renderHist(){
     mtRender(c.preview)+
     '<div class="btns" style="margin-top:8px"><button class="mini go" onclick="resumeConv(\''+esc(c.id)+'\',false)">▶ resume</button>'
     +'<button class="mini" title="branch this conversation into an independent copy (shares history, then diverges)" onclick="resumeConv(\''+esc(c.id)+'\',true)">⑂ fork</button></div></div>'
-  ).join("")||empty(q?"No past conversations match \""+esc(q)+"\".":"No past conversations found on "+histLabel(HISTMACHINE)+".");
+  ).join("")||empty(ql?"No past conversations match \""+esc(q)+"\" in the title/preview — type to search the FULL transcript text.":"No past conversations found on "+histLabel(HISTMACHINE)+".");
 }
-async function resumeConv(id,fork){const c=HISTDATA.find(x=>x.id==id); if(!c)return;
+function histSearch(q){
+  const msg=document.getElementById("histmsg"); if(msg)msg.textContent='searching full transcripts for "'+esc(q)+'"…';
+  if(HISTSEARCH.q===q && HISTSEARCH.res){ renderHistSearch(); return; }   // cached
+  clearTimeout(_histT);
+  _histT=setTimeout(async function(){
+    let r; try{ r=await(await fetch("/api/transcript-search?machine="+HISTMACHINE+"&q="+encodeURIComponent(q))).json(); }catch(e){ r={ok:false,error:"search failed",results:[]}; }
+    HISTSEARCH={q:q,res:r};
+    if((document.getElementById("search")||{value:""}).value.trim()===q) renderHistSearch();   // ignore if the query moved on
+  },300);
+}
+function hlm(s,q){ var e=esc(s||""); try{ var i=e.toLowerCase().indexOf((q||"").toLowerCase()); if(i>=0&&q) e=e.slice(0,i)+'<mark>'+e.slice(i,i+q.length)+'</mark>'+e.slice(i+q.length); }catch(_){} return e; }
+function renderHistSearch(){
+  const r=HISTSEARCH.res||{results:[]}, rows=r.results||[], qs=HISTSEARCH.q;
+  const msg=document.getElementById("histmsg"); if(msg)msg.textContent=(r.ok===false?"":(rows.length+' session'+(rows.length===1?'':'s')+' matching "'+esc(qs)+'"'+(r.scanned!=null?' · '+r.scanned+' scanned':'')));
+  const list=document.getElementById("histlist"); if(!list)return;
+  list.innerHTML=rows.map(c=>
+    '<div class="card" style="cursor:default"><h3><span>'+esc(c.label||"(no opening message)")+'</span></h3>'+
+    '<div class="meta">launched from <code>'+esc(c.cwd)+'</code> · '+new Date(c.mtime*1000).toLocaleString()+'</div>'+
+    '<div class="histmatches">'+(c.matches||[]).map(m=>'<div class="histm"><span class="histm-r">'+(m.role==='user'?'you':'claude')+'</span> '+hlm(m.snippet,qs)+'</div>').join('')+'</div>'+
+    '<div class="btns" style="margin-top:8px"><button class="mini go" onclick="resumeConv(\''+esc(c.id)+'\',false)">▶ resume</button>'
+    +'<button class="mini" title="branch this conversation into an independent copy" onclick="resumeConv(\''+esc(c.id)+'\',true)">⑂ fork</button></div></div>'
+  ).join("")||empty(r.ok===false?("Search unavailable: "+esc(r.error||"error")):('No session transcript contains "'+esc(qs)+'".'));
+}
+async function resumeConv(id,fork){const c=HISTDATA.find(x=>x.id==id)||(((HISTSEARCH||{}).res||{}).results||[]).find(x=>x.id==id); if(!c)return;
   toast((fork?"Forking ":"Resuming ")+(c.label||"session").slice(0,38)+"…");
   const r=await(await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({machine:HISTMACHINE,id:c.id,cwd:c.cwd,fork:!!fork,label:c.label||""})})).json();
   if(!r.ok){toast((fork?"Fork":"Resume")+" failed: "+(r.error||"?"),6000); return;}

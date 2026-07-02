@@ -75,6 +75,34 @@ def _call(key, *a, **k):
     except Exception: return None
 
 
+def _fmt_dt(s):
+    """Best-effort: an ISO / RFC2822-email / epoch date string -> a friendly ABSOLUTE label WITH the weekday,
+    e.g. 'Wed Jul 8 3:00pm' or 'Mon Jun 30'. Returns the input unchanged if unparseable. The brief MUST show the
+    model each item's real date -- a date-blind brief conflates 'the Jul 8 call' with 'today' (Sarah's reschedule)."""
+    import datetime as _dt, email.utils as _eu
+    if s is None: return ""
+    if isinstance(s, (int, float)):
+        try: return _dt.datetime.fromtimestamp(s).strftime("%a %b %-d %-I:%M%p").replace("AM", "am").replace("PM", "pm")
+        except Exception: return str(s)
+    raw = str(s).strip()
+    if not raw: return ""
+    dt = None
+    try: dt = _dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception: dt = None
+    if dt is None:
+        try: dt = _eu.parsedate_to_datetime(raw)
+        except Exception: dt = None
+    if dt is None:
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y"):
+            try: dt = _dt.datetime.strptime(raw[:10], fmt); break
+            except Exception: continue
+    if dt is None: return raw
+    has_time = ("T" in raw) or (len(raw) > 10 and ":" in raw)
+    if has_time and (dt.hour or dt.minute):
+        return dt.strftime("%a %b %-d %-I:%M%p").replace("AM", "am").replace("PM", "pm")
+    return dt.strftime("%a %b %-d")
+
+
 @source("calendar", "Calendar")
 def _src_calendar(cfg):
     ev = _call("calendar_events", cfg.get("horizon_days", 14))
@@ -87,8 +115,8 @@ def _src_calendar(cfg):
                 else st if isinstance(st, str) else "") or e.get("start_str") or e.get("date") or ""
         title = e.get("summary") or e.get("title") or "(busy)"
         who = ", ".join(a.get("email", "") for a in (e.get("attendees") or []) if isinstance(a, dict))[:160]
-        out.append({"label": title, "text": ("%s%s" % (title, (" -- with " + who) if who else "")),
-                    "ts": when, "ref": "calendar"})
+        out.append({"label": title, "text": ("%s -- %s%s" % (_fmt_dt(when), title, (" (with " + who + ")") if who else "")),
+                    "ts": when, "ref": "calendar"})   # LEAD with the real date -- the model must see WHICH day each event is
     return out
 
 
@@ -101,8 +129,9 @@ def _src_gmail(cfg):
         if not isinstance(m, dict): continue
         frm = m.get("from") or m.get("sender") or ""; subj = m.get("subject") or "(no subject)"
         snip = (m.get("snippet") or "")[:200]
-        out.append({"label": subj, "text": "From %s: %s -- %s" % (frm[:60], subj, snip),
-                    "ts": m.get("date") or m.get("ts") or "", "ref": "gmail"})
+        _d = m.get("date") or m.get("ts") or ""
+        out.append({"label": subj, "text": "arrived %s -- From %s: %s -- %s" % (_fmt_dt(_d), frm[:60], subj, snip),
+                    "ts": _d, "ref": "gmail"})   # LEAD with when it arrived -- so a reply is tied to the right dated event
     return out
 
 
@@ -221,7 +250,7 @@ def _work_clause(cfg):
             % (now, days, hrs))
 
 def _brief_prompt(blocks, cfg, style=""):
-    when = time.strftime("%A, %B %-d")
+    when = time.strftime("%A, %B %-d, %Y")
     length = "2 short paragraphs" if cfg.get("length") == "short" else "3 paragraphs"
     tone = "warm and personal" if cfg.get("tone") == "warm" else "crisp and businesslike"
     return (style +
@@ -236,8 +265,15 @@ def _brief_prompt(blocks, cfg, style=""):
             "real upcoming deadline). Be specific and cite real names/times from the data. Do NOT invent anything "
             "not in the data. If a section has nothing real, skip it. Keep it tight -- this is spoken, not a "
             "report.\n\n%s"
+            "DATES ARE CRITICAL -- BE METICULOUS. Every calendar and email item below is PREFIXED WITH ITS REAL "
+            "DATE. Today is %s. Never call something 'today' unless its date literally IS today. When an email is a "
+            "reply about a meeting/hold, tie it to that event's SPECIFIC date (e.g. a reply on the Jul 8 hold is "
+            "about Jul 8, not today) -- do not collapse a future reschedule into 'today'. If a reply's date and the "
+            "event's date don't line up, or which occurrence is meant is ambiguous, SAY SO plainly ('heads up: this "
+            "looks like it's about the Jul 8 call, but confirm') rather than guessing. Get the day of week and the "
+            "date right every time.\n\n"
             "=== MY DATA (grouped by source; newest-ish first) ===\n%s\n=== END DATA ===\n"
-            "Now write the brief as plain spoken prose." % (when, tone, length, _work_clause(cfg), blocks))
+            "Now write the brief as plain spoken prose." % (when, tone, length, _work_clause(cfg), when, blocks))
 
 
 def _synthesize(blocks, cfg, style=""):
