@@ -4514,6 +4514,42 @@ def peers():
                 seen.add(url); out.append({"id": e.get("id") or url, "url": url})
     return out
 
+def peer_add(pid, url):
+    """Register a mesh peer from the dashboard/API instead of hand-editing peers.json on every machine.
+    OPERATOR-auth only (never mesh ingress): peers.json is the routing map for mesh + superadmin sends,
+    so a peer must not be able to add peers on another node's behalf. Same-id entries are replaced."""
+    pid = re.sub(r"[^A-Za-z0-9_-]", "", (pid or ""))[:40]
+    url = (url or "").strip().rstrip("/")
+    if not pid: return {"ok": False, "error": "peer id required (A-Za-z0-9_-)"}
+    if not re.match(r"^https?://[A-Za-z0-9.\[\]:_-]+(?::\d+)?$", url):
+        return {"ok": False, "error": "url must be http(s)://host[:port]"}
+    if pid == INSTANCE_ID: return {"ok": False, "error": "that id is THIS node"}
+    pl = load(PEERS_FILE, [])
+    if isinstance(pl, dict): pl = pl.get("instances", [])
+    pl = [x for x in (pl or []) if x.get("id") != pid]
+    pl.append({"id": pid, "url": url})
+    tmp = PEERS_FILE + ".tmp"
+    with open(tmp, "w") as f: json.dump(pl, f, indent=2)
+    os.replace(tmp, PEERS_FILE)
+    try: os.chmod(PEERS_FILE, 0o600)
+    except Exception: pass
+    return {"ok": True, "peers": peers()}
+
+def peer_remove(pid):
+    """Remove a peer from THIS node's peers.json (operator-auth only). Local registry (_instances.json)
+    entries are managed by spawn/promote and are not touched here."""
+    pid = (pid or "").strip()
+    pl = load(PEERS_FILE, [])
+    if isinstance(pl, dict): pl = pl.get("instances", [])
+    keep = [x for x in (pl or []) if x.get("id") != pid]
+    if len(keep) == len(pl or []): return {"ok": False, "error": "no such peer in peers.json (local-registry entries can't be removed here)"}
+    tmp = PEERS_FILE + ".tmp"
+    with open(tmp, "w") as f: json.dump(keep, f, indent=2)
+    os.replace(tmp, PEERS_FILE)
+    try: os.chmod(PEERS_FILE, 0o600)
+    except Exception: pass
+    return {"ok": True, "peers": peers()}
+
 # ======================================================================================================
 # OPERATOR NOTES -- a HUMAN-to-human chat between the people running the nodes (e.g. James at Mission Control
 # <-> Sarah at AFP), distinct from the chief(agent) mesh. Leave a note; it lands in the peer operator's
@@ -9464,7 +9500,13 @@ def _system_brief():
 BROWSER_CMDS = []
 _BC_LOCK = threading.Lock()
 _BC_CAP = 60
+_BROWSER_ACT_ACTIONS = ("click", "type")   # act-for-me; show-me actions (open/scroll/highlight/screenshot) stay free
 def browser_queue(action, **args):
+    # SERVER-side act-for-me gate: the desktop's toggle is client-side courtesy only -- an agent could POST
+    # click/type straight to this queue. Enforce here: refused unless the operator enabled it in Settings
+    # (cc.config browser_act; settings_save applies it live). Both switches must be on for act-for-me.
+    if action in _BROWSER_ACT_ACTIONS and not bool(CC.get("browser_act")):
+        return {"ok": False, "error": "act-for-me (click/type) is disabled on this node -- the operator can enable 'Browser act' in Settings"}
     cmd = {"id": "bc-%d-%d" % (int(time.time() * 1000), len(BROWSER_CMDS)), "action": action,
            "args": {k: v for k, v in args.items() if v is not None}, "status": "queued", "ts": int(time.time())}
     with _BC_LOCK:
@@ -13657,7 +13699,8 @@ def routines_list():
         rr["last_run"] = s.get("last_run"); rr["last_status"] = s.get("last_status")
         rr["last_exit"] = s.get("last_exit"); rr["last_ms"] = s.get("last_ms")
         rr["running"] = bool(s.get("running"))
-        rr["auto"] = bool(r.get("cmd") and _routine_when(r))     # will it actually fire on a schedule?
+        rr["enabled"] = r.get("enabled") is not False
+        rr["auto"] = bool(r.get("cmd") and _routine_when(r) and r.get("enabled") is not False)     # will it actually fire on a schedule?
         if rr["running"]: rr["status"] = "running"
         elif s.get("last_status") == "failed": rr["status"] = "blocked"
         elif s.get("last_status") == "ok": rr["status"] = rr.get("status") or "idle"
@@ -13671,6 +13714,35 @@ def routine_run_now(name):
     if not r.get("cmd"): return {"ok": False, "error": "routine has no cmd to run"}
     threading.Thread(target=_routine_run, args=(r,), kwargs={"manual": True}, daemon=True).start()
     return {"ok": True, "started": name}
+
+def routine_set(name, enabled=None):
+    """Operator control from the Routines lens: enable/disable a routine without hand-editing _routines.json.
+    The scheduler already honors enabled=False (_routine_due); this just gives it an owner-facing switch.
+    A disabled routine can still be run manually (Run now)."""
+    name = (name or "").strip()
+    d = load(ROUTINES, {"routines": []})
+    r = next((x for x in d.get("routines", []) if x.get("name") == name), None)
+    if not r: return {"ok": False, "error": "no such routine"}
+    if enabled is not None: r["enabled"] = bool(enabled)
+    save(ROUTINES, d)
+    return {"ok": True, "name": name, "enabled": r.get("enabled", True)}
+
+def routine_delete(name):
+    """Delete-means-archive (platform rule): the entry moves to _routines_archive.json in this node's
+    STATE_DIR, never rm'd, so a mistaken delete is recoverable by moving it back."""
+    name = (name or "").strip()
+    d = load(ROUTINES, {"routines": []})
+    r = next((x for x in d.get("routines", []) if x.get("name") == name), None)
+    if not r: return {"ok": False, "error": "no such routine"}
+    if name in _ROUTINES_RUNNING: return {"ok": False, "error": "routine is running -- wait for it to finish"}
+    d["routines"] = [x for x in d.get("routines", []) if x.get("name") != name]
+    save(ROUTINES, d)
+    ap = os.path.join(STATE_DIR, "_routines_archive.json")
+    arch = load(ap, [])
+    if not isinstance(arch, list): arch = []
+    r["archived_at"] = time.time()
+    arch.append(r); save(ap, arch)
+    return {"ok": True, "archived": name}
 
 def _routines_loop():
     time.sleep(90)
@@ -13726,6 +13798,7 @@ def settings_get():
             "integration": (CC.get("integration") or "").lower(), "is_agency": is_agency(),
             "tier": "grandfather" if ROLE == "org" else "father",
             "type": "agency" if is_agency() else "project",
+            "browser_act": bool(CC.get("browser_act")),
             "config_path": _CC_CONFIG, "port": PORT}
 def settings_save(body):
     tier, typ = body.get("tier"), body.get("type")
@@ -13746,6 +13819,11 @@ def settings_save(body):
         if bool(cfg.get("fleet_share", True)) != v: cfg["fleet_share"] = v; changed.append("fleet_share=" + str(v))
     if body.get("fleet_view") in ("full", "own"):
         if (cfg.get("fleet_view") or "full") != body["fleet_view"]: cfg["fleet_view"] = body["fleet_view"]; changed.append("fleet_view=" + body["fleet_view"])
+    if "browser_act" in body:
+        v = bool(body.get("browser_act"))
+        if bool(cfg.get("browser_act")) != v:
+            cfg["browser_act"] = v; CC["browser_act"] = v   # applied LIVE (the browser_queue gate reads CC), persisted below
+            changed.append("browser_act=" + str(v))
     if not changed: return {"ok": True, "changed": [], "note": "No changes."}
     try:
         tmp = _CC_CONFIG + ".tmp"
@@ -14475,6 +14553,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/ccr-delete":    return self._s(200, json.dumps(ccr_delete(body.get("id", ""))))
         if u.path == "/api/ccr-propose":   return self._s(200, json.dumps(ccr_propose(body)))
         if u.path == "/api/settings-save": return self._s(200, json.dumps(settings_save(body)))
+        if u.path == "/api/peer-add":      return self._s(200, json.dumps(peer_add(body.get("id", ""), body.get("url", ""))))
+        if u.path == "/api/peer-remove":   return self._s(200, json.dumps(peer_remove(body.get("id", ""))))
         if u.path == "/api/auth-token-set":
             try:
                 tok = auth_token_set(body.get("token", ""))
@@ -14679,6 +14759,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/agent-create":  return self._s(200, json.dumps(agent_create(body.get("name", ""), body.get("summary", ""))))
         if u.path == "/api/agent-delete":  return self._s(200, json.dumps(agent_delete(body.get("slug", ""))))
         if u.path == "/api/routine-run":         return self._s(200, json.dumps(routine_run_now(body.get("name", ""))))
+        if u.path == "/api/routine-set":         return self._s(200, json.dumps(routine_set(body.get("name", ""), body.get("enabled"))))
+        if u.path == "/api/routine-delete":      return self._s(200, json.dumps(routine_delete(body.get("name", ""))))
         if u.path == "/api/ext-action":          return self._s(200, json.dumps(ext_action(body.get("ext", ""), body.get("action", ""), body.get("payload") or {})))
         if u.path == "/api/extension-install":   return self._s(200, json.dumps(extension_install(body.get("id", ""))))
         if u.path == "/api/entitlement-grant":   return self._s(200, json.dumps(entitlement_grant(body.get("node", INSTANCE_ID), body.get("ext", ""), int(body.get("days", 0) or 0))))
@@ -16998,16 +17080,29 @@ function empty(t){return "<p style='color:var(--mut)'>"+t+"</p>";}
 function compCard(c){const k=c.kind=="spine"?'<span class="badge bdg-amber">spine</span>':'';
   return '<div class="card" onclick="openComp(\''+c.id+'\')"><h3><span>'+c.name+'</span><span style="display:flex;gap:5px">'+k+badge(c.status)+'</span></h3><div class="brief">'+(c.summary||"")+'</div>'+((c.areas&&c.areas.length)?'<div class="meta">'+c.areas.length+' areas · <code>'+(c.path||"")+'</code></div>':'')+(c.active?'<div class="meta" style="color:var(--accent)">▶ '+e2(c.active).slice(0,80)+'</div>':'')+'</div>';}
 function rouCard(r){
+  var off=(r.enabled===false);
   var last=r.last_run?('ran '+tago(r.last_run)+(r.last_status?(' · '+(r.last_status=='ok'?'✅ ok':(r.last_status=='running'?'⏳ running':'❌ '+esc(r.last_status)+(r.last_exit!=null?(' (exit '+r.last_exit+')'):''))) ):'')):'never run';
   var sched='⏰ '+esc(r.schedule||r.when&&JSON.stringify(r.when)||'unscheduled')+(r.auto?' · <span style="color:#3fb950">auto</span>':' · <span style="color:#8b949e">manual</span>');
   var btn=r.cmd?('<button class="mini" onclick="routineRun(\''+esc(r.name)+'\')">▶ Run now</button>'):'';
-  return '<div class="card" style="cursor:default"><h3><span>'+esc(r.name)+'</span>'+badge(r.status)+'</h3>'
+  var tog='<button class="mini" onclick="routineSet(\''+esc(r.name)+'\','+(off?'true':'false')+')" title="'+(off?'Resume the schedule — the routine fires automatically again':'Pause the schedule — it stops auto-running but can still be run manually')+'">'+(off?'▶ Enable':'⏸ Disable')+'</button>';
+  var del='<button class="mini" onclick="routineDel(\''+esc(r.name)+'\')" title="Archive this routine — it moves to _routines_archive.json (recoverable), never hard-deleted">Archive</button>';
+  var st=off?'<span class="badge bdg-amber">disabled</span>':badge(r.status);
+  return '<div class="card" style="cursor:default'+(off?';opacity:.65':'')+'"><h3><span>'+esc(r.name)+'</span>'+st+'</h3>'
     +'<div class="meta">'+sched+'</div><div class="meta" style="opacity:.8">'+last+'</div>'
-    +'<div class="brief">'+esc(r.desc||"")+'</div>'+(btn?('<div class="modnav" style="margin-top:7px">'+btn+'</div>'):'')+'</div>';}
+    +'<div class="brief">'+esc(r.desc||"")+'</div><div class="modnav" style="margin-top:7px">'+btn+tog+del+'</div></div>';}
 async function routineRun(name){toast('Running '+name+'…',3000);
   try{const r=await(await fetch('/api/routine-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})})).json();
     if(r&&r.ok)toast('Started '+name+' — watch its status update.',4000);else toast('Could not run: '+((r||{}).error||'?'),5000);}catch(e){toast('Run failed');}
   setTimeout(()=>{if(LENS=='routines')load();},1500);}
+async function routineSet(name,on){
+  try{const r=await(await fetch('/api/routine-set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,enabled:on})})).json();
+    toast(r&&r.ok?((on?'Enabled ':'Disabled ')+name):('Could not update: '+((r||{}).error||'?')),4000);}catch(e){toast('Update failed');}
+  setTimeout(()=>{if(LENS=='routines')load();},400);}
+async function routineDel(name){
+  if(!(await confirmM('Archive routine "'+name+'"? It stops running and moves to the archive (recoverable — an operator can move it back from _routines_archive.json).')))return;
+  try{const r=await(await fetch('/api/routine-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})})).json();
+    toast(r&&r.ok?('Archived '+name):('Could not archive: '+((r||{}).error||'?')),4000);}catch(e){toast('Archive failed');}
+  setTimeout(()=>{if(LENS=='routines')load();},400);}
 const RCOL={running:"#3fb950",paused:"#d29922",blocked:"#f85149",done:"#3fb950",stopped:"#a0a0b0",halted:"#a0a0b0",idle:"#a0a0b0"};
 let RALPHVIEW='active';
 function ralphToggle(){return '<div style="display:flex;gap:6px;margin-bottom:10px">'
@@ -23025,7 +23120,38 @@ async function loadSettings(){
     +'<button class="mini go" onclick="changeToken()">Change token</button></div>'
     +'<div id="tokresult" style="margin-top:11px;display:none;background:#0d0d14;border:1px solid var(--line);border-radius:9px;padding:11px;font-size:12.5px;line-height:1.5"></div>'
     +'<div class="meta" style="margin-top:10px;opacity:.7">🛟 Locked out by a typo? Run <code>cc-recover.sh</code> in a terminal on the host — it prints every node\'s current token, port, and URL.</div></div>';
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Browser control</b> <span class="cc-p-sub">'+(s.browser_act?'act-for-me is ON — agents may click/type in the desktop browser':'act-for-me is OFF — agents can only show pages (open/scroll/highlight)')+'</span></div>'
+    +'<div class="cc-p-note">Agents can always <b>show</b> you pages in the desktop browser (open, scroll, highlight, screenshot). Letting them <b>act</b> (click and type) needs this server-side switch AND the desktop app\'s own toggle — both must be on. Applies immediately, no restart.</div>'
+    +'<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:6px"><input type="checkbox" id="set_browseract"'+(s.browser_act?' checked':'')+' onchange="browserActSave(this.checked)"> allow agents to click + type in the desktop browser</label></div>';
+  let peers=[];try{const pr=await(await fetch("/api/peers")).json();peers=(pr&&pr.peers)||[];}catch(e){}
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Mesh peers</b> <span class="cc-p-sub">the other ClaudeFather nodes this node can reach</span></div>'
+    +'<div class="cc-p-note">The address book for chief-to-chief messages, fleet drift, and operator Notes. Adding a peer here writes <code>peers.json</code> on THIS node only — add this node on the other side too so they can reach back. Trust still comes from tokens; an entry is just an address.</div>'
+    +'<div class="cc-list" id="peerList">'
+    +(peers.length?peers.map(function(p){return '<div class="cc-item"><span style="min-width:120px"><b>'+e2(p.id)+'</b></span><code style="flex:1;overflow:hidden;text-overflow:ellipsis">'+e2(p.url)+'</code><button class="mini" onclick="peerRemove(\''+e2(p.id)+'\')" title="Remove this peer from this node\'s peers.json (local-registry children are not removable here)">Remove</button></div>';}).join(''):'<div class="meta">No peers yet — this node is mesh-alone.</div>')
+    +'</div>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:9px">'
+    +'<input id="peer_id" class="cc-in" style="width:140px" placeholder="peer id (e.g. afp)" autocomplete="off">'
+    +'<input id="peer_url" class="cc-in" style="flex:1;min-width:220px" placeholder="https://host:port (tailnet URL for cross-machine)" autocomplete="off">'
+    +'<button class="mini go" onclick="peerAdd()">Add peer</button></div></div>';
   g.innerHTML=h;
+}
+async function browserActSave(on){
+  try{const r=await(await fetch("/api/settings-save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({browser_act:!!on})})).json();
+    if(r&&r.ok)toast(on?'Act-for-me enabled — agents may click/type in the desktop browser.':'Act-for-me disabled.',4000);
+    else toast("Failed: "+((r||{}).error||"?"),5000);}catch(e){toast("Request failed");}
+}
+async function peerAdd(){
+  const id=(document.getElementById("peer_id").value||"").trim(),url=(document.getElementById("peer_url").value||"").trim();
+  if(!id||!url){toast("Give the peer an id and a URL");return;}
+  try{const r=await(await fetch("/api/peer-add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:id,url:url})})).json();
+    if(r&&r.ok){toast("Peer "+id+" added ✓ — add this node on their side too.",5000);loadSettings();}
+    else toast("Failed: "+((r||{}).error||"?"),5000);}catch(e){toast("Request failed");}
+}
+async function peerRemove(id){
+  if(!(await confirmM('Remove peer "'+id+'" from this node\'s peers.json? Mesh messages and drift checks to it stop from this side.')))return;
+  try{const r=await(await fetch("/api/peer-remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:id})})).json();
+    if(r&&r.ok){toast("Peer removed.",3500);loadSettings();}
+    else toast("Failed: "+((r||{}).error||"?"),5000);}catch(e){toast("Request failed");}
 }
 function cfRandTok(){var a=new Uint8Array(16);crypto.getRandomValues(a);return Array.from(a,function(b){return b.toString(16).padStart(2,"0")}).join("");}
 async function changeToken(){

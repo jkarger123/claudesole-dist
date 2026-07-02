@@ -3,6 +3,23 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.124 -- 2026-07-02  (Mesh peers UI, server-side browser act gate, routines operator controls)
+- **Mesh peer registration from the dashboard** (plan item 1.2): `/api/peer-add` + `/api/peer-remove`
+  (operator-auth ONLY -- never mesh ingress, since peers.json is the routing map for mesh + superadmin
+  sends) + a "Mesh peers" panel in Settings that lists peers with Remove and an add form. Writes are
+  atomic + chmod 600. Ends "hand-edit peers.json on N machines" for the local side; the far side still
+  adds you back (the panel says so).
+- **Server-side act-for-me gate for the agent-driven browser** (item 1.4 / catalog C1): `browser_queue`
+  now REFUSES `click`/`type` unless the operator enabled "Browser act" in Settings (`cc.config
+  browser_act`, applied live -- no restart). The desktop toggle remains the client-side consent; both
+  must be on. Show-me actions (open/scroll/highlight/screenshot) stay free. Previously the only gate was
+  client-side in the desktop shell -- an agent could POST straight to the queue.
+- **Routines operator controls** (item 1.7 / catalog B5): Enable/Disable + Archive buttons on every
+  routine card (`/api/routine-set`, `/api/routine-delete`). The scheduler already honored
+  `enabled:false`; now operators can flip it without editing `_routines.json`. Delete-means-archive: the
+  entry moves to `_routines_archive.json` (recoverable); a running routine can't be archived mid-run.
+  Disabled routines show dimmed with an amber badge and can still be run manually.
+
 ## 0.99.123 -- 2026-07-02  (Safety floor: nodes are never born open + truthful VERSION stamps)
 - **Per-node auth_token minted at birth** (NODE_SETUP_STREAMLINE.md #3/#4, plan-of-attack item 1.1):
   `cc-newinstance.sh`, `cc-spawn.sh`, and `cc-init.sh` now mint a per-node login token (24-hex) instead of
