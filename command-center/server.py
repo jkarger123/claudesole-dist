@@ -14038,9 +14038,27 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/email-stats":                                                     # EMAIL ARCHIVE extension
             return self._s(200, json.dumps(email_archive.mb_stats() if email_archive else {"ok": False, "error": "not available"}))
         if u.path == "/api/email-search":
-            return self._s(200, json.dumps(email_archive.mb_search(q.get("q", [""])[0], int((q.get("limit", ["60"])[0]) or 60)) if email_archive else {"ok": False, "error": "not available"}))
+            if not email_archive: return self._s(200, json.dumps({"ok": False, "error": "not available"}))
+            def _eint(nm):
+                v = (q.get(nm, [""])[0] or "").strip()
+                try: return int(v) if v else None
+                except Exception: return None
+            return self._s(200, json.dumps(email_archive.mb_search(
+                q.get("q", [""])[0], int((q.get("limit", ["60"])[0]) or 60),
+                contact=(q.get("from", [""])[0] or None), since=_eint("since"), until=_eint("until"),
+                label=(q.get("label", [""])[0] or None), thread=(q.get("thread", [""])[0] or None))))
         if u.path == "/api/email-get":
             return self._s(200, json.dumps(email_archive.mb_get(q.get("id", ["0"])[0]) if email_archive else {"ok": False, "error": "not available"}))
+        if u.path == "/api/email-thread":
+            return self._s(200, json.dumps(email_archive.mb_thread(q.get("thread", [""])[0], 100) if email_archive else {"ok": False, "error": "not available"}))
+        if u.path == "/api/email-contacts":
+            return self._s(200, json.dumps(email_archive.mb_contacts(int((q.get("limit", ["40"])[0]) or 40)) if email_archive else {"ok": False, "error": "not available"}))
+        if u.path == "/api/email-facets":
+            return self._s(200, json.dumps(email_archive.mb_facets(q.get("q", [""])[0] or None, (q.get("from", [""])[0] or None)) if email_archive else {"ok": False}))
+        if u.path == "/api/email-ask":
+            if not email_archive: return self._s(200, json.dumps({"ok": False, "error": "not available"}))
+            _llm = (lambda p: _claude_text(p, model="claude-haiku-4-5", timeout=45)) if CC.get("smart", True) is not False else None
+            return self._s(200, json.dumps(email_archive.mb_ask(q.get("q", [""])[0], ask_llm=_llm, today=time.strftime("%Y-%m-%d")), default=str))
         if u.path == "/api/token-usage": return self._s(200, json.dumps(token_usage_payload()))
         if u.path == "/api/pipeline":   return self._s(200, json.dumps(pipeline_payload()))
         if u.path == "/api/usage": return self._s(200, json.dumps(usage_payload()))
@@ -21144,42 +21162,92 @@ async function loadNotes(){
 }
 var NB={notes:[],hasVoice:false,rec:null,chunks:[],q:""};
 async function nbSearch(){var i=document.getElementById("nbSearch");NB.q=i?i.value:"";var f=i&&document.activeElement===i;var p=i?i.selectionStart:0;await loadNotebook();var i2=document.getElementById("nbSearch");if(i2&&f){i2.focus();try{i2.setSelectionRange(p,p);}catch(e){}}}
-// ---- Email Archive lens (email-archive extension): full-text search over an exported (mbox) email history ----
-let EMAILA={q:'',res:null}, _emT=null;
+// ---- Email Archive lens (email-archive extension): ASK (bounded AI) + faceted full-text search + threads -------
+let EMAILA={q:'',res:null,facets:null,contact:null,year:null,ask:null,asking:false}, _emT=null;
 async function loadEmailArchive(){
   var g=document.getElementById('grid'); var st;
   try{ st=await(await fetch('/api/email-stats')).json(); }catch(e){ st={ok:false,error:'not reachable'}; }
-  var sub = (st&&st.ready)
-    ? ('search '+(st.count||0).toLocaleString()+' archived emails'+((st.oldest_ts&&st.newest_ts)?(' · '+new Date(st.oldest_ts*1000).getFullYear()+'–'+new Date(st.newest_ts*1000).getFullYear()):''))
-    : (esc((st&&st.error)||'index not built yet'));
+  if(!(st&&st.ready)){ g.innerHTML='<div class="modstack"><div class="cc-head"><span class="cc-h-t">Email Archive</span><span class="cc-h-sub">'+esc((st&&st.error)||'index not built yet')+'</span></div>'+empty((st&&st.error)?('Not ready: '+esc(st.error)):'Index not available.')+'</div>'; return; }
+  var span=(st.oldest_ts&&st.newest_ts)?(new Date(st.oldest_ts*1000).getFullYear()+'–'+new Date(st.newest_ts*1000).getFullYear()):'';
+  var sub=(st.count||0).toLocaleString()+' emails · '+(st.threads||0).toLocaleString()+' conversations · '+(st.contacts||0).toLocaleString()+' contacts'+(span?(' · '+span):'');
   g.innerHTML='<div class="modstack"><div class="cc-head"><span class="cc-h-t">Email Archive</span><span class="cc-h-sub">'+sub+'</span></div>'
+    +'<div class="cc-panel"><div class="cc-p-h"><b>Ask your email</b> <span class="cc-p-sub">a real question — I read only the few most relevant emails to answer, so it stays cheap</span></div>'
+    +'<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:9px"><input id="emask" class="cc-in" placeholder="e.g. what did we agree with Emily about the affiliate invoices?" style="flex:1;min-width:240px;font-size:14px" onkeydown="if(event.key===\'Enter\')emAsk()"><button class="btn go" onclick="emAsk()">Ask</button></div>'
+    +'<div id="emans"></div></div>'
     +'<div class="card" style="cursor:default">'
-    +'<input id="emq" class="cc-in" placeholder="Search your old email — a sender, a subject, a product, anything in the body…" style="width:100%;font-size:15px" oninput="emSearch()" value="'+esc(EMAILA.q)+'">'
-    +'<div id="emres" style="margin-top:14px">'+((st&&st.ready)?empty('Type to search '+(st.count||0).toLocaleString()+' emails — results are instant.'):empty((st&&st.error)?('Not ready: '+esc(st.error)):'Index not available.'))+'</div>'
+    +'<input id="emq" class="cc-in" placeholder="Or search by keyword — a sender, a subject, a product, anything in the body…" style="width:100%;font-size:15px" oninput="emSearch()" value="'+esc(EMAILA.q)+'">'
+    +'<div id="emfacet" style="margin-top:9px"></div>'
+    +'<div id="emres" style="margin-top:12px">'+empty('Type to search — or ask a question above.')+'</div>'
     +'</div></div>';
-  var i=document.getElementById('emq'); if(i){ i.focus(); if(EMAILA.q&&EMAILA.res)emRender(); }
+  if(EMAILA.ask)emRenderAsk();
+  var i=document.getElementById('emq'); if(i&&(EMAILA.q||EMAILA.contact||EMAILA.year)){ emRender(); emFacetBar(); }
+  var a=document.getElementById('emask'); if(a&&!EMAILA.q)a.focus();
+}
+// ---- ASK (token-bounded AI) ----
+async function emAsk(){
+  var i=document.getElementById('emask'); var qn=(i?i.value:'').trim();
+  if(qn.length<4){ toast('Ask a fuller question',2500); return; }
+  var out=document.getElementById('emans'); EMAILA.asking=true;
+  if(out)out.innerHTML='<div class="cc-p-note" style="margin-top:9px">Reading the most relevant emails…</div>';
+  let r; try{ r=await(await fetch('/api/email-ask?q='+encodeURIComponent(qn))).json(); }catch(e){ r={ok:false,error:'ask failed'}; }
+  EMAILA.asking=false; EMAILA.ask=r; emRenderAsk();
+}
+function emCite(txt){ return esc(txt).replace(/\[#(\d+)\]/g, function(_,n){ return '<b style="color:var(--accent,#e8c547)">[#'+n+']</b>'; }); }
+function emRenderAsk(){
+  var out=document.getElementById('emans'); if(!out)return; var r=EMAILA.ask; if(!r){ out.innerHTML=''; return; }
+  if(!r.ok){ out.innerHTML='<div class="cc-p-note" style="margin-top:9px">Could not answer: '+esc(r.error||'error')+'</div>'; return; }
+  var srcs=r.sources||[];
+  var body = r.answer ? ('<div class="cc-p-note" style="white-space:pre-wrap;line-height:1.55;margin-top:9px">'+emCite(r.answer)+'</div>')
+                      : '<div class="cc-p-note" style="margin-top:9px"><i>AI synthesis is off — showing the most relevant emails below.</i></div>';
+  var meta = r.synthesized ? ('read '+srcs.length+' emails · ~'+(r.tokens_in_est||0).toLocaleString()+' tokens') : (srcs.length+' relevant emails');
+  var chips = srcs.length ? ('<div style="margin-top:9px;display:flex;gap:6px;flex-wrap:wrap"><span class="sub" style="align-self:center">Sources (click or drag):</span>'+srcs.map(function(s,idx){ return '<span class="cc-chip" '+ssAttr({kind:'emailarc',id:s.rowid,name:(s.subject||'email')})+' onclick="emOpen('+s.rowid+')" title="open / drag this source email" style="cursor:pointer">['+(idx+1)+'] '+esc((s.subject||'(no subject)').slice(0,42))+'</span>'; }).join('')+'</div>') : '';
+  out.innerHTML='<div style="margin-top:11px;border-top:1px solid var(--line);padding-top:9px"><div class="cc-p-sub">'+meta+'</div>'+body+chips+'</div>';
+}
+// ---- keyword search + facets ----
+function emParams(){
+  var p='q='+encodeURIComponent(EMAILA.q||'');
+  if(EMAILA.contact) p+='&from='+encodeURIComponent(EMAILA.contact);
+  if(EMAILA.year){ var y=+EMAILA.year; p+='&since='+Math.floor(new Date(y,0,1).getTime()/1000)+'&until='+Math.floor(new Date(y,11,31,23,59,59).getTime()/1000); }
+  return p;
 }
 function emSearch(){
-  var q=(document.getElementById('emq')||{value:''}).value.trim(); EMAILA.q=q;
+  var el=document.getElementById('emq'); EMAILA.q=el?el.value.trim():EMAILA.q;
   var box=document.getElementById('emres'); if(!box)return;
-  if(q.length<2){ box.innerHTML=empty('Type at least 2 characters.'); return; }
+  if((EMAILA.q||'').length<2 && !EMAILA.contact && !EMAILA.year){ EMAILA.res=null; box.innerHTML=empty('Type at least 2 characters — or narrow by a contact/year.'); emFacetBar(); return; }
   box.innerHTML=empty('Searching…'); clearTimeout(_emT);
   _emT=setTimeout(async function(){
-    let r; try{ r=await(await fetch('/api/email-search?q='+encodeURIComponent(q))).json(); }catch(e){ r={ok:false,error:'search failed'}; }
-    if((document.getElementById('emq')||{value:''}).value.trim()!==q)return;
+    let r; try{ r=await(await fetch('/api/email-search?'+emParams()+'&limit=80')).json(); }catch(e){ r={ok:false,error:'search failed'}; }
     EMAILA.res=r; emRender();
+    try{ EMAILA.facets=await(await fetch('/api/email-facets?q='+encodeURIComponent(EMAILA.q||'')+(EMAILA.contact?('&from='+encodeURIComponent(EMAILA.contact)):''))).json(); }catch(e){ EMAILA.facets=null; }
+    emFacetBar();
   },250);
+}
+function emSetContact(a){ EMAILA.contact=(EMAILA.contact===a)?null:a; emSearch(); }
+function emSetYear(y){ EMAILA.year=(EMAILA.year==y)?null:y; emSearch(); }
+function emClearFacets(){ EMAILA.contact=null; EMAILA.year=null; emSearch(); }
+function emFacetBar(){
+  var bar=document.getElementById('emfacet'); if(!bar)return; var h='';
+  if(EMAILA.contact||EMAILA.year){ h+='<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:7px"><span class="sub">Filtered:</span>'
+    +(EMAILA.contact?('<span class="badge bdg-accent">from '+esc(EMAILA.contact)+'</span>'):'')
+    +(EMAILA.year?('<span class="badge bdg-accent">'+esc(String(EMAILA.year))+'</span>'):'')
+    +'<button class="mini" onclick="emClearFacets()" title="clear filters">clear</button></div>'; }
+  var f=EMAILA.facets||{}; var cs=(f.contacts||[]).slice(0,8), ys=(f.years||[]).slice(0,8);
+  if(cs.length||ys.length){ h+='<div class="sub" style="margin-bottom:4px">Narrow by</div><div style="display:flex;gap:6px;flex-wrap:wrap">'
+    +cs.map(function(c){ return '<span class="cc-chip" onclick="emSetContact(\''+esc(c.k)+'\')" title="only emails from this contact" style="cursor:pointer'+(EMAILA.contact===c.k?';outline:1px solid var(--accent,#e8c547)':'')+'">'+esc((c.k||'').slice(0,30))+' <b>'+c.n+'</b></span>'; }).join('')
+    +ys.map(function(y){ return '<span class="cc-chip" onclick="emSetYear(\''+esc(y.k)+'\')" title="only this year" style="cursor:pointer'+(EMAILA.year==y.k?';outline:1px solid var(--accent,#e8c547)':'')+'">'+esc(y.k)+' <b>'+y.n+'</b></span>'; }).join('')
+    +'</div>'; }
+  bar.innerHTML=h;
 }
 function emSnip(s){ var e=esc(s||''); return e.split('CCHLA').join('<mark>').split('CCHLB').join('</mark>'); }
 function emRender(){
   var box=document.getElementById('emres'); if(!box)return; var r=EMAILA.res||{}, rows=r.results||[];
   if(r.ok===false){ box.innerHTML=empty('Search unavailable: '+esc(r.error||'error')); return; }
-  box.innerHTML='<div class="sub" style="margin-bottom:9px">'+rows.length+' match'+(rows.length===1?'':'es')+' for "'+esc(EMAILA.q)+'" &middot; <span style="opacity:.8">click to read &middot; drag any result into a Claude session (or the Basket)</span></div>'
+  box.innerHTML='<div class="sub" style="margin-bottom:9px">'+rows.length+' result'+(rows.length===1?'':'s')+' &middot; <span style="opacity:.8">click to read &middot; drag any result into a Claude session (or the Basket)</span></div>'
     +rows.map(function(m){ return '<div class="emrow" '+ssAttr({kind:'emailarc',id:m.rowid,name:(m.subject||'email')})+' onclick="emOpen('+m.rowid+')" title="click to read — or drag into a session to hand the agent this email">'
       +'<div class="emsubj">'+esc(m.subject||'(no subject)')+'</div>'
       +'<div class="emmeta">'+esc((m.sender||'').slice(0,64))+' &middot; '+esc(m.date_str||'')+'</div>'
-      +'<div class="emsnip">'+emSnip(m.snip)+'</div></div>';
-    }).join('')||empty('No emails match "'+esc(EMAILA.q)+'".');
+      +(m.snip?('<div class="emsnip">'+emSnip(m.snip)+'</div>'):'')+'</div>';
+    }).join('')||empty('No emails match this search.');
 }
 async function emOpen(id){
   var r; try{ r=await(await fetch('/api/email-get?id='+encodeURIComponent(id))).json(); }catch(e){ toast('Could not open email',3000); return; }
@@ -21190,6 +21258,14 @@ async function emOpen(id){
     +'<div class="sub">To '+esc((m.recipients||'').slice(0,140))+'</div>'
     +'<div class="sub" style="margin-bottom:10px">'+esc(m.date_str||'')+(m.labels?(' &middot; '+esc(m.labels)):'')+'</div>'
     +'<pre style="white-space:pre-wrap;overflow:auto;flex:1;background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:15px;margin:0;color:var(--ink);font:13px/1.55 -apple-system,sans-serif">'+esc(m.body||'(no text body)')+'</pre>'
+    +'<div class="row" style="margin-top:11px;justify-content:flex-end">'+(m.thread_id?('<button class="mini" onclick="emThread(\''+esc(m.thread_id)+'\')" title="see the whole conversation">View whole thread</button> '):'')+'<button class="btn" onclick="closeM()">Close</button></div></div>');
+}
+async function emThread(tid){
+  var r; try{ r=await(await fetch('/api/email-thread?thread='+encodeURIComponent(tid))).json(); }catch(e){ toast('Could not load thread',2500); return; }
+  if(!r.ok){ toast(r.error||'no thread',2500); return; } var msgs=r.messages||[];
+  showM('<div style="max-width:820px;width:88vw;max-height:84vh;display:flex;flex-direction:column">'
+    +'<h2 style="margin:0 0 8px;font-size:17px">Conversation &middot; '+msgs.length+' message'+(msgs.length===1?'':'s')+'</h2>'
+    +'<div style="overflow:auto;flex:1">'+msgs.map(function(m){ return '<div class="emrow" '+ssAttr({kind:'emailarc',id:m.rowid,name:(m.subject||'email')})+' onclick="emOpen('+m.rowid+')" title="open this message" style="cursor:pointer"><div class="emmeta"><b>'+esc(m.from_name||m.sender||'')+'</b> &middot; '+esc(m.date_str||'')+'</div><div class="emsnip">'+esc((m.preview||'').slice(0,220))+'…</div></div>'; }).join('')+'</div>'
     +'<div class="row" style="margin-top:11px;justify-content:flex-end"><button class="btn" onclick="closeM()">Close</button></div></div>');
 }
 async function loadNotebook(){

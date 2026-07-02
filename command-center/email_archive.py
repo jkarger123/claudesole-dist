@@ -69,9 +69,22 @@ def _ts(datehdr):
     except Exception:
         return 0, (datehdr or "")[:40]
 
+def _from_parts(v):
+    """From header -> (display_name, lowercased email). For contact faceting + rollups."""
+    v = _dh(v)
+    try:
+        addrs = getaddresses([v])
+        if addrs:
+            name, addr = addrs[0]
+            return (name or "").strip(), (addr or "").strip().lower()
+    except Exception:
+        pass
+    return "", v.strip().lower()
+
 SCHEMA = ("CREATE VIRTUAL TABLE IF NOT EXISTS messages USING fts5("
           "subject, sender, recipients, labels, body, "
-          "date_str UNINDEXED, date_ts UNINDEXED, msgid UNINDEXED, tokenize='porter unicode61')")
+          "date_str UNINDEXED, date_ts UNINDEXED, msgid UNINDEXED, "
+          "thread_id UNINDEXED, from_addr UNINDEXED, from_name UNINDEXED, tokenize='porter unicode61')")
 
 # ---- index build --------------------------------------------------------------------------------------------
 def build_index(mbox_path=None, db_path=None, limit=None, log=print):
@@ -84,14 +97,17 @@ def build_index(mbox_path=None, db_path=None, limit=None, log=print):
     con = sqlite3.connect(tmp); cur = con.cursor()
     cur.execute("PRAGMA journal_mode=WAL"); cur.execute("PRAGMA synchronous=NORMAL"); cur.execute(SCHEMA)
     mb = mailbox.mbox(mbox_path); t0 = time.time(); n = 0; batch = []
-    ins = "INSERT INTO messages(subject,sender,recipients,labels,body,date_str,date_ts,msgid) VALUES(?,?,?,?,?,?,?,?)"
+    ins = ("INSERT INTO messages(subject,sender,recipients,labels,body,date_str,date_ts,msgid,"
+           "thread_id,from_addr,from_name) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
     for key in mb.keys():
         try: msg = mb.get_message(key)
         except Exception: continue
         ts, dstr = _ts(msg.get("Date", ""))
+        fname, faddr = _from_parts(msg.get("From", ""))
         batch.append((_dh(msg.get("Subject", "")), _addrs(msg.get("From", "")),
                       (_addrs(msg.get("To", "")) + " " + _addrs(msg.get("Cc", ""))).strip(),
-                      _dh(msg.get("X-Gmail-Labels", "")), _body_text(msg), dstr, ts, (msg.get("Message-ID", "") or "")[:200]))
+                      _dh(msg.get("X-Gmail-Labels", "")), _body_text(msg), dstr, ts, (msg.get("Message-ID", "") or "")[:200],
+                      (msg.get("X-GM-THRID", "") or "").strip(), faddr, fname))
         n += 1
         if len(batch) >= 500:
             cur.executemany(ins, batch); con.commit(); batch = []; log("  indexed %d (%.0fs)" % (n, time.time() - t0))
@@ -116,22 +132,51 @@ def mb_stats():
         n = cur.execute("SELECT count(*) FROM messages").fetchone()[0]
         lo = cur.execute("SELECT min(date_ts) FROM messages WHERE date_ts>0").fetchone()[0]
         hi = cur.execute("SELECT max(date_ts) FROM messages WHERE date_ts>0").fetchone()[0]
-        return {"ok": True, "ready": True, "count": n, "oldest_ts": lo, "newest_ts": hi,
-                "mbox": os.path.basename(_mbox_path() or "")}
+        try: threads = cur.execute("SELECT count(DISTINCT thread_id) FROM messages WHERE thread_id<>''").fetchone()[0]
+        except Exception: threads = 0
+        try: contacts = cur.execute("SELECT count(DISTINCT from_addr) FROM messages WHERE from_addr<>''").fetchone()[0]
+        except Exception: contacts = 0
+        return {"ok": True, "ready": True, "count": n, "threads": threads, "contacts": contacts,
+                "oldest_ts": lo, "newest_ts": hi, "mbox": os.path.basename(_mbox_path() or "")}
     finally: con.close()
 
-def mb_search(query, limit=50):
+_STOP = set(("the a an and or of to in on for with at by from is are was were be do did what when who "
+             "how why where which that this it me my we our i you your they their about did any all "
+             "email emails mail find show tell give get list did last first").split())
+def _kw_from_question(q):
+    ws = re.findall(r"[A-Za-z0-9][A-Za-z0-9'@.\-]{1,}", (q or "").lower())
+    kw = [w for w in ws if w not in _STOP and len(w) > 2]
+    return " ".join(kw[:8]) or (q or "").strip()
+
+_COLS = ("rowid, subject, sender, from_addr, from_name, recipients, date_str, date_ts, thread_id, labels")
+def _apply_facets(sel, params, contact, since, until, label, thread):
+    if contact:
+        sel += " AND (from_addr LIKE ? OR recipients LIKE ? OR sender LIKE ?)"; c = "%" + contact.lower() + "%"; params += [c, c, c]
+    if since: sel += " AND date_ts >= ?"; params.append(int(since))
+    if until: sel += " AND date_ts <= ?"; params.append(int(until))
+    if label:  sel += " AND labels LIKE ?"; params.append("%" + label + "%")
+    if thread: sel += " AND thread_id = ?"; params.append(str(thread))
+    return sel
+
+def mb_search(query, limit=50, contact=None, since=None, until=None, label=None, thread=None):
+    """Faceted full-text search. `query` = FTS5 text (optional); facets (contact/since/until/label/thread) narrow
+    the result deterministically. With no query, browse by facet ordered newest-first."""
     con = _conn()
     if not con: return {"ok": False, "ready": False, "results": [], "error": "index not built yet"}
     q = (query or "").strip()
-    if not q: return {"ok": True, "ready": True, "results": []}
-    sel = ("SELECT rowid, subject, sender, recipients, date_str, date_ts, "
-           "snippet(messages, 4, 'CCHLA', 'CCHLB', ' ... ', 16) AS snip "     # ASCII markers -> <mark> on the client (no control chars, no collision)
-           "FROM messages WHERE messages MATCH ? ORDER BY rank LIMIT ?")
     try:
-        try: rows = con.execute(sel, (q, min(int(limit), 200))).fetchall()
+        params = []
+        if q:
+            sel = ("SELECT " + _COLS + ", snippet(messages,4,'CCHLA','CCHLB',' ... ',16) AS snip "
+                   "FROM messages WHERE messages MATCH ?"); params.append(q)
+        else:
+            sel = "SELECT " + _COLS + ", '' AS snip FROM messages WHERE 1=1"
+        sel = _apply_facets(sel, params, contact, since, until, label, thread)
+        sel += " ORDER BY " + ("rank" if q else "date_ts DESC") + " LIMIT ?"; params.append(min(int(limit), 200))
+        try: rows = con.execute(sel, params).fetchall()
         except sqlite3.OperationalError:
-            rows = con.execute(sel, ('"' + q.replace('"', "") + '"', min(int(limit), 200))).fetchall()   # phrase-fallback for punctuation
+            if not q: raise
+            params[0] = '"' + q.replace('"', "") + '"'; rows = con.execute(sel, params).fetchall()   # phrase-fallback for punctuation
         return {"ok": True, "ready": True, "q": q, "results": [dict(r) for r in rows]}
     except Exception as e:
         return {"ok": False, "ready": True, "results": [], "error": str(e)[:140]}
@@ -141,10 +186,139 @@ def mb_get(rowid):
     con = _conn()
     if not con: return {"ok": False, "error": "index not built yet"}
     try:
-        r = con.execute("SELECT subject,sender,recipients,labels,body,date_str FROM messages WHERE rowid=?",
+        r = con.execute("SELECT subject,sender,recipients,labels,body,date_str,date_ts,thread_id,from_addr FROM messages WHERE rowid=?",
                         (int(rowid),)).fetchone()
         return {"ok": True, "message": dict(r)} if r else {"ok": False, "error": "not found"}
     finally: con.close()
+
+def mb_thread(thread_id, limit=100):
+    """All messages in one Gmail conversation (thread), oldest-first, with a short body preview each."""
+    con = _conn()
+    if not con: return {"ok": False, "error": "index not built yet"}
+    try:
+        rows = con.execute("SELECT rowid, subject, sender, from_name, date_str, date_ts, substr(body,1,600) AS preview "
+                           "FROM messages WHERE thread_id=? ORDER BY date_ts ASC LIMIT ?",
+                           (str(thread_id), int(limit))).fetchall()
+        if not rows: return {"ok": False, "error": "thread not found"}
+        return {"ok": True, "thread_id": str(thread_id), "messages": [dict(r) for r in rows]}
+    finally: con.close()
+
+def mb_contacts(limit=40, query=None):
+    """Top correspondents by message count -- for the facet sidebar / 'who do I email most'."""
+    con = _conn()
+    if not con: return {"ok": False, "ready": False, "contacts": []}
+    try:
+        rows = con.execute("SELECT from_addr AS addr, max(from_name) AS name, count(*) AS n, max(date_ts) AS last "
+                           "FROM messages WHERE from_addr<>'' GROUP BY from_addr ORDER BY n DESC LIMIT ?",
+                           (int(limit),)).fetchall()
+        return {"ok": True, "ready": True, "contacts": [dict(r) for r in rows]}
+    finally: con.close()
+
+def mb_facets(query=None, contact=None, since=None, until=None, label=None):
+    """For the CURRENT search, the top contacts / years / labels among the matches -- so the UI can offer
+    'narrow by' without any AI. Bounded, deterministic, cheap."""
+    con = _conn()
+    if not con: return {"ok": False, "contacts": [], "years": [], "labels": []}
+    q = (query or "").strip()
+    def _grp(expr, extra=""):
+        params = []
+        base = ("FROM messages WHERE messages MATCH ?" if q else "FROM messages WHERE 1=1")
+        if q: params.append(q)
+        base = _apply_facets(base, params, contact, since, until, label, None)
+        sql = "SELECT %s AS k, count(*) AS n %s AND %s GROUP BY k ORDER BY n DESC LIMIT 12" % (expr, base, extra or "k IS NOT NULL")
+        try: return [dict(r) for r in con.execute(sql, params).fetchall() if r["k"] not in (None, "")]
+        except sqlite3.OperationalError:
+            if q: params[0] = '"' + q.replace('"', "") + '"'
+            try: return [dict(r) for r in con.execute(sql, params).fetchall() if r["k"] not in (None, "")]
+            except Exception: return []
+        except Exception: return []
+    try:
+        contacts = _grp("from_addr", "from_addr<>''")
+        years = _grp("strftime('%Y', date_ts, 'unixepoch')", "date_ts>0")
+        return {"ok": True, "contacts": contacts, "years": years}
+    finally: con.close()
+
+# ---- the AI "ask" loop (token-bounded): plan -> retrieve (free) -> synthesize over a tiny slice -------------
+def _date_to_ts(s):
+    if not s: return None
+    try:
+        import datetime as _dt
+        return int(_dt.datetime.strptime(str(s)[:10], "%Y-%m-%d").timestamp())
+    except Exception:
+        return None
+
+def _parse_plan(raw):
+    if not raw: return {}
+    try:
+        m = re.search(r"\{.*\}", raw, re.S)
+        return json.loads(m.group(0)) if m else {}
+    except Exception:
+        return {}
+
+def _ask_plan_prompt(question, today):
+    return ("You convert an email-search question into a compact JSON query for a full-text email archive. "
+            "Today is %s. Output ONLY minified JSON with keys: keywords (space-separated search terms, no "
+            "operators), contact (an email/name to filter by, or null), since (YYYY-MM-DD or null), until "
+            "(YYYY-MM-DD or null). Keep keywords few and specific.\nQuestion: %s\nJSON:" % (today or "unknown", question))
+
+def _synth_prompt(question, ctx):
+    return ("Answer the question using ONLY the emails below. Cite the emails you use as [#n]. Be concise and "
+            "factual; if the emails don't answer it, say so plainly. Do not invent details.\n\nEMAILS:\n%s\n\n"
+            "QUESTION: %s\nAnswer (with [#n] citations):" % (ctx, question))
+
+def _format_ctx(rows, maxchars=550):
+    con = _conn(); bodies = {}
+    if con:
+        try:
+            ids = [int(r["rowid"]) for r in rows]
+            qmarks = ",".join("?" * len(ids))
+            for rr in con.execute("SELECT rowid, substr(body,1,%d) AS b FROM messages WHERE rowid IN (%s)" % (maxchars, qmarks), ids):
+                bodies[rr["rowid"]] = rr["b"]
+        except Exception: pass
+        finally: con.close()
+    out = []
+    for i, r in enumerate(rows, 1):
+        body = (bodies.get(r["rowid"]) or r.get("snip") or "").replace("CCHLA", "").replace("CCHLB", "").strip()
+        out.append("[#%d] (id=%s) %s | From %s | Subject: %s\n%s" %
+                   (i, r["rowid"], r.get("date_str", ""), (r.get("sender") or "")[:50],
+                    (r.get("subject") or "")[:90], re.sub(r"\s+", " ", body)[:maxchars]))
+    return "\n\n".join(out)
+
+def mb_ask(question, ask_llm=None, today=None, k=12):
+    """Bounded 'ask your email': (1) an optional cheap LLM plans the query, (2) DETERMINISTIC faceted retrieval
+    does the heavy lifting for free, (3) an optional cheap LLM synthesizes an answer over only the top-k snippets
+    -- never the corpus. ask_llm(prompt)->text is injected (server: Haiku on the subscription; CLI: `claude -p`).
+    With ask_llm=None it degrades to pure retrieval (no tokens spent)."""
+    question = (question or "").strip()
+    if not question: return {"ok": False, "error": "no question"}
+    if not os.path.isfile(_db_path()): return {"ok": False, "ready": False, "error": "index not built yet"}
+    plan = {}
+    if ask_llm:
+        try: plan = _parse_plan(ask_llm(_ask_plan_prompt(question, today)))
+        except Exception: plan = {}
+    kw = (plan.get("keywords") or "").strip() or _kw_from_question(question)
+    since, until = _date_to_ts(plan.get("since")), _date_to_ts(plan.get("until"))
+    contact = (plan.get("contact") or None)
+    # OR the terms so recall stays high (FTS ranks by relevance -> docs matching more terms float up); a single
+    # noisy keyword can't zero the result the way an implicit AND does.
+    fts = " OR ".join(w for w in kw.split() if w) or kw
+    res = mb_search(fts, limit=max(k * 3, 30), contact=contact, since=since, until=until)
+    hits = res.get("results", [])
+    if not hits and (contact or since or until):                      # relax facets if they zeroed it out
+        res = mb_search(fts, limit=max(k * 3, 30)); hits = res.get("results", [])
+    if not hits:                                                      # last resort: the question's own keywords, OR'd
+        alt = " OR ".join(w for w in _kw_from_question(question).split() if w)
+        res = mb_search(alt, limit=max(k * 3, 30)); hits = res.get("results", [])
+    top = hits[:k]
+    answer = None; est = 0
+    if ask_llm and top:
+        ctx = _format_ctx(top)
+        est = (len(ctx) + 200) // 4                                   # rough token estimate (in), for the UI
+        try: answer = ask_llm(_synth_prompt(question, ctx))
+        except Exception: answer = None
+    return {"ok": True, "ready": True, "question": question, "plan": {"keywords": kw, "contact": contact,
+            "since": plan.get("since"), "until": plan.get("until")}, "answer": answer,
+            "sources": top, "n_considered": len(hits), "tokens_in_est": est, "synthesized": bool(answer)}
 
 # ---- CLI ----------------------------------------------------------------------------------------------------
 if __name__ == "__main__":

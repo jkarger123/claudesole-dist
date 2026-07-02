@@ -1,7 +1,7 @@
 {
   "id": "email-archive",
   "name": "Email Archive",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "category": "integration",
   "summary": "Full-text search over an exported (mbox) email history -- find any old email in milliseconds.",
   "description": "Indexes a Gmail Takeout .mbox export into a node-local SQLite FTS index and adds an instant, searchable lens (search box + results with highlighted snippets + a message reader). Read-only; the archive never leaves this machine. Backed by the core helper command-center/email_archive.py + the /api/email-* routes; the lens only appears where the extension is installed.",
@@ -9,20 +9,34 @@
   "lens": {
     "id": "email-archive",
     "label": "Email Archive",
-    "icon": "📬",
+    "icon": "\ud83d\udcec",
     "category": "Integrations",
     "help": {
-      "sub": "Instantly search your old exported email -- a sender, a subject, or anything in the body.",
-      "h": "<p><b>What:</b> a fast search over a big email export (a Gmail Takeout .mbox). It builds a one-time local index, so every search returns in milliseconds with highlighted snippets, and you can open any message to read it in full.</p><p><b>Why:</b> years of old email (e.g. from a previous job) stay findable -- pull up that one thread from two years ago without ever loading it back into Gmail.</p><p><b>How:</b> point it at the .mbox file (config <code>email_archive_mbox</code>), build the index once (the index-build routine, or <code>python3 command-center/email_archive.py index &lt;mbox&gt; &lt;db&gt;</code>), then just type in the search box. Read-only -- the archive never leaves this machine.</p>"
+      "sub": "Ask a question or search your old exported email -- by sender, subject, or anything in the body.",
+      "h": "<p><b>What:</b> a smart search over a big email export (a Gmail Takeout .mbox). <b>Ask a real question</b> and it reads only the handful of most-relevant emails to answer -- with citations -- so it stays cheap; or search by keyword and narrow by contact/year/conversation. Every result opens to read or drags into a Claude session.</p><p><b>Why:</b> years of old email (e.g. from a previous job) stay useful -- get an answer or pull up that one thread from two years ago without ever loading it back into Gmail (or into an AI's whole context).</p><p><b>How:</b> point it at the .mbox file (config <code>email_archive_mbox</code>), build the index once (<code>python3 command-center/email_archive.py index &lt;mbox&gt; &lt;db&gt;</code>), then Ask or search. Read-only -- the archive never leaves this machine.</p>"
     }
   },
   "config": {
-    "email_archive_mbox": {"label": "Path to the .mbox export (Gmail Takeout Mail)", "required": true},
-    "email_archive_db": {"label": "Path for the search index (SQLite); defaults under the node state dir", "required": false}
+    "email_archive_mbox": {
+      "label": "Path to the .mbox export (Gmail Takeout Mail)",
+      "required": true
+    },
+    "email_archive_db": {
+      "label": "Path for the search index (SQLite); defaults under the node state dir",
+      "required": false
+    }
   },
-  "provides": ["lens:email-archive", "sendable:emailarc", "cli:cc-email"],
-  "draggables": [
-    {"kind": "emailarc", "label": "Archived email", "note": "Drag any search result onto a Claude session (or into the Basket) to hand the agent the full email -- headers + body -- as context. Resolved server-side from the local index by id."}
+  "provides": [
+    "lens:email-archive",
+    "sendable:emailarc",
+    "cli:cc-email"
   ],
-  "agent_cli": "cc-email search \"<query>\" [limit] | cc-email get <id> | cc-email stats"
+  "draggables": [
+    {
+      "kind": "emailarc",
+      "label": "Archived email",
+      "note": "Drag any search result onto a Claude session (or into the Basket) to hand the agent the full email -- headers + body -- as context. Resolved server-side from the local index by id."
+    }
+  ],
+  "agent_cli": "cc-email ask \"<question>\" | cc-email search \"<query>\" [limit] | cc-email get <id> | cc-email thread <id> | cc-email contacts | cc-email stats"
 }

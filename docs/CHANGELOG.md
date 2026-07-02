@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.121 -- 2026-07-02  (Email Archive: smart -- Ask-your-email + facets + threads, token-bounded)
+- Turned the archive from keyword FTS into a genuinely smart tool over 21k+ emails WITHOUT stuffing the corpus
+  into an LLM. Two layers:
+  - **Deterministic smarts (free):** the index now carries **thread id + normalized from-address**, so results
+    collapse into **conversations**, and search narrows by **contact / year** facets (`/api/email-facets`,
+    `mb_facets`) + a **thread view** (`/api/email-thread`, `mb_thread`) + a **contacts** rollup. Stats report
+    threads + contacts. All via SQL, zero tokens.
+  - **Ask your email (token-bounded AI):** `mb_ask` = plan (1 cheap Haiku call turns the question into a query) ->
+    DETERMINISTIC retrieval does the heavy lifting -> synthesize a **cited** answer over only the ~12 most-relevant
+    emails. Runs on the node SUBSCRIPTION (`_claude_text`, no metered key), OR's terms for recall, degrades to
+    pure retrieval if AI is off. **~2k tokens/question**, not the corpus. `/api/email-ask` + `cc-email ask`.
+  - Lens rebuilt: an **Ask** hero (answer + draggable cited sources + `[#n]` + token count), keyword search with
+    **narrow-by** contact/year chips, and a thread viewer. `cc-email` gains `ask`/`thread`/`contacts`; AGENT.md
+    steers agents to `ask` first ("never dump the archive into context"). Index rebuilt (new schema) on both nodes.
+- Verified end-to-end: cited answers (~1.6-2k tokens), facets, threads, draggable sources -- server, CLI, headless UI.
+
 ## 0.99.120 -- 2026-07-02  (Email Archive: fully functional -- draggable results + an agent CLI)
 - Rounded the email-archive extension out from a lens into a first-class capability agents + people can both use:
   - **Draggable results.** Every result row is now a sendable -- drag it onto a Claude session (or the Basket) to

@@ -7,15 +7,22 @@ a past invoice/order, who-said-what, a contact from a prior job, a number you ne
 
 ## How to use it (CLI — `cc-email`, on your PATH)
 ```
+cc-email ask "<question>" [--no-ai]   # BEST for a task — token-bounded answer with [#n] citations
 cc-email search "<query>" [limit]     # ranked matches: "id | date | from | subject" + a snippet line
 cc-email get <id>                      # the FULL message (headers + body) — include it in your working context
-cc-email stats                         # index status + message count
+cc-email thread <id>                   # every message in that conversation (a message id or a thread id)
+cc-email contacts [n]                  # top correspondents by volume
+cc-email stats                         # index status + counts
 ```
-- **Query = SQLite FTS5.** Bare words are AND-ed; use `"quoted phrases"`; `OR` / `NOT` work.
+- **Reach for `ask` first.** It runs a token-**bounded** loop for you: a cheap model plans the query →
+  DETERMINISTIC retrieval does the heavy lifting for free → a cheap model answers over only the ~12 most
+  relevant emails (~2k tokens on Haiku, node subscription — NOT the corpus). It returns a cited answer plus the
+  source ids. This is how you "use AI on 21k emails" without blowing your context. `--no-ai` = retrieval only.
+- **Never dump the archive into your context.** Don't `search` broad and `get` dozens of messages — that's the
+  token trap this tool exists to avoid. `ask` for the answer; `get`/`thread` only the specific messages you must read.
+- **Query = SQLite FTS5.** Bare words AND; `"quoted phrases"`; `OR` / `NOT` work.
   Examples: `cc-email search "purchase order emily" 10` · `cc-email search '"tracking number" OR shipment'`.
-- **Workflow:** `search` to find the id, then `get <id>` to pull the whole email in. Don't guess from the
-  snippet — `get` the message before you rely on its contents.
-- It's **read-only**: you can read/search, never send or modify. To send mail, use `google-workspace`.
+- It's **read-only**: search/read only, never send or modify. To send mail, use `google-workspace`.
 
 ## Draggable (when the operator is driving the dashboard)
 Every result row in the **Email Archive** lens is draggable: the operator can drop one onto a Claude session
