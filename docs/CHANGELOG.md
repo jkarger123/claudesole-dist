@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.116 -- 2026-07-02  (#8 End-of-day housekeeping: a once-a-day thorough tidy that sorts even DECLINED work)
+- New opt-in **end-of-day housekeeping** (`cc.config housekeeping_eod`). Once a day -- at `housekeeping_eod_hour`
+  (default 6pm) OR after the node's been ~2h idle in the afternoon, whichever comes first -- it runs a thorough
+  housekeeping pass AND re-surfaces the day's work the operator DECLINED to move in-conversation. Rationale: keeping
+  a session open doesn't mean the work shouldn't be filed (Sarah). Everything lands in the Transfers/housekeeping
+  review queue -- PROPOSE-ONLY, one-click to apply, never an in-session nag (that's what the .113 guidance stopped).
+- Mechanism: `_drift_sweep(eod=True)` relaxes the decline-suppress + cooldown gates (so declined/cooled day-work
+  re-appears once a day for review, not every hour); `_housekeeping_eod_once` combines it with the normal pass +
+  writes an `eod` digest; `_housekeeping_eod_loop` fires it on the evening-hour OR 2h-idle trigger, once/day,
+  project nodes only. Safe to run live because it only ever proposes -- tune thresholds from what it surfaces.
+
 ## 0.99.115 -- 2026-07-02  (allowlist deliverable_gdoc + housekeeping_eod for remote config-set)
 - Add `deliverable_gdoc`, `housekeeping_eod`, `housekeeping_eod_hour` to `SA_ALLOWED_KEYS` so Mission Control can
   toggle the Google-Doc delivery + end-of-day housekeeping on a node via a signed superadmin `set_config` (they're

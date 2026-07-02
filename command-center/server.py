@@ -10473,7 +10473,7 @@ def _confirm_file_llm(topic, dest_name, dest_summ):
     a = _claude_text(q, model="claude-haiku-4-5", timeout=25)
     return bool(a and a.strip().lower().startswith("y"))
 
-def _drift_sweep():
+def _drift_sweep(eod=False):
     """SERVER-SIDE warm transfer: instead of waiting for an agent to notice it's off-lane (which it ~never does),
     WE watch every live work conversation and PROPOSE a handoff. Two cases: (1) a conversation FILED in a sub-folder
     whose topic has drifted OUT of that folder; (2) a conversation running UNFILED at the project root whose topic
@@ -10505,9 +10505,9 @@ def _drift_sweep():
         else:
             checked += 1                                           # unfiled: no lane to be "on" -- always a filing candidate
         sup = _norm_toks(m.get("drift_suppress_topic") or "")      # operator declined this drift/filing before ("keep it here")
-        if sup and (len(rk & sup) / float(len(rk))) >= 0.5: continue
+        if not eod and sup and (len(rk & sup) / float(len(rk))) >= 0.5: continue   # EOD tidy DOES re-surface declined work (review-queue only, never an in-session nag)
         if s in open_for: continue                                 # already an open proposal for this one
-        if (time.time() - float(m.get("drift_proposed_ts") or 0)) < _DRIFT_REPROPOSE_SEC: continue
+        if not eod and (time.time() - float(m.get("drift_proposed_ts") or 0)) < _DRIFT_REPROPOSE_SEC: continue   # EOD ignores the cooldown (it's the once-a-day sort)
         topic = " ".join(sorted(rk))
         routed = route(topic, exclude=(rel or None))
         dest = routed.get("destination"); dest_rel = (dest or {}).get("rel")
@@ -10695,6 +10695,65 @@ def _housekeeping_loop():
             if CC.get("housekeeping", True) is not False: _housekeeping_once()
         except Exception: pass
         time.sleep(3600)             # hourly
+
+def _node_idle_secs():
+    """Seconds since the MOST RECENT session activity on this node (tmux activity + smeta active_ts). Big when
+    nobody's working -> lets the end-of-day tidy fire after a quiet stretch, not just at the clock hour."""
+    try:
+        acts = []
+        for s in tmux_sessions():
+            if s.get("kind") == "service": continue
+            acts.append(float(s.get("activity") or 0))
+            mv = _smeta(s.get("name") or "").get("active_ts")
+            if mv: acts.append(float(mv))
+        if not acts: return 10 ** 9
+        return max(0.0, time.time() - max(acts))
+    except Exception:
+        return 0.0
+
+_EOD_STATE = {"last": ""}            # last date the end-of-day pass ran (once/day gate)
+def _housekeeping_eod_once():
+    """END-OF-DAY thorough tidy (PROPOSE-ONLY): the full housekeeping pass PLUS a re-surface of the day's work
+    the operator DECLINED to move in-conversation -- because keeping a session open doesn't mean the work
+    shouldn't be filed. Everything lands in the Transfers/housekeeping review queue; nothing moves without a click.
+    This is the sanctioned 'sort it later' pass, never an in-session nag (that's what #7's guidance stopped)."""
+    base = _housekeeping_once()                          # regen + normal drift proposals + curate + reconcile-archive + doctor
+    extra = {"proposed": []}
+    try:
+        if CC.get("handoff", True) is not False: extra = _drift_sweep(eod=True)   # ALSO re-surface declined/cooled day-work
+    except Exception: pass
+    prop = ((base.get("drift") or {}).get("proposed") or []) + (extra.get("proposed") or [])
+    try:
+        _housekeeping_digest_write({"ts": int(time.time()), "eod": True, "map_regen": True,
+            "transfers_proposed": prop, "eod_resurfaced": len(extra.get("proposed") or []),
+            "archived": base.get("archived", []), "notes_curated": base.get("curated", []),
+            "docs_tidied": len(base.get("docs_tidied") or [])})
+    except Exception: pass
+    try:
+        with open(_HOUSEKEEP_LOG, "a") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M ") + "end-of-day tidy: %d transfer(s) proposed (%d re-surfaced from declined), %d archived\n"
+                    % (len(prop), len(extra.get("proposed") or []), len(base.get("archived") or [])))
+    except Exception: pass
+    return {"proposed": len(prop), "resurfaced": len(extra.get("proposed") or []), "archived": len(base.get("archived") or [])}
+
+def _housekeeping_eod_loop():
+    """Fire the end-of-day tidy ONCE/DAY, at the configured evening hour OR after ~2h idle (afternoon+), whichever
+    comes first. Opt-in (cc.config housekeeping_eod); project nodes only (the overseer must not manage sessions)."""
+    import datetime as _d
+    time.sleep(220)
+    while True:
+        try:
+            if CC.get("housekeeping_eod") and ROLE != "org":
+                now = _d.datetime.now(); today = now.strftime("%Y-%m-%d")
+                hr = int(CC.get("housekeeping_eod_hour") or 18)
+                idle_ok = (now.hour >= 12 and _node_idle_secs() >= 7200)   # 2h idle, but only afternoon+ (no morning-gap false fire)
+                if (now.hour >= hr or idle_ok) and _EOD_STATE["last"] != today:
+                    _EOD_STATE["last"] = today
+                    print("[housekeeping] end-of-day tidy (%s)" % ("hour" if now.hour >= hr else "idle-2h"))
+                    _housekeeping_eod_once()
+        except Exception as _e:
+            print("[housekeeping] eod loop error:", _e)
+        time.sleep(900)              # check every 15 min
 
 # ======================================================================================================
 # CAPTURE SPINE wiring (clips.py engine). Resolve a subject -> its folder + deliverables target, write clip
@@ -24176,6 +24235,7 @@ if __name__ == "__main__":
     except Exception: pass
     threading.Thread(target=_context_backfill_loop, daemon=True).start()   # CONTEXT LAYER: ingest existing surfaces into the store (idempotent, every 15 min)
     threading.Thread(target=_housekeeping_loop, daemon=True).start()        # HOUSEKEEPING: regen module map + Doctor sweep + surface new issues (hourly, idempotent)
+    threading.Thread(target=_housekeeping_eod_loop, daemon=True).start()    # END-OF-DAY tidy (opt-in housekeeping_eod): thorough sort + re-surface declined day-work; evening-hour OR 2h-idle; propose-only
     threading.Thread(target=_reconcile_loop, daemon=True).start()           # RECONCILE: heads-up + retire idle conversations after their grace window (every 10 min)
     threading.Thread(target=_clips_eod_loop, daemon=True).start()           # CAPTURE SPINE: opt-in end-of-day triage proposals (review-first; off unless clips_eod_process)
     # Bind host: default 0.0.0.0 (existing nodes unchanged). Provisioned standalone bundles set bind_host
