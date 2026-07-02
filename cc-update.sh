@@ -82,4 +82,12 @@ for p in (cfg_path,
 PY
 fi
 
+# Keep the VERSION stamp truthful. Bundles/mirrors carry a VERSION file (written at build time) but updates
+# only refreshed the manifest, so VERSION drifted (the public dist advertised 0.12.5 while shipping 0.99.x).
+# The manifest is the single source of truth -- restamp from it whenever a VERSION file exists here.
+if [ -z "$DRY" ] && [ -f "$CC_HOME/VERSION" ]; then
+  python3 -c "import json;print(json.load(open('$MAN')).get('version',''))" > "$CC_HOME/VERSION"
+  echo "  stamped VERSION $(cat "$CC_HOME/VERSION")"
+fi
+
 [ -z "$DRY" ] && echo "Done. Restart to load updates: TMUX_TMPDIR=/tmp /opt/homebrew/bin/tmux kill-session -t hpcc"

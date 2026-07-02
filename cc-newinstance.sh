@@ -76,9 +76,11 @@ lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1 && die "port $PORT is already 
 
 # carry the FAMILY mesh token (shared badge) from the parent so the new node joins this family's mesh
 MESH_TOKEN="$(python3 -c "import json;print(json.load(open('$SRC/cc.config.json')).get('mesh_token') or '')" 2>/dev/null || echo '')"
-# A new node starts with NO login token (open on the private tailnet). On first open the dashboard invites
-# the operator to set their OWN token -- better than auto-generating one they must copy down or be locked out.
-AUTH_TOKEN=""
+# Per-node auth_token minted at birth (NODE_SETUP_STREAMLINE.md #3/#4): a node must never be born as an
+# open dashboard. The old rationale ("auto-generating one risks lockout") is obsolete -- cc-recover.sh
+# reads live configs and prints every node's token, so the break-glass path always works. The token is
+# printed in the plan + final steps below (and in the machine-readable JSON for the provisioning agent).
+AUTH_TOKEN="$(python3 -c "import secrets;print(secrets.token_hex(12))")"
 
 cat <<PLAN
 == provision plan ==
@@ -92,6 +94,7 @@ cat <<PLAN
   project root: $PROOT  (inside bundle = portable)
   run as user:  $RUNUSER
   mesh family:  $([ -n "$MESH_TOKEN" ] && echo "joining (family token carried)" || echo "NONE found at SRC -- node will be mesh-isolated until a token is set")
+  login token:  minted per-node (printed at the end; cc-recover.sh is the break-glass)
 PLAN
 
 if [ -n "$DRY" ]; then echo "(dry run -- nothing written)"; exit 0; fi
@@ -158,7 +161,7 @@ d={
  "preset": preset,
  "deliverables_root": deliv,
 }
-if auth: d["auth_token"]=auth   # usually empty -> node starts open; operator sets a token on first open
+if auth: d["auth_token"]=auth   # minted per-node at birth (see AUTH_TOKEN above); never born open
 if mesh: d["mesh_token"]=mesh
 if integ: d["integration"]=integ   # "product" (single operation) | "agency" (clients+tools tree). default product.
 if nodetype in ("agency","developer"): d["type"]=nodetype   # node TYPE: agency=official-only/locked | developer=custom sandbox
@@ -234,8 +237,9 @@ NEXT (operator-approved):
   3) Mesh: add this node to the OTHER family nodes' peers (so they can reach it), e.g. append
        {"id":"$ID","url":"http://127.0.0.1:$PORT"}  (or the tailnet URL) to each peers.json.
 
-  Login: this node starts with NO token (open on your private tailnet). Open it and the dashboard will
-  invite you to set your OWN login token on first launch (changeable anytime in Settings -> Login token).
+  Login: this node's dashboard PIN (per-node auth_token, changeable anytime in Settings -> Login token;
+  recover anytime with cc-recover.sh):
+    $AUTH_TOKEN
 DONE
 
 if [ -n "$JSON" ]; then

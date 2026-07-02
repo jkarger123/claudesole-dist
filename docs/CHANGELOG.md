@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.123 -- 2026-07-02  (Safety floor: nodes are never born open + truthful VERSION stamps)
+- **Per-node auth_token minted at birth** (NODE_SETUP_STREAMLINE.md #3/#4, plan-of-attack item 1.1):
+  `cc-newinstance.sh`, `cc-spawn.sh`, and `cc-init.sh` now mint a per-node login token (24-hex) instead of
+  creating an open dashboard gated only by the shared PIN. The token is printed loudly at creation (and in
+  the `--json` summary for the provisioning agent); `cc-recover.sh` remains the break-glass that reads it
+  back, which is what made the old "born open to avoid lockout" rationale obsolete. `cc-init.sh` mints ONLY
+  when no token exists -- an existing node's token is never touched (lockout hard rule). Child/new configs
+  are chmod 600 at write; `cc-spawn.sh` children now also carry the family `mesh_token` from the parent.
+- **VERSION stamps can no longer drift** (item 1.10): `cc-update.sh` restamps a bundle's/mirror's `VERSION`
+  file from the freshly-updated manifest (the public dist mirror had been advertising `0.12.5` while
+  shipping 0.99.x; the manifest is the single source of truth).
+- Housekeeping: `.gitignore` hardening at MC (`secrets/`, runtime stores, `.claude/`); the conceptsandideas
+  module now carries the platform charter docs (system reference / improvement catalog / plan of attack).
+
 ## 0.99.122 -- 2026-07-02  (Fix: "Resume failed: unknown machine" on installs with an empty machine registry)
 - Resuming/forking a past conversation looked up its machine in `_machines.json` BEFORE the local-resume branch,
   so the LOCAL host ("studio") had to be a registered machine. On a fresh install or a tenant with no/empty

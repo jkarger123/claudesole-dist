@@ -15,16 +15,16 @@
       "agents/security/tools/scan.py": "89c6419c823bb6146d9750c2a6b6d5ec4a60e8449f30260e2b56196ba1cef325",
       "agents/skimlinks-merchant-sync/tools/backfill_skimlinks_changes.py": "78fcc686133bd33bbe568e5d02bebfb2b65d1a272ce920dcd25b82e46a630698",
       "agents/skimlinks-merchant-sync/tools/skimlinks_sync.py": "90c1171829b058224ae8626304118f956523d105b3ba62448ca53a121b798f9f",
-      "cc-init.sh": "22d00060b63d33c187debb4a097fffae789924e19323b3bdfff0e6653cd2e1e4",
-      "cc-newinstance.sh": "a47373a9d8a94cd9feb97699b5adf029f4c456b8f92f70f5adc98bb5f028a2f8",
+      "cc-init.sh": "b5e63351bf26d59266a347e457f1048836687dbef39af0729179d92598d5aa2e",
+      "cc-newinstance.sh": "6bb77b9d92787bbd04f90516f2b4f277bae2a4414ef67301554f347895eef2cc",
       "cc-recover.sh": "110a7a50ef880f2b1696f27d176ce501de1a4b4d148ec99d4c6d93216993708b",
-      "cc-update.sh": "c85dae6d74ca22452f1676cff55f09a23634bcbfa224297aaedc72f471d9693d",
+      "cc-update.sh": "ef23402e4669504036b69df527961e200027a7ab318b82b5fafab9aec56bf01f",
       "cf-appliance-install.sh": "6974494064107096079a40ed0f3ec865e38e0e0905ec94d5671a9d2793e9424e",
       "cf-build-appliance.sh": "fb8961bf3296a51e58701fa5bd869effa3d406397266df3c2083d282eb4e1d69",
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "71c6dda38d3c0933bddcd4cbe0220f4ebea9718d0df28c3e28af546b303e4ea4",
+      "claudesole.manifest.json": "f9c41195f13292e9dec8669174e69b8eacbf5fb4337f8f75068a032809c14f65",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
       "command-center/cc-email": "4895c4eb4ca8e1c6f3b26dd260f9ee3b776c42f24ec656b8581d1cef0c4155ed",
       "command-center/cc-handoff": "9194f8a409f322c9835615cdb014dc9e626a469611ea127b1e9e7a6bf4db2532",
@@ -120,9 +120,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1782999966,
+    "generated": 1783003308,
     "v": 1,
-    "version": "0.99.122"
+    "version": "0.99.123"
   },
-  "sig": "XsOJ/6dRwFowjvogRH745UcJvk0mww+tkfZpqA83EyzoKzzAssKdDX20SVo1c4YecX40Sv7BqWhe5epP4QQrAQ=="
+  "sig": "NylNtZNEGCRIbyJSsQjr57ghN6QR9VxjeHx4cSxQXvz2xUOkE+JxLmcFLd6JfFDBLZ7APe1OhvNoaqgBCmm8Dg=="
 }

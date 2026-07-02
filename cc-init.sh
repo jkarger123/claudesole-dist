@@ -46,9 +46,18 @@ d.setdefault("framework","command-center")
 d.setdefault("auto_update",True)
 d.setdefault("agents",["security","backup","usage","ideas","routines"])
 d.setdefault("chief_brief","You are my Chief of Staff, operating from the top level. Read CLAUDE.md, give me a one-line status of the operation, and stand by.")
+# Per-node auth_token (NODE_SETUP_STREAMLINE.md #3/#4): mint one ONLY when none exists -- an existing
+# token is NEVER touched (lockout hard rule). Printed once below; cc-recover.sh is the break-glass.
+minted=""
+if not d.get("auth_token"):
+    import secrets; minted=secrets.token_hex(12); d["auth_token"]=minted
 json.dump(d,open(cfg,"w"),indent=2)
 print("  wrote",cfg)
+if minted:
+    print("  LOGIN TOKEN minted (dashboard PIN -- save it; recover anytime with cc-recover.sh):")
+    print("    "+minted)
 PY
+chmod 600 "$CFG"
 
 # 3) scanners (only if missing)
 if [ -x "$CC_HOME/bin/gitleaks" ]; then echo "  scanners: present"; else
