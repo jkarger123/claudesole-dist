@@ -8674,6 +8674,15 @@ def doctor():
             issues.append({"sev": "err", "path": p, "msg": "registered component has no CLAUDE.md"})
     if not AUTH_TOKEN:
         issues.append({"sev": "warn", "path": "auth", "msg": "Command Center has NO authentication -- dashboard + every /api is open to anyone who can reach the port (perimeter is network-only). Set cc.config auth_token / CC_AUTH_TOKEN to require a login."})
+    try:                                                       # daemon health: a crashed background loop must be LOUD, not a buried print (catalog D4)
+        for _d in daemons_status()["daemons"]:
+            if _d.get("last_error"):
+                issues.append({"sev": "warn", "path": "daemon:" + _d["name"], "msg": "background daemon crashed (%s restart(s)): %s -- auto-respawning with backoff; see %s" % (_d.get("restarts", "?"), _d["last_error"], "_daemons.log")})
+    except Exception: pass
+    try:                                                       # headless-claude preflight (catalog B11): the brief synthesizes via `claude -p`, which needs a LIVE keychain login for this macOS user (a stored setup-token is NOT enough -- it runs API-mode)
+        if _brief_is_enabled_here() and not _kc_read():
+            issues.append({"sev": "err", "path": "brief", "msg": "Morning Brief is enabled on this node but this macOS user has NO live Claude login -- headless synthesis will fail silently at 8am. Log in once (`claude` then /login) as the user this CC runs as, or disable the brief."})
+    except Exception: pass
     if os.path.isfile(SA_PUBKEY_PATH) and not _HAS_CRYPTO:
         issues.append({"sev": "warn", "path": "superadmin", "msg": "superadmin.pub is present but the `cryptography` library is NOT installed for this CC's python -- Ed25519 superadmin grants cannot be verified here (the node is NOT under the owner's superadmin until fixed). Install: pip install --user cryptography, then restart the CC."})
     # Turnkey hardening (docs/HARDENING.md): a locked appliance should carry a signed core manifest + verify clean.
@@ -14186,6 +14195,7 @@ class H(BaseHTTPRequestHandler):
             if ROLE == "org": return self._s(200, json.dumps(portfolio()))
             return self._s(403, json.dumps({"instances": [], "roll": {}, "n": 0, "role": ROLE, "gated": True, "error": "portfolio is ClaudeGrandfather (overseer) only"}))
         if u.path == "/api/peers":         return self._s(200, json.dumps({"peers": peers(), "self": INSTANCE_ID}))
+        if u.path == "/api/daemons":       return self._s(200, json.dumps(daemons_status(), default=str))
         if u.path == "/api/agency":        return self._s(200, json.dumps(agency_model()))
         if u.path == "/api/mesh":          return self._s(200, json.dumps(mesh_inbox()))
         if u.path == "/api/granola":       return self._s(200, json.dumps(granola.gr_proposals()))
@@ -24474,6 +24484,42 @@ def _brief_catchup_loop():
             print("[morning_brief] catch-up error:", _e)
         time.sleep(1200)   # every 20 min
 
+# ==== DAEMON SUPERVISOR: the ~25 background loops must never die silently =========================
+# Before this, a loop that raised was simply GONE until the next full restart -- its print() buried in
+# tmux scrollback, nothing surfaced (catalog D4). Contract: a daemon that RAISES is respawned with
+# exponential backoff (30s -> 10min cap) and the crash is recorded; a daemon that RETURNS cleanly is a
+# one-shot that finished (boot housekeeping, warm-views) -- marked ended, NOT respawned. /api/daemons
+# lists live state; Doctor flags any daemon with a recorded crash.
+_DAEMONS = {}
+_DAEMONS_LOCK = threading.Lock()
+_DAEMONS_LOG = os.path.join(STATE_DIR, "_daemons.log")
+def _daemon(name, target):
+    def _run():
+        delay = 30.0
+        while True:
+            with _DAEMONS_LOCK:
+                st = _DAEMONS.setdefault(name, {"restarts": -1})
+                st["restarts"] += 1; st["alive"] = True; st["started"] = time.time()
+            try:
+                target()
+                with _DAEMONS_LOCK:
+                    _DAEMONS[name].update(alive=False, ended=time.time())
+                return                      # clean return = one-shot finished; never respawn
+            except Exception as e:
+                err = "%s: %s" % (type(e).__name__, str(e)[:280])
+            with _DAEMONS_LOCK:
+                _DAEMONS[name].update(alive=False, last_error=err, died=time.time())
+            try:
+                with open(_DAEMONS_LOG, "a") as f:
+                    f.write("%s  %s crashed: %s (respawn in %ds)\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), name, err, int(delay)))
+            except Exception: pass
+            time.sleep(delay); delay = min(delay * 2, 600)
+    threading.Thread(target=_run, daemon=True, name="sup-" + name).start()
+
+def daemons_status():
+    with _DAEMONS_LOCK:
+        return {"ok": True, "daemons": [dict(name=k, **v) for k, v in sorted(_DAEMONS.items())]}
+
 if __name__ == "__main__":
     print("%s Command Center on http://0.0.0.0:%d  (tailnet http://%s:%d)" % (BRAND, PORT, STUDIO_TS, PORT))
     # Lock secret-bearing per-deployment files to owner-only (0600) -- fast + security-critical, so it stays
@@ -24551,32 +24597,32 @@ if __name__ == "__main__":
                 _ao = icloud_age_off()
                 if _ao.get("moved"): print("icloud deliverables: aged off %d file(s) internal->SSD" % _ao["moved"])
             except Exception: pass
-    threading.Thread(target=_boot_housekeeping, daemon=True).start()
+    _daemon("boot_housekeeping", _boot_housekeeping)     # one-shot: ends after boot chores (supervisor marks it ended)
     if ACCOUNT_WALLET:
-        threading.Thread(target=_acct_poll_loop, daemon=True).start()  # per-account /usage fuel gauges (token-isolated)
-        threading.Thread(target=_acct_autopilot_loop, daemon=True).start()  # USAGE: idle-gated auto-switch (no-op unless account_autopilot=auto AND the switch ledger is proven)
-    threading.Thread(target=_autoapprove_loop, daemon=True).start()   # keep agents off the permission-prompt wall
-    threading.Thread(target=_autocompact_loop, daemon=True).start()    # graceful auto-compact when a session's context fills past the threshold
-    threading.Thread(target=_compact_recover, daemon=True).start()     # RESUME any compact orphaned by a restart (handoff written but /compact never ran)
-    threading.Thread(target=_tg_outbound_loop, daemon=True).start()    # Telegram: ping the phone when a routed session finishes/blocks
-    threading.Thread(target=_tg_inbound_loop, daemon=True).start()     # Telegram: relay your replies back into the routed session
-    threading.Thread(target=_sk_outbound_loop, daemon=True).start()    # Slack (team): post to a channel thread when a routed session finishes/blocks
-    threading.Thread(target=_sk_inbound_loop, daemon=True).start()     # Slack (team): poll thread/channel replies + inject back into the routed session
-    threading.Thread(target=_autoupdate_loop, daemon=True).start()     # PULL convergence: every tenant self-updates from the dist (boot + timer); source nodes self-skip
-    threading.Thread(target=_core_integrity_loop, daemon=True).start() # INTEGRITY: verify framework files vs the signed manifest; appliances self-heal drift from the signed dist
-    threading.Thread(target=_acct_windows_loop, daemon=True).start()   # USAGE: keep the account fuel-gauge fresh (refresh the live login's 5h/weekly windows ~30m; shared-lock deduped across co-located instances)
-    threading.Thread(target=_substack_loop, daemon=True).start()       # SUBSTACK: poll tracked publications' RSS into the read cache (no-op until publications are configured)
-    threading.Thread(target=_chief_watchdog, daemon=True).start()      # CHIEF WATCHDOG: keep the always-on Chief of Staff (the mesh comms endpoint) alive -- respawn if its claude exits
-    threading.Thread(target=_license_activate_loop, daemon=True).start() # LICENSE: a sold box auto-activates from its configured activation server on boot if unlicensed
-    threading.Thread(target=_fleet_converge_loop, daemon=True).start() # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
-    threading.Thread(target=_routines_loop, daemon=True).start()       # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts
-    threading.Thread(target=_brief_catchup_loop, daemon=True).start()  # SELF-HEAL: re-attempt a missed/failed Morning Brief so a transient 8am failure doesn't silently cost the day
-    threading.Thread(target=_deliverable_gdoc_loop, daemon=True).start()  # DELIVER agent .md output as Google Docs (opt-in cc.config deliverable_gdoc + Google connected)
-    _ensure_opnote_worker()                                            # OPERATOR NOTES: drain any queued human-to-human notes (durable across restart)
-    threading.Thread(target=_tasks_morning_loop, daemon=True).start()  # daily-morning Tasks auto-scan (fresh list each AM)
-    threading.Thread(target=_gmail_sync_loop, daemon=True).start()      # keep recently-viewed Gmail lists warm (cache + outage fallback)
-    threading.Thread(target=_gc_sync_loop, daemon=True).start()         # same for Calendar/Drive (resilient cache)
-    threading.Thread(target=_warm_default_views, daemon=True).start()   # boot-warm the UI's default views + prime the OAuth token (non-blocking)
+        _daemon("acct_poll", _acct_poll_loop)            # per-account /usage fuel gauges (token-isolated)
+        _daemon("acct_autopilot", _acct_autopilot_loop)  # USAGE: idle-gated auto-switch (no-op unless account_autopilot=auto AND the switch ledger is proven)
+    _daemon("autoapprove", _autoapprove_loop)            # keep agents off the permission-prompt wall
+    _daemon("autocompact", _autocompact_loop)            # graceful auto-compact when a session's context fills past the threshold
+    _daemon("compact_recover", _compact_recover)         # one-shot: RESUME any compact orphaned by a restart (handoff written but /compact never ran)
+    _daemon("tg_outbound", _tg_outbound_loop)            # Telegram: ping the phone when a routed session finishes/blocks
+    _daemon("tg_inbound", _tg_inbound_loop)              # Telegram: relay your replies back into the routed session
+    _daemon("sk_outbound", _sk_outbound_loop)            # Slack (team): post to a channel thread when a routed session finishes/blocks
+    _daemon("sk_inbound", _sk_inbound_loop)              # Slack (team): poll thread/channel replies + inject back into the routed session
+    _daemon("autoupdate", _autoupdate_loop)              # PULL convergence: every tenant self-updates from the dist (boot + timer); source nodes self-skip
+    _daemon("core_integrity", _core_integrity_loop)      # INTEGRITY: verify framework files vs the signed manifest; appliances self-heal drift from the signed dist
+    _daemon("acct_windows", _acct_windows_loop)          # USAGE: keep the account fuel-gauge fresh (refresh the live login's 5h/weekly windows ~30m; shared-lock deduped across co-located instances)
+    _daemon("substack", _substack_loop)                  # SUBSTACK: poll tracked publications' RSS into the read cache (no-op until publications are configured)
+    _daemon("chief_watchdog", _chief_watchdog)           # CHIEF WATCHDOG: keep the always-on Chief of Staff (the mesh comms endpoint) alive -- respawn if its claude exits
+    _daemon("license_activate", _license_activate_loop)  # LICENSE: a sold box auto-activates from its configured activation server on boot if unlicensed
+    _daemon("fleet_converge", _fleet_converge_loop)      # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
+    _daemon("routines", _routines_loop)                  # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts
+    _daemon("brief_catchup", _brief_catchup_loop)        # SELF-HEAL: re-attempt a missed/failed Morning Brief so a transient 8am failure doesn't silently cost the day
+    _daemon("deliverable_gdoc", _deliverable_gdoc_loop)  # DELIVER agent .md output as Google Docs (opt-in cc.config deliverable_gdoc + Google connected)
+    _ensure_opnote_worker()                              # OPERATOR NOTES: drain any queued human-to-human notes (durable across restart)
+    _daemon("tasks_morning", _tasks_morning_loop)        # daily-morning Tasks auto-scan (fresh list each AM)
+    _daemon("gmail_sync", _gmail_sync_loop)              # keep recently-viewed Gmail lists warm (cache + outage fallback)
+    _daemon("gc_sync", _gc_sync_loop)                    # same for Calendar/Drive (resilient cache)
+    _daemon("warm_views", _warm_default_views)           # one-shot: boot-warm the UI's default views + prime the OAuth token (non-blocking)
     try: _google_vault_resync()        # heal the re-mint gap: push any fresher token FILE (a re-mint) into the vault the server reads first
     except Exception: pass
     try: _vault_materialize_google()   # re-hydrate google_oauth.json + tokens/ from the vault for the external MCP server (vault stays source of truth)
@@ -24585,11 +24631,11 @@ if __name__ == "__main__":
     except Exception: pass
     try: _colo_publish()               # publish this instance's {project_root, port} so co-located viewers resolve payload ownership
     except Exception: pass
-    threading.Thread(target=_context_backfill_loop, daemon=True).start()   # CONTEXT LAYER: ingest existing surfaces into the store (idempotent, every 15 min)
-    threading.Thread(target=_housekeeping_loop, daemon=True).start()        # HOUSEKEEPING: regen module map + Doctor sweep + surface new issues (hourly, idempotent)
-    threading.Thread(target=_housekeeping_eod_loop, daemon=True).start()    # END-OF-DAY tidy (opt-in housekeeping_eod): thorough sort + re-surface declined day-work; evening-hour OR 2h-idle; propose-only
-    threading.Thread(target=_reconcile_loop, daemon=True).start()           # RECONCILE: heads-up + retire idle conversations after their grace window (every 10 min)
-    threading.Thread(target=_clips_eod_loop, daemon=True).start()           # CAPTURE SPINE: opt-in end-of-day triage proposals (review-first; off unless clips_eod_process)
+    _daemon("context_backfill", _context_backfill_loop)  # CONTEXT LAYER: ingest existing surfaces into the store (idempotent, every 15 min)
+    _daemon("housekeeping", _housekeeping_loop)          # HOUSEKEEPING: regen module map + Doctor sweep + surface new issues (hourly, idempotent)
+    _daemon("housekeeping_eod", _housekeeping_eod_loop)  # END-OF-DAY tidy (opt-in housekeeping_eod): thorough sort + re-surface declined day-work; evening-hour OR 2h-idle; propose-only
+    _daemon("reconcile", _reconcile_loop)                # RECONCILE: heads-up + retire idle conversations after their grace window (every 10 min)
+    _daemon("clips_eod", _clips_eod_loop)                # CAPTURE SPINE: opt-in end-of-day triage proposals (review-first; off unless clips_eod_process)
     # Bind host: default 0.0.0.0 (existing nodes unchanged). Provisioned standalone bundles set bind_host
     # "127.0.0.1" so the ONLY tailnet-visible surface is the TLS `tailscale serve` URL -- no raw plain-HTTP
     # port on the tailnet for a browser to hit and get ERR_SSL_PROTOCOL_ERROR.

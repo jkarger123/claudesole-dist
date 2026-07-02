@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.125 -- 2026-07-02  (The node watches its own health: daemon supervisor + headless-login preflight)
+- **Daemon supervisor** (plan item 1.11 / catalog D4): all ~28 background loops now launch via
+  `_daemon(name, fn)` instead of bare `threading.Thread` -- a loop that RAISES is respawned with
+  exponential backoff (30s -> 10min cap) and the crash is recorded to `_daemons.log`; a loop that
+  RETURNS cleanly is a one-shot that finished (boot housekeeping, warm-views) and is marked ended, not
+  respawned. `/api/daemons` lists live state (alive/restarts/last_error); **Doctor flags any daemon with
+  a recorded crash**. Before this, a crashed loop was silently gone until the next full restart, its
+  print() buried in tmux scrollback.
+- **Headless-login preflight** (item 1.6 / catalog B11): Doctor now errs when the Morning Brief is
+  enabled but the macOS user has NO live Claude keychain login (a stored setup-token is not enough --
+  it runs API-mode without subscription auth). Previously the 8am synthesis just failed silently.
+- **`cryptography` at install** (item 1.8): `cc-init.sh` best-effort installs it when missing (Ed25519
+  superadmin verification; Doctor already flagged the HMAC-only fallback -- that check stays).
+
 ## 0.99.124 -- 2026-07-02  (Mesh peers UI, server-side browser act gate, routines operator controls)
 - **Mesh peer registration from the dashboard** (plan item 1.2): `/api/peer-add` + `/api/peer-remove`
   (operator-auth ONLY -- never mesh ingress, since peers.json is the routing map for mesh + superadmin

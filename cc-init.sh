@@ -64,6 +64,13 @@ if [ -x "$CC_HOME/bin/gitleaks" ]; then echo "  scanners: present"; else
   bash "$SEC/install_scanners.sh" >/dev/null 2>&1 && echo "  scanners: installed" || echo "  scanners: SKIP (network?)"
 fi
 
+# 3b) Ed25519 verification: without `cryptography` this node can't verify the owner's superadmin grants
+#     (falls back to HMAC-only) -- best-effort install here; Doctor keeps flagging it if still missing.
+if python3 -c "import cryptography" >/dev/null 2>&1; then echo "  cryptography: present"; else
+  pip3 install --user cryptography >/dev/null 2>&1 && echo "  cryptography: installed" \
+    || echo "  cryptography: MISSING (superadmin grants verify on HMAC fallback -- pip3 install --user cryptography)"
+fi
+
 # 4) starter project CLAUDE.md if missing
 if [ ! -f "$ROOT/CLAUDE.md" ]; then
   cat > "$ROOT/CLAUDE.md" <<EOF
