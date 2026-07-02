@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.119 -- 2026-07-02  (#8 reframed: end-of-day DIGEST + quiet filing, no more re-proposing declined moves)
+- The first end-of-day pass (.116) re-surfaced work the operator had DECLINED to move -- which quietly re-nagged
+  the exact move they'd said no to, in tension with #7 ("a declined move is final"). Reframed to what was actually
+  asked for: a passive **end-of-day digest** + quiet filing. `_drift_sweep` no longer relaxes the decline/cooldown
+  gates for EOD (a declined move is final EVERYWHERE). `_housekeeping_eod_once` now runs the thorough tidy (curate
+  records, retire idle, refresh the map, propose ONLY genuinely-new drift) then writes a read-only day recap via
+  new `_eod_day_digest`: where today's work is filed + an FYI list of off-lane threads (never a kept-here one, never
+  a dismiss-me proposal). Surfaces as an "End-of-day recap" block in the Automatic-housekeeping card + a gentle
+  notify; nothing to action. Added a manual "End-of-day recap" button (`/api/housekeeping-run {eod:true}`). Verified
+  end-to-end (real pass emits the digest; the recap + button render in the Transfers lens).
+
 ## 0.99.118 -- 2026-07-02  (#4 Terminal selection rebuilt: smooth client-side highlight, no flicker)
 - The browser terminal's drag-to-select drove tmux copy-mode on EVERY mouse-move (~45ms), re-rendering the pane
   each tick -> a distracting flicker while you tried to see what you were selecting. Rebuilt: a drag now draws a

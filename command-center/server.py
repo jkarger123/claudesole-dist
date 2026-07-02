@@ -10476,7 +10476,7 @@ def _confirm_file_llm(topic, dest_name, dest_summ):
     a = _claude_text(q, model="claude-haiku-4-5", timeout=25)
     return bool(a and a.strip().lower().startswith("y"))
 
-def _drift_sweep(eod=False):
+def _drift_sweep():
     """SERVER-SIDE warm transfer: instead of waiting for an agent to notice it's off-lane (which it ~never does),
     WE watch every live work conversation and PROPOSE a handoff. Two cases: (1) a conversation FILED in a sub-folder
     whose topic has drifted OUT of that folder; (2) a conversation running UNFILED at the project root whose topic
@@ -10508,9 +10508,9 @@ def _drift_sweep(eod=False):
         else:
             checked += 1                                           # unfiled: no lane to be "on" -- always a filing candidate
         sup = _norm_toks(m.get("drift_suppress_topic") or "")      # operator declined this drift/filing before ("keep it here")
-        if not eod and sup and (len(rk & sup) / float(len(rk))) >= 0.5: continue   # EOD tidy DOES re-surface declined work (review-queue only, never an in-session nag)
+        if sup and (len(rk & sup) / float(len(rk))) >= 0.5: continue   # a declined move is FINAL -- never re-propose it (end-of-day only ever FYIs it, never re-queues a move)
         if s in open_for: continue                                 # already an open proposal for this one
-        if not eod and (time.time() - float(m.get("drift_proposed_ts") or 0)) < _DRIFT_REPROPOSE_SEC: continue   # EOD ignores the cooldown (it's the once-a-day sort)
+        if (time.time() - float(m.get("drift_proposed_ts") or 0)) < _DRIFT_REPROPOSE_SEC: continue
         topic = " ".join(sorted(rk))
         routed = route(topic, exclude=(rel or None))
         dest = routed.get("destination"); dest_rel = (dest or {}).get("rel")
@@ -10715,29 +10715,59 @@ def _node_idle_secs():
         return 0.0
 
 _EOD_STATE = {"last": ""}            # last date the end-of-day pass ran (once/day gate)
-def _housekeeping_eod_once():
-    """END-OF-DAY thorough tidy (PROPOSE-ONLY): the full housekeeping pass PLUS a re-surface of the day's work
-    the operator DECLINED to move in-conversation -- because keeping a session open doesn't mean the work
-    shouldn't be filed. Everything lands in the Transfers/housekeeping review queue; nothing moves without a click.
-    This is the sanctioned 'sort it later' pass, never an in-session nag (that's what #7's guidance stopped)."""
-    base = _housekeeping_once()                          # regen + normal drift proposals + curate + reconcile-archive + doctor
-    extra = {"proposed": []}
+def _eod_day_digest(base):
+    """READ-ONLY end-of-day picture: where today's live work is filed + an FYI list of any off-lane threads worth a
+    glance. NOT a move request -- it never proposes, never writes session-meta, and NEVER lists a thread the
+    operator already chose to keep (a declined move stays declined). Pure summary."""
+    sessions = []; offscope = []
+    try: cand_sum = {c["rel"]: c["summary"] for c in _scope_candidates()}
+    except Exception: cand_sum = {}
     try:
-        if CC.get("handoff", True) is not False: extra = _drift_sweep(eod=True)   # ALSO re-surface declined/cooled day-work
+        for s in _live_sessions():
+            if s == CHIEF or s.startswith(("admin-", "ralph-", "chief")) or _is_service_session(s): continue
+            m = _smeta(s); rel = _session_scope(s)
+            if rel is None: continue
+            sessions.append({"session": s, "folder": rel or "<root>", "subject": (m.get("subject") or "")[:80]})
+            rk = _norm_toks(m.get("recent_kw") or "")
+            if not rk or not rel: continue
+            sup = _norm_toks(m.get("drift_suppress_topic") or "")
+            if sup and (len(rk & sup) / float(len(rk))) >= 0.5: continue          # kept-here -> never FYI it
+            stok = _norm_toks(os.path.basename(rel) + " " + (cand_sum.get(rel) or ""))
+            if stok and len(rk & stok) > 0: continue                              # on-lane
+            try: routed = route(" ".join(sorted(rk)), exclude=(rel or None))
+            except Exception: routed = {}
+            dest = (routed or {}).get("destination")
+            if dest and (dest.get("confidence") or 0) >= 0.6:
+                offscope.append({"session": s, "in": rel, "looks_like": (dest.get("name") or dest.get("rel") or "?")})
     except Exception: pass
-    prop = ((base.get("drift") or {}).get("proposed") or []) + (extra.get("proposed") or [])
+    return {"date": time.strftime("%Y-%m-%d"), "sessions": sessions[:40], "offscope": offscope[:15],
+            "notes_curated": len(base.get("curated") or []), "archived": len(base.get("archived") or []),
+            "docs_tidied": len(base.get("docs_tidied") or [])}
+
+def _housekeeping_eod_once():
+    """END-OF-DAY digest + quiet tidy. Runs the thorough housekeeping pass (which QUIETLY files -- curates folder
+    records, archives idle conversations, refreshes the map -- and proposes ONLY genuinely-new drift, respecting
+    every prior 'keep it here'), then writes a PASSIVE day DIGEST (where work landed + off-lane threads as an FYI).
+    No dismiss-me re-proposals; nothing to action. Reframed from the earlier 're-surface declined moves' version."""
+    base = _housekeeping_once()
+    dig = _eod_day_digest(base)
     try:
-        _housekeeping_digest_write({"ts": int(time.time()), "eod": True, "map_regen": True,
-            "transfers_proposed": prop, "eod_resurfaced": len(extra.get("proposed") or []),
+        _housekeeping_digest_write({"ts": int(time.time()), "eod": True, "map_regen": True, "eod_summary": dig,
+            "transfers_proposed": (base.get("drift") or {}).get("proposed", []),
             "archived": base.get("archived", []), "notes_curated": base.get("curated", []),
             "docs_tidied": len(base.get("docs_tidied") or [])})
     except Exception: pass
     try:
         with open(_HOUSEKEEP_LOG, "a") as f:
-            f.write(time.strftime("%Y-%m-%d %H:%M ") + "end-of-day tidy: %d transfer(s) proposed (%d re-surfaced from declined), %d archived\n"
-                    % (len(prop), len(extra.get("proposed") or []), len(base.get("archived") or [])))
+            f.write(time.strftime("%Y-%m-%d %H:%M ") + "end-of-day: %d note-set(s) curated, %d idle conversation(s) archived; %d off-lane thread(s) noted (FYI only)\n"
+                    % (dig["notes_curated"], dig["archived"], len(dig["offscope"])))
     except Exception: pass
-    return {"proposed": len(prop), "resurfaced": len(extra.get("proposed") or []), "archived": len(base.get("archived") or [])}
+    try:
+        if dig["archived"] or dig["offscope"] or dig["notes_curated"]:
+            notify_send("End-of-day summary: %d conversation(s) archived, records tidied%s. Day recap in Housekeeping." % (
+                dig["archived"], ((", %d off-lane thread(s) to glance at" % len(dig["offscope"])) if dig["offscope"] else "")))
+    except Exception: pass
+    return dig
 
 def _housekeeping_eod_loop():
     """Fire the end-of-day tidy ONCE/DAY, at the configured evening hour OR after ~2h idle (afternoon+), whichever
@@ -14382,7 +14412,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/session-archive":   return self._s(200, json.dumps(_archive_session(body.get("name", ""), "manual"), default=str))
         if u.path == "/api/session-resume":    return self._s(200, json.dumps(resume_archived(body.get("name", "")), default=str))
         if u.path == "/api/reconcile":         return self._s(200, json.dumps(reconcile_once(grace=False), default=str))   # operator chose -> immediate
-        if u.path == "/api/housekeeping-run":  return self._s(200, json.dumps({"ok": True, "result": _housekeeping_once(), "digest": housekeeping_digest().get("last")}, default=str))
+        if u.path == "/api/housekeeping-run":  return self._s(200, json.dumps({"ok": True, "result": (_housekeeping_eod_once() if body.get("eod") else _housekeeping_once()), "digest": housekeeping_digest().get("last")}, default=str))
         if u.path == "/api/module-remove": return self._s(200, json.dumps(module_remove(body.get("rel",""))))
         if u.path == "/api/module-combine":return self._s(200, json.dumps(module_combine(body.get("a",""), body.get("b",""))))
         if u.path == "/api/module-regen":  return self._s(200, json.dumps({"ok": True, "regenerated": regen_all_children()}))
@@ -20906,7 +20936,7 @@ function hoDur(s){s=Math.max(0,s|0);return s<60?(s+'s'):s<3600?((s/60|0)+'m'):s<
 function hoDigestCard(dg){
   if(!dg||!dg.ok) return '';
   var L=dg.last, on=dg.on;
-  var head='<div class="cc-panel"><div class="cc-p-h"><b>Automatic housekeeping</b> <span class="cc-p-sub">'+(on?'active':'<span style="color:#d29922">off</span>')+(L?(' &middot; last pass '+hoAgo(L.ts)+' ago'):' &middot; no pass yet')+'</span><span class="cc-p-act"><button class="mini go" onclick="hoRunHK()">Run a pass now</button></span></div>';
+  var head='<div class="cc-panel"><div class="cc-p-h"><b>Automatic housekeeping</b> <span class="cc-p-sub">'+(on?'active':'<span style="color:#d29922">off</span>')+(L?(' &middot; last pass '+hoAgo(L.ts)+' ago'):' &middot; no pass yet')+'</span><span class="cc-p-act"><button class="mini" onclick="hoRunEOD()" title="thorough tidy + a passive end-of-day recap (where today\'s work landed + any off-lane threads, FYI only)">&#127769; End-of-day recap</button> <button class="mini go" onclick="hoRunHK()">Run a pass now</button></span></div>';
   if(!L) return head+'<div class="cc-p-note" style="margin-top:0">Every hour the platform regenerates the module map, watches each live conversation for topic-drift (and proposes a warm transfer when one wanders off its lane), retires idle conversations, and runs Doctor. Hit <b>Run a pass now</b> to do one and see exactly what it did.</div></div>';
   var chips='<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:10px">'
     +'<span class="cc-chip"><b>'+(L.drift_checked||0)+'</b> conversations watched</span>'
@@ -20921,11 +20951,21 @@ function hoDigestCard(dg){
   if((L.archived||[]).length) det+='<div class="cc-p-note"><b>Retired (one-click resumable):</b> '+L.archived.map(e2).join(', ')+'</div>';
   if((L.notes_curated||[]).length) det+='<div class="cc-p-note"><b>Records tightened:</b> '+L.notes_curated.map(function(c){return e2(c.rel)+' ('+c.before+'&rarr;'+c.after+' learnings)';}).join(', ')+'</div>';
   if((L.fresh_issues||[]).length) det+='<div class="cc-p-note"><b>Doc issues flagged:</b> '+L.fresh_issues.map(function(i){return e2((i.path||'')+': '+(i.msg||'').slice(0,80));}).join(' &middot; ')+'</div>';
+  // End-of-day recap: a PASSIVE day summary (where work landed + off-lane threads as an FYI). Never a move request.
+  var E=(L.eod&&L.eod_summary)?L.eod_summary:null,eod='';
+  if(E){
+    eod='<div style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px"><b style="font-size:12px">&#127769; End-of-day recap'+(E.date?(' &middot; '+e2(E.date)):'')+'</b>'
+      +'<div class="meta" style="margin-top:3px">'+(E.notes_curated||0)+' record-set(s) tightened &middot; '+(E.archived||0)+' idle conversation(s) retired'+((E.docs_tidied||0)?(' &middot; '+E.docs_tidied+' docs tidied'):'')+' &middot; module map refreshed</div>';
+    if((E.offscope||[]).length) eod+='<div class="cc-p-note" style="margin-top:5px"><b>Worth a glance</b> (off-lane &mdash; FYI only, nothing to move): '+E.offscope.map(function(o){return '<code>'+e2(o.session)+'</code> in '+e2(o.in)+' looks like <b>'+e2(o.looks_like)+'</b>';}).join(' &middot; ')+'</div>';
+    else eod+='<div class="meta" style="margin-top:4px">Everything today is filed where it belongs &mdash; nothing off-lane.</div>';
+    eod+='</div>';
+  }
   var recent=(dg.recent||[]).filter(function(r){return (r.transfers_proposed&&r.transfers_proposed.length)||(r.archived&&r.archived.length)||(r.doc_issues_new>0);}).slice(0,6);
   var tl=recent.length?('<div style="margin-top:9px;border-top:1px solid var(--line);padding-top:7px"><b style="font-size:11.5px;color:var(--mut)">Recent activity</b>'+recent.map(function(r){return '<div class="meta" style="margin-top:3px">'+hoAgo(r.ts)+' ago &middot; '+((r.transfers_proposed||[]).length)+' proposed &middot; '+((r.archived||[]).length)+' retired &middot; '+(r.doc_issues_new||0)+' issues</div>';}).join('')+'</div>'):'';
-  return head+chips+det+tl+'</div>';
+  return head+chips+det+eod+tl+'</div>';
 }
 async function hoRunHK(){busyOn('Running a housekeeping pass&hellip;','regenerate map &middot; watch for drift &middot; retire idle &middot; Doctor');try{await fetch('/api/housekeeping-run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});}catch(e){}busyOff();loadHandoffs();}
+async function hoRunEOD(){busyOn('Running the end-of-day recap&hellip;','tidy records &middot; retire idle &middot; refresh map &middot; summarize the day');try{await fetch('/api/housekeeping-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({eod:true})});}catch(e){}busyOff();loadHandoffs();}
 function hoHygieneCard(hy){
   if(!hy||!hy.ok)return '';
   var folders=hy.folders||[],arch=hy.archived||[],multi=hy.multi||[];
