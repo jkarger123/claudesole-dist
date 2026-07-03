@@ -21510,7 +21510,11 @@ function srvChart(series,opt){ opt=opt||{}; var W=640,H=opt.h||120,PL=4,PR=6,PT=
     body+='<polyline points="'+pts.join(' ')+'" fill="none" stroke="'+s.color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
     var lp=pts[pts.length-1].split(','); body+='<circle cx="'+lp[0]+'" cy="'+lp[1]+'" r="2.8" fill="'+s.color+'"/>';
   });
-  return '<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" style="width:100%;height:'+H+'px;display:block"><defs>'+defs+'</defs>'+body+'</svg>';
+  var svg='<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" style="width:100%;height:'+H+'px;display:block"><defs>'+defs+'</defs>'+body+'</svg>';
+  var u=opt.unit||'', mid=Math.round((lo+hi)/2);
+  var lab='<div style="display:flex;flex-direction:column;justify-content:space-between;padding:'+(PT-4)+'px 0 '+(PB-4)+'px 0;font-size:10px;line-height:1;color:var(--dim);text-align:right;min-width:32px;height:'+H+'px">'
+    +'<span>'+Math.round(hi)+u+'</span><span>'+mid+u+'</span><span>'+Math.round(lo)+u+'</span></div>';
+  return '<div style="display:flex;gap:6px;align-items:stretch">'+lab+'<div style="flex:1;min-width:0">'+svg+'</div></div>';
 }
 function srvLeg(c,t){ return '<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px;font-size:11.5px;color:var(--mut)"><span style="width:11px;height:11px;border-radius:3px;background:'+c+';display:inline-block"></span>'+t+'</span>'; }
 function srvGB(b){ b=+b||0; if(b>=1e12)return (b/1099511627776).toFixed(2)+' TB'; if(b>=1e9)return (b/1073741824).toFixed(1)+' GB'; if(b>=1e6)return (b/1048576).toFixed(0)+' MB'; return (b/1024).toFixed(0)+' KB'; }
@@ -21544,10 +21548,10 @@ function renderServerMetrics(){
   h+='<div class="cc-panel"><div class="cc-p-h"><b>History</b> <span class="cc-p-sub">'+HD.length+' samples &middot; recorded every minute, always on</span>'
     +'<span class="cc-p-act">'+RANGES.map(function(r){return '<button class="mini'+((SRV.range||21600)===r[1]?' go':'')+'" onclick="srvSetRange('+r[1]+')">'+r[0]+'</button>';}).join(' ')+'</span></div>';
   h+='<div style="margin:9px 0 2px">'+srvLeg(CU,'CPU %')+srvLeg(CM,'Memory %')+'</div>';
-  h+=srvChart([{color:CU,data:HD.map(function(s){return s.cpu;}),area:true},{color:CM,data:HD.map(function(s){return s.mem;})}],{h:130,min:0,max:100});
+  h+=srvChart([{color:CU,data:HD.map(function(s){return s.cpu;}),area:true},{color:CM,data:HD.map(function(s){return s.mem;})}],{h:130,min:0,max:100,unit:'%'});
   if(HD.some(function(s){return s.cf!=null;})){
     h+='<div style="margin:15px 0 2px">'+srvLeg(CT,'CPU temp °F')+srvLeg(CG,'GPU temp °F')+'</div>';
-    h+=srvChart([{color:CT,data:HD.map(function(s){return s.cf;}),area:true},{color:CG,data:HD.map(function(s){return s.gf;})}],{h:120});
+    h+=srvChart([{color:CT,data:HD.map(function(s){return s.cf;}),area:true},{color:CG,data:HD.map(function(s){return s.gf;})}],{h:120,min:80,max:220,unit:'°'});
   }
   h+='</div>';
   // Load + CPU + memory panel

@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.134 -- 2026-07-03  (Server lens graph: fixed axes + y-axis labels)
+- The history charts now use FIXED axes instead of auto-ranging (which made small wiggles look dramatic and made
+  the scale jump around): **utilization pinned 0-100%**, **temperature pinned 80-220°F** (idle-to-throttle range).
+  Both charts gained left-edge **y-axis labels** (100/50/0% and 220/150/80°) so the scale is explicit. Temps that
+  sit at ~110°F now honestly read as low on the axis, not filling the chart.
+
 ## 0.99.133 -- 2026-07-03  (Server lens: CONTINUOUS metrics history -- records always, not just while watching)
 - The graph now draws from a PERSISTED machine record instead of a client-only buffer that vanished when you left
   the tab. A background daemon (`_metrics_sample_loop`) records one light sample/minute -- load, CPU%, memory%,
