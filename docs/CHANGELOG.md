@@ -3,6 +3,24 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.129 -- 2026-07-03  (CORE RESILIENCE: a self-healing immune system so a node can never silently drown again)
+- Post-mortem of a self-inflicted outage (an 11-core zombie server ran 6h unchecked; another EXHAUSTED its file
+  descriptors -> tmux calls failed -> /api/sessions returned a silent empty list -> the operator's chief looked
+  "gone"). Root failure: no immune system. Built one into the core (`command-center/server.py`, "CORE RESILIENCE"
+  block + `_vitals_loop` daemon; full write-up docs/RESILIENCE.md):
+  - **Raise the ceilings:** `_raise_fd_limit()` lifts RLIMIT_NOFILE from the ~256 launchd default to **65,536** at
+    boot -- the exact fd-wedge becomes effectively impossible.
+  - **Watch our own vitals:** `_vitals_loop` samples fds / threads / self-CPU% / child-procs every ~45s. WARN ->
+    log LOUD + notify the operator; CRITICAL twice -> **self-heal** (shed leaked tmux-attach children, clean
+    supervised restart; loop-guarded). Symptom-based -> a 1080%-CPU zombie trips it at ~90s, not 6 hours.
+  - **Fail LOUD:** `tmux_sessions()` distinguishes "no sessions" from "the call FAILED" -> marks the node DEGRADED
+    (never a silent empty list again); an EMFILE reason self-heals immediately.
+  - **Smoking gun:** `_thread_dump()` records every thread's stack at self-heal + on demand (`_vitals_stacks.log`) --
+    so the NEXT runaway's exact hot loop is captured (this one's wasn't; we could only infer a spinning handler).
+  - **Surfaced:** `/api/health` carries vitals+degraded; new `/api/vitals?dump=1` captures a live runaway; Doctor
+    flags resource pressure; a can't-miss dashboard banner shows on degraded/critical.
+- Phase 2 (documented, RESILIENCE.md): external watchdog + restart-verification for a process too wedged to self-heal.
+
 ## 0.99.128 -- 2026-07-02  (Fix: restarts no longer trigger a full transcript rescan -- Usage/Sessions slowdown)
 - **Root cause of "usage/sessions load really slow":** the token-scan cache (`_TOK_STATE`) was memory-only,
   so EVERY server restart re-scanned the whole transcript store from byte 0 (1.7GB / 12.4k .jsonl files on

@@ -2050,8 +2050,18 @@ def _is_server_session(name):
     return name == "hpcc" or bool(re.match(r"^cc-[A-Za-z0-9_-]+$", name))
 
 def tmux_sessions():
-    code, o, _ = sh([TMUX, "list-sessions", "-F",
+    code, o, err = sh([TMUX, "list-sessions", "-F",
                      "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}"])
+    # FAIL LOUD: a non-zero here is the tmux call FAILING (EMFILE / timeout / server thrash), NOT "no sessions".
+    # Silently returning [] is exactly what made a resource-starved server look like "your chief is gone". Mark
+    # the node degraded (surfaced in /api/health + a dashboard banner) and, on EMFILE, escalate to self-heal.
+    if code != 0:
+        low = (err or "").lower()
+        if "no server running" not in low:   # a genuinely-empty tmux server (no sessions yet) is not a failure
+            try: _mark_degraded("tmux list-sessions failed: " + (err or "unknown")[:120])
+            except Exception: pass
+    elif "_clear_degraded" in globals():
+        _clear_degraded()                     # a good listing clears the degraded flag
     cwds = _session_cwds()   # always -- also used to show WHERE each session is launched
     _sm = _smeta_load()      # per-session metadata (once) -- carries the CONFIGURED model set at launch / via the picker
     res = []
@@ -8671,6 +8681,16 @@ def doctor():
     issues = []
     if _semver(BOOT_VERSION) < _semver(_manifest_version()):   # files updated by a converge but this process never re-exec'd
         issues.append({"sev": "warn", "path": "runtime", "msg": "running STALE code: this process booted on v%s but the framework on disk is v%s -- restart to load the update (the converge's restart didn't land)" % (BOOT_VERSION, _manifest_version())})
+    try:                                                       # RESILIENCE: surface resource pressure BEFORE it wedges the node (the immune system's dashboard face)
+        if "vitals" in globals():
+            _v = vitals(sample=False) or {}
+            if _v.get("level") == "critical":
+                issues.append({"sev": "err", "path": "resources", "msg": "CRITICAL resource pressure -- fds %s/%s (%s%%), %s threads, %s%% CPU, %s child procs. The vitals monitor self-heals (clean restart) at this level; if it recurs there's a leak to fix." % (_v.get("fds"), _v.get("fd_limit"), _v.get("fd_pct"), _v.get("threads"), _v.get("cpu"), _v.get("children"))})
+            elif _v.get("level") == "warn":
+                issues.append({"sev": "warn", "path": "resources", "msg": "elevated resource use -- fds %s/%s (%s%%), %s threads, %s%% CPU. Watching; a leak would trend UP here over hours." % (_v.get("fds"), _v.get("fd_limit"), _v.get("fd_pct"), _v.get("threads"), _v.get("cpu"))})
+        if _DEGRADED.get("since"):
+            issues.append({"sev": "err", "path": "resources", "msg": "server is DEGRADED: a core tmux/subprocess call failed (%s) -- session/chief listings may read empty. This is fail-loud (never a silent empty). Clears automatically once calls succeed." % _DEGRADED.get("reason", "?")})
+    except Exception: pass
     try:                                                       # mesh reply-forwarding must be wired or a chief's replies to peers silently never arrive
         _hk = os.path.join(STATE_DIR, "_mesh_hook_settings.json")
         if not (os.path.isfile(_hk) and "mesh_stop_hook" in _read(_hk)):
@@ -14112,7 +14132,10 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path); q = urllib.parse.parse_qs(u.query)
         if not self._auth_gate(u.path): return
         if u.path == "/login": return self._s(200, LOGIN_PAGE, "text/html; charset=utf-8")
-        if u.path == "/api/health": return self._s(200, json.dumps({"ok": True, "instance": INSTANCE_ID, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "auth": bool(AUTH_TOKEN), "edition": _edition(), "integrity": _CORE_STATUS.get("status"), "licensed": _licensed()}))
+        if u.path == "/api/health": return self._s(200, json.dumps({"ok": True, "instance": INSTANCE_ID, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "auth": bool(AUTH_TOKEN), "edition": _edition(), "integrity": _CORE_STATUS.get("status"), "licensed": _licensed(), "vitals": (vitals(sample=False) if "vitals" in globals() else None), "degraded": (dict(_DEGRADED) if _DEGRADED.get("since") else None)}))
+        if u.path == "/api/vitals":   # RESILIENCE: live vitals + on-demand thread-stack capture (?dump=1) -> catch a runaway's hot loop in the act
+            _hot = _thread_dump("on-demand via /api/vitals") if q.get("dump") else None
+            return self._s(200, json.dumps({"vitals": vitals(), "degraded": (dict(_DEGRADED) if _DEGRADED.get("since") else None), "hot_frames": _hot, "stacks_log": os.path.join(STATE_DIR, "_vitals_stacks.log") if _hot else None}))
         if u.path == "/ws": return self.handle_ws(q)
         if u.path == "/wsvnc": return self.handle_wsvnc()
         if u.path == "/api/convo-tree":
@@ -18532,6 +18555,24 @@ async function briefSurfacePoll(){
 }
 function briefDismiss(){try{fetch('/api/brief-seen',{method:'POST'});}catch(e){}var bn=document.getElementById('briefBanner');if(bn)bn.remove();}
 setInterval(briefSurfacePoll,30000);setTimeout(briefSurfacePoll,2500);
+// RESILIENCE: a can't-miss banner when THIS node is resource-degraded/critical -- so a starved server never again
+// just "looks broken" with no explanation. Polls /api/health; the server self-heals, this only makes it visible.
+async function resHealthPoll(){
+  try{ var h=await(await fetch('/api/health')).json();
+    var v=h.vitals||{}, crit=(v.level==='critical'), deg=!!h.degraded;
+    var el=document.getElementById('resBanner');
+    if(deg||crit){
+      if(!el){ el=document.createElement('div'); el.id='resBanner';
+        el.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;padding:7px 14px;font:600 12.5px/1.4 -apple-system,sans-serif;text-align:center;background:#e8c547;color:#15120a;box-shadow:0 2px 8px rgba(0,0,0,.4)';
+        document.body.appendChild(el); }
+      var w=String.fromCharCode(9888);
+      el.innerHTML = deg
+        ? (w+' This node is DEGRADED &mdash; a core system call failed ('+esc(String(h.degraded.reason||'').slice(0,90))+'). Session/chief lists may read empty; it self-heals as calls recover.')
+        : (w+' CRITICAL resource pressure &mdash; '+(v.fd_pct||0)+'% file descriptors, '+(v.threads||0)+' threads, '+(v.cpu||0)+'% CPU. The node will self-heal with a clean restart.');
+    } else if(el){ el.remove(); }
+  }catch(e){}
+}
+setInterval(resHealthPoll,30000);setTimeout(resHealthPoll,4000);
 // ============ GOOGLE WORKSPACE LENSES (live Gmail / Calendar / Drive, server-side OAuth) ============
 function gVal(id){var e=document.getElementById(id);return e?e.value:'';}
 function gFrom(s){s=s||'';var m=s.match(/^(.*?)</);var nm=m?m[1].replace(/"/g,'').trim():s;return nm||s;}
@@ -24579,8 +24620,176 @@ def daemons_status():
     with _DAEMONS_LOCK:
         return {"ok": True, "daemons": [dict(name=k, **v) for k, v in sorted(_DAEMONS.items())]}
 
+# ============================ CORE RESILIENCE / SELF-HEALING ============================
+# Born from a real self-inflicted outage: one node's server LEAKED (threads/CPU -> an 11-core zombie for 6h) while
+# another EXHAUSTED its file descriptors (EMFILE -> tmux calls failed -> /api/sessions returned a silent empty list
+# -> the operator's chief looked "gone"). Nothing watched, nothing warned, nothing healed, and restarts silently
+# failed. This is the immune system so it can NEVER happen again: raise the ceilings, watch our own vitals, FAIL
+# LOUD instead of silent-empty, and self-heal a leak BEFORE it becomes a zombie. Symptom-based (fds/threads/cpu) so
+# it catches leaks we haven't even written yet. Full write-up: docs/RESILIENCE.md.
+try: import resource as _resource
+except Exception: _resource = None
+
+_FD_TARGET = 65536
+def _raise_fd_limit():
+    """Raise this process's open-file limit far above the OS/launchd default (~256 on macOS). A busy node scans
+    thousands of transcripts + holds WebSocket terminals + spawns tmux constantly; at 256 fds it hits EMFILE and
+    wedges. Self-applied at boot -- no launchd plist edit needed, ships everywhere. Returns the new soft limit."""
+    if not _resource: return None
+    try:
+        soft, hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
+        want = _FD_TARGET if (hard == _resource.RLIM_INFINITY or hard >= _FD_TARGET) else hard
+        if soft < want:
+            _resource.setrlimit(_resource.RLIMIT_NOFILE, (want, hard)); soft = want
+        return soft
+    except Exception: return None
+
+def _fd_count():
+    for d in ("/dev/fd", "/proc/self/fd"):
+        try: return len(os.listdir(d))
+        except Exception: continue
+    return -1
+def _fd_limit():
+    if not _resource: return -1
+    try: return _resource.getrlimit(_resource.RLIMIT_NOFILE)[0]
+    except Exception: return -1
+
+_CPU_PREV = {"cpu": 0.0, "wall": 0.0}
+def _self_cpu_pct():
+    """This process's CPU% since the last call (100% = one full core; an 11-core zombie reads ~1100%). Pure
+    getrusage -- no subprocess, so it still measures even when the box is starved."""
+    if not _resource: return -1.0
+    try:
+        ru = _resource.getrusage(_resource.RUSAGE_SELF); cpu = ru.ru_utime + ru.ru_stime; wall = time.time()
+        p = _CPU_PREV; dc, dw = cpu - p["cpu"], wall - p["wall"]; p["cpu"], p["wall"] = cpu, wall
+        return (100.0 * dc / dw) if (dw > 0 and p["wall"] and dc >= 0) else 0.0
+    except Exception: return -1.0
+
+def _my_children(match=None):
+    """Direct child PIDs of this server (optionally whose args match). Leaked pty/tmux-attach children show here."""
+    try:
+        code, o, _ = sh(["pgrep", "-P", str(os.getpid())] + (["-f", match] if match else []), timeout=6)
+        return [int(x) for x in o.split() if x.strip().isdigit()] if code == 0 else []
+    except Exception: return []
+
+_VITALS = {"fds": 0, "fd_limit": 0, "fd_pct": 0, "threads": 0, "cpu": 0.0, "children": 0, "level": "ok", "at": 0}
+_DEGRADED = {"since": 0, "reason": "", "count": 0, "at": 0}
+def _mark_degraded(reason):
+    """A CORE subprocess call failed in a way that smells like resource starvation (EMFILE / timeout). Record it
+    LOUD -- it must NEVER read as a benign empty result (that illusion is what hid the outage). Surfaced in
+    /api/health + a dashboard banner; an EMFILE reason escalates straight to self-heal."""
+    now = time.time(); _DEGRADED["since"] = _DEGRADED["since"] or now
+    _DEGRADED["reason"] = str(reason)[:200]; _DEGRADED["count"] += 1; _DEGRADED["at"] = now
+    try:
+        with open(os.path.join(STATE_DIR, "_degraded.log"), "a") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + INSTANCE_ID + " " + str(reason)[:200] + "\n")
+    except Exception: pass
+    if "too many open files" in str(reason).lower() or "emfile" in str(reason).lower():
+        try: _selfheal("fd exhaustion: " + str(reason)[:80])
+        except Exception: pass
+def _clear_degraded():
+    if _DEGRADED["since"]: _DEGRADED.update({"since": 0, "reason": ""})
+
+def vitals(sample=True):
+    if sample:
+        fd, fl = _fd_count(), _fd_limit(); th = threading.active_count(); cpu = _self_cpu_pct()
+        pct = int(100 * fd / fl) if (fd > 0 and fl > 0) else 0
+        lvl = "ok"
+        if pct >= 85 or th > 400 or cpu > 900: lvl = "critical"
+        elif pct >= 60 or th > 220 or cpu > 550: lvl = "warn"
+        _VITALS.update({"fds": fd, "fd_limit": fl, "fd_pct": pct, "threads": th, "cpu": round(cpu, 1),
+                        "children": len(_my_children()), "level": lvl, "at": int(time.time())})
+    return dict(_VITALS)
+
+def _thread_dump(reason=""):
+    """Capture EVERY thread's stack to a forensic file -- so the NEXT runaway/zombie records its exact hot loop
+    (this incident couldn't: the process was killed for relief before its stack could be sampled, and no log
+    survived). Cheap (sys._current_frames), stdlib, safe to call under load. This is how a symptom-based immune
+    system also becomes a diagnostic: heal fast, but leave the smoking gun behind."""
+    try:
+        import traceback as _tb
+        frames = sys._current_frames(); names = {t.ident: t.name for t in threading.enumerate()}
+        # count identical stacks -> the hot loop is whatever repeats across many threads
+        buckets = {}
+        lines = [time.strftime("%Y-%m-%d %H:%M:%S ") + INSTANCE_ID + " thread-dump: " + str(reason)[:120]]
+        for tid, fr in frames.items():
+            stack = "".join(_tb.format_stack(fr))
+            top = _tb.extract_stack(fr)[-1]
+            key = "%s:%s %s" % (os.path.basename(top.filename), top.lineno, top.name)
+            buckets[key] = buckets.get(key, 0) + 1
+        lines.append("  HOT (threads sharing a top frame -- the leak is almost certainly the highest count):")
+        for k, n in sorted(buckets.items(), key=lambda kv: -kv[1])[:12]:
+            lines.append("    x%-4d %s" % (n, k))
+        # full stacks for the top few so the loop body is recorded
+        for tid, fr in list(frames.items())[:40]:
+            lines.append("  --- thread %s (%s) ---\n%s" % (tid, names.get(tid, "?"), "".join(_tb.format_stack(fr))))
+        with open(os.path.join(STATE_DIR, "_vitals_stacks.log"), "a") as f:
+            f.write("\n".join(lines) + "\n" + "=" * 80 + "\n")
+        return [{"frame": k, "threads": n} for k, n in sorted(buckets.items(), key=lambda kv: -kv[1])[:12]]
+    except Exception: return []
+
+_SELFHEAL = {"last": 0, "boot": time.time()}
+def _reap_orphan_terminals():
+    """Kill this server's own `tmux attach-session` children (browser-terminal pty children). Called only at a
+    controlled restart -- everything's going down anyway, so shedding them prevents the reparented-orphan leak
+    (the exact tmux-attach pile that thrashed the shared tmux server)."""
+    n = 0
+    for pid in _my_children("attach-session"):
+        try: os.kill(pid, signal.SIGKILL); n += 1
+        except Exception: pass
+    return n
+def _selfheal(reason):
+    """Recover from CRITICAL resource pressure the in-process code can't fix by itself: alert, and do a CONTROLLED
+    supervised restart (shed leaked children, then exit -> launchd/tmux respawns a CLEAN process). Loop-guarded
+    (>=5 min apart, never in the first 90s of boot) so a genuinely-sick node can't thrash-restart."""
+    now = time.time()
+    if now - _SELFHEAL["boot"] < 90 or now - _SELFHEAL["last"] < 300: return
+    _SELFHEAL["last"] = now; v = vitals()
+    _thread_dump("pre-selfheal " + reason)   # SMOKING GUN: record every thread's stack BEFORE we restart, so the runaway's exact hot loop IS captured next time
+    try: notify_send("[%s] CRITICAL resource pressure (%s) -- self-healing with a clean restart. fds=%s/%s threads=%s cpu=%s%% (stacks in _vitals_stacks.log)" % (
+        INSTANCE_ID, reason, v.get("fds"), v.get("fd_limit"), v.get("threads"), v.get("cpu")))
+    except Exception: pass
+    try:
+        with open(os.path.join(STATE_DIR, "_selfheal.log"), "a") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + INSTANCE_ID + " " + reason + " " + json.dumps(v) + "\n")
+    except Exception: pass
+    try: _reap_orphan_terminals()
+    except Exception: pass
+    os._exit(1)   # supervised (launchd KeepAlive / tmux) respawns a fresh process -> clean fd + thread table
+
+def _vitals_loop():
+    """THE immune system: every ~45s sample our own vitals. WARN -> log LOUD + alert the operator once per episode.
+    CRITICAL (twice running, to ignore a blip) -> self-heal. Catches BOTH failure modes we hit -- fd exhaustion AND
+    a thread/CPU zombie -- and, being symptom-based, any future leak too. Cheap (getrusage + one pgrep)."""
+    time.sleep(30); crit = 0; warned = ""
+    while True:
+        try:
+            v = vitals()
+            if v["level"] == "critical":
+                crit += 1
+                if crit >= 2: _selfheal("vitals critical: " + json.dumps({k: v[k] for k in ("fd_pct", "threads", "cpu", "children")}))
+            else:
+                crit = 0
+            if v["level"] in ("warn", "critical"):
+                sig = "%s:%s" % (v["level"], v["fd_pct"] // 10)
+                if sig != warned:
+                    warned = sig
+                    msg = "[%s] resource %s -- fds=%s/%s (%s%%) threads=%s cpu=%s%% children=%s" % (
+                        INSTANCE_ID, v["level"].upper(), v["fds"], v["fd_limit"], v["fd_pct"], v["threads"], v["cpu"], v["children"])
+                    print(msg)
+                    try: notify_send(msg)
+                    except Exception: pass
+            elif warned:
+                warned = ""   # recovered -> allow the next episode to alert again
+        except Exception: pass
+        time.sleep(45)
+
 if __name__ == "__main__":
     print("%s Command Center on http://0.0.0.0:%d  (tailnet http://%s:%d)" % (BRAND, PORT, STUDIO_TS, PORT))
+    _nfd = _raise_fd_limit()
+    if _nfd: print("resilience: open-file limit raised to %s" % _nfd)
+    try: vitals()   # seed the vitals snapshot so /api/health + Doctor have real numbers before the monitor's first sample
+    except Exception: pass
     # Lock secret-bearing per-deployment files to owner-only (0600) -- fast + security-critical, so it stays
     # inline (before serving). The OS umask writes them 644 (world-readable) -> on a shared box another
     # account could read auth_token/mesh_token. Self-heals 644 on boot + closes it for fresh deploys.
@@ -24672,6 +24881,7 @@ if __name__ == "__main__":
     _daemon("acct_windows", _acct_windows_loop)          # USAGE: keep the account fuel-gauge fresh (refresh the live login's 5h/weekly windows ~30m; shared-lock deduped across co-located instances)
     _daemon("substack", _substack_loop)                  # SUBSTACK: poll tracked publications' RSS into the read cache (no-op until publications are configured)
     _daemon("chief_watchdog", _chief_watchdog)           # CHIEF WATCHDOG: keep the always-on Chief of Staff (the mesh comms endpoint) alive -- respawn if its claude exits
+    _daemon("vitals", _vitals_loop)                       # RESILIENCE: watch our OWN fds/threads/cpu/children -> WARN (alert) -> CRITICAL (self-heal) before a leak becomes a zombie or an fd wedge
     _daemon("license_activate", _license_activate_loop)  # LICENSE: a sold box auto-activates from its configured activation server on boot if unlicensed
     _daemon("fleet_converge", _fleet_converge_loop)      # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     _daemon("routines", _routines_loop)                  # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts
