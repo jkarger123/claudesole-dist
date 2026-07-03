@@ -17,7 +17,7 @@ die(){ printf "\033[31mERROR: %s\033[0m\n" "$*" >&2; exit 1; }
 command -v openssl >/dev/null 2>&1 || die "openssl required"
 
 VERIFY=0; if [ "${1:-}" = "--verify" ]; then VERIFY=1; shift; fi
-ENC="${1:-}"; CC_HOME="${2:-$HOME/hptuners-control}"
+ENC="${1:-}"; CC_HOME="${2:-$(cd "$(dirname "$0")" 2>/dev/null && pwd)}"
 [ -f "$ENC" ] || die "bundle not found: $ENC"
 
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT

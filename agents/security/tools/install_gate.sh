@@ -4,7 +4,7 @@
 # Pre-commit only (scans STAGED changes). We intentionally do NOT add a pre-push history scan:
 # a repo with un-rotated historical secrets would have every push blocked. Scrub history first.
 set -uo pipefail
-CC_HOME="${CC_HOME:-$HOME/hptuners-control}"
+CC_HOME="${CC_HOME:-$(cd "$(dirname "$0")/../../.." 2>/dev/null && pwd)}"
 REPO="${1:-}"
 if [ -z "$REPO" ] && [ -f "$CC_HOME/cc.config.json" ]; then
   REPO=$(python3 -c "import json;print(json.load(open('$CC_HOME/cc.config.json')).get('project_root',''))" 2>/dev/null)

@@ -22,6 +22,7 @@ Loop dir (created by /api/ralph-create or by hand):
 import json, os, re, signal, subprocess, sys, threading, time
 
 HOME = os.path.expanduser("~")
+CC_HOME = os.environ.get("CC_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # this bundle's root (portable; = ~/hptuners-control on the master)
 ap = [a for a in sys.argv[1:]]
 DRY = "--dry-run" in ap
 START = 1
@@ -33,7 +34,7 @@ NAME = POS[0] if POS else None
 if not NAME:
     print("usage: ralph_runner.py <loop-name> [--dry-run] [--start N]"); sys.exit(2)
 
-LOOPDIR = os.path.join(HOME, "hptuners-control", "data", "ralph", NAME)
+LOOPDIR = os.path.join(CC_HOME, "data", "ralph", NAME)
 def lp(*p): return os.path.join(LOOPDIR, *p)
 if not os.path.isdir(LOOPDIR):
     print("FATAL: no such loop dir: " + LOOPDIR); sys.exit(1)

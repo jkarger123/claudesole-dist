@@ -6,7 +6,7 @@
 import json, os, re, shutil, subprocess, sys, time
 
 HOME = os.path.expanduser("~")
-DEFAULT_REPO = "/Volumes/Samsung990PRO/hptuners"
+DEFAULT_REPO = ""   # neutral last-resort; _project_root() prefers cc.config project_root / env
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENT_DIR = os.path.dirname(HERE)
 REPORTS = os.path.join(AGENT_DIR, "reports")
@@ -171,7 +171,7 @@ def scan_deps(repo):
 
 # ---------------- AI-agent safety (Ralph loops) ----------------
 def scan_loops():
-    rdir = os.path.join(HOME, "hptuners-control", "data", "ralph")
+    rdir = os.path.join(CC_HOME, "data", "ralph")
     if not os.path.isdir(rdir): return
     uncapped = []
     for n in os.listdir(rdir):

@@ -7,10 +7,12 @@
 # Usage: git-backup.sh [auto|manual]
 # ============================================================================
 set -uo pipefail
-REPO="/Volumes/Samsung990PRO/hptuners"
-CC="$HOME/hptuners-control/command-center"
+CC_HOME="${CC_HOME:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)}"   # this bundle's root (portable)
+CC="$CC_HOME/command-center"
 STATE="$CC/_backup_state.json"
-LOG="$HOME/hptuners-control/data/backup.log"
+LOG="$CC_HOME/data/backup.log"
+# Repo to back up = the tenant's project_root (cc.config); override with the REPO env var.
+REPO="${REPO:-$(python3 -c "import json;print(json.load(open('$CC_HOME/cc.config.json')).get('project_root',''))" 2>/dev/null)}"
 SCAN="$CC/git-backup-secretscan.py"
 MODE="${1:-auto}"
 export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"

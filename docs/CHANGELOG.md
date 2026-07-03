@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.143 -- 2026-07-03  (clean-core Phase 4a: functional path hardcodes -> derived-from-location)
+- Scrubbed the remaining HARDCODED tenant PATHS from framework scripts so a renamed/relocated tenant works, not
+  just an install literally at ~/hptuners-control: ralph_runner (loop dir), git-backup.sh + git-backup-secretscan
+  (repo/CC/log from cc.config + script location), security scan.py (repo + ralph dir), and the CC_HOME fallbacks in
+  cf-key-backup/restore, make-install-package, install_gate/scanners. Each now derives its base from the script's
+  OWN location (or cc.config), with a fallback that resolves IDENTICALLY on the master. VERIFIED lose-nothing: ralph
+  loop dir, backup REPO, scan _project_root all resolve to the exact same paths as before. Residue 227 -> 213.
+- Remaining residue (213) is illustrative-only: shipped-doc examples, code comments, and multi-tenant UI copy --
+  Phase 4b, gated by residue_lint so it can only shrink.
+
 ## 0.99.142 -- 2026-07-03  (clean-core: residue gate excludes the changelog + linters)
 - Follow-up to .141: the residue gate flagged docs/CHANGELOG.md (and preship.py's own gate message) because they
   NAME tenant terms by design -- the changelog narrates tenant work on every ship, so gating on it self-blocks.

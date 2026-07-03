@@ -3,7 +3,7 @@
 # framework_paths) + the agent playbook + bootstrap. Point a Claude Code instance at the unzipped
 # AGENT_INSTALL.md and it installs a new project or migrates an existing one. Output: dist/claudefather-install.zip
 set -uo pipefail
-CC_HOME="${CC_HOME:-$HOME/hptuners-control}"
+CC_HOME="${CC_HOME:-$(cd "$(dirname "$0")" 2>/dev/null && pwd)}"
 cd "$CC_HOME"
 [ -f claudesole.manifest.json ] || { echo "no manifest at $CC_HOME"; exit 1; }
 

@@ -14,7 +14,7 @@
 #   Set CF_HOME to the install root if not the default. You'll be prompted for an encryption passphrase.
 # ============================================================================================================
 set -uo pipefail
-CC_HOME="${CC_HOME:-$HOME/hptuners-control}"
+CC_HOME="${CC_HOME:-$(cd "$(dirname "$0")" 2>/dev/null && pwd)}"
 OUT="${1:-$CC_HOME/cf-key-backup}"
 say(){ printf "\n\033[1m== %s\033[0m\n" "$*"; }
 die(){ printf "\033[31mERROR: %s\033[0m\n" "$*" >&2; exit 1; }

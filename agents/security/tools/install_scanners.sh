@@ -3,7 +3,7 @@
 # Downloads gitleaks, trufflehog, osv-scanner for THIS host's OS/arch into the framework bin dir.
 # No sudo. Re-runnable. Works on any machine the framework is dropped onto (macOS/Linux, arm64/amd64).
 set -uo pipefail
-BIN="${CC_BIN:-$HOME/hptuners-control/bin}"
+BIN="${CC_BIN:-$(cd "$(dirname "$0")/../../.." 2>/dev/null && pwd)/bin}"
 mkdir -p "$BIN"
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')               # darwin | linux
 case "$(uname -m)" in arm64|aarch64) A=arm64;; x86_64|amd64) A=amd64;; *) A=$(uname -m);; esac

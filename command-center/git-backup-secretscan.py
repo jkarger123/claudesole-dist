@@ -17,7 +17,7 @@ Usage: git-backup-secretscan.py [REPO_DIR]   (default: /Volumes/Samsung990PRO/hp
 """
 import os, re, subprocess, sys
 
-REPO = sys.argv[1] if len(sys.argv) > 1 else "/Volumes/Samsung990PRO/hptuners"
+REPO = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()   # backup engine always passes the repo; cwd is a neutral fallback
 MAX_BYTES = 95 * 1024 * 1024
 SCAN_CONTENT_MAX = 3 * 1024 * 1024     # don't read >3MB files for content (still size-checked)
 
