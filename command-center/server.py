@@ -21499,14 +21499,15 @@ function renderServerMetrics(){
     +'<span class="cc-chip" style="'+(loadBad?'outline:1px solid rgba(248,81,73,.8)':'')+'">Load <b>'+load[0].toFixed(2)+'</b> / '+cores+' cores <span class="sub">('+Math.round(lpc*100)+'% per core)</span></span>'
     +'<span class="cc-chip">CPU busy <b>'+cpuBusy+'%</b></span>'
     +'<span class="cc-chip">Memory <b>'+(mem.pct||0)+'%</b> <span class="sub">'+srvGB(mem.used)+' / '+srvGB(mem.total)+'</span></span>'
-    +'<span class="cc-chip" style="'+(thBad?'outline:1px solid rgba(248,81,73,.8)':'')+'">Thermal <b>'+esc(th.pressure||'?')+'</b></span>'
+    +'<span class="cc-chip" style="'+((thBad||(th.cpu_c!=null&&th.cpu_c>=95))?'outline:1px solid rgba(248,81,73,.8)':'')+'">'+((th.cpu_c!=null)?('Temp <b>CPU '+th.cpu_c+'°C</b>'+(th.gpu_c!=null?(' <span class="sub">GPU '+th.gpu_c+'°C</span>'):'')):('Thermal <b>'+esc(th.pressure||'?')+'</b>'))+'</span>'
+    +(d.power?('<span class="cc-chip">Power <b>'+d.power.all_w+'W</b> <span class="sub">cpu '+d.power.cpu_w+' · gpu '+d.power.gpu_w+'</span></span>'):'')
     +'<span class="cc-chip">Procs <b>'+(d.proc_count||0)+'</b></span></div>';
   // Load + CPU + memory panel
   h+='<div class="cc-panel"><div class="cc-p-h"><b>Load &amp; CPU</b> <span class="cc-p-sub">1/5/15 min: '+load.map(function(x){return x.toFixed(2);}).join(' &middot; ')+(loadBad?' &mdash; ABOVE core count (oversubscribed)':'')+'</span></div>';
   h+='<div class="cc-p-note">CPU busy '+cpuBusy+'%'+(d.cpu?(' &middot; '+Math.round(d.cpu.user||0)+'% user, '+Math.round(d.cpu.sys||0)+'% sys, '+Math.round(d.cpu.idle||0)+'% idle'):'')+srvFill(cpuBusy)+'</div>';
   h+='<div class="cc-p-note" style="margin-top:8px">Load per core '+Math.round(lpc*100)+'% (load '+load[0].toFixed(2)+' across '+cores+' cores)'+srvFill(lpc*100)+'</div>';
   if(mem.total) h+='<div class="cc-p-note" style="margin-top:8px">Memory '+(mem.pct||0)+'% &middot; '+srvGB(mem.used)+' used of '+srvGB(mem.total)+' <span class="sub">('+srvGB(mem.wired)+' wired, '+srvGB(mem.compressed)+' compressed)</span>'+srvFill(mem.pct)+'</div>';
-  h+='<div class="cc-p-note" style="margin-top:8px;color:var(--dim)">'+esc(th.note||'')+'</div></div>';
+  h+='<div class="cc-p-note" style="margin-top:8px">Thermal: '+((th.cpu_c!=null)?('CPU <b>'+th.cpu_c+'°C</b>'+(th.gpu_c!=null?(', GPU <b>'+th.gpu_c+'°C</b>'):'')+' &middot; '):'')+'pressure <b>'+esc(th.pressure||'?')+'</b>'+(d.power?(' &middot; drawing <b>'+d.power.all_w+'W</b> (cpu '+d.power.cpu_w+'W, gpu '+d.power.gpu_w+'W)'):'')+' <span class="sub" style="color:var(--dim)">&mdash; '+esc(th.note||'')+'</span></div></div>';
   // Disks
   if((d.disks||[]).length){ h+='<div class="cc-panel"><div class="cc-p-h"><b>Disk</b></div>';
     (d.disks||[]).forEach(function(dk){ h+='<div class="cc-p-note" style="margin-top:6px"><b>'+esc(dk.label)+'</b> '+dk.pct+'% &middot; '+srvGB(dk.avail)+' free of '+srvGB(dk.total)+srvFill(dk.pct)+'</div>'; });
@@ -22787,7 +22788,7 @@ var HELP={
  jobs:{t:'Jobs',sub:'A simple board of the active work items in flight, each tied to a part of your product.',h:'<p><b>What:</b> a lightweight list of the work currently on the go -- each job has a name, which part of the product it belongs to, a status, and the next step.</p><p><b>Why:</b> it is the at-a-glance answer to "what are we actually working on right now," separate from your personal to-dos.</p><p><b>How:</b> click Add to log one, or ask your Chief of Staff to open a job for a piece of work you want tracked here.</p>'},
  machines:{t:'Machines',sub:'The computers in your fleet and whether each one is online right now.',h:'<p><b>What:</b> the other computers this system can reach -- your dev boxes and servers -- each showing a green dot when it is online.</p><p><b>Why:</b> you can confirm a machine is up and start work on it without opening a terminal yourself.</p><p><b>How:</b> click a machine to see its details and launch a session on it.</p>'},
  desktop:{t:'Remote Desktop',sub:'See and control the host Mac\'s full screen from here, even from your phone.',h:'<p><b>What:</b> a live view of the host Mac\'s actual screen, with full mouse and keyboard control, tunneled securely over your private network.</p><p><b>Why:</b> when you need to do something on the machine itself -- click a real app, approve a dialog -- you can, from any device including a phone.</p><p><b>How:</b> tap Open fullscreen; the first connection asks for the screen-sharing password (saved after that). If it will not connect, macOS Screen Sharing is not turned on yet.</p>'},
- server:{t:'Server',sub:'Whole-machine health -- cores, load, CPU, memory, disk, thermal, and every Command Center node\'s own vitals.',h:'<p><b>What:</b> a live view of the physical server this runs on: CPU load vs core count, memory + disk use, thermal pressure, the heaviest processes, and each co-located Command Center node\'s file descriptors / threads / CPU (its self-heal vitals).</p><p><b>Why:</b> so you can VISUALLY confirm nothing is running away -- the exact blind spot that once let a leaked process eat the whole machine for hours. If Load is above the core count, or a process is pegging many cores, or a node shows CRITICAL, you see it here immediately.</p><p><b>How:</b> it refreshes every 5s; watch Load-per-core and the Heaviest-processes list. Exact CPU/GPU temperature in degrees needs a sudo helper (macOS blocks it otherwise); thermal PRESSURE (the throttling signal) is shown without one.</p>'},
+ server:{t:'Server',sub:'Whole-machine health -- cores, load, CPU, memory, disk, thermal, and every Command Center node\'s own vitals.',h:'<p><b>What:</b> a live view of the physical server this runs on: CPU load vs core count, memory + disk use, thermal pressure, the heaviest processes, and each co-located Command Center node\'s file descriptors / threads / CPU (its self-heal vitals).</p><p><b>Why:</b> so you can VISUALLY confirm nothing is running away -- the exact blind spot that once let a leaked process eat the whole machine for hours. If Load is above the core count, or a process is pegging many cores, or a node shows CRITICAL, you see it here immediately.</p><p><b>How:</b> it refreshes every 5s; watch Load-per-core and the Heaviest-processes list. Live CPU/GPU temperature (and power draw) come from the Apple Silicon SoC sensors via macmon -- sudoless, no helper; thermal pressure (the throttling signal) is shown alongside.</p>'},
  usage:{t:'Accounts / Usage',sub:'How many AI tokens and dollars you are spending, broken down by account and project.',h:'<p><b>What:</b> a live view of your AI usage -- tokens processed and dollar cost over time, split by model, Claude account, and project.</p><p><b>Why:</b> you can see where the spend is going and, when accounts are connected, how much of each account\'s rate-limit window is left before you hit a wall.</p><p><b>How:</b> pick a time window at the top to drive the charts; switch which login is active over in the Accounts tab.</p>'},
  backup:{t:'Backup',sub:'Whether your work is safely backed up, and a one-click button to back up now.',h:'<p><b>What:</b> the status of your automatic backups -- when the last one succeeded and whether it reached its offsite copy.</p><p><b>Why:</b> peace of mind that your work is saved, with a clear warning if backups have gone stale.</p><p><b>How:</b> it runs on its own; click Back up now to force one immediately (it scans for secrets first, then commits and pushes).</p>'},
  security:{t:'Security',sub:'A red/yellow/green health check of your setup -- secrets, access, and AI safety.',h:'<p><b>What:</b> a scan of this node\'s security posture -- exposed secrets, access settings, dependencies, network, and AI-agent safety -- summed up as a single green, amber, or red light.</p><p><b>Why:</b> it catches the risky mistakes (a leaked key, an open door) before they bite, and tells you exactly what to fix.</p><p><b>How:</b> click Run scan; each finding shows what it is and the evidence. Ask your Chief of Staff to help fix anything flagged red.</p>'},
@@ -24968,7 +24969,20 @@ def _server_metrics(ttl=8):
         m = re.search(r"CPU_Speed_Limit\s*=\s*(\d+)", ln)
         if m and int(m.group(1)) < 100: tl = "Throttled (%s%% CPU speed)" % m.group(1)
         if "thermal warning" in ln.lower() and "no thermal" not in ln.lower(): tl = "Thermal warning"
-    d["thermal"] = {"pressure": tl, "temp_c": None, "note": "exact temperature needs a sudo helper (powermetrics); thermal pressure shown"}
+    d["thermal"] = {"pressure": tl, "cpu_c": None, "gpu_c": None, "note": "thermal pressure (throttling signal)"}
+    # REAL sensor temps -- sudoless, via macmon (Apple Silicon SoC sensors); best-effort, falls back to pressure-only
+    try:
+        for mp in ("/opt/homebrew/bin/macmon", "macmon"):
+            code, o, _ = sh([mp, "pipe", "-s", "1", "-i", "220"], timeout=6)
+            if code == 0 and o.strip():
+                mm = json.loads(o.strip().splitlines()[-1]); t = mm.get("temp") or {}
+                if t.get("cpu_temp_avg"): d["thermal"]["cpu_c"] = round(t["cpu_temp_avg"], 1)
+                if t.get("gpu_temp_avg"): d["thermal"]["gpu_c"] = round(t["gpu_temp_avg"], 1)
+                d["thermal"]["note"] = "live SoC sensor temps via macmon (sudoless)"
+                d["power"] = {"all_w": round(mm.get("all_power", 0) or 0, 1), "cpu_w": round(mm.get("cpu_power", 0) or 0, 1),
+                              "gpu_w": round(mm.get("gpu_power", 0) or 0, 1)}
+                break
+    except Exception: pass
     # heaviest processes
     _, o, _ = sh(["ps", "-A", "-o", "pid=,%cpu=,%mem=,comm="], timeout=6)
     procs = []

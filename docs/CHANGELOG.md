@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.131 -- 2026-07-03  (Server lens: live CPU/GPU temperature + power -- sudoless, via macmon)
+- The Server lens now shows REAL SoC temperatures (CPU + GPU degC) and power draw (total / cpu / gpu watts),
+  read sudolessly from the Apple Silicon sensors via `macmon` -- no root daemon, no sudo helper. `_server_metrics()`
+  reads `macmon pipe` best-effort (falls back to thermal-pressure-only where macmon isn't installed). The Temp KPI
+  outlines red past 95degC. macmon is a static binary (pulled from the Homebrew bottle registry to /opt/homebrew/bin);
+  a future install-time auto-fetch would give every Mac node live temps by construction.
+
 ## 0.99.130 -- 2026-07-03  (Resilience phase 2: external watchdog + a Server metrics lens + agent awareness)
 - **Server lens** (Mission Control + every node, System category): whole-machine metrics so the operator can
   VISUALLY confirm nothing's running away -- load vs cores, CPU (user/sys/idle), memory, disk per volume, thermal
