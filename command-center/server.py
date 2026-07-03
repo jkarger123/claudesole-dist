@@ -14144,6 +14144,15 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"vitals": vitals(), "degraded": (dict(_DEGRADED) if _DEGRADED.get("since") else None), "hot_frames": _hot, "stacks_log": os.path.join(STATE_DIR, "_vitals_stacks.log") if _hot else None}))
         if u.path == "/api/server-metrics":   # SERVER lens: whole-machine metrics (cores/load/cpu/mem/disk/thermal/procs + per-node vitals)
             return self._s(200, json.dumps(_server_metrics()))
+        if u.path == "/api/metrics-history":  # SERVER lens graph: persisted machine history (records even when unwatched)
+            try: rng = max(300, min(int(q.get("range", ["21600"])[0]), 7 * 86400))
+            except Exception: rng = 21600
+            try: hist = json.load(open(_MHIST)).get("samples", [])
+            except Exception: hist = []
+            now = time.time(); sel = [s for s in hist if s.get("t", 0) >= now - rng]
+            if len(sel) > 200:                                # downsample to a chart-friendly point count
+                step = len(sel) // 200; sel = sel[::step]
+            return self._s(200, json.dumps({"samples": sel, "total": len(hist), "range": rng}))
         if u.path == "/ws": return self.handle_ws(q)
         if u.path == "/wsvnc": return self.handle_wsvnc()
         if u.path == "/api/convo-tree":
@@ -21476,11 +21485,10 @@ async function emThread(tid){
     +'<div class="row" style="margin-top:11px;justify-content:flex-end"><button class="btn" onclick="closeM()">Close</button></div></div>');
 }
 // ---- SERVER lens: whole-machine metrics so the operator can VISUALLY confirm nothing's running away ----------
-let SRV={data:null,hist:[]}, _srvT=null;
+let SRV={data:null,range:21600,histData:[]}, _srvT=null;
 function cToF(c){ return (c==null||isNaN(c))?null:Math.round(c*9/5+32); }
-function srvPush(){ var d=SRV.data; if(!d)return; var th=d.thermal||{},mem=d.mem||{};
-  SRV.hist.push({cpu:d.cpu?Math.round(100-(d.cpu.idle||0)):0, mem:mem.pct||0, cpuF:cToF(th.cpu_c), gpuF:cToF(th.gpu_c)});
-  while(SRV.hist.length>72) SRV.hist.shift(); }   // ~6 min of 5s samples
+async function srvLoadHist(){ try{ SRV.histData=((await(await fetch('/api/metrics-history?range='+(SRV.range||21600))).json())||{}).samples||[]; }catch(e){} }
+function srvSetRange(sec){ SRV.range=sec; loadServerMetrics(); }
 // A CF-themed live SVG chart: series=[{color,data[],area?}], auto-ranged (or fixed min/max). Crisp, no library.
 function srvChart(series,opt){ opt=opt||{}; var W=640,H=opt.h||120,PL=4,PR=6,PT=9,PB=6;
   var n=0; series.forEach(function(s){ n=Math.max(n,(s.data||[]).length); });
@@ -21511,8 +21519,8 @@ function srvLvl(l){ var m={ok:'bdg-green',warn:'bdg-amber',critical:'bdg-red'}; 
 async function loadServerMetrics(){
   var g=document.getElementById('grid'); if(!SRV.data)g.innerHTML=empty('Reading server metrics…');
   try{ SRV.data=await(await fetch('/api/server-metrics')).json(); }catch(e){ g.innerHTML=empty('Could not read server metrics.'); return; }
-  srvPush(); renderServerMetrics();
-  clearInterval(_srvT); _srvT=setInterval(async function(){ if(LENS!=='server'){clearInterval(_srvT);return;} try{ SRV.data=await(await fetch('/api/server-metrics')).json(); srvPush(); renderServerMetrics(); }catch(e){} }, 5000);
+  await srvLoadHist(); renderServerMetrics();
+  clearInterval(_srvT); _srvT=setInterval(async function(){ if(LENS!=='server'){clearInterval(_srvT);return;} try{ SRV.data=await(await fetch('/api/server-metrics')).json(); await srvLoadHist(); renderServerMetrics(); }catch(e){} }, 5000);
 }
 function renderServerMetrics(){
   var d=SRV.data||{}, g=document.getElementById('grid'); if(!g)return;
@@ -21530,15 +21538,16 @@ function renderServerMetrics(){
     +'<span class="cc-chip" style="'+((thBad||(th.cpu_c!=null&&th.cpu_c>=95))?'outline:1px solid rgba(248,81,73,.8)':'')+'">'+((th.cpu_c!=null)?('Temp <b>CPU '+cToF(th.cpu_c)+'°F</b>'+(th.gpu_c!=null?(' <span class="sub">GPU '+cToF(th.gpu_c)+'°F</span>'):'')):('Thermal <b>'+esc(th.pressure||'?')+'</b>'))+'</span>'
     +(d.power?('<span class="cc-chip">Power <b>'+d.power.all_w+'W</b> <span class="sub">cpu '+d.power.cpu_w+' · gpu '+d.power.gpu_w+'</span></span>'):'')
     +'<span class="cc-chip">Procs <b>'+(d.proc_count||0)+'</b></span></div>';
-  // LIVE CF-themed charts -- utilization + temperature over time
-  var HH=SRV.hist||[], CU='rgba(232,197,71,1)', CM='rgba(120,170,255,.95)', CT='rgba(240,140,90,1)', CG='rgba(90,205,205,1)';
-  var mins=Math.round(HH.length*5/60*10)/10;
-  h+='<div class="cc-panel"><div class="cc-p-h"><b>Live</b> <span class="cc-p-sub">last '+mins+' min &middot; updates every 5s</span></div>';
-  h+='<div style="margin:8px 0 2px">'+srvLeg(CU,'CPU %')+srvLeg(CM,'Memory %')+'</div>';
-  h+=srvChart([{color:CU,data:HH.map(function(s){return s.cpu;}),area:true},{color:CM,data:HH.map(function(s){return s.mem;})}],{h:130,min:0,max:100});
-  if(HH.some(function(s){return s.cpuF!=null;})){
-    h+='<div style="margin:14px 0 2px">'+srvLeg(CT,'CPU temp °F')+srvLeg(CG,'GPU temp °F')+'</div>';
-    h+=srvChart([{color:CT,data:HH.map(function(s){return s.cpuF;}),area:true},{color:CG,data:HH.map(function(s){return s.gpuF;})}],{h:120});
+  // HISTORY: CF-themed charts from the PERSISTED machine record (kept even when no tab is open), with a range picker
+  var HD=SRV.histData||[], CU='rgba(232,197,71,1)', CM='rgba(120,170,255,.95)', CT='rgba(240,140,90,1)', CG='rgba(90,205,205,1)';
+  var RANGES=[['1h',3600],['6h',21600],['24h',86400],['3d',259200]];
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>History</b> <span class="cc-p-sub">'+HD.length+' samples &middot; recorded every minute, always on</span>'
+    +'<span class="cc-p-act">'+RANGES.map(function(r){return '<button class="mini'+((SRV.range||21600)===r[1]?' go':'')+'" onclick="srvSetRange('+r[1]+')">'+r[0]+'</button>';}).join(' ')+'</span></div>';
+  h+='<div style="margin:9px 0 2px">'+srvLeg(CU,'CPU %')+srvLeg(CM,'Memory %')+'</div>';
+  h+=srvChart([{color:CU,data:HD.map(function(s){return s.cpu;}),area:true},{color:CM,data:HD.map(function(s){return s.mem;})}],{h:130,min:0,max:100});
+  if(HD.some(function(s){return s.cf!=null;})){
+    h+='<div style="margin:15px 0 2px">'+srvLeg(CT,'CPU temp °F')+srvLeg(CG,'GPU temp °F')+'</div>';
+    h+=srvChart([{color:CT,data:HD.map(function(s){return s.cf;}),area:true},{color:CG,data:HD.map(function(s){return s.gf;})}],{h:120});
   }
   h+='</div>';
   // Load + CPU + memory panel
@@ -25046,6 +25055,59 @@ def _server_metrics(ttl=8):
     _METRICS_CACHE.update({"at": now, "data": d})
     return d
 
+# ---- continuous metrics HISTORY (records even when nobody's watching) ---------------------------------------
+_MHIST = "/Users/Shared/claudefather-metrics/history.json"   # machine-level, shared across the co-located nodes
+_MHIST_CAP = 4320                                            # ~3 days at one sample/minute (a tiny ~200KB file)
+def _metrics_light():
+    """A CHEAP point sample for the history graph -- load, CPU%, memory%, CPU/GPU degF, watts. No node polls / df /
+    ps (those are for the live detail view). ~1s of work, run once a minute -> negligible."""
+    d = {"t": int(time.time())}
+    try: d["load"] = round(float(sh(["sysctl", "-n", "vm.loadavg"], timeout=4)[1].strip().strip("{} ").split()[0]), 2)
+    except Exception: d["load"] = 0
+    try:
+        _, o, _ = sh(["top", "-l", "1", "-n", "0"], timeout=8)
+        for ln in o.splitlines():
+            if ln.startswith("CPU usage"):
+                m = {k: float(v) for v, k in re.findall(r"([\d.]+)%\s*(\w+)", ln)}; d["cpu"] = round(100 - (m.get("idle", 0)), 1); break
+    except Exception: d["cpu"] = 0
+    try:
+        total = int(sh(["sysctl", "-n", "hw.memsize"], timeout=4)[1] or 0); _, vo, _ = sh(["vm_stat"], timeout=5); pg = 16384; st = {}
+        for ln in vo.splitlines():
+            m = re.match(r"(.+?):\s+(\d+)\.", ln)
+            if m: st[m.group(1).strip().lower()] = int(m.group(2))
+        used = (st.get("pages active", 0) + st.get("pages wired down", 0) + st.get("pages occupied by compressor", 0)) * pg
+        d["mem"] = int(100 * used / total) if total else 0
+    except Exception: d["mem"] = 0
+    try:
+        for mp in ("/opt/homebrew/bin/macmon", "macmon"):
+            code, o, _ = sh([mp, "pipe", "-s", "1", "-i", "220"], timeout=6)
+            if code == 0 and o.strip():
+                mm = json.loads(o.strip().splitlines()[-1]); t = mm.get("temp") or {}
+                if t.get("cpu_temp_avg"): d["cf"] = round(t["cpu_temp_avg"] * 9 / 5 + 32)
+                if t.get("gpu_temp_avg"): d["gf"] = round(t["gpu_temp_avg"] * 9 / 5 + 32)
+                d["w"] = round(mm.get("all_power", 0) or 0, 1); break
+    except Exception: pass
+    return d
+def _metrics_sample_loop():
+    """Record one sample/minute to the shared machine-level history, FOREVER (not just while a tab is open).
+    Deduped across the co-located nodes by shared-file freshness: whichever node fires while the file is stale
+    (>55s) takes the sample; the others see it fresh and skip -> ~one sample/min total, no matter how many nodes."""
+    time.sleep(50)
+    while True:
+        try:
+            fresh = os.path.isfile(_MHIST) and (time.time() - os.path.getmtime(_MHIST) < 55)
+            if not fresh:
+                os.makedirs(os.path.dirname(_MHIST), exist_ok=True)
+                try: hist = json.load(open(_MHIST)).get("samples", [])
+                except Exception: hist = []
+                hist.append(_metrics_light())
+                if len(hist) > _MHIST_CAP: hist = hist[-_MHIST_CAP:]
+                tmp = _MHIST + ".tmp"; json.dump({"samples": hist}, open(tmp, "w")); os.replace(tmp, _MHIST)
+                try: os.chmod(_MHIST, 0o644)
+                except Exception: pass
+        except Exception: pass
+        time.sleep(60)
+
 if __name__ == "__main__":
     print("%s Command Center on http://0.0.0.0:%d  (tailnet http://%s:%d)" % (BRAND, PORT, STUDIO_TS, PORT))
     _nfd = _raise_fd_limit()
@@ -25145,6 +25207,7 @@ if __name__ == "__main__":
     _daemon("chief_watchdog", _chief_watchdog)           # CHIEF WATCHDOG: keep the always-on Chief of Staff (the mesh comms endpoint) alive -- respawn if its claude exits
     _daemon("vitals", _vitals_loop)                       # RESILIENCE: watch our OWN fds/threads/cpu/children -> WARN (alert) -> CRITICAL (self-heal) before a leak becomes a zombie or an fd wedge
     _daemon("fleet_watchdog", _fleet_watchdog_loop)       # RESILIENCE phase 2 (overseer only): external backstop -- kill+respawn a co-located node too wedged to self-heal, then verify it came back
+    _daemon("metrics_sample", _metrics_sample_loop)       # SERVER metrics HISTORY: record one machine sample/min forever (shared, deduped) so the graph shows real history, not just while a tab is open
     _daemon("license_activate", _license_activate_loop)  # LICENSE: a sold box auto-activates from its configured activation server on boot if unlicensed
     _daemon("fleet_converge", _fleet_converge_loop)      # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     _daemon("routines", _routines_loop)                  # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts

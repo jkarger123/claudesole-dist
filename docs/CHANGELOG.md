@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.133 -- 2026-07-03  (Server lens: CONTINUOUS metrics history -- records always, not just while watching)
+- The graph now draws from a PERSISTED machine record instead of a client-only buffer that vanished when you left
+  the tab. A background daemon (`_metrics_sample_loop`) records one light sample/minute -- load, CPU%, memory%,
+  CPU/GPU degF, watts -- FOREVER, deduped across the co-located nodes by shared-file freshness (~one sample/min
+  total regardless of node count) to a tiny shared ring buffer (`/Users/Shared/claudefather-metrics/history.json`,
+  ~3 days / ~200KB). Cost: ~1s of work per minute -- negligible. New `/api/metrics-history?range=` (downsampled to
+  ~200 pts). The History panel gains a **range picker (1h / 6h / 24h / 3d)** so you can look back at trends -- a
+  spike or a climb -- even if no one was watching when it happened. Everything still in Fahrenheit.
+
 ## 0.99.132 -- 2026-07-03  (Server lens: live CF-themed graphs + Fahrenheit)
 - Added a **Live** panel to the Server lens: two beautiful CF-themed SVG charts (gold/azure/orange/teal, gradient
   area fills, grid, legends, current-value dots) tracking the last ~6 min -- **CPU % + Memory %** on one, **CPU +

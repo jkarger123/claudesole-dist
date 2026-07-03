@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "06f846b22276359dfd05e929a190261bf919acefd5f81e4fa91ec0a17cd3137c",
+      "claudesole.manifest.json": "4b6a8796fe9c2668a4bb78e72f9fad5f4a2d4ca1ac9069cd555e0905ae9f9d71",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
       "command-center/cc-email": "4895c4eb4ca8e1c6f3b26dd260f9ee3b776c42f24ec656b8581d1cef0c4155ed",
       "command-center/cc-handoff": "9194f8a409f322c9835615cdb014dc9e626a469611ea127b1e9e7a6bf4db2532",
@@ -49,7 +49,7 @@
       "command-center/preship.py": "5500f8d04923413e8d91352d4d6b61c3aa4eefb906fcbefd6954a159aabc439f",
       "command-center/ralph_runner.py": "7d26a8d8bca83ba6f52c8ab45aae1c5643233e5cf94c6293b8f6f14b6c169f3b",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "962abc68a02acc721d04b478b9290e3048ff91e79f2aab25da5ef23066f07d44",
+      "command-center/server.py": "6adf454a448ca0935f98003483543a3c97c34400da1a99170ae7f3aca2450ecd",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/ui_lint.py": "0cabb923f1edd1a5f9808e4e04329c46334483b3da38fcf4adba2e3e9b476132",
@@ -121,9 +121,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783097451,
+    "generated": 1783098675,
     "v": 1,
-    "version": "0.99.132"
+    "version": "0.99.133"
   },
-  "sig": "J+k0/+/PG7PPbK23cw+/2rsm6AUbqUQ5Vk+DpcYf0JuidJzIp/8oRXSaX+QMdSCqkDH8DE+7Ofx4qUOkLwuNCA=="
+  "sig": "mrF0uzw81J1v/ExbNqJD3ejz0a2K1eQSeRDVO6F1EXPhIZ85COgZ4ywythWzNirk8oc6m/r6tTI+Ga4c8slBAA=="
 }
