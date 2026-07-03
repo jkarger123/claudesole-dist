@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.135 -- 2026-07-03  (Experimental category + Agent Lab + _agent_run primitive + resilience auto-diagnosis)
+- **New "Experimental" nav category** -- a staging area for features being worked out; they graduate into core or
+  ship as an extension once proven.
+- **`_agent_run(agent, prompt, model=None)`** -- run a NAMED Claude Code subagent headless on the node SUBSCRIPTION
+  via `claude -p --agent <a> --output-format json` -> {ok, result, cost, ms}. Validates the agent, obeys the `smart`
+  toggle, never raises, uses each agent's own configured model unless one is passed. `_subagents_available()` lists
+  the installed specialists. (Built via an ultracode workflow: 2 codegen agents + a review pass.)
+- **Agent Lab lens** (Experimental): run a specialist as a one-shot function, OR a **Panel** -- several specialists
+  on the SAME task in parallel, side by side (a dynamic mini-workflow). `/api/lab-agents` + `/api/lab-run`.
+- **Resilience auto-diagnosis:** the vitals monitor now fires `incident-scanner` (non-blocking, once per episode on
+  the first warn/critical) to auto-explain a resource spike, persisting the read to `_vitals_diagnosis.json`.
+- Review fixes applied: namespaced routes (avoid the existing /api/agent-run), optional model, injection-safe
+  attribute escaping, @keyframes spin. Verified: both endpoints + the lens headless.
+
 ## 0.99.134 -- 2026-07-03  (Server lens graph: fixed axes + y-axis labels)
 - The history charts now use FIXED axes instead of auto-ranging (which made small wiggles look dramatic and made
   the scale jump around): **utilization pinned 0-100%**, **temperature pinned 80-220°F** (idle-to-throttle range).

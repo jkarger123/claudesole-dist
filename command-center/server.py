@@ -14144,6 +14144,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"vitals": vitals(), "degraded": (dict(_DEGRADED) if _DEGRADED.get("since") else None), "hot_frames": _hot, "stacks_log": os.path.join(STATE_DIR, "_vitals_stacks.log") if _hot else None}))
         if u.path == "/api/server-metrics":   # SERVER lens: whole-machine metrics (cores/load/cpu/mem/disk/thermal/procs + per-node vitals)
             return self._s(200, json.dumps(_server_metrics()))
+        if u.path == "/api/lab-agents":       # AGENT LAB (experimental): installed Claude Code subagents (name + desc)
+            return self._s(200, json.dumps({"ok": True, "agents": _subagents_available()}))
         if u.path == "/api/metrics-history":  # SERVER lens graph: persisted machine history (records even when unwatched)
             try: rng = max(300, min(int(q.get("range", ["21600"])[0]), 7 * 86400))
             except Exception: rng = 21600
@@ -14849,6 +14851,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/security-scan": return self._s(200, json.dumps(security_scan()))
         if u.path == "/api/agent-open":    return self._s(200, json.dumps(agent_open(body.get("slug", ""))))
         if u.path == "/api/agent-run":     return self._s(200, json.dumps(agent_run(body.get("slug", ""))))
+        if u.path == "/api/lab-run":       return self._s(200, json.dumps(_agent_run(body.get("agent") or "", body.get("prompt") or "", model=(body.get("model") or None))))
         if u.path == "/api/admin-shell":   return self._s(200, json.dumps(admin_shell()))
         if u.path == "/api/admin-stage":   return self._s(200, json.dumps(admin_stage(body.get("text", ""), run=bool(body.get("run")))))
         if u.path == "/api/skill-create":  return self._s(200, json.dumps(skill_create(body.get("scope", "project"), body.get("name", ""), body.get("description", ""))))
@@ -15002,6 +15005,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #selcopy.show{display:block}
 #selov{position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:6;display:none}
 #selov i{position:absolute;background:rgba(120,170,255,.32);border-radius:1px}
+@keyframes spin{to{transform:rotate(360deg)}}
 #cliptoast{position:fixed;left:50%;transform:translateX(-50%);top:14px;z-index:30;display:none;background:#e8c547;color:#15120a;border:0;font:700 12.5px -apple-system,sans-serif;border-radius:18px;padding:9px 18px;box-shadow:0 8px 24px rgba(0,0,0,.55)}
 #cliptoast.show{display:block;animation:ctpop .18s ease}
 @keyframes ctpop{from{opacity:0;transform:translateX(-50%) translateY(-6px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
@@ -17049,6 +17053,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="desktop"><i class="ph-light ph-monitor"></i>Remote Desktop</button>
 <button data-l="usage"><i class="ph-light ph-chart-line-up"></i>Accounts / Usage</button>
 <button data-l="server"><i class="ph-light ph-gauge"></i>Server</button>
+<button data-l="agentlab"><i class="ph-light ph-flask"></i>Agent Lab</button>
 <button data-l="backup"><i class="ph-light ph-floppy-disk"></i>Backup</button>
 <button data-l="security"><i class="ph-light ph-shield-check"></i>Security</button>
 <button data-l="agents"><i class="ph-light ph-robot"></i>Agents</button>
@@ -17139,6 +17144,7 @@ function render(){
   else if(LENS=="desktop"){loadDesktop();return;}
   else if(LENS=="usage"){loadUsage();return;}
   else if(LENS=="server"){loadServerMetrics();return;}
+  else if(LENS=="agentlab"){loadAgentLab();return;}
   else if(LENS=="backup"){loadBackup();return;}
   else if(LENS=="security"){loadSecurity();return;}
   else if(LENS=="agents"){loadAgents();return;}
@@ -21576,6 +21582,152 @@ function renderServerMetrics(){
     h+='</table></div>'; }
   g.innerHTML='<div class="modstack">'+h+'</div>';
 }
+// ===== Agent Lab (EXPERIMENTAL) — run specialist subagents as one-shot functions + parallel panels =====
+function agEsc(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function agAttr(s){ return agEsc(s).replace(/\"/g,"&quot;").replace(/'/g,"&#39;"); }
+var AGENTLAB={agents:null,sel:null,busy:false,result:null,panelSel:{},panelRunning:false,panelResults:{}};
+
+async function loadAgentLab(){
+  var g=document.getElementById("grid"); if(!g)return;
+  g.innerHTML=empty("Loading specialists…");
+  try{
+    var d=await(await fetch("/api/lab-agents")).json();
+    AGENTLAB.agents=(d&&d.agents)||d||[];
+  }catch(e){ g.innerHTML=empty("Could not load available specialists."); return; }
+  if(!AGENTLAB.agents.length){ g.innerHTML=alHead()+empty("No specialists are available on this node yet."); return; }
+  if(!AGENTLAB.sel) AGENTLAB.sel=AGENTLAB.agents[0].name;
+  renderAgentLab();
+}
+
+function alHead(){
+  return '<div class="cc-head"><span class="cc-h-t">Agent Lab</span>'
+    +'<span class="cc-h-sub">Run our specialist subagents as one-shot functions and side-by-side panels</span></div>'
+    +'<div class="cc-panel"><div class="cc-p-note">'
+    +'<span class="badge bdg-amber">Experimental</span> &nbsp;These features are being worked out here. When one proves itself it graduates into core or ships as an extension.'
+    +'</div></div>';
+}
+
+function renderAgentLab(){
+  var g=document.getElementById("grid"); if(!g)return;
+  var A=AGENTLAB, list=A.agents||[];
+  var h=alHead();
+
+  // ---- Single-agent runner ----
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Run a specialist</b> <span class="cc-p-sub">one agent, one task — a one-shot function call</span></div>';
+  h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0">';
+  list.forEach(function(a){
+    var on=(A.sel===a.name);
+    h+='<span class="cc-chip" style="cursor:pointer;'+(on?'outline:1px solid rgba(232,197,71,.85)':'')+'" title="'+agAttr(a.description||"")+'" onclick="alPick(\''+esc(a.name)+'\')">'+esc(a.name)+'</span>';
+  });
+  h+='</div>';
+  var selA=alFind(A.sel);
+  if(selA&&selA.description) h+='<div class="cc-p-note" style="margin-bottom:8px">'+esc(selA.description)+'</div>';
+  h+='<textarea id="alTask" class="cc-in" style="width:100%;min-height:84px;resize:vertical" placeholder="Describe the task for '+esc(A.sel||"the agent")+'…"'+(A.busy?" disabled":"")+'></textarea>';
+  h+='<div style="margin-top:8px"><button class="btn go" onclick="alRun()"'+(A.busy?" disabled":"")+'>'+(A.busy?"Running…":"Run")+'</button>'
+    +(A.busy?' <span class="cc-p-sub">'+esc(A.sel||"")+' is thinking…</span>':'')+'</div>';
+  // result
+  if(A.result){
+    var r=A.result;
+    h+='<div class="cc-panel" style="margin-top:10px"><div class="cc-p-h"><b>'+esc(r.agent||A.sel||"result")+'</b> '
+      +'<span class="cc-p-sub">'+alMeta(r)+'</span></div>';
+    if(r.error){ h+='<div class="cc-p-note"><span class="badge bdg-red">error</span> '+esc(r.error)+'</div>'; }
+    else { h+='<div class="cc-p-note" style="white-space:pre-wrap">'+agEsc(r.result||"(no output)")+'</div>'; }
+    h+='</div>';
+  }
+  h+='</div>';
+
+  // ---- Panel mode ----
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Panel</b> <span class="cc-p-sub">several specialists on the SAME task, in parallel — a dynamic mini-workflow</span></div>';
+  h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0">';
+  list.forEach(function(a){
+    var on=!!A.panelSel[a.name];
+    h+='<span class="cc-chip" style="cursor:pointer;'+(on?'outline:1px solid rgba(232,197,71,.85)':'')+'" title="'+agAttr(a.description||"")+'" onclick="alPanelToggle(\''+esc(a.name)+'\')">'
+      +(on?'✓ ':'')+esc(a.name)+'</span>';
+  });
+  h+='</div>';
+  h+='<textarea id="alPanelTask" class="cc-in" style="width:100%;min-height:72px;resize:vertical" placeholder="One task to send to every selected specialist…"'+(A.panelRunning?" disabled":"")+'></textarea>';
+  var nSel=Object.keys(A.panelSel).filter(function(k){return A.panelSel[k];}).length;
+  h+='<div style="margin-top:8px"><button class="btn go" onclick="alPanelRun()"'+(A.panelRunning?" disabled":"")+'>'+(A.panelRunning?"Running…":"Run panel")+'</button> '
+    +'<span class="cc-p-sub">'+nSel+' selected</span></div>';
+  // panel results grid
+  var panelKeys=Object.keys(A.panelResults);
+  if(panelKeys.length){
+    h+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-top:10px">';
+    panelKeys.forEach(function(name){
+      var pr=A.panelResults[name];
+      h+='<div class="cc-panel" style="margin:0"><div class="cc-p-h"><b>'+esc(name)+'</b> <span class="cc-p-sub">'
+        +(pr.pending?'<span class="badge bdg-dim">running…</span>':alMeta(pr))+'</span></div>';
+      if(pr.pending){ h+='<div class="cc-p-note">'+alSpinner()+' working…</div>'; }
+      else if(pr.error){ h+='<div class="cc-p-note"><span class="badge bdg-red">error</span> '+esc(pr.error)+'</div>'; }
+      else { h+='<div class="cc-p-note" style="white-space:pre-wrap">'+agEsc(pr.result||"(no output)")+'</div>'; }
+      h+='</div>';
+    });
+    h+='</div>';
+  }
+  h+='</div>';
+
+  g.innerHTML='<div class="modstack">'+h+'</div>';
+}
+
+function alFind(name){ return (AGENTLAB.agents||[]).filter(function(a){return a.name===name;})[0]; }
+function alSpinner(){ return '<span style="display:inline-block;width:10px;height:10px;border:2px solid rgba(232,197,71,.35);border-top-color:rgba(232,197,71,1);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-1px"></span>'; }
+function alMeta(r){
+  var bits=[];
+  if(r.cost!=null||r.total_cost_usd!=null){ var c=(r.cost!=null?r.cost:r.total_cost_usd); bits.push('$'+Number(c||0).toFixed(4)); }
+  if(r.ms!=null||r.duration_ms!=null){ var m=(r.ms!=null?r.ms:r.duration_ms); bits.push(Math.round(m)+'ms'); }
+  return bits.join(' · ');
+}
+
+function alPick(name){ AGENTLAB.sel=name; renderAgentLab(); }
+
+async function alRun(){
+  var A=AGENTLAB;
+  var ta=document.getElementById("alTask");
+  var prompt=(ta&&ta.value||"").trim();
+  if(!prompt){ toast("Enter a task first."); return; }
+  if(!A.sel){ toast("Pick a specialist."); return; }
+  A.busy=true; A.result=null; renderAgentLab();
+  try{
+    var res=await fetch("/api/lab-run",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({agent:A.sel,prompt:prompt})});
+    var d=await res.json();
+    A.result=alNorm(d,A.sel);
+  }catch(e){ toast("Run failed."); A.result={agent:A.sel,error:String(e&&e.message||e)}; }
+  A.busy=false; renderAgentLab();
+}
+
+function alPanelToggle(name){ AGENTLAB.panelSel[name]=!AGENTLAB.panelSel[name]; renderAgentLab(); }
+
+async function alPanelRun(){
+  var A=AGENTLAB;
+  var ta=document.getElementById("alPanelTask");
+  var prompt=(ta&&ta.value||"").trim();
+  var picks=Object.keys(A.panelSel).filter(function(k){return A.panelSel[k];});
+  if(!prompt){ toast("Enter a task first."); return; }
+  if(!picks.length){ toast("Select at least one specialist."); return; }
+  A.panelRunning=true; A.panelResults={};
+  picks.forEach(function(n){ A.panelResults[n]={pending:true}; });
+  renderAgentLab();
+  // fire all in parallel; each updates its own panel as it resolves
+  await Promise.all(picks.map(function(name){
+    return fetch("/api/lab-run",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({agent:name,prompt:prompt})})
+      .then(function(r){return r.json();})
+      .then(function(d){ A.panelResults[name]=alNorm(d,name); renderAgentLab(); })
+      .catch(function(e){ A.panelResults[name]={agent:name,error:String(e&&e.message||e)}; renderAgentLab(); });
+  }));
+  A.panelRunning=false; renderAgentLab();
+}
+
+function alNorm(d,name){
+  d=d||{};
+  return {
+    agent:d.agent||name,
+    result:d.result!=null?d.result:(d.output!=null?d.output:""),
+    cost:(d.cost!=null?d.cost:d.total_cost_usd),
+    ms:(d.ms!=null?d.ms:d.duration_ms),
+    error:(d.is_error?(d.result||"agent reported an error"):(d.error||null))
+  };
+}
+
 async function loadNotebook(){
   var box=document.getElementById("grid");if(!box)return;
   var url="/api/note-list"+(NB.q?("?q="+encodeURIComponent(NB.q)):"");
@@ -22827,6 +22979,7 @@ function busyOn(msg,sub){ var o=document.getElementById('cfbusy'); if(!o){ o=doc
 function busyOff(){ var o=document.getElementById('cfbusy'); if(o) o.style.display='none'; }
 // ---- "How this works" explainers: per-feature, auto-shows once, dismissible + never-again, reopen via the ? button ----
 var HELP={
+  agentlab:{t:'Agent Lab',sub:'Experimental \u2014 run specialist subagents as one-shot functions and parallel panels',h:'<p><span class="badge bdg-amber">Experimental</span> Agent Lab is a workbench for our specialist subagents (code-reviewer, cost-reporter, deploy-checker, incident-scanner, security-auditor, and any others the node exposes). Features here are being worked out; when one proves itself it graduates into core or ships as an extension.</p><p><b>Run a specialist</b> \u2014 pick one agent, type a task, and Run it as a one-shot function; you get the answer plus its cost and duration.</p><p><b>Panel</b> \u2014 select several specialists and give them ONE task; they run in parallel and answers land side by side as each finishes, a quick dynamic mini-workflow.</p><p>Every run uses the node&rsquo;s own subscription login.</p>'},
  pillars:{t:'Pillars',sub:'The major building blocks of your product, each with a status and what is in progress.',h:'<p><b>What:</b> the big pieces your product is made of -- each a card showing its health and the item being worked on right now.</p><p><b>Why:</b> one glance tells you what exists and where the active work is, without digging through folders.</p><p><b>How:</b> click a card to drill into its areas, or use the launch button to start a working session focused on that pillar.</p>'},
  routines:{t:'Routines',sub:'Recurring jobs that run on a schedule -- a nightly report, a weekly cleanup, and so on.',h:'<p><b>What:</b> a routine is a task that runs itself on a schedule (daily, weekly, or on demand) instead of you remembering to trigger it.</p><p><b>Why:</b> the repeatable chores -- a morning digest, a backup, a sync -- happen on their own, and this tab shows when each last ran and whether it worked.</p><p><b>How:</b> hit Run now to fire one immediately, or ask your Chief of Staff: \'set up a routine that emails me a summary every weekday at 8am.\'</p>'},
  modules:{t:'Projects',sub:'Your tools and work, organized as a tidy folder tree you can drill into.',h:'<p><b>What:</b> a browsable map of everything in this workspace -- each folder is a tool, project, or area, with a one-line description of what it is.</p><p><b>Why:</b> it keeps related work together so you and your agents always know where something lives and can pick up past conversations or files for that area.</p><p><b>How:</b> click a card to go deeper, use launch to start a session in that folder, or ask your Chief of Staff: \'make a new module for the Johnson project.\'</p>'},
@@ -23554,8 +23707,9 @@ function treeRemoveLens(tree,l){for(var i=tree.length-1;i>=0;i--){var n=tree[i];
 // Users can still drag/rename/add/delete + "flatten" to the old most-used list. Built-ins map here; extension
 // lenses carry their own category (extension.json default_category -> extLenses[].category). "reset" re-seeds this.
 var NAV_PINNED=["portfolio","sessions","chief","comms","notebook","notes","tasks","files"];   // stay top-level (daily drivers)
-var NAV_CAT_ORDER=["Google","Workspace","Agency","Team","Integrations","System"];
+var NAV_CAT_ORDER=["Google","Workspace","Agency","Team","Integrations","Experimental","System"];
 var NAV_CAT={
+  agentlab:"Experimental",
   gmail:"Google",calendar:"Google",drive:"Google",
   modules:"Workspace",projects:"Workspace",context:"Workspace",capture:"Workspace",ideas:"Workspace",handoffs:"Workspace",
   pipeline:"Workspace",ralph:"Workspace",jobs:"Workspace",routines:"Workspace",tree:"Workspace",
@@ -24840,6 +24994,131 @@ def _thread_dump(reason=""):
         return [{"frame": k, "threads": n} for k, n in sorted(buckets.items(), key=lambda kv: -kv[1])[:12]]
     except Exception: return []
 
+# ---- SUBAGENTS: run a scoped Claude Code subagent (~/.claude/agents/<name>.md) headless on the SUBSCRIPTION ----
+# Sibling of _claude_text: same no-metered-key subscription login + `smart` toggle, but dispatches to a NAMED
+# subagent (its own system prompt/tools) and asks for --output-format json so we get cost + timing back. Used by
+# the API (Agents lens) and by the resilience layer to AUTO-EXPLAIN a resource spike (incident-scanner). Defensive:
+# validates the agent exists, never raises, always returns a small dict/list.
+_SUBAGENTS_CACHE = {"ts": 0, "v": []}
+
+def _subagents_available():
+    """List installed Claude Code subagents -> [{"name","desc"}]. Scans ~/.claude/agents/*.md plus the project's
+    own .claude/agents (if present); desc = the frontmatter `description:` line (fallback: first non-empty body
+    line). 30s memo so a hot loop of /api/agents-available calls doesn't stat the tree every hit. Never raises."""
+    now = time.time()
+    if _SUBAGENTS_CACHE["v"] and now - _SUBAGENTS_CACHE["ts"] < 30:
+        return _SUBAGENTS_CACHE["v"]
+    out = {}   # name -> desc  (first dir wins; user roster before project roster)
+    dirs = [os.path.expanduser("~/.claude/agents")]
+    try:
+        pj = os.path.join(PROJECT, ".claude", "agents")
+        if os.path.isdir(pj): dirs.append(pj)
+    except Exception: pass
+    for d in dirs:
+        try:
+            if not os.path.isdir(d): continue
+            for p in sorted(glob.glob(os.path.join(d, "*.md"))):
+                try:
+                    with open(p, errors="ignore") as f:
+                        txt = f.read()
+                except Exception:
+                    continue
+                name = os.path.splitext(os.path.basename(p))[0]
+                desc = ""
+                # parse a leading --- YAML frontmatter block for name:/description:
+                fm = ""
+                m = re.match(r"\s*---\s*\n(.*?)\n---\s*\n", txt, re.DOTALL)
+                if m:
+                    fm = m.group(1)
+                    for ln in fm.splitlines():
+                        s = ln.strip()
+                        if s.lower().startswith("name:"):
+                            v = s.split(":", 1)[1].strip().strip("\"'")
+                            if v: name = v
+                        elif s.lower().startswith("description:"):
+                            v = s.split(":", 1)[1].strip().strip("\"'")
+                            if v: desc = v
+                if not desc:
+                    body = txt[m.end():] if m else txt
+                    for ln in body.splitlines():
+                        s = ln.strip().lstrip("#").strip()
+                        if s: desc = s; break
+                if name and name not in out:
+                    out[name] = (desc or "")[:400]
+        except Exception:
+            continue
+    res = [{"name": k, "desc": out[k]} for k in sorted(out)]
+    _SUBAGENTS_CACHE["ts"] = now; _SUBAGENTS_CACHE["v"] = res
+    return res
+
+def _agent_run(agent, prompt, model=None, timeout=90):
+    """Run a NAMED Claude Code subagent headless on the node's SUBSCRIPTION login (no metered key), like _claude_text
+    but via `--agent <agent> --output-format json`. Validates the agent is installed; obeys the `smart` toggle.
+    Returns {"ok":True,"agent","result","cost","ms"} on success, else {"ok":False,"error":...}. Never raises."""
+    if CC.get("smart", True) is False:
+        return {"ok": False, "error": "smart disabled"}
+    try:
+        agent = (agent or "").strip()
+        if not agent or not any(a["name"] == agent for a in _subagents_available()):
+            return {"ok": False, "error": "unknown agent"}
+        if not (prompt or "").strip():
+            return {"ok": False, "error": "empty prompt"}
+        r = subprocess.run(["claude", "--dangerously-skip-permissions", "-p", prompt,
+                            "--agent", agent, "--output-format", "json"] + (["--model", model] if model else []),
+                           capture_output=True, text=True, timeout=timeout, cwd="/tmp",
+                           env={**os.environ, "PATH": os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin"})
+        if r.returncode != 0:
+            return {"ok": False, "error": ((r.stderr or r.stdout or "").strip()[:200] or "exit %s" % r.returncode)}
+        try:
+            o = json.loads((r.stdout or "").strip() or "{}")
+        except Exception:
+            return {"ok": False, "error": "unparseable json output"}
+        if not isinstance(o, dict):
+            return {"ok": False, "error": "unexpected json output"}
+        if o.get("is_error"):
+            return {"ok": False, "error": (str(o.get("result") or "agent reported error")[:200])}
+        return {"ok": True, "agent": agent, "result": (o.get("result") or ""),
+                "cost": o.get("total_cost_usd"), "ms": o.get("duration_ms")}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "timeout after %ss" % timeout}
+    except Exception as e:
+        return {"ok": False, "error": (type(e).__name__ + ": " + str(e))[:200]}
+
+_VITALS_DIAGNOSIS = os.path.join(STATE_DIR, "_vitals_diagnosis.json")
+def _auto_diagnose(reason, vitals, hot_frames):
+    """AUTO-EXPLAIN a resource spike: hand the incident-scanner subagent the WARN reason + the vitals snapshot + the
+    top hot-frame buckets (which threads share a top frame -- the runaway is the highest count) and persist its
+    read. Cheap/off-path -- meant to run in a daemon thread off the FIRST WARN of an episode so a starved node is
+    never blocked on it. Writes _vitals_diagnosis.json atomically. Returns the record. Never raises."""
+    rec = {"ts": int(time.time()), "reason": reason, "vitals": vitals, "diagnosis": None, "cost": None}
+    try:
+        frames = hot_frames or []
+        lines = []
+        for fr in frames[:8]:
+            try: lines.append("  x%-4s %s" % (fr.get("threads"), fr.get("frame")))
+            except Exception: pass
+        prompt = ("A ClaudeFather node (%s) just flagged a resource WARN. Reason: %s\n\n"
+                  "Vitals snapshot:\n%s\n\n"
+                  "Hot frames (threads sharing a top stack frame -- the leak is almost certainly the highest count):\n%s\n\n"
+                  "In 3-5 sentences: what is the most likely cause, and the single highest-value next action? "
+                  "Be concrete; name the suspect thread/loop if the hot frames point at one." % (
+                      INSTANCE_ID, str(reason)[:200],
+                      json.dumps(vitals, default=str)[:1500],
+                      ("\n".join(lines) or "  (none captured)")))
+        r = _agent_run("incident-scanner", prompt, timeout=90)
+        if r.get("ok"):
+            rec["diagnosis"] = r.get("result"); rec["cost"] = r.get("cost")
+        else:
+            rec["diagnosis"] = "error: " + str(r.get("error"))
+    except Exception as e:
+        rec["diagnosis"] = "error: " + (type(e).__name__ + ": " + str(e))[:160]
+    try:
+        tmp = _VITALS_DIAGNOSIS + ".tmp"
+        with open(tmp, "w") as f: json.dump(rec, f)
+        os.replace(tmp, _VITALS_DIAGNOSIS)
+    except Exception: pass
+    return rec
+
 _SELFHEAL = {"last": 0, "boot": time.time()}
 def _reap_orphan_terminals():
     """Kill this server's own `tmux attach-session` children (browser-terminal pty children). Called only at a
@@ -24873,7 +25152,7 @@ def _vitals_loop():
     """THE immune system: every ~45s sample our own vitals. WARN -> log LOUD + alert the operator once per episode.
     CRITICAL (twice running, to ignore a blip) -> self-heal. Catches BOTH failure modes we hit -- fd exhaustion AND
     a thread/CPU zombie -- and, being symptom-based, any future leak too. Cheap (getrusage + one pgrep)."""
-    time.sleep(30); crit = 0; warned = ""
+    time.sleep(30); crit = 0; warned = ""; diag_armed = True
     while True:
         try:
             v = vitals()
@@ -24891,8 +25170,14 @@ def _vitals_loop():
                     print(msg)
                     try: notify_send(msg)
                     except Exception: pass
+                if diag_armed:               # AUTO-DIAGNOSE once per episode (first warn/critical), off the vitals thread so a starved node isn't blocked
+                    diag_armed = False
+                    try:
+                        _hf = _thread_dump("auto-diagnose: " + v["level"])
+                        threading.Thread(target=_auto_diagnose, args=("vitals " + v["level"], v, _hf), daemon=True, name="auto-diagnose").start()
+                    except Exception: pass
             elif warned:
-                warned = ""   # recovered -> allow the next episode to alert again
+                warned = ""; diag_armed = True   # recovered -> re-arm alert + diagnosis for the next episode
         except Exception: pass
         time.sleep(45)
 
