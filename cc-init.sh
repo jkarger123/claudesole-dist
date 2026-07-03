@@ -31,6 +31,13 @@ echo "  framework:    $CC_HOME"
 #    deliverables/ symlinks into it). Override its location with cc.config "deliverables_root" to put it on a
 #    dedicated drive without moving the rest of the install.
 mkdir -p "$CC_HOME/agents" "$CC_HOME/bin" "$CC_HOME/data" "$CC_HOME/deliverables"
+# git-init the central deliverables store so authored docs are versioned from day one (CCR: node-builder git-init).
+# Guarded; the project_root is the user's own tree, so we do NOT force git on it here.
+if command -v git >/dev/null 2>&1 && [ ! -d "$CC_HOME/deliverables/.git" ]; then
+  printf '%s\n' '.DS_Store' > "$CC_HOME/deliverables/.gitignore"
+  ( git -C "$CC_HOME/deliverables" init -q && git -C "$CC_HOME/deliverables" add -A \
+      && git -C "$CC_HOME/deliverables" -c user.name="$BRAND" -c user.email="node@claudefather.local" commit -qm "deliverables store initialized" ) 2>/dev/null || true
+fi
 
 # 2) write/merge config (preserve agents list + chief_brief if already present)
 python3 - "$CFG" "$NAME" "$ROOT" "$BRAND" "$STORAGE" <<'PY'

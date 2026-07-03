@@ -15,8 +15,8 @@
       "agents/security/tools/scan.py": "89c6419c823bb6146d9750c2a6b6d5ec4a60e8449f30260e2b56196ba1cef325",
       "agents/skimlinks-merchant-sync/tools/backfill_skimlinks_changes.py": "78fcc686133bd33bbe568e5d02bebfb2b65d1a272ce920dcd25b82e46a630698",
       "agents/skimlinks-merchant-sync/tools/skimlinks_sync.py": "90c1171829b058224ae8626304118f956523d105b3ba62448ca53a121b798f9f",
-      "cc-init.sh": "77c63bc3f2738980758b64c3b152ce4bfc63d3567ad56aed2ce800e966db24b9",
-      "cc-newinstance.sh": "6bb77b9d92787bbd04f90516f2b4f277bae2a4414ef67301554f347895eef2cc",
+      "cc-init.sh": "239e797c4c173fb00aa966a19df0d1ce632b0491d06b83ecf4a78b75208e6010",
+      "cc-newinstance.sh": "4d8fbb0797b751b724a61f1987d5a4ea212325118a7a1c77308317b23449350c",
       "cc-recover.sh": "110a7a50ef880f2b1696f27d176ce501de1a4b4d148ec99d4c6d93216993708b",
       "cc-update.sh": "ef23402e4669504036b69df527961e200027a7ab318b82b5fafab9aec56bf01f",
       "cf-appliance-install.sh": "6974494064107096079a40ed0f3ec865e38e0e0905ec94d5671a9d2793e9424e",
@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "6a211661d4265d97d0dca5f5067ba1ce0b170003878ad02b7b57bfb5e068119f",
+      "claudesole.manifest.json": "8c53c5ebeadcd0b4128c6dcea1756b205f92c0c51e5da4912e9ee3e4deb9f245",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
       "command-center/cc-email": "4895c4eb4ca8e1c6f3b26dd260f9ee3b776c42f24ec656b8581d1cef0c4155ed",
       "command-center/cc-handoff": "9194f8a409f322c9835615cdb014dc9e626a469611ea127b1e9e7a6bf4db2532",
@@ -50,7 +50,7 @@
       "command-center/preship.py": "5500f8d04923413e8d91352d4d6b61c3aa4eefb906fcbefd6954a159aabc439f",
       "command-center/ralph_runner.py": "ee50495ce1c0aa06b7f660854d2ee531fb151cdbce2c4fdaaaeec6ff5abff55e",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "e826ce496e85b498eec494b419783447d5280fbd9a5f89090e1b2c9e70c6ae7f",
+      "command-center/server.py": "87a90040d0c024176ee2408a962412c2c219158bb5e6ff5707567e6f2cef6ac4",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/ui_lint.py": "0cabb923f1edd1a5f9808e4e04329c46334483b3da38fcf4adba2e3e9b476132",
@@ -122,9 +122,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783114818,
+    "generated": 1783118958,
     "v": 1,
-    "version": "0.99.139"
+    "version": "0.99.140"
   },
-  "sig": "b4j9Gq1HSUHLBYzLYsRAeGXu7P39Wr4rX3CVZi9IH6FOnGX4f7WQgj0eaNfl3391ghGMxufDh8EdhvjFUxi1Cw=="
+  "sig": "FtnLkmX5x02Dj0nbNjH9rgP8gdsp9AbQaxkspk9sX+t2AvdX4ia9Rj75hFvWsVU4BhNGx/RX2BT238/5GLrQDw=="
 }

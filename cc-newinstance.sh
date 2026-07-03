@@ -138,7 +138,28 @@ Keep this a LEAN index (< 200 lines): what this project is, where things live, h
 
 ## Sub-tools
 (Folders with their own CLAUDE.md become modules; the control center indexes them here.)
+
+## Deliverables
+Authored docs (Status/Roadmap/as-builts) go in the bundle's central \`deliverables/\` store, which is its OWN git
+repo (module \`deliverables/\` dirs symlink into it) -- commit docs THERE, not in this project repo.
 EOF
+fi
+
+# ---- 2b) git-init the project repo + the central deliverables store so every node is BORN with a diff/rollback
+#          baseline + versioned docs (CCR: node-builder git-init). Guarded: a git-less box still scaffolds fine.
+if command -v git >/dev/null 2>&1; then
+  if [ ! -d "$PROOT/.git" ]; then
+    printf '%s\n' '.venv/' '__pycache__/' '*.pyc' '*.db' 'node_modules/' 'media_store/' 'secrets/' '.env' '.env.*' '.DS_Store' > "$PROOT/.gitignore"
+    ( git -C "$PROOT" init -q && git -C "$PROOT" add -A \
+        && git -C "$PROOT" -c user.name="$BRAND" -c user.email="node@claudefather.local" commit -qm "node scaffolded ($NAME)" ) 2>/dev/null || true
+    echo "  git: initialized project repo at $PROOT"
+  fi
+  if [ ! -d "$DEST/deliverables/.git" ]; then
+    printf '%s\n' '.DS_Store' > "$DEST/deliverables/.gitignore"
+    ( git -C "$DEST/deliverables" init -q && git -C "$DEST/deliverables" add -A \
+        && git -C "$DEST/deliverables" -c user.name="$BRAND" -c user.email="node@claudefather.local" commit -qm "deliverables store initialized" ) 2>/dev/null || true
+    echo "  git: initialized deliverables store at $DEST/deliverables"
+  fi
 fi
 
 # ---- 3) write the per-instance config (secrets included; chmod 600 below). Values pass as argv so

@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.140 -- 2026-07-03  (node-builder git-init + stale-CCR auto-detect)
+- **Node-builder git-init (CCR from shopos):** cc-newinstance.sh + cc-init.sh now git-init the project repo (starter
+  .gitignore + a "node scaffolded" baseline commit) AND the central deliverables store (its own repo, versioned docs)
+  at instance creation, so every node is BORN with a diff/rollback baseline instead of hand-initializing mid-work.
+  Guarded on `command-v git` so a git-less box still scaffolds; the starter project CLAUDE.md now orients agents that
+  deliverables/ is a separate git repo (commit docs there, not the project repo).
+- **Stale-CCR auto-detect:** the CCR queue now flags open CCRs whose named code CHANGED in git since they were filed
+  ("possibly addressed -- verify + likely close"), so a shipped-but-not-closed CCR gets caught instead of re-worked
+  (we found 4 by hand this week). `_ccr_staleness` + `ccr_recheck()` + POST /api/ccr-recheck + a "Re-scan for
+  already-done" button + a gold pill on the card. Churn-capped (>30 commits on a file = high-churn like server.py, not
+  signal) so it doesn't cry wolf on every CCR that merely names the big file.
+
 ## 0.99.139 -- 2026-07-03  (Ralph loops: stop the relaunch churn -- CCR ccr-1783114463894)
 - A finished Ralph loop, when re-invoked by some external trigger, was burning a full agent turn + the ~2min
   verifier before exiting, because the completion check was gated on n>START. Two fixes (from an hptuner-node CCR,

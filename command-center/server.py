@@ -13000,6 +13000,45 @@ _CCR_REVIEW_SEM = threading.Semaphore(2)   # bound concurrent auto-reviews so a 
 CCR_KINDS = ("module", "extension", "framework", "fix")
 CCR_STATUSES = ("new", "triaged", "approved", "building", "shipped", "rejected")
 
+def _ccr_staleness(text, since_ts):
+    """If files the CCR NAMES were changed in git since it was filed, it may ALREADY be addressed -> flag it so a
+    stale CCR gets CLOSED, not re-worked (we found 4 already-shipped-but-open CCRs by hand this way). Cheap: git only.
+    Returns [{path, commits, latest}]."""
+    try: since = int(since_ts or 0)
+    except Exception: since = 0
+    if since <= 0: return []
+    paths = set(re.findall(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:py|sh|js|json|md)", text or ""))
+    hits = []
+    for p in list(paths)[:14]:
+        p = p.strip().strip(".,);:")
+        if not os.path.exists(os.path.join(CC_HOME, p)): continue
+        try:
+            code, o, _ = sh(["git", "-C", CC_HOME, "log", "--since=@%d" % since, "--oneline", "--", p], timeout=8)
+            if code == 0 and o.strip():
+                ls = o.strip().splitlines()
+                # A TARGETED fix touches a file a few times; a mega-file (server.py) churns on every ship -> "changed
+                # since filed" is meaningless there. Only count modest-churn files as a staleness signal, so we don't
+                # cry wolf on every CCR that merely names server.py.
+                if len(ls) <= 30:
+                    hits.append({"path": p, "commits": len(ls), "latest": ls[0][:90]})
+        except Exception: pass
+    return hits[:6]
+
+def ccr_recheck():
+    """Re-scan every OPEN CCR: did its named surface change in git since it was filed? Flags likely-already-addressed
+    CCRs so they can be closed instead of re-worked. No subagent -- pure git, safe to run often."""
+    n = 0
+    with _CCR_LOCK:
+        d = load(CCR, {"ccrs": []})
+        for c in d.get("ccrs", []):
+            if c.get("status") not in ("new", "triaged", "approved", "building"): continue
+            txt = "%s %s %s" % (c.get("title", ""), c.get("surface", ""), c.get("plan", ""))
+            st = _ccr_staleness(txt, c.get("ts"))
+            c.setdefault("ai_review", {})["stale"] = st
+            if st: n += 1
+        save(CCR, d)
+    return {"ok": True, "flagged": n}
+
 def ccr_list(): return load(CCR, {"ccrs": []}).get("ccrs", [])
 
 def ccr_submit(body):
@@ -13038,7 +13077,8 @@ def ccr_submit(body):
                 for c in dd.get("ccrs", []):
                     if c.get("id") == cid:
                         c["ai_review"] = {"verdict": rv.get("verdict"), "ts": int(time.time()),
-                                          "text": ((rv.get("reviews") or [{}])[0].get("text") or "")[:2000]}
+                                          "text": ((rv.get("reviews") or [{}])[0].get("text") or "")[:2000],
+                                          "stale": _ccr_staleness(txt, c.get("ts"))}
                         save(CCR, dd); break
         except Exception as e:
             print("[ccr-review] %s failed: %s" % (cid, str(e)[:120]))
@@ -14696,6 +14736,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/idea-promote":  return self._s(200, json.dumps(idea_promote(body)))
         if u.path == "/api/ccr-submit":    return self._s(200, json.dumps(ccr_submit(body)))
         if u.path == "/api/ccr-update":    return self._s(200, json.dumps(ccr_update(body)))
+        if u.path == "/api/ccr-recheck":   return self._s(200, json.dumps(ccr_recheck()))   # flag open CCRs whose surface changed since filed (likely already addressed)
         if u.path == "/api/ccr-delete":    return self._s(200, json.dumps(ccr_delete(body.get("id", ""))))
         if u.path == "/api/ccr-propose":   return self._s(200, json.dumps(ccr_propose(body)))
         if u.path == "/api/settings-save": return self._s(200, json.dumps(settings_save(body)))
@@ -23366,7 +23407,8 @@ async function loadCcr(){
     }).join("")+'</div>';
     h+='<div class="cc-p-note">✅ current · ⬆️ ahead (build source, not yet staged to dist) · ⚠️ drifted (local edits — investigate) · ⬇️ behind (run cc-update) · ❔ unreachable. Hover a drifted/behind node for the differing files.</div></div>';
   }
-  h+='<div class="cc-panel"><div class="cc-p-h"><b>Core Change Requests</b> <span class="cc-p-sub">'+open+' open / '+CCRS.length+' total</span></div>'
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Core Change Requests</b> <span class="cc-p-sub">'+open+' open / '+CCRS.length+' total</span>'
+    +'<span class="cc-p-act"><button class="mini" title="Scan every OPEN CCR: has the code it names changed in git since it was filed? Flags ones likely ALREADY addressed (so you close them instead of re-working). Pure git, no cost." onclick="ccrRecheck()">Re-scan for already-done</button></span></div>'
     +'<div class="cc-p-note">Every platform/core change routes HERE. Nodes + agents <b>propose</b>; you approve, build at Mission Control, and ship uniformly via the dist. Nodes never self-edit framework files. Lifecycle: new → triaged → approved → building → shipped.</div>'
     +'<div class="cc-row-in"><input id="ccr_t" class="cc-in" placeholder="title…" style="min-width:220px">'
     +'<select id="ccr_kind" class="cc-in">'
@@ -23385,13 +23427,20 @@ async function fleetUpdate(force){
   await alertM('Mirror: '+(r.mirror||'?')+'\n\nConverged:\n'+ran+(skip?('\n\nSkipped:\n'+skip):''));
   loadCcr();
 }
-function ccrReviewHtml(c){   // CHANGE-REVIEW GATE: the AI assessment of a node's proposal (auto-run on submit)
-  var r=c.ai_review; if(!r)return '';
-  var mv={PASS:'rgba(63,185,80,1)',CONCERNS:'rgba(232,197,71,1)',BLOCK:'rgba(248,81,73,1)'};
-  var col=mv[(r.verdict||'').toUpperCase()]||'rgba(139,148,158,1)';
-  return '<div style="margin-top:6px"><span class="cc-pill" style="background:'+col+'22;color:'+col+'" title="an independent specialist auto-reviewed this proposal (advisory second opinion -- not a binding gate)">&#9878; AI review: '+e2(r.verdict||'?')+'</span>'
-    +(r.text?' <details style="display:inline-block;vertical-align:top;margin-left:6px"><summary class="meta" style="cursor:pointer;display:inline">details</summary><div class="cc-dt" style="white-space:pre-wrap;margin-top:4px">'+e2(r.text)+'</div></details>':'')+'</div>';
+function ccrReviewHtml(c){   // AI assessment (advisory) + a "possibly already addressed" staleness flag
+  var r=c.ai_review; if(!r)return ''; var out='';
+  if(r.verdict){
+    var mv={PASS:'rgba(63,185,80,1)',CONCERNS:'rgba(232,197,71,1)',BLOCK:'rgba(248,81,73,1)'};
+    var col=mv[(r.verdict||'').toUpperCase()]||'rgba(139,148,158,1)';
+    out+='<span class="cc-pill" style="background:'+col+'22;color:'+col+'" title="an independent specialist auto-reviewed this proposal (advisory -- not a binding gate)">&#9878; AI review: '+e2(r.verdict||'?')+'</span>'
+      +(r.text?' <details style="display:inline-block;vertical-align:top;margin-left:6px"><summary class="meta" style="cursor:pointer;display:inline">details</summary><div class="cc-dt" style="white-space:pre-wrap;margin-top:4px">'+e2(r.text)+'</div></details>':'');
+  }
+  if(r.stale&&r.stale.length){
+    out+=' <span class="cc-pill" style="background:rgba(232,197,71,.18);color:rgba(232,197,71,1)" title="files this CCR names have changed in git since it was filed -- verify + likely close as already-addressed: '+e2(r.stale.map(function(s){return s.path;}).join(", "))+'">&#8635; possibly addressed ('+r.stale.length+' file'+(r.stale.length>1?'s':'')+' changed since filed)</span>';
+  }
+  return out?('<div style="margin-top:6px">'+out+'</div>'):'';
 }
+async function ccrRecheck(){ toast("Re-scanning open CCRs against git…",4000); try{ var r=await(await fetch("/api/ccr-recheck",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})).json(); toast((r.flagged||0)+" possibly-already-addressed",4000); }catch(e){} loadCcr(); }
 function ccrCard(c){
   const col=CCR_COL[c.status]||"#8b949e";const ico=CCR_KIND_ICO[c.kind]||"⚙️";
   const cmts=(c.comments||[]).map(m=>'<div class="meta" style="margin-top:4px">💬 <b>'+e2(m.by||"?")+'</b>: '+e2(m.text||"")+' <span style="opacity:.6">'+tago(m.ts)+'</span></div>').join("");
