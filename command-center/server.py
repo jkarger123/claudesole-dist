@@ -2184,6 +2184,38 @@ def _parse_ts(ts):
 _TOK_LOCK = threading.Lock()
 _TOK_STATE = {}                       # path -> {"off": byte_offset, "events": [(ts, total, in, out, cache)]}
 _TOK_CACHE = {"at": 0.0, "data": None}
+# PERSISTED across restarts (added after the 2026-07-02 slowdown): _TOK_STATE used to be memory-only, so
+# EVERY restart re-scanned the whole transcript store from byte 0 (1.7GB / 12k files on the Studio) -- and
+# co-located instances share one store, so a trio restart tripled it. Now the offsets+events persist to
+# STATE_DIR and a restart costs an incremental catch-up. Saves are atomic + throttled (300s); losing the
+# tail costs at most 5 min of re-parse, never a full rescan.
+_TOK_PERSIST = os.path.join(STATE_DIR, "_tok_state.json")
+_TOK_LOADED = [False]
+_TOK_SAVED_AT = [0.0]
+
+def _tok_state_load():
+    _TOK_LOADED[0] = True
+    try:
+        d = json.load(open(_TOK_PERSIST))
+        for p, st in d.items():
+            _TOK_STATE[p] = {"off": int(st.get("off", 0)), "proj": st.get("proj"), "self": bool(st.get("self")),
+                             "events": [tuple(e) for e in (st.get("events") or [])]}
+    except Exception:
+        pass
+
+def _tok_state_save(force=False):
+    now = time.time()
+    if not force and now - _TOK_SAVED_AT[0] < 300: return
+    try:
+        tmp = _TOK_PERSIST + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({p: {"off": st.get("off", 0), "proj": st.get("proj"), "self": st.get("self"),
+                           "events": [list(e) for e in st.get("events", [])]}
+                       for p, st in _TOK_STATE.items()}, f)
+        os.replace(tmp, _TOK_PERSIST)
+        _TOK_SAVED_AT[0] = now
+    except Exception:
+        pass
 
 # each event = (ts, model, input, output, cache_creation, cache_read, cw_5m, cw_1h)
 #   cache_creation = total cache-write tokens; cw_5m/cw_1h split it by TTL tier (5-min vs 1-hour cache).
@@ -2210,6 +2242,8 @@ def _is_self_cwd(cwd):
 def _scan_tok():
     """Incrementally parse newly-appended transcript bytes into per-file rich token events. Caller holds
     _TOK_LOCK. Each transcript is append-only, so we only ever read the bytes added since last scan."""
+    if not _TOK_LOADED[0]: _tok_state_load()
+    changed = False
     now = time.time(); horizon = now - 31 * 86400; seen = set()
     if os.path.isdir(CLAUDE_PROJECTS):
         for sl in os.listdir(CLAUDE_PROJECTS):
@@ -2227,7 +2261,7 @@ def _scan_tok():
                 st = _TOK_STATE.setdefault(f, {"off": 0, "events": [], "proj": None, "self": False})
                 try: sz = os.path.getsize(f)
                 except Exception: continue
-                if sz < st["off"]: st["off"] = 0; st["events"] = []   # rotated/truncated -> reparse
+                if sz < st["off"]: st["off"] = 0; st["events"] = []; changed = True   # rotated/truncated -> reparse
                 if sz > st["off"]:
                     try:
                         with open(f, "rb") as fh:
@@ -2235,7 +2269,7 @@ def _scan_tok():
                     except Exception: continue
                     nl = data.rfind(b"\n")                            # only consume complete lines
                     if nl >= 0:
-                        st["off"] += nl + 1
+                        st["off"] += nl + 1; changed = True
                         for ln in data[:nl + 1].decode("utf-8", "replace").splitlines():
                             ln = ln.strip()
                             if not ln or '"usage"' not in ln: continue
@@ -2258,7 +2292,8 @@ def _scan_tok():
                                 cwt, u.get("cache_read_input_tokens", 0) or 0, cw5, cw1))
                 st["events"] = [e for e in st["events"] if e[0] >= horizon]
     for f in list(_TOK_STATE.keys()):
-        if f not in seen: _TOK_STATE.pop(f, None)
+        if f not in seen: _TOK_STATE.pop(f, None); changed = True
+    if changed: _tok_state_save()
     return now
 
 def token_totals(ttl=45):

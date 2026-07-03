@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.128 -- 2026-07-02  (Fix: restarts no longer trigger a full transcript rescan -- Usage/Sessions slowdown)
+- **Root cause of "usage/sessions load really slow":** the token-scan cache (`_TOK_STATE`) was memory-only,
+  so EVERY server restart re-scanned the whole transcript store from byte 0 (1.7GB / 12.4k .jsonl files on
+  the Studio) -- and co-located instances share one store, so each trio restart tripled it. Today's ship
+  cadence (5 restarts) made the latent gap acute: /api/usage blocked 30s+ and the overseer pinned CPU.
+- **Fix:** `_TOK_STATE` (offsets + parsed events) now persists to `STATE_DIR/_tok_state.json` (atomic
+  writes, throttled 300s; first post-scan save immediate). A restart now costs an incremental catch-up of
+  only the bytes appended since the last save -- worst case ~5 minutes of re-parse, never a full rescan.
+  Known remaining tail (catalog): co-located instances each keep their own cache of the shared store; a
+  cross-instance shared cache would cut cold-scan work 3x further.
+
 ## 0.99.127 -- 2026-07-02  (Context store Phase 1: bi-temporal edges + deterministic freshness + entity resolution)
 - **Bi-temporal edges** (VISION 3.2 / plan 2.1): the graph's edges now carry valid_at/invalid_at
   (world-time) + created_at/expired_at (system-time). Conflict rule: INVALIDATE, NEVER DELETE -- asserting
