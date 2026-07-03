@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "819cac0b056975fb66b33dbedbe02c09fd5a175a64dc84eb0849d8e665d619ed",
+      "claudesole.manifest.json": "8a88ad104df98a38fc7dcb133bb93c6110e2f31cb4769c039a124b6085a6cd0b",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
       "command-center/cc-email": "4895c4eb4ca8e1c6f3b26dd260f9ee3b776c42f24ec656b8581d1cef0c4155ed",
       "command-center/cc-handoff": "9194f8a409f322c9835615cdb014dc9e626a469611ea127b1e9e7a6bf4db2532",
@@ -35,6 +35,7 @@
       "command-center/cc-secure": "905c3ff71dc61697942f5c4fe5202924641b3faab8e4720029f2fca27793323e",
       "command-center/cc-session-watchdog.py": "6f8190b72caf3eca1fd2a60ae48765f81a10052b76be7209af68641112996b0a",
       "command-center/cc-task": "2cc1e34814177c8db4b924999c28ed68b260d35f4ebaee434f200e3659c864e1",
+      "command-center/cc-vitals": "4ff84f1b55103833a5c458e7763b8184037ef663f7801622826660e046786395",
       "command-center/clips.py": "24eaca65a8dd372a27e605e8bc66c50602ecb872349048aee4a990a6480e5438",
       "command-center/context.py": "4469bccc834c85627b4ab8229f8f9bc109ff5093633eaab94d74e6369cfccd76",
       "command-center/email_archive.py": "b06ef1b7707945fd5cc1560fa5ca7fee28a2fed60c2e09da69e07d63739ee119",
@@ -48,7 +49,7 @@
       "command-center/preship.py": "5500f8d04923413e8d91352d4d6b61c3aa4eefb906fcbefd6954a159aabc439f",
       "command-center/ralph_runner.py": "7d26a8d8bca83ba6f52c8ab45aae1c5643233e5cf94c6293b8f6f14b6c169f3b",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "84a611e52f3294198a830b8a09a5a1c4c2d7914f0ab7204ea7cd22419fa79780",
+      "command-center/server.py": "12fbd7464a8047772eeea9daf6b4bdb7a17b8ab0f52533afbc329573f3c8a0c2",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/ui_lint.py": "0cabb923f1edd1a5f9808e4e04329c46334483b3da38fcf4adba2e3e9b476132",
@@ -115,14 +116,14 @@
       "extensions/web-research/extension.json": "37a02bd3645a2a36972b29c59a24f8c6aae18a1817b25350b2792910067f3841",
       "install/install.sh": "2073b5d25795ec74f94828c9385eb1a1fd96ed67158220c6537304882e15ce4f",
       "make-install-package.sh": "3e13de8bdb69aed455a4aff2e9ae3c2492a6e8a183f5ec25e5fd49edfbb2ed37",
-      "presets/overseer.json": "5e84c5e564c2647cd4d8be6527417c8b069cc77fa8ebbe230c65062e828146a1",
-      "presets/project.json": "3ba6bc6bd1e8096d78ec2e7bd7321902488a3dfdfe231f23bd1d94d37068d526",
+      "presets/overseer.json": "b5722c0954c19d5cdf68cf391909bab1ebce36222a29c21e4ea38b097608b9fd",
+      "presets/project.json": "90c1d0f160c5c879248f0e03950bd7684dd70610e5d698c2749678e461a2d78f",
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783091018,
+    "generated": 1783091875,
     "v": 1,
-    "version": "0.99.129"
+    "version": "0.99.130"
   },
-  "sig": "Oe7j5oS7o7IhKH88/Y0V6eM+b/VV2B4jxwJ81nfOEHglUHsFB6fMDluXepYh/Oh+S2wzfjaz58IJWL9q4FNXDQ=="
+  "sig": "hKpnMJB10vgkWXQ8SgKL5t7Ykv3xvjkAkMEz6IIwCcm/fr+suuSiGqVoUfeDqrYwIrcLU/tdKOFmP/pcfy63AA=="
 }

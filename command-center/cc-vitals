@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""cc-vitals -- quick server + node health for agents and operators, no dashboard needed. Read-only.
+
+  cc-vitals            this node's own vitals: fds / threads / CPU% / level + any DEGRADED state
+  cc-vitals server     whole-machine metrics: load vs cores, CPU, memory, disk, thermal, heaviest processes
+  cc-vitals dump       capture this node's thread stacks NOW (a runaway's hot loop) -> _vitals_stacks.log
+
+The platform self-monitors and SELF-HEALS (a leaked/runaway process gets a clean restart). If a list reads
+empty or you see a DEGRADED/CRITICAL banner, that's the immune system reacting to resource pressure -- check
+here rather than assuming the box is fine. Resolves the local port + auth from cc.config.
+"""
+import sys, os, json, urllib.request
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _cfg():
+    p = os.environ.get("CC_CONFIG") or os.path.join(os.environ.get("CC_HOME") or os.path.dirname(BASE), "cc.config.json")
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _get(path):
+    c = _cfg(); port = c.get("port") or int(os.environ.get("HPCC_PORT") or 8799)
+    tok = c.get("auth_token") or os.environ.get("CC_AUTH_TOKEN") or ""
+    req = urllib.request.Request("http://127.0.0.1:%s%s" % (port, path), headers={"Cookie": "cc_auth=%s" % tok})
+    return json.loads(urllib.request.urlopen(req, timeout=8).read().decode())
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__); return 0
+    try:
+        if cmd == "server":
+            d = _get("/api/server-metrics"); mem = d.get("mem") or {}
+            print("chip: %s | %s cores | load %s (%.0f%% per core)" % (
+                d.get("chip"), d.get("cores"), d.get("load"), (d.get("load_per_core") or 0) * 100))
+            cpu = d.get("cpu") or {}
+            print("cpu: %.0f%% busy | mem: %s%% (%s) | thermal: %s" % (
+                100 - (cpu.get("idle") or 0), mem.get("pct"), _gb(mem.get("used")), (d.get("thermal") or {}).get("pressure")))
+            for dk in d.get("disks", []):
+                print("  disk %-20s %s%% used, %s free" % (dk.get("label"), dk.get("pct"), _gb(dk.get("avail"))))
+            print("heaviest processes:")
+            for p in (d.get("top_procs") or [])[:6]:
+                print("  %6d  %5.0f%% cpu  %4.1f%% mem  %s" % (p.get("pid"), p.get("cpu"), p.get("mem"), p.get("cmd")))
+            return 0
+        if cmd == "dump":
+            d = _get("/api/vitals?dump=1")
+            print("thread-stack dump written to:", d.get("stacks_log"))
+            print("hot frames (threads sharing a top-of-stack -- a runaway shows many on one line):")
+            for h in (d.get("hot_frames") or [])[:10]:
+                print("  x%-3d %s" % (h.get("threads"), h.get("frame")))
+            return 0
+        d = _get("/api/vitals"); v = d.get("vitals") or {}
+        print("vitals: fds=%s/%s (%s%%) | threads=%s | cpu=%s%% | LEVEL=%s" % (
+            v.get("fds"), v.get("fd_limit"), v.get("fd_pct"), v.get("threads"), v.get("cpu"), v.get("level")))
+        if d.get("degraded"):
+            print("DEGRADED:", d["degraded"].get("reason"))
+        return 0
+    except Exception as e:
+        print("cc-vitals: could not reach the local server (%s)" % str(e)[:80])
+        return 1
+
+
+def _gb(b):
+    b = b or 0
+    return ("%.1f GB" % (b / 1073741824)) if b >= 1073741824 else ("%.0f MB" % (b / 1048576))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

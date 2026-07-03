@@ -7108,6 +7108,12 @@ def roster_text():
     if sk: bits.append("Skills here (Claude auto-invokes when a description matches, or /<name>): " + ", ".join(sk) + ".")
     if ag: bits.append("Agent-tools (scoped helpers in the Agents lens): " + ", ".join(ag) + ".")
     if tm: bits.append("Teams (rung-4 coordinating rosters in the Teams lens): " + ", ".join(tm) + ".")
+    bits.append("PLATFORM RESILIENCE: this node watches its OWN resources (file descriptors / threads / CPU) and "
+                "SELF-HEALS with a clean restart if something leaks or runs away -- so if a session/chief list reads "
+                "empty, or you see a DEGRADED or CRITICAL banner, that is the immune system reacting to resource "
+                "pressure, NOT necessarily your bug (do not thrash trying to fix it). Check real health via the "
+                "Server lens or GET /api/vitals (add ?dump=1 to capture a runaway process's stack), or run  cc-vitals"
+                ".  Never assert the box is healthy from memory -- read the vitals.")
     bits.append("TO-DO: if you spot a task the operator should do (or a date they should put on their calendar), "
                 "propose it by running:  bash " + os.path.join(CC_HOME, "command-center", "cc-task") + " \"<short task>\""
                 "  -- it lands as a SUGGESTION in their Tasks tab for them to approve (never auto-added).")
@@ -14136,6 +14142,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/vitals":   # RESILIENCE: live vitals + on-demand thread-stack capture (?dump=1) -> catch a runaway's hot loop in the act
             _hot = _thread_dump("on-demand via /api/vitals") if q.get("dump") else None
             return self._s(200, json.dumps({"vitals": vitals(), "degraded": (dict(_DEGRADED) if _DEGRADED.get("since") else None), "hot_frames": _hot, "stacks_log": os.path.join(STATE_DIR, "_vitals_stacks.log") if _hot else None}))
+        if u.path == "/api/server-metrics":   # SERVER lens: whole-machine metrics (cores/load/cpu/mem/disk/thermal/procs + per-node vitals)
+            return self._s(200, json.dumps(_server_metrics()))
         if u.path == "/ws": return self.handle_ws(q)
         if u.path == "/wsvnc": return self.handle_wsvnc()
         if u.path == "/api/convo-tree":
@@ -17031,6 +17039,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="tree"><i class="ph-light ph-git-branch"></i>Convo Tree</button>
 <button data-l="desktop"><i class="ph-light ph-monitor"></i>Remote Desktop</button>
 <button data-l="usage"><i class="ph-light ph-chart-line-up"></i>Accounts / Usage</button>
+<button data-l="server"><i class="ph-light ph-gauge"></i>Server</button>
 <button data-l="backup"><i class="ph-light ph-floppy-disk"></i>Backup</button>
 <button data-l="security"><i class="ph-light ph-shield-check"></i>Security</button>
 <button data-l="agents"><i class="ph-light ph-robot"></i>Agents</button>
@@ -17120,6 +17129,7 @@ function render(){
   else if(LENS=="machines")h=D.machines.map(machCard).join("");
   else if(LENS=="desktop"){loadDesktop();return;}
   else if(LENS=="usage"){loadUsage();return;}
+  else if(LENS=="server"){loadServerMetrics();return;}
   else if(LENS=="backup"){loadBackup();return;}
   else if(LENS=="security"){loadSecurity();return;}
   else if(LENS=="agents"){loadAgents();return;}
@@ -21465,6 +21475,54 @@ async function emThread(tid){
     +'<div style="overflow:auto;flex:1">'+msgs.map(function(m){ return '<div class="emrow" '+ssAttr({kind:'emailarc',id:m.rowid,name:(m.subject||'email')})+' onclick="emOpen('+m.rowid+')" title="open this message" style="cursor:pointer"><div class="emmeta"><b>'+esc(m.from_name||m.sender||'')+'</b> &middot; '+esc(m.date_str||'')+'</div><div class="emsnip">'+esc((m.preview||'').slice(0,220))+'…</div></div>'; }).join('')+'</div>'
     +'<div class="row" style="margin-top:11px;justify-content:flex-end"><button class="btn" onclick="closeM()">Close</button></div></div>');
 }
+// ---- SERVER lens: whole-machine metrics so the operator can VISUALLY confirm nothing's running away ----------
+let SRV={data:null}, _srvT=null;
+function srvGB(b){ b=+b||0; if(b>=1e12)return (b/1099511627776).toFixed(2)+' TB'; if(b>=1e9)return (b/1073741824).toFixed(1)+' GB'; if(b>=1e6)return (b/1048576).toFixed(0)+' MB'; return (b/1024).toFixed(0)+' KB'; }
+function srvFill(pct){ pct=Math.max(0,Math.min(100,+pct||0)); var c = pct>=90?'rgba(248,81,73,.9)' : pct>=70?'rgba(232,197,71,.9)' : 'rgba(63,185,80,.85)'; return '<div style="height:9px;border-radius:5px;background:var(--line);overflow:hidden;margin-top:4px"><div style="height:100%;width:'+pct+'%;background:'+c+'"></div></div>'; }
+function srvLvl(l){ var m={ok:'bdg-green',warn:'bdg-amber',critical:'bdg-red'}; return '<span class="badge '+(m[l]||'bdg-dim')+'">'+esc(l||'?')+'</span>'; }
+async function loadServerMetrics(){
+  var g=document.getElementById('grid'); if(!SRV.data)g.innerHTML=empty('Reading server metrics…');
+  try{ SRV.data=await(await fetch('/api/server-metrics')).json(); }catch(e){ g.innerHTML=empty('Could not read server metrics.'); return; }
+  renderServerMetrics();
+  clearInterval(_srvT); _srvT=setInterval(async function(){ if(LENS!=='server'){clearInterval(_srvT);return;} try{ SRV.data=await(await fetch('/api/server-metrics')).json(); renderServerMetrics(); }catch(e){} }, 5000);
+}
+function renderServerMetrics(){
+  var d=SRV.data||{}, g=document.getElementById('grid'); if(!g)return;
+  var cores=d.cores||0, load=(d.load||[0,0,0]), lpc=d.load_per_core||0;
+  var cpuBusy = d.cpu ? Math.round(100-(d.cpu.idle||0)) : 0;
+  var mem=d.mem||{}, th=d.thermal||{};
+  var thBad = (th.pressure||'').toLowerCase().indexOf('throttl')>=0 || (th.pressure||'').toLowerCase().indexOf('warning')>=0;
+  var loadBad = cores && load[0] > cores;   // load above core count = oversubscribed (the runaway signal)
+  var h='<div class="cc-head"><span class="cc-h-t">Server</span><span class="cc-h-sub">'+esc(d.chip||'')+' &middot; '+cores+' cores &middot; '+esc((d.model||''))+'</span></div>';
+  // KPI strip
+  h+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">'
+    +'<span class="cc-chip" style="'+(loadBad?'outline:1px solid rgba(248,81,73,.8)':'')+'">Load <b>'+load[0].toFixed(2)+'</b> / '+cores+' cores <span class="sub">('+Math.round(lpc*100)+'% per core)</span></span>'
+    +'<span class="cc-chip">CPU busy <b>'+cpuBusy+'%</b></span>'
+    +'<span class="cc-chip">Memory <b>'+(mem.pct||0)+'%</b> <span class="sub">'+srvGB(mem.used)+' / '+srvGB(mem.total)+'</span></span>'
+    +'<span class="cc-chip" style="'+(thBad?'outline:1px solid rgba(248,81,73,.8)':'')+'">Thermal <b>'+esc(th.pressure||'?')+'</b></span>'
+    +'<span class="cc-chip">Procs <b>'+(d.proc_count||0)+'</b></span></div>';
+  // Load + CPU + memory panel
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Load &amp; CPU</b> <span class="cc-p-sub">1/5/15 min: '+load.map(function(x){return x.toFixed(2);}).join(' &middot; ')+(loadBad?' &mdash; ABOVE core count (oversubscribed)':'')+'</span></div>';
+  h+='<div class="cc-p-note">CPU busy '+cpuBusy+'%'+(d.cpu?(' &middot; '+Math.round(d.cpu.user||0)+'% user, '+Math.round(d.cpu.sys||0)+'% sys, '+Math.round(d.cpu.idle||0)+'% idle'):'')+srvFill(cpuBusy)+'</div>';
+  h+='<div class="cc-p-note" style="margin-top:8px">Load per core '+Math.round(lpc*100)+'% (load '+load[0].toFixed(2)+' across '+cores+' cores)'+srvFill(lpc*100)+'</div>';
+  if(mem.total) h+='<div class="cc-p-note" style="margin-top:8px">Memory '+(mem.pct||0)+'% &middot; '+srvGB(mem.used)+' used of '+srvGB(mem.total)+' <span class="sub">('+srvGB(mem.wired)+' wired, '+srvGB(mem.compressed)+' compressed)</span>'+srvFill(mem.pct)+'</div>';
+  h+='<div class="cc-p-note" style="margin-top:8px;color:var(--dim)">'+esc(th.note||'')+'</div></div>';
+  // Disks
+  if((d.disks||[]).length){ h+='<div class="cc-panel"><div class="cc-p-h"><b>Disk</b></div>';
+    (d.disks||[]).forEach(function(dk){ h+='<div class="cc-p-note" style="margin-top:6px"><b>'+esc(dk.label)+'</b> '+dk.pct+'% &middot; '+srvGB(dk.avail)+' free of '+srvGB(dk.total)+srvFill(dk.pct)+'</div>'; });
+    h+='</div>'; }
+  // Per-node CC vitals (the immune system readout)
+  if((d.nodes||[]).length){ h+='<div class="cc-panel"><div class="cc-p-h"><b>Command Center nodes</b> <span class="cc-p-sub">each server\'s own vitals (self-heals on CRITICAL)</span></div>';
+    h+='<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:6px"><tr style="color:var(--mut);text-align:left"><th style="padding:4px 6px">node</th><th>:port</th><th>ver</th><th>fds</th><th>threads</th><th>cpu%</th><th>state</th></tr>';
+    (d.nodes||[]).forEach(function(n){ h+='<tr style="border-top:1px solid var(--line)"><td style="padding:4px 6px"><code>'+esc(n.instance||'?')+'</code></td><td>'+n.port+'</td><td class="sub">'+esc(n.version||'')+'</td><td>'+(n.fds!=null?n.fds:'-')+'</td><td>'+(n.threads!=null?n.threads:'-')+'</td><td>'+(n.cpu!=null?n.cpu:'-')+'</td><td>'+(n.degraded?'<span class="badge bdg-red">degraded</span>':srvLvl(n.level))+'</td></tr>'; });
+    h+='</table></div>'; }
+  // Top processes
+  if((d.top_procs||[]).length){ h+='<div class="cc-panel"><div class="cc-p-h"><b>Heaviest processes</b> <span class="cc-p-sub">anything pegging many cores here is a runaway</span></div>';
+    h+='<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:6px"><tr style="color:var(--mut);text-align:left"><th style="padding:4px 6px">pid</th><th>cpu%</th><th>mem%</th><th>command</th></tr>';
+    (d.top_procs||[]).forEach(function(p){ var hot=p.cpu>=100; h+='<tr style="border-top:1px solid var(--line)'+(hot?';color:rgba(248,81,73,.95);font-weight:600':'')+'"><td style="padding:4px 6px">'+p.pid+'</td><td>'+p.cpu.toFixed(0)+'%</td><td>'+p.mem.toFixed(1)+'%</td><td><code>'+esc(p.cmd)+'</code></td></tr>'; });
+    h+='</table></div>'; }
+  g.innerHTML='<div class="modstack">'+h+'</div>';
+}
 async function loadNotebook(){
   var box=document.getElementById("grid");if(!box)return;
   var url="/api/note-list"+(NB.q?("?q="+encodeURIComponent(NB.q)):"");
@@ -22729,6 +22787,7 @@ var HELP={
  jobs:{t:'Jobs',sub:'A simple board of the active work items in flight, each tied to a part of your product.',h:'<p><b>What:</b> a lightweight list of the work currently on the go -- each job has a name, which part of the product it belongs to, a status, and the next step.</p><p><b>Why:</b> it is the at-a-glance answer to "what are we actually working on right now," separate from your personal to-dos.</p><p><b>How:</b> click Add to log one, or ask your Chief of Staff to open a job for a piece of work you want tracked here.</p>'},
  machines:{t:'Machines',sub:'The computers in your fleet and whether each one is online right now.',h:'<p><b>What:</b> the other computers this system can reach -- your dev boxes and servers -- each showing a green dot when it is online.</p><p><b>Why:</b> you can confirm a machine is up and start work on it without opening a terminal yourself.</p><p><b>How:</b> click a machine to see its details and launch a session on it.</p>'},
  desktop:{t:'Remote Desktop',sub:'See and control the host Mac\'s full screen from here, even from your phone.',h:'<p><b>What:</b> a live view of the host Mac\'s actual screen, with full mouse and keyboard control, tunneled securely over your private network.</p><p><b>Why:</b> when you need to do something on the machine itself -- click a real app, approve a dialog -- you can, from any device including a phone.</p><p><b>How:</b> tap Open fullscreen; the first connection asks for the screen-sharing password (saved after that). If it will not connect, macOS Screen Sharing is not turned on yet.</p>'},
+ server:{t:'Server',sub:'Whole-machine health -- cores, load, CPU, memory, disk, thermal, and every Command Center node\'s own vitals.',h:'<p><b>What:</b> a live view of the physical server this runs on: CPU load vs core count, memory + disk use, thermal pressure, the heaviest processes, and each co-located Command Center node\'s file descriptors / threads / CPU (its self-heal vitals).</p><p><b>Why:</b> so you can VISUALLY confirm nothing is running away -- the exact blind spot that once let a leaked process eat the whole machine for hours. If Load is above the core count, or a process is pegging many cores, or a node shows CRITICAL, you see it here immediately.</p><p><b>How:</b> it refreshes every 5s; watch Load-per-core and the Heaviest-processes list. Exact CPU/GPU temperature in degrees needs a sudo helper (macOS blocks it otherwise); thermal PRESSURE (the throttling signal) is shown without one.</p>'},
  usage:{t:'Accounts / Usage',sub:'How many AI tokens and dollars you are spending, broken down by account and project.',h:'<p><b>What:</b> a live view of your AI usage -- tokens processed and dollar cost over time, split by model, Claude account, and project.</p><p><b>Why:</b> you can see where the spend is going and, when accounts are connected, how much of each account\'s rate-limit window is left before you hit a wall.</p><p><b>How:</b> pick a time window at the top to drive the charts; switch which login is active over in the Accounts tab.</p>'},
  backup:{t:'Backup',sub:'Whether your work is safely backed up, and a one-click button to back up now.',h:'<p><b>What:</b> the status of your automatic backups -- when the last one succeeded and whether it reached its offsite copy.</p><p><b>Why:</b> peace of mind that your work is saved, with a clear warning if backups have gone stale.</p><p><b>How:</b> it runs on its own; click Back up now to force one immediately (it scans for secrets first, then commits and pushes).</p>'},
  security:{t:'Security',sub:'A red/yellow/green health check of your setup -- secrets, access, and AI safety.',h:'<p><b>What:</b> a scan of this node\'s security posture -- exposed secrets, access settings, dependencies, network, and AI-agent safety -- summed up as a single green, amber, or red light.</p><p><b>Why:</b> it catches the risky mistakes (a leaked key, an open door) before they bite, and tells you exactly what to fix.</p><p><b>How:</b> click Run scan; each finding shows what it is and the evidence. Ask your Chief of Staff to help fix anything flagged red.</p>'},
@@ -23450,7 +23509,7 @@ var NAV_CAT={
   agency:"Agency",calls:"Agency",
   agents:"Team",skills:"Team",teams:"Team",audit:"Team",
   marketplace:"Integrations",vault:"Integrations",
-  usage:"System",accounts:"System",security:"System",backup:"System",machines:"System",desktop:"System",
+  usage:"System",server:"System",accounts:"System",security:"System",backup:"System",machines:"System",desktop:"System",
   history:"System",docs:"System",doctor:"System",ccr:"System",propose:"System",settings:"System"
 };
 function navAvail(){return navBtns().filter(function(b){return b.style.display!=="none";});}   // gated/hidden lenses excluded
@@ -24784,6 +24843,156 @@ def _vitals_loop():
         except Exception: pass
         time.sleep(45)
 
+# ---- PHASE 2: external watchdog (overseer) -- the backstop for a process too wedged to self-heal ------------
+def _pid_on_port(port):
+    try:
+        code, o, _ = sh(["lsof", "-nP", "-iTCP:%d" % port, "-sTCP:LISTEN", "-t"], timeout=5)
+        return int(o.split()[0]) if code == 0 and o.split() else None
+    except Exception: return None
+def _pid_cpu(pid):
+    try:
+        code, o, _ = sh(["ps", "-o", "%cpu=", "-p", str(pid)], timeout=5)
+        return float(o.strip()) if code == 0 and o.strip() else 0.0
+    except Exception: return 0.0
+def _fetch_health(port):
+    try:
+        req = urllib.request.Request("http://127.0.0.1:%d/api/health" % port, headers={"Cookie": "cc_auth=%s" % (AUTH_TOKEN or "")})
+        return json.loads(urllib.request.urlopen(req, timeout=3).read().decode())
+    except Exception: return None
+
+_FWD = {}   # port -> consecutive-bad count (self-heal gets its chance before the external kill)
+def _fleet_watchdog_loop():
+    """EXTERNAL immune backstop, OVERSEER ONLY. The in-process vitals monitor self-heals a node that can still run
+    its own thread; this catches what it can't -- a node CRITICAL and NOT recovering, or a ZOMBIE pegging cores
+    while unreachable (the exact 6h case). After ~3 consecutive bad checks (giving self-heal first crack), kill the
+    wedged PID -> the supervisor respawns clean -> then VERIFY the respawn actually took (restart verification, the
+    gap that let the zombie survive every restart). Alerts either way."""
+    if ROLE != "org": return                         # only Mission Control / an overseer runs this
+    time.sleep(150)
+    while True:
+        try:
+            for port in _COLO_PORTS:
+                if port == PORT: continue
+                pid = _pid_on_port(port)
+                if not pid: _FWD[port] = 0; continue
+                h = _fetch_health(port); bad = False; why = ""
+                if h is None:
+                    cpu = _pid_cpu(pid)
+                    if cpu > 300: bad = True; why = "unreachable while burning %d%% CPU (zombie)" % cpu
+                elif ((h.get("vitals") or {}).get("level") == "critical") or h.get("degraded"):
+                    bad = True; why = "CRITICAL/degraded and not self-healing"
+                _FWD[port] = (_FWD.get(port, 0) + 1) if bad else 0
+                if _FWD[port] >= 3:
+                    _FWD[port] = 0
+                    inst = (h or {}).get("instance") if h else "?"
+                    try: notify_send("[overseer] node on :%d (%s) %s -- external watchdog killing pid %d for a clean respawn" % (port, inst, why, pid))
+                    except Exception: pass
+                    killed = False
+                    try: os.kill(pid, signal.SIGKILL); killed = True
+                    except Exception as e:
+                        try: notify_send("[overseer] could NOT kill :%d pid %d (%s) -- likely cross-user (AFP); needs a superadmin restart" % (port, pid, str(e)[:60]))
+                        except Exception: pass
+                    try:
+                        with open(os.path.join(STATE_DIR, "_watchdog.log"), "a") as f:
+                            f.write("%s overseer killed=%s :%d pid=%d %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), killed, port, pid, why))
+                    except Exception: pass
+                    if killed:                                        # RESTART VERIFICATION: confirm a fresh process actually came back
+                        ok = False
+                        for _ in range(15):
+                            time.sleep(2)
+                            np = _pid_on_port(port)
+                            if np and np != pid and _fetch_health(port): ok = True; break
+                        if not ok:
+                            try: notify_send("[overseer] :%d did NOT come back after the watchdog kill -- its supervisor may be down; needs a look" % port)
+                            except Exception: pass
+        except Exception: pass
+        time.sleep(60)
+
+_METRICS_CACHE = {"at": 0.0, "data": None}
+_COLO_PORTS = [8799, 8800, 8801, 8802, 8803, 8804, 8805, 8806, 8807, 8851]   # co-located CC servers to poll for per-node vitals
+def _server_metrics(ttl=8):
+    """WHOLE-MACHINE health for the Server lens: cores/load, CPU%, memory, disk, thermal pressure, the heaviest
+    processes, and every co-located CC node's own vitals (fds/threads/cpu). So the operator can VISUALLY confirm
+    nothing is running away -- the exact blind spot that let a zombie eat the box for 6h. Cached (top -l 1 ~1s)."""
+    now = time.time()
+    if _METRICS_CACHE["data"] and now - _METRICS_CACHE["at"] < ttl: return _METRICS_CACHE["data"]
+    d = {"at": int(now)}
+    def _n(args, t=6):
+        try: return sh(args, timeout=t)[1].strip()
+        except Exception: return ""
+    d["chip"] = _n(["sysctl", "-n", "machdep.cpu.brand_string"]) or "?"
+    d["model"] = _n(["sysctl", "-n", "hw.model"])
+    try: d["cores"] = int(_n(["sysctl", "-n", "hw.ncpu"]) or "0")
+    except Exception: d["cores"] = 0
+    try:
+        la = _n(["sysctl", "-n", "vm.loadavg"]).strip("{} ").split()
+        d["load"] = [round(float(x), 2) for x in la[:3]]
+        d["load_per_core"] = round(d["load"][0] / max(1, d["cores"]), 2) if d.get("load") else 0
+    except Exception: d["load"] = []; d["load_per_core"] = 0
+    try: d["uptime"] = _n(["uptime"])
+    except Exception: d["uptime"] = ""
+    # CPU% + memory from one `top` sample
+    _, o, _ = sh(["top", "-l", "1", "-n", "0"], timeout=9)
+    for ln in o.splitlines():
+        if ln.startswith("CPU usage"):
+            try: d["cpu"] = {k: float(v) for v, k in re.findall(r"([\d.]+)%\s*(\w+)", ln)}
+            except Exception: pass
+        elif ln.startswith("PhysMem"): d["physmem"] = ln.replace("PhysMem:", "").strip()
+    # precise memory via vm_stat + hw.memsize
+    try:
+        total = int(_n(["sysctl", "-n", "hw.memsize"]) or "0"); _, vo, _ = sh(["vm_stat"], timeout=5)
+        pg = 16384; st = {}
+        for ln in vo.splitlines():
+            m = re.match(r"(.+?):\s+(\d+)\.", ln)
+            if m: st[m.group(1).strip().lower()] = int(m.group(2))
+        used = (st.get("pages active", 0) + st.get("pages wired down", 0) + st.get("pages occupied by compressor", 0)) * pg
+        d["mem"] = {"total": total, "used": used, "pct": int(100 * used / total) if total else 0,
+                    "wired": st.get("pages wired down", 0) * pg, "compressed": st.get("pages occupied by compressor", 0) * pg}
+    except Exception: d["mem"] = {}
+    # disk (the volumes that matter here)
+    d["disks"] = []
+    for mnt, label in [("/System/Volumes/Data", "Internal (data)"), ("/", "Internal (system)"), ("/Volumes/Samsung990PRO", "SSD (Samsung 990 PRO)")]:
+        _, o, _ = sh(["df", "-k", mnt], timeout=5)
+        rows = o.splitlines()
+        if len(rows) >= 2:
+            p = rows[1].split()
+            try:
+                tot, used, avail = int(p[1]) * 1024, int(p[2]) * 1024, int(p[3]) * 1024
+                d["disks"].append({"label": label, "mount": mnt, "total": tot, "used": used, "avail": avail,
+                                   "pct": int(100 * used / tot) if tot else 0})
+            except Exception: pass
+    # thermal PRESSURE (no sudo needed) -- the throttling signal; exact degC needs a sudo helper (powermetrics)
+    _, to, _ = sh(["pmset", "-g", "therm"], timeout=5)
+    tl = "Nominal"
+    for ln in to.splitlines():
+        m = re.search(r"CPU_Speed_Limit\s*=\s*(\d+)", ln)
+        if m and int(m.group(1)) < 100: tl = "Throttled (%s%% CPU speed)" % m.group(1)
+        if "thermal warning" in ln.lower() and "no thermal" not in ln.lower(): tl = "Thermal warning"
+    d["thermal"] = {"pressure": tl, "temp_c": None, "note": "exact temperature needs a sudo helper (powermetrics); thermal pressure shown"}
+    # heaviest processes
+    _, o, _ = sh(["ps", "-A", "-o", "pid=,%cpu=,%mem=,comm="], timeout=6)
+    procs = []
+    for ln in o.splitlines():
+        p = ln.split(None, 3)
+        if len(p) == 4:
+            try: procs.append({"pid": int(p[0]), "cpu": float(p[1]), "mem": float(p[2]), "cmd": p[3].split("/")[-1][:40]})
+            except Exception: pass
+    d["top_procs"] = sorted(procs, key=lambda x: -x["cpu"])[:10]
+    d["proc_count"] = len(procs)
+    # every co-located CC node's OWN vitals (the immune-system readout per server)
+    d["nodes"] = []
+    for port in _COLO_PORTS:
+        try:
+            req = urllib.request.Request("http://127.0.0.1:%d/api/health" % port, headers={"Cookie": "cc_auth=%s" % (AUTH_TOKEN or "")})
+            h = json.loads(urllib.request.urlopen(req, timeout=2).read().decode())
+            v = h.get("vitals") or {}
+            d["nodes"].append({"port": port, "instance": h.get("instance"), "version": h.get("version"),
+                               "level": v.get("level"), "fds": v.get("fds"), "fd_limit": v.get("fd_limit"),
+                               "threads": v.get("threads"), "cpu": v.get("cpu"), "degraded": bool(h.get("degraded"))})
+        except Exception: pass
+    _METRICS_CACHE.update({"at": now, "data": d})
+    return d
+
 if __name__ == "__main__":
     print("%s Command Center on http://0.0.0.0:%d  (tailnet http://%s:%d)" % (BRAND, PORT, STUDIO_TS, PORT))
     _nfd = _raise_fd_limit()
@@ -24882,6 +25091,7 @@ if __name__ == "__main__":
     _daemon("substack", _substack_loop)                  # SUBSTACK: poll tracked publications' RSS into the read cache (no-op until publications are configured)
     _daemon("chief_watchdog", _chief_watchdog)           # CHIEF WATCHDOG: keep the always-on Chief of Staff (the mesh comms endpoint) alive -- respawn if its claude exits
     _daemon("vitals", _vitals_loop)                       # RESILIENCE: watch our OWN fds/threads/cpu/children -> WARN (alert) -> CRITICAL (self-heal) before a leak becomes a zombie or an fd wedge
+    _daemon("fleet_watchdog", _fleet_watchdog_loop)       # RESILIENCE phase 2 (overseer only): external backstop -- kill+respawn a co-located node too wedged to self-heal, then verify it came back
     _daemon("license_activate", _license_activate_loop)  # LICENSE: a sold box auto-activates from its configured activation server on boot if unlicensed
     _daemon("fleet_converge", _fleet_converge_loop)      # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     _daemon("routines", _routines_loop)                  # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts

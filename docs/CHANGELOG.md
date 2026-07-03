@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.130 -- 2026-07-03  (Resilience phase 2: external watchdog + a Server metrics lens + agent awareness)
+- **Server lens** (Mission Control + every node, System category): whole-machine metrics so the operator can
+  VISUALLY confirm nothing's running away -- load vs cores, CPU (user/sys/idle), memory, disk per volume, thermal
+  PRESSURE, the heaviest processes (a runaway pegging cores is obvious), and every co-located CC node's OWN vitals
+  (fds/threads/cpu/level). Refreshes every 5s. `_server_metrics()` + `/api/server-metrics`. (Exact CPU/GPU degC
+  needs a sudo helper on macOS; thermal pressure -- the throttling signal -- is shown without one.)
+- **External watchdog (phase 2, overseer-only `_fleet_watchdog_loop`):** the in-process monitor self-heals a node
+  that can still run its own thread; this catches what it can't -- a node CRITICAL/degraded and NOT recovering, or
+  a ZOMBIE pegging >300% CPU while unreachable. After ~3 bad checks (self-heal gets first crack) it kills the wedged
+  PID for a clean supervised respawn, **then verifies the respawn took** (the gap that let the original zombie
+  survive every restart); alerts + `_watchdog.log`; cross-user (AFP) surfaced for a superadmin restart.
+- **Agent awareness:** the capabilities brief every chief/agent launches with now states the platform self-monitors
+  + self-heals -- so a DEGRADED banner or an empty list is the immune system, not their bug -- and points to the
+  Server lens / `GET /api/vitals?dump=1` / the new **`cc-vitals`** CLI (this-node / `server` / `dump`). See docs/RESILIENCE.md.
+
 ## 0.99.129 -- 2026-07-03  (CORE RESILIENCE: a self-healing immune system so a node can never silently drown again)
 - Post-mortem of a self-inflicted outage (an 11-core zombie server ran 6h unchecked; another EXHAUSTED its file
   descriptors -> tmux calls failed -> /api/sessions returned a silent empty list -> the operator's chief looked
