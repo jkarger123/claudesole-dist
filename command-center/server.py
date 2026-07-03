@@ -13775,6 +13775,8 @@ def _routine_run(r, manual=False):
                             last_exit=code, last_ms=int((time.time() - started) * 1000), tail=tail)
         if not ok:
             _routine_alert(r, "Routine '%s' FAILED (exit %s). Tail:\n%s" % (name, code, tail[-300:]))
+            try: _incident("routine", "routine '%s' failed (exit %s)" % (name, code), "Log tail:\n" + tail[-1200:])
+            except Exception: pass
         return {"ok": ok, "exit": code, "log": logp}
     except Exception as e:
         _routines_state_set(name, running=False, last_status="error", tail=str(e)[:300])
@@ -14169,6 +14171,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(_server_metrics()))
         if u.path == "/api/lab-agents":       # AGENT LAB (experimental): installed Claude Code subagents (name + desc)
             return self._s(200, json.dumps({"ok": True, "agents": _subagents_available()}))
+        if u.path == "/api/incidents":        # SERVER lens: recent triaged incidents (loud failures + their AI triage)
+            return self._s(200, json.dumps({"ok": True, "incidents": incidents_list()[:30]}))
         if u.path == "/api/metrics-history":  # SERVER lens graph: persisted machine history (records even when unwatched)
             try: rng = max(300, min(int(q.get("range", ["21600"])[0]), 7 * 86400))
             except Exception: rng = 21600
@@ -21515,9 +21519,11 @@ async function emThread(tid){
     +'<div class="row" style="margin-top:11px;justify-content:flex-end"><button class="btn" onclick="closeM()">Close</button></div></div>');
 }
 // ---- SERVER lens: whole-machine metrics so the operator can VISUALLY confirm nothing's running away ----------
-let SRV={data:null,range:21600,histData:[]}, _srvT=null;
+let SRV={data:null,range:21600,histData:[],incidents:[]}, _srvT=null;
 function cToF(c){ return (c==null||isNaN(c))?null:Math.round(c*9/5+32); }
-async function srvLoadHist(){ try{ SRV.histData=((await(await fetch('/api/metrics-history?range='+(SRV.range||21600))).json())||{}).samples||[]; }catch(e){} }
+function srvAgo(ts){ var s=Math.max(0,(Date.now()/1000-ts)); return s<60?((s|0)+'s'):s<3600?((s/60|0)+'m'):s<86400?((s/3600|0)+'h'):((s/86400|0)+'d'); }
+async function srvLoadHist(){ try{ SRV.histData=((await(await fetch('/api/metrics-history?range='+(SRV.range||21600))).json())||{}).samples||[]; }catch(e){}
+  try{ SRV.incidents=((await(await fetch('/api/incidents')).json())||{}).incidents||[]; }catch(e){} }
 function srvSetRange(sec){ SRV.range=sec; loadServerMetrics(); }
 // A CF-themed live SVG chart: series=[{color,data[],area?}], auto-ranged (or fixed min/max). Crisp, no library.
 function srvChart(series,opt){ opt=opt||{}; var W=640,H=opt.h||120,PL=4,PR=6,PT=9,PB=6;
@@ -21572,6 +21578,19 @@ function renderServerMetrics(){
     +'<span class="cc-chip" style="'+((thBad||(th.cpu_c!=null&&th.cpu_c>=95))?'outline:1px solid rgba(248,81,73,.8)':'')+'">'+((th.cpu_c!=null)?('Temp <b>CPU '+cToF(th.cpu_c)+'°F</b>'+(th.gpu_c!=null?(' <span class="sub">GPU '+cToF(th.gpu_c)+'°F</span>'):'')):('Thermal <b>'+esc(th.pressure||'?')+'</b>'))+'</span>'
     +(d.power?('<span class="cc-chip">Power <b>'+d.power.all_w+'W</b> <span class="sub">cpu '+d.power.cpu_w+' · gpu '+d.power.gpu_w+'</span></span>'):'')
     +'<span class="cc-chip">Procs <b>'+(d.proc_count||0)+'</b></span></div>';
+  // INCIDENTS: loud failures, each with an AI triage (cause + next action). Advisory -- it explains, never acts.
+  var INC=SRV.incidents||[];
+  if(INC.length){
+    h+='<div class="cc-panel"><div class="cc-p-h"><b>Incidents</b> <span class="cc-p-sub">loud failures &middot; auto-triaged by incident-scanner (advisory)</span></div>';
+    INC.slice(0,6).forEach(function(it,ix){ var tri=it.triage;
+      h+='<div class="cc-p-note"'+(ix?' style="border-top:1px solid var(--line);padding-top:8px;margin-top:8px"':'')+'>'
+        +'<b>'+esc(it.source||'?')+'</b> &mdash; '+esc(it.summary||'')+' <span class="sub">'+srvAgo(it.ts)+' ago</span>';
+      if(tri&&tri.text) h+='<div style="margin-top:5px;padding-left:9px;border-left:2px solid rgba(232,197,71,.6);white-space:pre-wrap"><span class="badge bdg-amber">triage</span> '+esc(tri.text)+'</div>';
+      else h+='<div class="sub" style="margin-top:3px">triaging&hellip;</div>';
+      h+='</div>';
+    });
+    h+='</div>';
+  }
   // HISTORY: CF-themed charts from the PERSISTED machine record (kept even when no tab is open), with a range picker
   var HD=SRV.histData||[], CU='rgba(232,197,71,1)', CM='rgba(120,170,255,.95)', CT='rgba(240,140,90,1)', CG='rgba(90,205,205,1)';
   var RANGES=[['1h',3600],['6h',21600],['24h',86400],['3d',259200]];
@@ -25200,6 +25219,72 @@ def _review_change(text, kind="diff", deep=False, label="", cwd=None):
     worst = max(oks, key=lambda x: rank.get(x, 1)) if oks else "unknown"
     return {"ok": any(r["ok"] for r in reviews), "verdict": worst, "reviews": reviews, "kind": kind}
 
+# ---- INCIDENTS: turn a loud failure into a TRIAGED incident (cause + recommended action) ---------------------
+_INCIDENTS = os.path.join(STATE_DIR, "_incidents.json")
+_INC_LOCK = threading.Lock()
+def incidents_list(): return load(_INCIDENTS, {"incidents": []}).get("incidents", [])
+def _incident(source, summary, detail="", triage=True):
+    """Record a loud failure as an incident and (async) have incident-scanner triage it -> the likely cause + the
+    single highest-value next action. Deduped (same source+summary within 30 min so a flapping failure isn't spam).
+    The Server lens surfaces recent incidents + their triage. Advisory -- it explains, never auto-acts."""
+    now = int(time.time()); sig = (str(source) + "|" + str(summary))[:200]; iid = "inc-%d" % int(time.time() * 1000)
+    try:
+        with _INC_LOCK:
+            d = load(_INCIDENTS, {"incidents": []}); items = d.get("incidents", [])
+            for it in items[:25]:
+                if it.get("sig") == sig and now - it.get("ts", 0) < 1800: return it.get("id")   # dedup a flapping failure
+            items.insert(0, {"id": iid, "sig": sig, "ts": now, "source": str(source)[:60], "summary": str(summary)[:200],
+                             "detail": str(detail)[:2000], "status": "open", "triage": None})
+            d["incidents"] = items[:200]; save(_INCIDENTS, d)
+    except Exception: return iid
+    try: notify_send("[%s] incident (%s): %s" % (INSTANCE_ID, source, str(summary)[:120]))
+    except Exception: pass
+    if triage:
+        def _tri():
+            try:
+                prompt = ("A ClaudeFather node (%s) hit a loud failure. Triage it.\nSource: %s\nSummary: %s\nDetail:\n%s\n\n"
+                          "In 3-5 sentences: the most likely cause and the single highest-value next action. Be concrete; "
+                          "if the detail points at a specific loop/file/process, name it." % (INSTANCE_ID, source, summary, str(detail)[:2500]))
+                r = _agent_run("incident-scanner", prompt, timeout=120)
+                tri = {"text": (r.get("result") or r.get("error") or "")[:2500], "cost": r.get("cost"), "ts": int(time.time())}
+                with _INC_LOCK:
+                    d = load(_INCIDENTS, {"incidents": []})
+                    for it in d.get("incidents", []):
+                        if it.get("id") == iid: it["triage"] = tri; save(_INCIDENTS, d); break
+            except Exception as e: print("[incident] triage failed: " + str(e)[:120])
+        try: threading.Thread(target=_tri, daemon=True, name="incident-triage").start()
+        except Exception: pass
+    return iid
+
+# ---- SECURITY BEAT: opt-in weekly security-auditor posture sweep (proactive; nothing else AI-audits config drift) --
+_SECBEAT = os.path.join(STATE_DIR, "_security_beat.json")
+def _security_beat_loop():
+    """OPT-IN (cc.config security_beat). Weekly, run the security-auditor over this install (repo + config) and
+    store the posture read; if it surfaces anything HIGH/critical, raise it as an incident. Proactive drift catch --
+    the Doctor does static checks, this is a reasoning audit. Advisory; never changes anything."""
+    time.sleep(120)
+    while True:
+        try:
+            if CC.get("security_beat"):
+                last = 0
+                try: last = load(_SECBEAT, {}).get("ts", 0)
+                except Exception: pass
+                if time.time() - last > 7 * 86400:
+                    r = _agent_run("security-auditor",
+                                   "Audit this ClaudeFather install for security posture drift: exposed secrets, auth "
+                                   "off, over-broad permissions, world-readable credential files, risky config. Working "
+                                   "dir IS the install. Be concise; end with 'FINDINGS: <n>' and the top issues by severity.",
+                                   timeout=240, cwd=CC_HOME)
+                    if r.get("ok"):
+                        txt = r.get("result") or ""
+                        try: save(_SECBEAT, {"ts": int(time.time()), "text": txt[:4000], "cost": r.get("cost")})
+                        except Exception: pass
+                        low = txt.lower()
+                        if any(k in low for k in ("critical", "high severity", "exposed", "world-readable", "leak", "unauthenticated")):
+                            _incident("security-beat", "weekly posture sweep flagged issue(s)", txt[:1500], triage=False)
+        except Exception: pass
+        time.sleep(6 * 3600)   # check ~4x/day; the 7-day gate does the real spacing
+
 _SELFHEAL = {"last": 0, "boot": time.time()}
 def _reap_orphan_terminals():
     """Kill this server's own `tmux attach-session` children (browser-terminal pty children). Called only at a
@@ -25251,11 +25336,12 @@ def _vitals_loop():
                     print(msg)
                     try: notify_send(msg)
                     except Exception: pass
-                if diag_armed:               # AUTO-DIAGNOSE once per episode (first warn/critical), off the vitals thread so a starved node isn't blocked
+                if diag_armed:               # TRIAGE once per episode (first warn/critical), off the vitals thread so a starved node isn't blocked
                     diag_armed = False
                     try:
                         _hf = _thread_dump("auto-diagnose: " + v["level"])
-                        threading.Thread(target=_auto_diagnose, args=("vitals " + v["level"], v, _hf), daemon=True, name="auto-diagnose").start()
+                        _det = json.dumps({"vitals": v, "hot_frames": _hf}, default=str)[:1800]
+                        threading.Thread(target=_incident, args=("resource pressure", "vitals " + v["level"], _det), daemon=True, name="incident").start()
                     except Exception: pass
             elif warned:
                 warned = ""; diag_armed = True   # recovered -> re-arm alert + diagnosis for the next episode
@@ -25314,6 +25400,9 @@ def _fleet_watchdog_loop():
                     try:
                         with open(os.path.join(STATE_DIR, "_watchdog.log"), "a") as f:
                             f.write("%s overseer killed=%s :%d pid=%d %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), killed, port, pid, why))
+                    except Exception: pass
+                    try: _incident("watchdog", "%s on :%d (%s) -- %s" % ("killed" if killed else "could not kill", port, inst, why),
+                                   "External watchdog acted on a node too wedged to self-heal. pid=%d killed=%s." % (pid, killed))
                     except Exception: pass
                     if killed:                                        # RESTART VERIFICATION: confirm a fresh process actually came back
                         ok = False
@@ -25578,6 +25667,7 @@ if __name__ == "__main__":
     _daemon("vitals", _vitals_loop)                       # RESILIENCE: watch our OWN fds/threads/cpu/children -> WARN (alert) -> CRITICAL (self-heal) before a leak becomes a zombie or an fd wedge
     _daemon("fleet_watchdog", _fleet_watchdog_loop)       # RESILIENCE phase 2 (overseer only): external backstop -- kill+respawn a co-located node too wedged to self-heal, then verify it came back
     _daemon("metrics_sample", _metrics_sample_loop)       # SERVER metrics HISTORY: record one machine sample/min forever (shared, deduped) so the graph shows real history, not just while a tab is open
+    _daemon("security_beat", _security_beat_loop)         # SECURITY BEAT (opt-in security_beat): weekly security-auditor posture sweep -> incident on high-severity drift
     _daemon("license_activate", _license_activate_loop)  # LICENSE: a sold box auto-activates from its configured activation server on boot if unlicensed
     _daemon("fleet_converge", _fleet_converge_loop)      # PUSH backstop: MC sweeps the fleet for any node that couldn't self-converge
     _daemon("routines", _routines_loop)                  # ROUTINES heartbeat: run due scheduled routines in this node's own (FDA) context, de-duped by name, with failure alerts

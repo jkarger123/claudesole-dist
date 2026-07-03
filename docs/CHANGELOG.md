@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.137 -- 2026-07-03  (AI incident triage on loud failures + opt-in weekly security beat)
+- **AI incident triage:** a loud failure no longer just says "X broke" -- `_incident(source, summary, detail)`
+  records it and (async, deduped 30min) has `incident-scanner` triage it into the likely cause + the single
+  highest-value next action. Wired into the real failure points: vitals warn/critical (generalizes the earlier
+  auto-diagnosis), the fleet watchdog killing a wedged node, and a scheduled routine failing. Surfaced in a new
+  **Incidents panel in the Server lens** + `/api/incidents`. Advisory -- it explains, never auto-acts.
+- **Security beat (opt-in `security_beat`):** a weekly `security-auditor` posture sweep over the install (repo +
+  config) for drift the static Doctor checks miss (exposed secrets, auth off, world-readable creds); a HIGH finding
+  raises an incident. Off by default.
+- Deliberately DROPPED the "scheduled cost digest" candidate as redundant -- the Usage lens + account fuel-gauges +
+  Morning Brief already cover spend; an AI cost digest there would be noise, not power.
+
 ## 0.99.136 -- 2026-07-03  (Change-review gate: the platform reviews its own changes before they hit the fleet)
 - The first deep core use of the _agent_run specialist primitive. `_review_change(diff|proposal, deep=)` runs
   code-reviewer (deep=+security-auditor, in PARALLEL -- a mini review workflow) over a change BEFORE it propagates,
