@@ -69,5 +69,25 @@ if _viol:
         print("  [%s] %d (e.g. server.py:%d %s)" % (kind, len(_by[kind]), _by[kind][0][0], _by[kind][0][1]))
     sys.exit(1)
 
+# CLEAN-CORE gate: a framework file must not gain NEW tenant residue (hptuners/text2tune/carsearch/Sarah/...).
+# Ratchets down toward 0 -- see command-center/residue_lint.py. Fails the ship on any regression vs the baseline.
+try:
+    import residue_lint
+except Exception as _e:
+    print("PRESHIP FAIL: could not load the residue linter:", _e); sys.exit(1)
+_cur = residue_lint.scan(); _base = {}
+try:
+    import json as _json
+    _base = _json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".residue_baseline.json")))
+except Exception: pass
+_reg = [(rel, _base.get(rel, 0), n) for rel, n in _cur.items() if n > _base.get(rel, 0)]
+if _reg:
+    print("PRESHIP FAIL: tenant residue INCREASED in %d framework file(s) (clean-core gate) -- keep the core "
+          "tenant-neutral (config-drive it) or re-baseline if intentional:" % len(_reg))
+    for rel, was, now in sorted(_reg): print("  %s: %d -> %d (+%d)" % (rel, was, now, now - was))
+    print("  Re-baseline (only if intentional): python3 command-center/residue_lint.py --baseline")
+    sys.exit(1)
+
 print("PRESHIP OK: all %d local engine modules imported by server.py are in framework_paths (%s); no "
-      "kill-server footgun; UI design-system clean" % (len(local), ", ".join(local)))
+      "kill-server footgun; UI design-system clean; no new tenant residue (clean-core: %d hits, ratcheting to 0)"
+      % (len(local), ", ".join(local), sum(_cur.values())))

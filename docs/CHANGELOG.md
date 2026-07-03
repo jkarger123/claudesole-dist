@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.141 -- 2026-07-03  (clean-core Phase 1+3: engine portability + a tenant-residue ship gate)
+- **Engine portability (Phase 1):** made the last hardcoded TENANT values config-driven so a fresh node boots
+  NEUTRAL instead of inheriting hptuners/text2tune defaults -- pillar list, project-path fallback, ssh user, the
+  text2tune bridge/edge health probes (now cc.config "product_health"), the default services list, protected
+  session names, and name fallbacks. The master keeps its behavior by declaring these in its own (never-shipped)
+  cc.config; other instances now come up blank. Verified: overseer boots pillars=[] while hptuners is unchanged.
+- **platform_map.json off the ship surface:** it was static tenant STATE in framework_paths -- shipped to every
+  node (leaking our component map) AND clobbering each tenant's own map on update. Removed from framework_paths;
+  /api/platform-map already degrades to empty. (-132 residue hits.)
+- **Residue ship-gate (Phase 3):** new command-center/residue_lint.py + a preship gate that FAILS the ship if a
+  framework file gains NEW tenant residue (hptuners/text2tune/carsearch/Sarah/...). Ratchet model with a baseline
+  (339 hits today) that only moves DOWN toward 0 -- so the clean-core cleanup can't silently regress. Remaining
+  residue is comments + docs + CHANGELOG + multi-tenant example copy (Phases 2/4, tracked by the gate).
+
 ## 0.99.140 -- 2026-07-03  (node-builder git-init + stale-CCR auto-detect)
 - **Node-builder git-init (CCR from shopos):** cc-newinstance.sh + cc-init.sh now git-init the project repo (starter
   .gitignore + a "node scaffolded" baseline commit) AND the central deliverables store (its own repo, versioned docs)

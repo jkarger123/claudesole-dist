@@ -126,7 +126,7 @@ def _default_pillars():
                     if os.path.isdir(os.path.join(PROJECT, e)) and not e.startswith((".", "_"))][:14]
         except Exception:
             return []
-    return ["text2tune", "patches", "read_write", "shared"]
+    return CC.get("pillars") or []   # neutral for a fresh tenant; the master lists its pillars in cc.config
 # per-instance state (registries below) -- children isolate theirs so portfolios don't bleed together
 STATE_DIR = os.path.expanduser(CC.get("state_dir") or BASE)
 try: os.makedirs(STATE_DIR, exist_ok=True)
@@ -199,9 +199,7 @@ def render_page():
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
         "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "models": CC_MODELS, "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(), "backupTiers": CC.get("backup_tiers") or [],
-        "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md", "MASTER_HANDOFF.md",
-            "FILE_SYSTEM_GOVERNANCE.md", "TEXT2TUNE_ARCHITECTURE.md", "ENTERPRISE_MIGRATION.md",
-            "BRIDGE_MIGRATION.md"]})
+        "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md"]})   # tenant desk docs come from cc.config; neutral default
     return (PAGE
             .replace("<title>text2tune ", "<title>%s " % BRAND)
             .replace(">text2tune<small>", ">%s<small>" % BRAND)
@@ -1929,14 +1927,22 @@ def all_status():
     for m in load(MACHINES, {"machines": []}).get("machines", []):
         def probe(mm): out[mm["id"]] = machine_status(mm)
         t = threading.Thread(target=probe, args=(m,)); t.start(); ts.append(t)
-    def probe_bridge():   # the text2tune product bridge (runs as sarahkarger); read-only pgrep
-        code, o, _ = sh(["pgrep", "-f", "text2tune_bridge"], timeout=6)
-        out["bridge"] = "online" if (code == 0 and o.strip()) else "offline"
-    def probe_edge():     # Cloudflare worker / product API
-        _, o, _ = sh(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10",
-                      "https://api.text2tune.com/api/status"], timeout=12)
-        out["edge"] = "online" if o.strip() == "200" else "offline"
-    for fn in (probe_bridge, probe_edge):
+    # Optional product-health probes -- ONLY when a tenant declares them (cc.config "product_health":
+    # {"bridge_pgrep": "<proc pattern>", "edge_url": "<status url>"}). A fresh node probes nothing.
+    _ph = CC.get("product_health") or {}
+    _probes = []
+    if _ph.get("bridge_pgrep"):
+        def probe_bridge():   # read-only pgrep for the tenant's product process
+            code, o, _ = sh(["pgrep", "-f", _ph["bridge_pgrep"]], timeout=6)
+            out["bridge"] = "online" if (code == 0 and o.strip()) else "offline"
+        _probes.append(probe_bridge)
+    if _ph.get("edge_url"):
+        def probe_edge():     # the tenant's product API / edge status endpoint
+            _, o, _ = sh(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10",
+                          _ph["edge_url"]], timeout=12)
+            out["edge"] = "online" if o.strip() == "200" else "offline"
+        _probes.append(probe_edge)
+    for fn in _probes:
         t = threading.Thread(target=fn); t.start(); ts.append(t)
     for t in ts: t.join(timeout=13)
     STATUS_CACHE.clear(); STATUS_CACHE.update({"ts": now, "data": out})
@@ -1949,8 +1955,7 @@ def _protected(name):
     (bridge + crons), and Ralph loops (managed in the Ralph lens). Extra names via cc.config
     'protected_sessions'."""
     if name and name == globals().get("CHIEF"): return True
-    if name in ("t2tbridge", "t2tcrons"): return True
-    if name in (CC.get("protected_sessions") or []): return True
+    if name in (CC.get("protected_sessions") or []): return True   # tenant declares its infra sessions in cc.config
     return name.startswith("ralph-")
 _FRIENDLY = {"chief": "Chief of Staff", "hptuner-brain": "Orchestration Brain",
              "t2tbridge": "Live bridge", "t2tcrons": "Bridge crons"}
@@ -4368,7 +4373,7 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
     try: sibs = [s for s in _sessions_in_scope(rel) if s != name] if rel else []
     except Exception: sibs = []
     return {"ok": True, "session": name, "term": "/term?name=" + urllib.parse.quote(name),
-            "attach": 'ssh -t hptuner@%s "%s attach -t %s"' % (STUDIO_TS, TMUX, name), "siblings": sibs}
+            "attach": 'ssh -t %s@%s "%s attach -t %s"' % ((CC.get("ssh_user") or os.environ.get("USER") or "user"), STUDIO_TS, TMUX, name), "siblings": sibs}
 
 # ---- the Chief of Staff: a persistent top-level session you can reach any time ----
 # Per-instance Chief session -- MUST be unique per ClaudeFather, else every instance's "Talk to Chief"
@@ -7671,10 +7676,7 @@ def portfolio():
 # set "services" in cc.config.json as [[name,label,desc],...]. Falls back to this deployment's fleet.
 # Per-instance services. Only the master (hptuners, no CC_CONFIG) gets the default fleet; any instance
 # that sets "services" in its cc.config.json owns its list -- "services": [] means none (no hptuners leak).
-_DEFAULT_SERVICES = [
-    ("t2tbridge", "🌉 Bridge", "the live product — processes customer tuning jobs"),
-    ("t2tcrons", "⏱ Crons", "TDN contract check + T480 cloud-entry sync"),
-    ("hptuner-brain", "🧠 Brain", "the always-on orchestration session")]
+_DEFAULT_SERVICES = []   # neutral: a fresh node has no tenant services. The master lists its own in cc.config "services".
 _SERVICES_CONFIG = [tuple(s) for s in CC["services"]] if "services" in CC else None
 
 def _services_list():
@@ -9019,7 +9021,7 @@ def regen_treemap(force=False):
 
 def module_tree(rel="", depth=0):
     absdir = projpath(rel) if rel else PROJECT
-    node = {"name": (os.path.basename(absdir) or "hptuners"), "rel": rel, "children": []}
+    node = {"name": (os.path.basename(absdir) or PROJECT_NAME or "project"), "rel": rel, "children": []}
     if depth < 7:
         for k in child_modules(absdir):
             sub = module_tree(k["rel"], depth + 1)
@@ -17505,7 +17507,7 @@ function openMach(id){const m=D.machines.find(x=>x.id==id);const st=ST[id]||m.st
    +'<div class="meta">SSH: <code>'+(m.ssh||"")+'</code>'+(m.alias?' · alias <code>'+m.alias+'</code>':'')+'</div>'
    +'<div class="btns" style="margin-top:14px"><button class="btn go" onclick="openLaunch(\''+id+'\',\'\')">▶ Open Claude here</button>'
    +'<button class="btn" onclick="closeM()">Close</button></div>');}
-function PROJ(){return (window.CC&&window.CC.project)||"/Volumes/Samsung990PRO/hptuners";}
+function PROJ(){return (window.CC&&window.CC.project)||"";}
 // ---- launch / sessions / terminal ----
 // New session: pick a working dir by BROWSING the project/client tree (each folder expands lazily to show its
 // contents). The machine selector ("Run on") only appears when there's actually more than one machine -- on a
