@@ -29,7 +29,8 @@ MARKERS = re.compile(r"""(
 )""", re.IGNORECASE | re.VERBOSE)
 
 TEXT_EXT = (".py", ".js", ".json", ".md", ".sh", ".txt", ".html", ".css")
-SKIP = {"command-center/residue_lint.py", "command-center/preship.py"}   # these NAME the tenant markers by design (linter + its gate message) -- don't lint the linters
+SKIP = {"command-center/residue_lint.py", "command-center/preship.py",   # NAME the markers by design (linter + gate)
+        "docs/CHANGELOG.md"}   # narrates tenant work EVERY ship by design -> can't gate on it; product-changelog strategy is Phase 4
 
 
 def _framework_files():

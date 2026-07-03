@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.142 -- 2026-07-03  (clean-core: residue gate excludes the changelog + linters)
+- Follow-up to .141: the residue gate flagged docs/CHANGELOG.md (and preship.py's own gate message) because they
+  NAME tenant terms by design -- the changelog narrates tenant work on every ship, so gating on it self-blocks.
+  Excluded the changelog + the two linter files from the residue scan; re-baselined to 227 real code/doc hits.
+  The product-changelog strategy (ship a clean one vs the tenant-narrated one) is tracked as clean-core Phase 4.
+
 ## 0.99.141 -- 2026-07-03  (clean-core Phase 1+3: engine portability + a tenant-residue ship gate)
 - **Engine portability (Phase 1):** made the last hardcoded TENANT values config-driven so a fresh node boots
   NEUTRAL instead of inheriting hptuners/text2tune defaults -- pillar list, project-path fallback, ssh user, the
