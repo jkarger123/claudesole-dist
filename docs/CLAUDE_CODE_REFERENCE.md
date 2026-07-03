@@ -572,6 +572,40 @@ Doc: /en/best-practices.
   Org-wide distribution           -> Plugins + private marketplace
   Hard enterprise policy          -> Managed settings + managed CLAUDE.md (uneditable)
   Spend tracking                  -> claude -p --output-format json (total_cost_usd)
+  One bounded expert answer       -> claude -p --agent <name> (persona + tool scope enforced)
+  Act on that answer in code      -> + --output-format json (parse result/verdict/cost/ms)
+  MANY agents (broad or confident)-> a dynamic WORKFLOW (say "ultracode" / use the Workflow tool)
+
+--------------------------------------------------------------------------------
+## 14. Capability -> WHEN/WHY to reach for it (ClaudeFather playbook -- updated 2026-07-03)
+
+Decision rule of thumb:
+- Need ONE bounded expert answer you can act on -> `claude -p --agent <name> --output-format json`. In CF this is
+  the **`_agent_run(agent, prompt)`** primitive (subscription, returns {result,cost,ms}); the `cc-review` / Agent Lab
+  / incident-triage / change-review-gate all sit on it. Reach for it over a raw `_claude_text` Haiku call whenever the
+  task wants an EXPERT with tools + enforced scope (read the repo, security lens, etc.), not just a quick opinion.
+- Need MANY agents orchestrated -- to be COMPREHENSIVE (fan out + cover), CONFIDENT (independent + adversarial verify),
+  or to take on SCALE one context can't hold -> a **dynamic workflow** (mention "ultracode" or ask to use the Workflow
+  tool). CF used one to build the Agent Lab (2 codegen agents + a review pass). The server can also orchestrate
+  `_agent_run` itself in Python (the review "deep" mode + the Agent Lab Panel are fan-outs) -- no Workflow tool needed
+  at runtime. Pick a workflow when the WORK-LIST is knowable and parallel/verify pays off; scout inline first.
+- Recurring, human-triggered capability -> a **skill** (`.claude/skills`) or a scoped **agent-tool** (`agents/`).
+- A hard guardrail / post-edit automation -> a **hook** (PreToolUse deny / Stop gate / PostToolUse).
+- An external system -> an **MCP** extension. Continue a specific past conversation -> **`--resume <id>`** (fork to branch).
+- Unattended run -> `-p` + `--dangerously-skip-permissions` (or `--permission-mode`); pick a tier with `--model`
+  (OMIT it to use the subagent's own configured model -- forcing one overrides its quality choice).
+
+The three tiers of "an agent" in CF, and when each:
+- `.claude/agents/*` **subagents** (code-reviewer, cost-reporter, deploy-checker, incident-scanner, security-auditor):
+  invoked headless via `--agent` as FUNCTIONS, or by the main agent via the Task tool. Use for a scoped expert opinion.
+- `agents/<slug>/` **agent-tools** (backup/cost/deploy/google/incidents/security/usage...): human-gated, read-only,
+  session-based helpers surfaced in the Agents lens. Use for an operator-driven scoped operation.
+- **Teams** (rung-4 rosters): multiple agents that must SHARE findings + reconcile. Use for the rare coordinate case.
+
+Where CF already wires specialists into its LIFECYCLE (the pattern to extend): before a change propagates (the
+change-review gate + CCR auto-review), on a resource spike / node wedge / job failure (incident triage), and an
+opt-in weekly security-auditor beat. Deliberately NOT wired into the fast reflexes (self-heal, deterministic router)
+-- those are better without an AI in the path. See docs/RESILIENCE.md + docs/SERVER_METRICS.md.
 
 --------------------------------------------------------------------------------
 ## Source URLs (fetched 2026-06-20)

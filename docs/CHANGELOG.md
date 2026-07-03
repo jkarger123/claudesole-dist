@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.138 -- 2026-07-03  (Claude Code capability catalog: refreshed + a when/why decision layer + surfaced to agents)
+- We DID have docs/CLAUDE_CODE_REFERENCE.md, but it was 13 days stale (zero workflow/ultracode coverage, thin --agent),
+  a "what exists" reference with no "when/why to reach for it", and not surfaced to agents. Fixed: added **section 14
+  "Capability -> WHEN/WHY to reach for it (ClaudeFather playbook)"** -- the decision layer (one bounded expert answer
+  -> _agent_run; MANY agents to be comprehensive/confident -> a dynamic workflow/ultracode; recurring -> skill/agent-
+  tool; hard rule -> hook; external -> MCP) + the three agent tiers + where CF wires specialists into its lifecycle
+  (and where it deliberately doesn't). Also refreshed the cheat-sheet.
+- **Surfaced to agents:** the launch capabilities-brief now names the cc-review/cc-vitals/cc-email CLIs, the Agent Lab,
+  `_agent_run`, and dynamic workflows, and points at the when/why guide -- so an agent knows these powers exist and
+  when to reach for each, instead of rediscovering them.
+
 ## 0.99.137 -- 2026-07-03  (AI incident triage on loud failures + opt-in weekly security beat)
 - **AI incident triage:** a loud failure no longer just says "X broke" -- `_incident(source, summary, detail)`
   records it and (async, deduped 30min) has `incident-scanner` triage it into the likely cause + the single

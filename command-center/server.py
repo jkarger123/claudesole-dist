@@ -7114,6 +7114,12 @@ def roster_text():
                 "pressure, NOT necessarily your bug (do not thrash trying to fix it). Check real health via the "
                 "Server lens or GET /api/vitals (add ?dump=1 to capture a runaway process's stack), or run  cc-vitals"
                 ".  Never assert the box is healthy from memory -- read the vitals.")
+    bits.append("CLAUDE CODE POWERS you can invoke (and WHEN): dispatch a bounded SPECIALIST headless -- the cc-review / "
+                "cc-vitals / cc-email CLIs, the Agent Lab lens, or `claude -p --agent <name> --output-format json` "
+                "(_agent_run: a scoped expert -- code-reviewer/security-auditor/incident-scanner/... -- as a callable "
+                "function that returns {result,cost,ms}); reach for a DYNAMIC WORKFLOW when a task needs MANY agents to "
+                "be comprehensive or confident (say 'ultracode' or ask to use the Workflow tool). Full when/why decision "
+                "guide: docs/CLAUDE_CODE_REFERENCE.md sec 14.")
     bits.append("TO-DO: if you spot a task the operator should do (or a date they should put on their calendar), "
                 "propose it by running:  bash " + os.path.join(CC_HOME, "command-center", "cc-task") + " \"<short task>\""
                 "  -- it lands as a SUGGESTION in their Tasks tab for them to approve (never auto-added).")
