@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.132 -- 2026-07-03  (Server lens: live CF-themed graphs + Fahrenheit)
+- Added a **Live** panel to the Server lens: two beautiful CF-themed SVG charts (gold/azure/orange/teal, gradient
+  area fills, grid, legends, current-value dots) tracking the last ~6 min -- **CPU % + Memory %** on one, **CPU +
+  GPU temperature** on the other. Client-side rolling history (72 x 5s samples), no charting library, redraws each
+  poll. **All temperatures are now shown in Fahrenheit** across the lens (KPI chip, thermal line, and the graph).
+
 ## 0.99.131 -- 2026-07-03  (Server lens: live CPU/GPU temperature + power -- sudoless, via macmon)
 - The Server lens now shows REAL SoC temperatures (CPU + GPU degC) and power draw (total / cpu / gpu watts),
   read sudolessly from the Apple Silicon sensors via `macmon` -- no root daemon, no sudo helper. `_server_metrics()`

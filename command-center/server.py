@@ -21476,15 +21476,43 @@ async function emThread(tid){
     +'<div class="row" style="margin-top:11px;justify-content:flex-end"><button class="btn" onclick="closeM()">Close</button></div></div>');
 }
 // ---- SERVER lens: whole-machine metrics so the operator can VISUALLY confirm nothing's running away ----------
-let SRV={data:null}, _srvT=null;
+let SRV={data:null,hist:[]}, _srvT=null;
+function cToF(c){ return (c==null||isNaN(c))?null:Math.round(c*9/5+32); }
+function srvPush(){ var d=SRV.data; if(!d)return; var th=d.thermal||{},mem=d.mem||{};
+  SRV.hist.push({cpu:d.cpu?Math.round(100-(d.cpu.idle||0)):0, mem:mem.pct||0, cpuF:cToF(th.cpu_c), gpuF:cToF(th.gpu_c)});
+  while(SRV.hist.length>72) SRV.hist.shift(); }   // ~6 min of 5s samples
+// A CF-themed live SVG chart: series=[{color,data[],area?}], auto-ranged (or fixed min/max). Crisp, no library.
+function srvChart(series,opt){ opt=opt||{}; var W=640,H=opt.h||120,PL=4,PR=6,PT=9,PB=6;
+  var n=0; series.forEach(function(s){ n=Math.max(n,(s.data||[]).length); });
+  if(n<2) return '<div class="cc-p-note" style="color:var(--dim);padding:16px 0;text-align:center">collecting samples&hellip;</div>';
+  var vals=[]; series.forEach(function(s){ (s.data||[]).forEach(function(v){ if(v!=null&&!isNaN(v))vals.push(v); }); });
+  if(!vals.length) return '';
+  var lo=(opt.min!=null)?opt.min:Math.min.apply(null,vals), hi=(opt.max!=null)?opt.max:Math.max.apply(null,vals);
+  if(hi<=lo)hi=lo+1; if(opt.min==null)lo-=(hi-lo)*0.12; if(opt.max==null)hi+=(hi-lo)*0.12;
+  var iw=W-PL-PR, ih=H-PT-PB;
+  var X=function(i){return (PL+iw*(i/(n-1))).toFixed(1);}, Y=function(v){return (PT+ih*(1-(v-lo)/(hi-lo))).toFixed(1);};
+  var defs='', body='';
+  for(var gi=0;gi<=3;gi++){ var gy=(PT+ih*gi/3).toFixed(1); body+='<line x1="'+PL+'" y1="'+gy+'" x2="'+(W-PR)+'" y2="'+gy+'" stroke="var(--line)" stroke-width="1" opacity=".45"/>'; }
+  series.forEach(function(s,si){ var off=n-(s.data||[]).length, pts=[];
+    (s.data||[]).forEach(function(v,i){ if(v==null||isNaN(v))return; pts.push(X(i+off)+','+Y(v)); });
+    if(pts.length<2) return;
+    if(s.area){ var gid='cg'+si; defs+='<linearGradient id="'+gid+'" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="'+s.color+'" stop-opacity="0.30"/><stop offset="100%" stop-color="'+s.color+'" stop-opacity="0"/></linearGradient>';
+      var x0=pts[0].split(',')[0], x1=pts[pts.length-1].split(',')[0];
+      body+='<polygon points="'+x0+','+(H-PB)+' '+pts.join(' ')+' '+x1+','+(H-PB)+'" fill="url(#'+gid+')"/>'; }
+    body+='<polyline points="'+pts.join(' ')+'" fill="none" stroke="'+s.color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+    var lp=pts[pts.length-1].split(','); body+='<circle cx="'+lp[0]+'" cy="'+lp[1]+'" r="2.8" fill="'+s.color+'"/>';
+  });
+  return '<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" style="width:100%;height:'+H+'px;display:block"><defs>'+defs+'</defs>'+body+'</svg>';
+}
+function srvLeg(c,t){ return '<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px;font-size:11.5px;color:var(--mut)"><span style="width:11px;height:11px;border-radius:3px;background:'+c+';display:inline-block"></span>'+t+'</span>'; }
 function srvGB(b){ b=+b||0; if(b>=1e12)return (b/1099511627776).toFixed(2)+' TB'; if(b>=1e9)return (b/1073741824).toFixed(1)+' GB'; if(b>=1e6)return (b/1048576).toFixed(0)+' MB'; return (b/1024).toFixed(0)+' KB'; }
 function srvFill(pct){ pct=Math.max(0,Math.min(100,+pct||0)); var c = pct>=90?'rgba(248,81,73,.9)' : pct>=70?'rgba(232,197,71,.9)' : 'rgba(63,185,80,.85)'; return '<div style="height:9px;border-radius:5px;background:var(--line);overflow:hidden;margin-top:4px"><div style="height:100%;width:'+pct+'%;background:'+c+'"></div></div>'; }
 function srvLvl(l){ var m={ok:'bdg-green',warn:'bdg-amber',critical:'bdg-red'}; return '<span class="badge '+(m[l]||'bdg-dim')+'">'+esc(l||'?')+'</span>'; }
 async function loadServerMetrics(){
   var g=document.getElementById('grid'); if(!SRV.data)g.innerHTML=empty('Reading server metrics…');
   try{ SRV.data=await(await fetch('/api/server-metrics')).json(); }catch(e){ g.innerHTML=empty('Could not read server metrics.'); return; }
-  renderServerMetrics();
-  clearInterval(_srvT); _srvT=setInterval(async function(){ if(LENS!=='server'){clearInterval(_srvT);return;} try{ SRV.data=await(await fetch('/api/server-metrics')).json(); renderServerMetrics(); }catch(e){} }, 5000);
+  srvPush(); renderServerMetrics();
+  clearInterval(_srvT); _srvT=setInterval(async function(){ if(LENS!=='server'){clearInterval(_srvT);return;} try{ SRV.data=await(await fetch('/api/server-metrics')).json(); srvPush(); renderServerMetrics(); }catch(e){} }, 5000);
 }
 function renderServerMetrics(){
   var d=SRV.data||{}, g=document.getElementById('grid'); if(!g)return;
@@ -21499,15 +21527,26 @@ function renderServerMetrics(){
     +'<span class="cc-chip" style="'+(loadBad?'outline:1px solid rgba(248,81,73,.8)':'')+'">Load <b>'+load[0].toFixed(2)+'</b> / '+cores+' cores <span class="sub">('+Math.round(lpc*100)+'% per core)</span></span>'
     +'<span class="cc-chip">CPU busy <b>'+cpuBusy+'%</b></span>'
     +'<span class="cc-chip">Memory <b>'+(mem.pct||0)+'%</b> <span class="sub">'+srvGB(mem.used)+' / '+srvGB(mem.total)+'</span></span>'
-    +'<span class="cc-chip" style="'+((thBad||(th.cpu_c!=null&&th.cpu_c>=95))?'outline:1px solid rgba(248,81,73,.8)':'')+'">'+((th.cpu_c!=null)?('Temp <b>CPU '+th.cpu_c+'°C</b>'+(th.gpu_c!=null?(' <span class="sub">GPU '+th.gpu_c+'°C</span>'):'')):('Thermal <b>'+esc(th.pressure||'?')+'</b>'))+'</span>'
+    +'<span class="cc-chip" style="'+((thBad||(th.cpu_c!=null&&th.cpu_c>=95))?'outline:1px solid rgba(248,81,73,.8)':'')+'">'+((th.cpu_c!=null)?('Temp <b>CPU '+cToF(th.cpu_c)+'°F</b>'+(th.gpu_c!=null?(' <span class="sub">GPU '+cToF(th.gpu_c)+'°F</span>'):'')):('Thermal <b>'+esc(th.pressure||'?')+'</b>'))+'</span>'
     +(d.power?('<span class="cc-chip">Power <b>'+d.power.all_w+'W</b> <span class="sub">cpu '+d.power.cpu_w+' · gpu '+d.power.gpu_w+'</span></span>'):'')
     +'<span class="cc-chip">Procs <b>'+(d.proc_count||0)+'</b></span></div>';
+  // LIVE CF-themed charts -- utilization + temperature over time
+  var HH=SRV.hist||[], CU='rgba(232,197,71,1)', CM='rgba(120,170,255,.95)', CT='rgba(240,140,90,1)', CG='rgba(90,205,205,1)';
+  var mins=Math.round(HH.length*5/60*10)/10;
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Live</b> <span class="cc-p-sub">last '+mins+' min &middot; updates every 5s</span></div>';
+  h+='<div style="margin:8px 0 2px">'+srvLeg(CU,'CPU %')+srvLeg(CM,'Memory %')+'</div>';
+  h+=srvChart([{color:CU,data:HH.map(function(s){return s.cpu;}),area:true},{color:CM,data:HH.map(function(s){return s.mem;})}],{h:130,min:0,max:100});
+  if(HH.some(function(s){return s.cpuF!=null;})){
+    h+='<div style="margin:14px 0 2px">'+srvLeg(CT,'CPU temp °F')+srvLeg(CG,'GPU temp °F')+'</div>';
+    h+=srvChart([{color:CT,data:HH.map(function(s){return s.cpuF;}),area:true},{color:CG,data:HH.map(function(s){return s.gpuF;})}],{h:120});
+  }
+  h+='</div>';
   // Load + CPU + memory panel
   h+='<div class="cc-panel"><div class="cc-p-h"><b>Load &amp; CPU</b> <span class="cc-p-sub">1/5/15 min: '+load.map(function(x){return x.toFixed(2);}).join(' &middot; ')+(loadBad?' &mdash; ABOVE core count (oversubscribed)':'')+'</span></div>';
   h+='<div class="cc-p-note">CPU busy '+cpuBusy+'%'+(d.cpu?(' &middot; '+Math.round(d.cpu.user||0)+'% user, '+Math.round(d.cpu.sys||0)+'% sys, '+Math.round(d.cpu.idle||0)+'% idle'):'')+srvFill(cpuBusy)+'</div>';
   h+='<div class="cc-p-note" style="margin-top:8px">Load per core '+Math.round(lpc*100)+'% (load '+load[0].toFixed(2)+' across '+cores+' cores)'+srvFill(lpc*100)+'</div>';
   if(mem.total) h+='<div class="cc-p-note" style="margin-top:8px">Memory '+(mem.pct||0)+'% &middot; '+srvGB(mem.used)+' used of '+srvGB(mem.total)+' <span class="sub">('+srvGB(mem.wired)+' wired, '+srvGB(mem.compressed)+' compressed)</span>'+srvFill(mem.pct)+'</div>';
-  h+='<div class="cc-p-note" style="margin-top:8px">Thermal: '+((th.cpu_c!=null)?('CPU <b>'+th.cpu_c+'°C</b>'+(th.gpu_c!=null?(', GPU <b>'+th.gpu_c+'°C</b>'):'')+' &middot; '):'')+'pressure <b>'+esc(th.pressure||'?')+'</b>'+(d.power?(' &middot; drawing <b>'+d.power.all_w+'W</b> (cpu '+d.power.cpu_w+'W, gpu '+d.power.gpu_w+'W)'):'')+' <span class="sub" style="color:var(--dim)">&mdash; '+esc(th.note||'')+'</span></div></div>';
+  h+='<div class="cc-p-note" style="margin-top:8px">Thermal: '+((th.cpu_c!=null)?('CPU <b>'+cToF(th.cpu_c)+'°F</b>'+(th.gpu_c!=null?(', GPU <b>'+cToF(th.gpu_c)+'°F</b>'):'')+' &middot; '):'')+'pressure <b>'+esc(th.pressure||'?')+'</b>'+(d.power?(' &middot; drawing <b>'+d.power.all_w+'W</b> (cpu '+d.power.cpu_w+'W, gpu '+d.power.gpu_w+'W)'):'')+' <span class="sub" style="color:var(--dim)">&mdash; '+esc(th.note||'')+'</span></div></div>';
   // Disks
   if((d.disks||[]).length){ h+='<div class="cc-panel"><div class="cc-p-h"><b>Disk</b></div>';
     (d.disks||[]).forEach(function(dk){ h+='<div class="cc-p-note" style="margin-top:6px"><b>'+esc(dk.label)+'</b> '+dk.pct+'% &middot; '+srvGB(dk.avail)+' free of '+srvGB(dk.total)+srvFill(dk.pct)+'</div>'; });
