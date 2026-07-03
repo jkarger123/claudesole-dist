@@ -204,7 +204,9 @@ def main():
         if os.path.exists(lp("halt")):
             log("  HALT requested -- stopping."); set_status(state="halted"); break
         wait_if_paused()
-        if n > START and is_complete():
+        if is_complete():   # UNCONDITIONAL (was gated on n>START): a relaunched DONE loop must exit instantly, not
+                            # burn a full iteration + verifier first. Safe: is_complete() requires total>0 AND
+                            # unchecked==0 (+ capstone), so a fresh loop with real items never false-completes here.
             log(""); log("  ===== %s COMPLETE -- all items checked =====" % NAME); set_status(state="done"); break
         if MAX_ITERS and n > (START + MAX_ITERS - 1):
             log("  max iterations reached."); set_status(state="stopped"); break

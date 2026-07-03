@@ -8382,11 +8382,24 @@ def ralph_detail(name):
             "rules": _rread(os.path.join(d, "rules.md")), "prompt": _rread(os.path.join(d, "prompt.txt")),
             "log": _rread(os.path.join(d, "run.log"), 300)}
 
+def _ral_done_at_launch(d):
+    """True only if the runner MARKED this loop done AND its progress still has no unchecked items (i.e. the operator
+    hasn't re-opened it). Used to NO-OP a relaunch of a finished loop -- the churn fix (CCR ccr-1783114463894).
+    Conservative: any doubt -> False, so a genuinely-resumable loop still launches."""
+    try:
+        if (_rjson(os.path.join(d, "status.json")) or {}).get("state") != "done": return False
+        t = _rread(os.path.join(d, "progress.md")) or ""
+        return ("[ ]" not in t) and ("[" in t)   # runner said done + has checkboxes + none left unchecked
+    except Exception:
+        return False
+
 def ralph_launch(name):
     d = _rdir(name)
     if not d: return {"ok": False, "error": "no such loop"}
     n = _rname(name); sess = "ralph-" + n
     if _ralive(name): return {"ok": True, "session": sess, "term": "/term?name=" + sess, "note": "already running"}
+    if _ral_done_at_launch(d):   # LAUNCH-TIME completion guard: never respawn a finished loop -> the (unidentified) relaunch trigger becomes a no-op, ending the churn
+        return {"ok": True, "session": sess, "complete": True, "note": "loop is complete -- not relaunched (archive it, or add unchecked items to resume)"}
     for ctl in ("halt", "pause"):
         try: os.remove(os.path.join(d, ctl))
         except Exception: pass

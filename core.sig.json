@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "7830f80ee6da048ee9a40ef8cc9362dacab85c9a66281924924ecc93a4ab5216",
       "cf-key-restore.sh": "02140b8b3f213b51151c037b844a8cae7d9d586805e7110cf2f5d017896d58c1",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "94650dff228cdc503f5f3b42bae14693a916dbb174f4f3238cac9929ec495439",
+      "claudesole.manifest.json": "6a211661d4265d97d0dca5f5067ba1ce0b170003878ad02b7b57bfb5e068119f",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
       "command-center/cc-email": "4895c4eb4ca8e1c6f3b26dd260f9ee3b776c42f24ec656b8581d1cef0c4155ed",
       "command-center/cc-handoff": "9194f8a409f322c9835615cdb014dc9e626a469611ea127b1e9e7a6bf4db2532",
@@ -48,9 +48,9 @@
       "command-center/notebook.py": "add370e9972d9c36b9217b4406e441ab383b210e096b467eb1f819f9ce6c040c",
       "command-center/platform_map.json": "91b6a19c6b3804796887a3b66b51dfa2dcc17ff517088dd837f6699b595a22be",
       "command-center/preship.py": "5500f8d04923413e8d91352d4d6b61c3aa4eefb906fcbefd6954a159aabc439f",
-      "command-center/ralph_runner.py": "7d26a8d8bca83ba6f52c8ab45aae1c5643233e5cf94c6293b8f6f14b6c169f3b",
+      "command-center/ralph_runner.py": "ee50495ce1c0aa06b7f660854d2ee531fb151cdbce2c4fdaaaeec6ff5abff55e",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "964551f6872a886c5b0caec7e03bb90b0a3b1ac87c7227f6870bbb1814f9443a",
+      "command-center/server.py": "e826ce496e85b498eec494b419783447d5280fbd9a5f89090e1b2c9e70c6ae7f",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/ui_lint.py": "0cabb923f1edd1a5f9808e4e04329c46334483b3da38fcf4adba2e3e9b476132",
@@ -122,9 +122,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783112780,
+    "generated": 1783114818,
     "v": 1,
-    "version": "0.99.138"
+    "version": "0.99.139"
   },
-  "sig": "x4ANq28mxncIZf/QjfXuWc2EMkeCzbQiaR1/bAtcvBJwWUllFxmx0RQ90M5ac6PLQLSO33DxvikgN5FM4L3aAw=="
+  "sig": "b4j9Gq1HSUHLBYzLYsRAeGXu7P39Wr4rX3CVZi9IH6FOnGX4f7WQgj0eaNfl3391ghGMxufDh8EdhvjFUxi1Cw=="
 }

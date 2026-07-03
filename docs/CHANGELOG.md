@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.139 -- 2026-07-03  (Ralph loops: stop the relaunch churn -- CCR ccr-1783114463894)
+- A finished Ralph loop, when re-invoked by some external trigger, was burning a full agent turn + the ~2min
+  verifier before exiting, because the completion check was gated on n>START. Two fixes (from an hptuner-node CCR,
+  auto-reviewed PASS): (A) `ralph_runner.py` checks is_complete() UNCONDITIONALLY at the top of the loop -> a done
+  loop exits instantly on relaunch (safe: is_complete requires total>0 AND unchecked==0 (+capstone), so a fresh loop
+  never false-completes); (B) `ralph_launch` no-ops a finished loop (runner marked done + progress has no unchecked)
+  -> the relaunch trigger becomes harmless. Either ends the churn; both make it robust.
+- Deliberately did NOT auto-archive-on-completion (the CCR's fix C): archiving needs operator review of the final
+  report first, so that stays operator-driven (can be an opt-in later). A+B fix the waste without changing the
+  review workflow.
+
 ## 0.99.138 -- 2026-07-03  (Claude Code capability catalog: refreshed + a when/why decision layer + surfaced to agents)
 - We DID have docs/CLAUDE_CODE_REFERENCE.md, but it was 13 days stale (zero workflow/ultracode coverage, thin --agent),
   a "what exists" reference with no "when/why to reach for it", and not surfaced to agents. Fixed: added **section 14
