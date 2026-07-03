@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.136 -- 2026-07-03  (Change-review gate: the platform reviews its own changes before they hit the fleet)
+- The first deep core use of the _agent_run specialist primitive. `_review_change(diff|proposal, deep=)` runs
+  code-reviewer (deep=+security-auditor, in PARALLEL -- a mini review workflow) over a change BEFORE it propagates,
+  reading the REAL repo (new `cwd` param on _agent_run) for context; returns a VERDICT (PASS/CONCERNS/BLOCK). ADVISORY,
+  never a hard gate.
+- **`cc-review` CLI**: reviews `git diff HEAD` (--deep, --staged); exit 2 on BLOCK so a ship script / autonomous job
+  can gate. **CCR intake auto-review**: a node's proposal is auto-assessed on submit (off-thread, concurrency-bounded)
+  and the verdict surfaces on the CCR card -- vetting semi-trusted node changes before MC implements them. `/api/review-diff`.
+- DOGFOODED: the gate reviewed its OWN implementation and caught (1) a real parser bug (first-vs-last VERDICT), (2) a
+  prompt-injection vector (a submitted diff/CCR could try to coerce a PASS) + that calling it a "GATE" overstated its
+  authority, (3) missing dedup + a swallowed exception -- all fixed here (last-verdict parse, untrusted-content prompt
+  framing, a review semaphore + logging, honest advisory wording). The change-review gate improving its own code is the point.
+
 ## 0.99.135 -- 2026-07-03  (Experimental category + Agent Lab + _agent_run primitive + resilience auto-diagnosis)
 - **New "Experimental" nav category** -- a staging area for features being worked out; they graduate into core or
   ship as an extension once proven.
