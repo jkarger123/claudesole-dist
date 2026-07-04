@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.149 -- 2026-07-04  (Add-a-ClaudeFather: show the new node's access token with a Copy button)
+- The "Add a ClaudeFather" result now surfaces the **per-node access token** (minted at birth) in a prominent
+  callout with a **Copy token** button and a clear message: copy it now, you enter it the moment the new
+  dashboard opens, then you can reset it in Settings -> Login token. Previously the UI wrongly said "no token
+  yet -- the dashboard will ask you to set your own", so the operator hit an unexpected token prompt with
+  nothing to paste. The token was always returned by the engine (`CC_NEWINSTANCE_JSON.auth_token`); the UI just
+  discarded it. Also corrected a stale "new nodes start open" code comment (they mint a token at birth).
+- Terminal **auto-reconnect** (rode into 0.99.148): the `/term` view and the Ralph-loop viewer now silently
+  reconnect through a server restart (~5-9s) instead of freezing on "detached" until a manual refresh.
+
 ## 0.99.148 -- 2026-07-04  (Edge MCP Host: run remote-computer MCP servers over the mesh, transparently)
 - NEW core extension **Edge MCP Host** (`extensions/edge-mcp/`, v1.0.0): run MCP servers that must live on a
   user's OWN computer -- GUI apps (Adobe InDesign/Photoshop/Blender), their real logged-in browser, local

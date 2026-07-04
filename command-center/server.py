@@ -7683,7 +7683,7 @@ def instance_provision(p, do_launch=False, dry=False):
         if res["alive"]:
             try:
                 _h = {"Content-Type": "application/json"}
-                if summ.get("auth_token"): _h["X-CC-Token"] = summ["auth_token"]   # new nodes start open (no token)
+                if summ.get("auth_token"): _h["X-CC-Token"] = summ["auth_token"]   # new nodes mint a per-node token at birth -- authenticate with it
                 creq = urllib.request.Request("http://127.0.0.1:%s/api/chief-open" % port, data=b"{}", headers=_h, method="POST")
                 cr = json.loads(urllib.request.urlopen(creq, timeout=35).read().decode())
                 res["chief_started"] = bool(cr.get("ok"))
@@ -22831,7 +22831,8 @@ async function cfProvision(launch){
   var r=await cfPost({launch:launch, persist:persist, mesh:persist});if(!r)return;var o=document.getElementById('cfout');
   if(!r.ok){o.textContent='ERROR: '+(r.error||'?');return;}
   var s=r.summary||{}, NL=String.fromCharCode(10);
-  var txt=(r.launched?'✅ Created & started: ':'✅ Created (not started): ')+(s.bundle||'?')+NL+'port: '+(s.port||'?')+'   role: '+(s.role||'?')+NL+'dashboard: '+(s.url||'?')+NL+NL+'Login: no token yet — when you open it, the dashboard will ask you to set your own (changeable later in Settings → Login token).'+NL;
+  var tok=s.auth_token||'';   // the per-node access token minted at birth -- the user MUST enter it on first open
+  var txt=(r.launched?'✅ Created & started: ':'✅ Created (not started): ')+(s.bundle||'?')+NL+'port: '+(s.port||'?')+'   role: '+(s.role||'?')+NL+'dashboard: '+(s.url||'?')+NL+NL+(tok?'🔑 Login token: shown above — COPY IT before you open the node. You enter it immediately on first open; you can reset it afterward in Settings → Login token.':'Login: when you open it, the dashboard will ask you to set your own token (changeable later in Settings → Login token).')+NL;
   if(r.launched)txt+=NL+'Running: '+(r.alive?('✅ alive (HTTP '+r.http+')'):('⚠ not responding (HTTP '+r.http+')'))+NL;
   if('persisted' in r)txt+='Permanent: '+(r.persisted?'✅ installed — survives reboot':('⚠ '+(r.persist_note||r.persist_warn||'not installed')))+NL;
   if('meshed' in r)txt+='Mesh: '+(r.meshed?'✅ added to the fleet peers':('⚠ '+(r.mesh_warn||'not added')))+NL;
@@ -22840,8 +22841,23 @@ async function cfProvision(launch){
   if('chief_started' in r)txt+='Chief of Staff: '+(r.chief_started?'✅ warmed up & ready':'⚠ start it from the Chief tab')+NL;
   if(!r.launched)txt+=NL+'It is staged but OFF. Re-run with Create & start to bring it online.'+NL;
   txt+=NL+'➡ Next: open the '+(s.id||'')+' dashboard ('+(s.url||'')+') and run its Setup agent (Agents → setup) to configure the project.';
-  o.textContent=txt; toast((r.launched?'Started ':'Created ')+(s.id||'')); setTimeout(loadPortfolio,1600);
+  // Surface the minted access token PROMINENTLY with a Copy button -- the user must paste it the instant the
+  // new dashboard opens (it prompts for the token before letting them set their own). Plain text used to bury it.
+  var head='';
+  if(tok){head='<div style="border:1px solid var(--accent-light,#e8c547);background:rgba(232,197,71,.09);border-radius:10px;padding:12px 14px;margin:0 0 11px">'
+    +'<div style="font-weight:800;color:var(--accent-light,#e8c547);margin-bottom:8px;font-size:13.5px">🔑 Access token for '+esc(s.id||'the new node')+' — copy it now</div>'
+    +'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+    +'<code id="cfTokVal" style="flex:1;min-width:180px;font-size:15px;font-weight:700;letter-spacing:.5px;background:rgba(0,0,0,.4);padding:9px 12px;border-radius:7px;-webkit-user-select:all;user-select:all;word-break:break-all">'+esc(tok)+'</code>'
+    +'<button class="mini go" onclick="cfCopyTok()">Copy token</button></div>'
+    +'<div style="margin-top:9px;font-size:12.5px;line-height:1.5;opacity:.92">You will be asked for this <b>the moment you open the new dashboard</b> — paste it to log in. After that, set your own password in <b>Settings → Login token</b>.</div>'
+    +'</div>';}
+  o.innerHTML=head+'<div style="white-space:pre-wrap">'+esc(txt)+'</div>';
+  toast((r.launched?'Started ':'Created ')+(s.id||'')); setTimeout(loadPortfolio,1600);
 }
+function cfCopyTok(){var el=document.getElementById('cfTokVal');if(!el)return;var t=(el.textContent||'').trim();
+  try{if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(function(){toast('Token copied — paste it to log into the new node');},function(){cfCopyFallback(t);});return;}}catch(e){}
+  cfCopyFallback(t);}
+function cfCopyFallback(t){var ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.left='-9999px';document.body.appendChild(ta);ta.select();var ok=false;try{ok=document.execCommand('copy');}catch(e){}document.body.removeChild(ta);toast(ok?'Token copied — paste it to log in':'Select the token and copy it manually');}
 async function chiefComms(){var t=document.getElementById('chieftarget'),m=document.getElementById('chiefmsg'),rd=document.getElementById('chiefreplies');
   var msg=((m&&m.value)||'').trim(); if(!msg){toast('Type a message first.');return;}
   var tgt=(t&&t.value)||''; if(rd)rd.innerHTML=empty('Reaching the chief(s)... a chief takes ~20-40s to reply.');
