@@ -97,6 +97,40 @@ def is_complete():
         done = done and os.path.exists(CAPSTONE)
     return done
 
+NOTIFY_ITERS = CFG.get("notify_iters", True) is not False   # ping the launching session after each iteration too
+
+def _notify(payload):
+    """POST to the server (CC_NOTIFY) so it pings the session that STARTED this loop (loop.json notify_session).
+    Best-effort + authenticated. `payload` gets {name} added; kind='iteration'|'complete' picks the message."""
+    url = os.environ.get("CC_NOTIFY")
+    if not url: return False
+    tok = ""
+    try:
+        _cp = os.environ.get("CC_CONFIG") or os.path.join(CC_HOME, "cc.config.json")
+        tok = json.load(open(_cp)).get("auth_token") or ""
+    except Exception: pass
+    try:
+        import urllib.request
+        body = dict(payload); body["name"] = NAME
+        req = urllib.request.Request(url.rstrip("/") + "/api/ralph-notify",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json", "Cookie": "cc_auth=%s" % tok})
+        urllib.request.urlopen(req, timeout=12).read()
+        return True
+    except Exception as e:
+        log("  (notify failed: %s)" % str(e)[:100]); return False
+
+def _notify_starter():
+    """On COMPLETION, tell the starting session the loop finished (server delivers when that session is idle)."""
+    if _notify({"kind": "complete"}): log("  notified the starting session that this loop finished.")
+
+def _notify_iteration(n, checked_this, prog):
+    """After EACH iteration, send a progress ping to the starting session (unless loop.json notify_iters:false)."""
+    if not NOTIFY_ITERS: return
+    if _notify({"kind": "iteration", "iter": n, "checked_this": checked_this,
+                "done": prog.get("checked", 0), "total": prog.get("total", 0), "next": prog.get("next", "")}):
+        log("  pinged the starting session (iteration %d progress)." % n)
+
 # ---- control: halt (stop) / pause (wait) -------------------------------------
 PAUSED = threading.Event()
 def control_state():
@@ -208,7 +242,8 @@ def main():
         if is_complete():   # UNCONDITIONAL (was gated on n>START): a relaunched DONE loop must exit instantly, not
                             # burn a full iteration + verifier first. Safe: is_complete() requires total>0 AND
                             # unchecked==0 (+ capstone), so a fresh loop with real items never false-completes here.
-            log(""); log("  ===== %s COMPLETE -- all items checked =====" % NAME); set_status(state="done"); break
+            log(""); log("  ===== %s COMPLETE -- all items checked =====" % NAME); set_status(state="done")
+            _notify_starter(); break   # ping the agent/session that started this loop (via the server)
         if MAX_ITERS and n > (START + MAX_ITERS - 1):
             log("  max iterations reached."); set_status(state="stopped"); break
         before = parse_progress()["checked"]
@@ -225,8 +260,10 @@ def main():
                 for ln in (vp.stdout or "").splitlines(): log("    " + ln)
                 log("    verifier: %s" % ("all good" if vp.returncode == 0 else "unchecked something -> fix next iter"))
             except Exception as e: log("    verifier error: %s" % e)
-        after = parse_progress()["checked"]
+        prog_now = parse_progress()
+        after = prog_now["checked"]
         log("  items checked this iteration: %d (total %d)" % (after - before, after))
+        _notify_iteration(n, after - before, prog_now)   # progress ping to the session that started the loop
         # circuit-breaker: a loop that checks 0 new boxes for many iterations is non-converging (spinning,
         # or a verifier that fails every pass). Auto-halt + escalate so it can't burn tokens forever.
         if (after - before) > 0:

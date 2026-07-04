@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""cc-ralph -- create/launch a Ralph loop that PINGS YOU when it finishes.
+
+Run it from INSIDE your session (an agent's tmux) so the loop records who to notify: when the loop completes, a
+"your loop finished" message is delivered back into your session automatically.
+
+  cc-ralph new <name> [goal words...]   # create + launch a loop; records THIS session as the notify target
+  cc-ralph launch <name>                # (re)launch an existing loop (keeps its recorded notify target)
+  cc-ralph list                         # active loops + state
+"""
+import json, os, subprocess, sys, urllib.request
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+HOME = os.path.dirname(BASE)
+
+def _cfg():
+    p = os.environ.get("CC_CONFIG") or os.path.join(os.environ.get("CC_HOME") or HOME, "cc.config.json")
+    try: return json.load(open(p))
+    except Exception: return {}
+
+def _api(path, body=None, method="POST"):
+    c = _cfg(); port = c.get("port") or int(os.environ.get("HPCC_PORT") or 8799); tok = c.get("auth_token") or ""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request("http://127.0.0.1:%s%s" % (port, path), data=data,
+        headers={"Content-Type": "application/json", "Cookie": "cc_auth=%s" % tok}, method=method)
+    return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
+
+def _my_session():
+    """The tmux session this command runs inside (= the agent to ping). Keeps the inherited $TMUX on purpose."""
+    try:
+        r = subprocess.run(["/opt/homebrew/bin/tmux", "display-message", "-p", "#S"], capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception: return ""
+
+def main():
+    a = sys.argv[1:]
+    if not a: print(__doc__); return 0
+    cmd = a[0]
+    if cmd in ("new", "create"):
+        if len(a) < 2: print("usage: cc-ralph new <name> [goal...]"); return 1
+        name = a[1]; goal = " ".join(a[2:]); ns = _my_session()
+        r = _api("/api/ralph-create", {"name": name, "goal": goal, "cwd": os.getcwd(), "notify_session": ns})
+        if not r.get("ok"): print("create failed: " + str(r.get("error"))); return 1
+        r2 = _api("/api/ralph-launch", {"name": name})
+        if not r2.get("ok"): print("created but launch failed: " + str(r2.get("error"))); return 1
+        print("created + launched loop '%s'." % name + (
+            " It will PING THIS session (%s) when it finishes." % ns if ns
+            else " (No tmux session detected -- run this from inside your session to be pinged on completion.)"))
+    elif cmd == "launch":
+        if len(a) < 2: print("usage: cc-ralph launch <name>"); return 1
+        print(json.dumps(_api("/api/ralph-launch", {"name": a[1]})))
+    elif cmd == "list":
+        try:
+            r = _api("/api/ralph", None, "GET")
+            loops = r.get("loops") if isinstance(r, dict) else (r if isinstance(r, list) else [])
+            if not loops: print("(no active loops)")
+            for lp in loops:
+                print("  %-24s %-10s %s" % (lp.get("name", "?"), lp.get("state", "?"),
+                      ("-> pings " + (lp.get("config", {}).get("notify_session") or "(nobody)")) if lp.get("config") else ""))
+        except Exception as e:
+            print("list failed (%s) -- use the Ralph lens in the dashboard" % str(e)[:60])
+    else:
+        print(__doc__)
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

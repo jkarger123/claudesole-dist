@@ -5508,6 +5508,47 @@ def _tg_index():
     if idx != (d.get("index") or {}): d["index"] = idx; _tg_save(d)
     return idx, {n: s for s, n in idx.items()}
 def _tg_label(session): return "%s/%s" % (INSTANCE_ID, _session_label(session))
+_AUTONUDGE_FILE = os.path.expanduser("~/.cc-autonudge.json")   # shared store with the cc-autonudge CLI + loop
+_AUTONUDGE_DEFAULT = ("Like always, I want the complete solution -- I do not want any shortcuts. We need to get this "
+    "correct before we move on. If you really feel it is correct -- like truly as correct as we need it to be for this "
+    "very important tool -- then continue to the next thing. Otherwise, continue and get this figured out. No shortcuts.")
+_AN_LOCK = threading.Lock()
+def _autonudge_ensure_loop():
+    """Lazy-start the auto-nudge loop on THIS node so the dashboard toggle is never a dead button on a fresh node.
+    Runs the cc-autonudge.py that ships alongside server.py, as a detached process; a pidfile (also written by the
+    loop itself) prevents duplicates across the co-located instances + restarts. No-op if a live loop already owns it."""
+    pidf = os.path.expanduser("~/.cc-autonudge.pid")
+    try:
+        pid = int(open(pidf).read().strip() or "0")
+        if pid: os.kill(pid, 0); return   # a live loop already owns the pidfile
+    except Exception:
+        pass
+    script = os.path.join(BASE, "autonudge", "cc-autonudge.py")
+    if not os.path.isfile(script): return
+    try:
+        subprocess.Popen(["python3", script, "loop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         stdin=subprocess.DEVNULL, start_new_session=True, cwd=CC_HOME)
+    except Exception: pass
+def autonudge_session(name, on=None, msg=None):
+    """Per-session auto-nudge toggle. Writes ~/.cc-autonudge.json (the SAME store the cc-autonudge loop reads), so
+    turning it on here makes that loop re-send `msg` into this session every time it stops at an idle turn-end."""
+    name = (name or "").strip()
+    if not name: return {"ok": False, "error": "no session"}
+    with _AN_LOCK:
+        try: d = json.load(open(_AUTONUDGE_FILE))
+        except Exception: d = {}
+        cur = dict(d.get(name, {}))
+        if on is not None or msg is not None:
+            if msg is not None: cur["msg"] = msg
+            if on is not None: cur["on"] = bool(on)
+            cur.setdefault("count", 0); d[name] = cur
+            try:
+                fd = os.open(_AUTONUDGE_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                os.write(fd, json.dumps(d, indent=2).encode()); os.close(fd)
+            except Exception: pass
+        if on: _autonudge_ensure_loop()   # make sure something is actually watching this now-armed session
+        return {"ok": True, "name": name, "on": bool(cur.get("on")), "msg": cur.get("msg") or _AUTONUDGE_DEFAULT, "count": cur.get("count", 0)}
+
 def telegram_session(name, on=None):
     name = re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:48]
     d = _tg_load(); r = set(d.get("routed", []))
@@ -8405,8 +8446,45 @@ def ralph_launch(name):
     for ctl in ("halt", "pause"):
         try: os.remove(os.path.join(d, ctl))
         except Exception: pass
-    sh([TMUX, "new-session", "-d", "-s", sess, "-c", BASE, "python3 %s %s" % (RUNNER, n)])
+    # pass this server's URL + config path so the runner can ping /api/ralph-notify (authenticated) on completion
+    _cfgpath = os.environ.get("CC_CONFIG") or os.path.join(CC_HOME, "cc.config.json")
+    sh([TMUX, "new-session", "-d", "-s", sess, "-c", BASE,
+        "CC_NOTIFY=http://127.0.0.1:%d CC_CONFIG=%s python3 %s %s" % (PORT, _cfgpath, RUNNER, n)])
     return {"ok": True, "session": sess, "term": "/term?name=" + sess}
+
+def ralph_notify(body):
+    """Called by the runner to ping the session that STARTED the loop (loop.json notify_session), via the
+    idle-aware injector so it lands as a clean turn. Two kinds:
+      - kind='iteration' : after EACH iteration -- a progress ping (per-pass, NOT idempotent).
+      - kind='complete'  : the instant the loop finishes -- idempotent (a .notified marker = deliver exactly once).
+    `body` is the POST dict {name, kind, iter, checked_this, done, total, next}."""
+    if not isinstance(body, dict): body = {"name": body}
+    name = body.get("name", ""); kind = (body.get("kind") or "complete").strip()
+    d = _rdir(name)
+    if not d: return {"ok": False, "error": "no such loop"}
+    cfg = _rjson(os.path.join(d, "loop.json")); ns = (cfg.get("notify_session") or "").strip()
+    if not ns: return {"ok": True, "note": "no notify_session"}
+    if sh([TMUX, "has-session", "-t", ns])[0] != 0: return {"ok": False, "error": "notify_session gone"}
+    nm = _rname(name); cwd = cfg.get("cwd", "")
+    if kind == "iteration":
+        it = body.get("iter"); ct = body.get("checked_this", 0)
+        done = body.get("done", 0); total = body.get("total", 0); nxt = (body.get("next") or "").strip()
+        msg = ("[Ralph loop '%s' finished iteration %s: checked %d new item(s) this pass (%s/%s done)%s. It is STILL "
+               "running -- this is a progress ping (you started it). No action needed unless it's going off track.]" %
+               (nm, it, ct, done, total, (" -- next: " + nxt[:120]) if nxt else ""))
+        _mesh_deliver(ns, msg)
+        return {"ok": True, "notified": ns, "kind": "iteration", "iter": it}
+    mark = os.path.join(d, ".notified")
+    if os.path.exists(mark): return {"ok": True, "note": "already notified"}
+    prog = 0
+    try: prog = len(re.findall(r"(?m)^\s*[-*]\s*\[", open(os.path.join(d, "progress.md")).read()))
+    except Exception: pass
+    msg = ("[Ralph loop '%s' has FINISHED -- all %d checklist item(s) complete%s. You started this loop, so you are "
+           "being notified. Review its output / progress.md if you need it, then carry on.]" % (nm, prog, (" (it ran in %s)" % cwd) if cwd else ""))
+    _mesh_deliver(ns, msg)
+    try: open(mark, "w").close()
+    except Exception: pass
+    return {"ok": True, "notified": ns}
 
 def ralph_control(name, action):
     d = _rdir(name)
@@ -8463,7 +8541,8 @@ def ralph_create(body):
     os.makedirs(d, exist_ok=True)
     cfg = {"name": n, "goal": body.get("goal", ""), "cwd": body.get("cwd", "") or PROJECT,
            "max_iters": int(body.get("max_iters", 0) or 0), "timeout_sec": int(body.get("timeout_sec", 2700) or 2700),
-           "max_turns": int(body.get("max_turns", 200) or 200), "model": body.get("model", "")}
+           "max_turns": int(body.get("max_turns", 200) or 200), "model": body.get("model", ""),
+           "notify_session": (body.get("notify_session") or "").strip()}   # tmux session to ping when the loop finishes
     open(os.path.join(d, "loop.json"), "w").write(json.dumps(cfg, indent=2))
     open(os.path.join(d, "prompt.txt"), "w").write(body.get("prompt", "You are the %s loop, iteration $ITER. Read rules.md, then progress.md, pick the FIRST unchecked item, do it, write the deliverable, and check the box with a one-line summary.\n" % n))
     open(os.path.join(d, "rules.md"), "w").write(body.get("rules", "# %s -- hard rules\n- One deliverable per iteration. ASCII only. Stop on a hard blocker.\n" % n))
@@ -14699,6 +14778,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/resume":
             return self._s(200, json.dumps(resume_session(body.get("machine", "studio"), body.get("id", ""), body.get("cwd", ""), body.get("fork", False), body.get("label", ""))))
         if u.path == "/api/ralph-launch":  return self._s(200, json.dumps(ralph_launch(body.get("name", ""))))
+        if u.path == "/api/ralph-notify":  return self._s(200, json.dumps(ralph_notify(body)))
         if u.path == "/api/module-launch": return self._s(200, json.dumps(launch("studio", body.get("name") or (body.get("rel","").split("/")[-1] or "session"), rel=body.get("rel",""))))
         if u.path == "/api/module-note":   return self._s(200, json.dumps(module_note(body.get("rel",""), body.get("text",""))))
         if u.path == "/api/module-add":    return self._s(200, json.dumps(module_add(body.get("parent",""), body.get("name",""), body.get("summary",""), bool(body.get("adopt")))))
@@ -14960,6 +15040,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/extension-setup":     return self._s(200, json.dumps(extension_setup(body.get("id", ""))))
         if u.path == "/api/notify":              return self._s(200, json.dumps(notify_send(body.get("text", ""))))
         if u.path == "/api/telegram-session":    return self._s(200, json.dumps(telegram_session(body.get("name", ""), body.get("on"))))
+        if u.path == "/api/autonudge-session":   return self._s(200, json.dumps(autonudge_session(body.get("name", ""), body.get("on"), body.get("msg"))))
         if u.path == "/api/slack-session":       return self._s(200, json.dumps(slack_session(body.get("name", ""), body.get("on"))))
         if u.path == "/api/vault-lease":
             ok = _mesh_token_ok(self.headers.get("X-Mesh-Token", "")) or self._operator_only()
@@ -15141,7 +15222,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid #2a2a3a;background:#22222e;color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px;font-family:inherit}
 #tdlg .tdlg-b.go{background:linear-gradient(135deg,#d6b23c,#c9a227);color:#15120a;border:none;font-weight:700}
 </style></head><body>
-<div id="bar"><span id="st">connecting...</span><button id="mdlbtn" onclick="mdlPickTerm(event)" title="the model this session runs -- click to change">Model</button><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button id="actog" onclick="toggleAutoCopy()" title="Auto-copy: when ON, whatever you have selected is copied to your clipboard the moment you release the mouse (no Ctrl+C needed). Needs a secure origin (https/localhost); on plain http a one-tap Copy chip is used instead.">&#9113; auto-copy</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
+<div id="bar"><span id="st">connecting...</span><button id="mdlbtn" onclick="mdlPickTerm(event)" title="the model this session runs -- click to change">Model</button><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button id="actog" onclick="toggleAutoCopy()" title="Auto-copy: when ON, whatever you have selected is copied to your clipboard the moment you release the mouse (no Ctrl+C needed). Needs a secure origin (https/localhost); on plain http a one-tap Copy chip is used instead.">&#9113; auto-copy</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button id="anbtn" onclick="toggleAn()" title="Auto-nudge: auto-send your keep-going message to this session every time it stops at a turn-end, until you turn it off (you are the brake)" style="color:#8a8a99">Auto-nudge</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
 <button id="live" onclick="toLive()">&#8595; jump to live</button><button id="selcopy" onclick="doSelCopy()">&#10697; Copy selection</button><div id="cliptoast"></div>
 <div id="copyov"><div id="copybar"><b>Selectable text</b><span id="copyst" style="color:#8a8a99">long-press to select, or</span><button onclick="copyAll()">&#10697; copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" style="border-color:#e8c547">&#10005; close</button></div><pre id="copybody"></pre></div>
 <div id="wrap">
@@ -15167,7 +15248,7 @@ function confirmM(msg){return new Promise(function(res){var ov=document.getEleme
 const name=new URLSearchParams(location.search).get('name')||'';document.title='Claude: '+name;
 // Protected services (the Chief of Staff mesh endpoint / live product / Ralph loops) are constant
 // singletons -- strip their end+kill buttons so they can't be closed from the terminal view.
-if(/^(chief-|ralph-)/.test(name)||((window.CC&&window.CC.protectedSessions)||[]).indexOf(name)>=0){document.querySelectorAll('#bar button').forEach(function(b){var t=(b.getAttribute('title')||'').toLowerCase();if(t.indexOf('end')>=0||t.indexOf('kill')>=0)b.remove();});}
+if(/^(chief-|ralph-)/.test(name)||((window.CC&&window.CC.protectedSessions)||[]).indexOf(name)>=0){document.querySelectorAll('#bar button').forEach(function(b){var oc=(b.getAttribute('onclick')||'');if(/gracefulEnd|killSess/.test(oc))b.remove();});}
 // MOBILE overflow menu (the ⋯ button): tuck secondary + destructive bar actions behind one tap.
 function toggleMore(){var m=document.getElementById('moremenu');if(m)m.classList.toggle('open');}
 // ---- MODEL picker (broken-out /term view): show + switch the model this session runs ----
@@ -15241,8 +15322,12 @@ function tgState(){fetch('/api/telegram-session',{method:'POST',headers:{'Conten
 function toggleTg(){fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(function(cur){if(!cur.configured){st.textContent='Telegram not set up -- install + Set up telegram-notify (Marketplace), then toggle';return;}fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:!cur.on})}).then(r=>r.json()).then(function(s){tgPaint(s);st.textContent=name+' - Telegram '+(s.on?'ON (phone alerts + reply-to-interact)':'off');});});}
 function skPaint(s){var b=document.getElementById('skbtn');if(!b)return;if(!s||!s.installed){b.style.display='none';return;}b.style.display='';var n=(s.on&&s.num)?(' #'+s.num):'';b.innerHTML='&#128172; Slack'+n+': '+(s.on?'on':'off');b.style.color=s.on?'#36c5f0':'#8a8a99';b.title=s.configured?('Slack '+(s.on?('ON'+(s.num?(' as #'+s.num):'')+' -- your team is pinged in a channel thread when this finishes/blocks; reply in-thread to interact'):'off')+' for this session'):'Slack not set up -- install + Set up the Slack extension and set a comms_channel';}
 function skState(){fetch('/api/slack-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(skPaint).catch(()=>{});}
+function anPaint(s){var b=document.getElementById('anbtn');if(!b)return;var on=s&&s.on;b.innerHTML='Auto-nudge: '+(on?'ON':'off')+((on&&s.count)?(' ('+s.count+')'):'');b.style.color=on?'#e8c547':'#8a8a99';b.title=on?('Auto-nudge ON -- your message is auto-sent every time this session stops (so far: '+(s.count||0)+'). Click to turn it off.'):'Auto-nudge OFF -- click to auto-send a keep-going message every time this session stops, until you turn it off (you are the brake).';}
+function anState(){fetch('/api/autonudge-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(anPaint).catch(()=>{});}
+function anPrompt(label,def){return new Promise(function(res){var o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center';var c=document.createElement('div');c.style.cssText='background:rgba(20,20,28,.98);border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:16px;width:min(600px,92vw)';c.innerHTML='<div style="color:rgba(230,230,240,.9);font-size:13px;margin-bottom:8px"></div><textarea id="_anin" style="width:100%;height:120px;background:rgba(0,0,0,.35);color:rgba(230,230,240,.95);border:1px solid rgba(255,255,255,.14);border-radius:6px;padding:8px;font:13px/1.45 ui-monospace,monospace;box-sizing:border-box"></textarea><div style="text-align:right;margin-top:10px"><button id="_ancx" style="margin-right:8px">Cancel</button><button id="_anok" style="color:rgba(232,197,71,1)">Save &amp; arm</button></div>';c.querySelector('div').textContent=label;o.appendChild(c);document.body.appendChild(o);var ta=c.querySelector('#_anin');ta.value=def||'';setTimeout(function(){ta.focus();},30);var fin=function(v){try{document.body.removeChild(o);}catch(e){}res(v);};c.querySelector('#_anok').onclick=function(){fin(ta.value);};c.querySelector('#_ancx').onclick=function(){fin(null);};o.onclick=function(e){if(e.target===o)fin(null);};});}
+async function toggleAn(){try{var cur=await(await fetch('/api/autonudge-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})})).json();if(cur.on){var s=await(await fetch('/api/autonudge-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:false})})).json();anPaint(s);st.textContent=name+' - Auto-nudge off';return;}var m=await anPrompt('Auto-nudge message -- auto-sent to this session every time it stops, until you switch it off. Edit or keep it:',cur.msg);if(m==null)return;var s2=await(await fetch('/api/autonudge-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:true,msg:m})})).json();anPaint(s2);st.textContent=name+' - Auto-nudge ON';}catch(e){st.textContent=name+' - Auto-nudge failed: '+e;}}
 function toggleSk(){fetch('/api/slack-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(function(cur){if(!cur.configured){st.textContent='Slack not set up -- install the Slack extension + set a comms_channel, then toggle';return;}fetch('/api/slack-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:!cur.on})}).then(r=>r.json()).then(function(s){skPaint(s);st.textContent=name+' - Slack '+(s.on?'ON (team channel + reply-in-thread)':'off');});});}
-ws.onopen=()=>{st.textContent=name+' - connected';fitNow();term.focus();applyMouse();applyAutoCopy();tgState();skState();};
+ws.onopen=()=>{st.textContent=name+' - connected';fitNow();term.focus();applyMouse();applyAutoCopy();tgState();skState();anState();};
 ws.onmessage=(e)=>term.write(new Uint8Array(e.data));
 ws.onclose=()=>{var det=function(){st.textContent=name+' - detached (session lives on)';term.write('\r\n\x1b[33m[detached - close this tab; the session keeps running]\x1b[0m\r\n');};
   fetch('/api/session-exists?name='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(d){
@@ -17479,8 +17564,8 @@ async function newRalph(){
   const name=(await promptM("New loop name (letters/numbers/-_):")||"").trim(); if(!name)return;
   const goal=(await promptM("One-line goal:")||"").trim();
   const cwd=(await promptM("Working directory the agent runs in:",PROJ())||"").trim();
-  fetch("/api/ralph-create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,goal,cwd})}).then(r=>r.json()).then(r=>{
-    if(r&&r.ok){toast("Loop created — opening it to set up the prompt + items.");openRalph(r.name);}else toast("Create failed: "+((r||{}).error||"?"),5000);});
+  fetch("/api/ralph-create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,goal,cwd,notify_session:(window.CC&&window.CC.chiefSession)||''})}).then(r=>r.json()).then(r=>{
+    if(r&&r.ok){toast("Loop created — the Chief of Staff will be pinged when it finishes. Opening it…");openRalph(r.name);}else toast("Create failed: "+((r||{}).error||"?"),5000);});
 }
 function jobCard(j){return '<div class="card" style="cursor:default"><h3><span>'+j.name+'</span>'+badge(j.status)+'</h3>'+(j.component?'<div class="meta">'+j.component+'</div>':'')+'<div class="brief">'+(j.desc||"")+'</div>'+(j.next?'<div class="meta" style="color:var(--accent)">next: '+e2(j.next)+'</div>':'')+'</div>';}
 function machCard(m){const st=ST[m.id]||m.status||"";const ok=st=="online";return '<div class="card" onclick="openMach(\''+m.id+'\')"><h3><span><span class="dot '+(ok?"ok":(st=="offline"?"bad":""))+'"></span> '+m.name+'</span></h3><div class="meta">'+m.role+'</div><div class="brief"><code>'+(m.ssh||"")+'</code></div></div>';}
@@ -21582,8 +21667,29 @@ async function emThread(tid){
 }
 // ---- SERVER lens: whole-machine metrics so the operator can VISUALLY confirm nothing's running away ----------
 let SRV={data:null,range:21600,histData:[],incidents:[]}, _srvT=null;
+var _SRVCHARTS={}, _srvChartN=0;   // id -> chart geometry+data, for hover crosshair/tooltip
 function cToF(c){ return (c==null||isNaN(c))?null:Math.round(c*9/5+32); }
 function srvAgo(ts){ var s=Math.max(0,(Date.now()/1000-ts)); return s<60?((s|0)+'s'):s<3600?((s/60|0)+'m'):s<86400?((s/3600|0)+'h'):((s/86400|0)+'d'); }
+function srvWhen(ts){ if(ts==null)return ''; var d=new Date(ts*1000), p=function(x){return (x<10?'0':'')+x;};
+  var hm=p(d.getHours())+':'+p(d.getMinutes()); var day=(Date.now()/1000-ts>=86400)?((d.getMonth()+1)+'/'+d.getDate()+' '):'';
+  return day+hm+' · '+srvAgo(ts)+' ago'; }
+// Hover readout: nearest sample -> crosshair + floating tooltip with each series value + its timestamp.
+function srvHover(ev,id){ var c=_SRVCHARTS[id]; if(!c||c.n<2)return;
+  var box=ev.currentTarget, r=box.getBoundingClientRect();
+  var fx=Math.max(0,Math.min(1,(ev.clientX-r.left)/r.width));
+  var i=Math.round((fx*c.W-c.PL)/c.iw*(c.n-1)); i=Math.max(0,Math.min(c.n-1,i));
+  var cx=box.querySelector('.srvcx'); if(cx){ cx.style.left=((c.PL+c.iw*(i/(c.n-1)))/c.W*100)+'%'; cx.style.display='block'; }
+  var t=document.getElementById('srvTip');
+  if(!t){ t=document.createElement('div'); t.id='srvTip'; t.style.cssText='position:fixed;z-index:99999;pointer-events:none;background:var(--card,#161b22);border:1px solid var(--line,#30363d);border-radius:7px;padding:6px 9px;font-size:11.5px;line-height:1.55;box-shadow:0 6px 18px rgba(0,0,0,.45);display:none;white-space:nowrap'; document.body.appendChild(t); }
+  var html='<div style="color:var(--dim);margin-bottom:3px">'+esc(srvWhen(c.ts&&c.ts[i]))+'</div>', any=false;
+  c.series.forEach(function(s){ var v=(s.data||[])[i]; if(v==null||isNaN(v))return; any=true;
+    html+='<div style="display:flex;align-items:center;gap:7px"><span style="width:9px;height:9px;border-radius:2px;background:'+s.color+';display:inline-block"></span><span style="color:var(--mut)">'+esc(s.name||'')+'</span><b style="margin-left:auto;padding-left:10px">'+(Math.round(v*10)/10)+(c.unit||'')+'</b></div>'; });
+  if(!any){ srvHoverOut(); return; }
+  t.innerHTML=html; t.style.display='block';
+  var tw=t.offsetWidth, x=ev.clientX+14; if(x+tw>window.innerWidth-8)x=ev.clientX-tw-14;
+  t.style.left=Math.max(6,x)+'px'; t.style.top=Math.max(6,ev.clientY-12)+'px'; }
+function srvHoverOut(){ var t=document.getElementById('srvTip'); if(t)t.style.display='none';
+  Array.prototype.forEach.call(document.querySelectorAll('.srvcx'),function(c){c.style.display='none';}); }
 async function srvLoadHist(){ try{ SRV.histData=((await(await fetch('/api/metrics-history?range='+(SRV.range||21600))).json())||{}).samples||[]; }catch(e){}
   try{ SRV.incidents=((await(await fetch('/api/incidents')).json())||{}).incidents||[]; }catch(e){} }
 function srvSetRange(sec){ SRV.range=sec; loadServerMetrics(); }
@@ -21612,7 +21718,11 @@ function srvChart(series,opt){ opt=opt||{}; var W=640,H=opt.h||120,PL=4,PR=6,PT=
   var u=opt.unit||'', mid=Math.round((lo+hi)/2);
   var lab='<div style="display:flex;flex-direction:column;justify-content:space-between;padding:'+(PT-4)+'px 0 '+(PB-4)+'px 0;font-size:10px;line-height:1;color:var(--dim);text-align:right;min-width:32px;height:'+H+'px">'
     +'<span>'+Math.round(hi)+u+'</span><span>'+mid+u+'</span><span>'+Math.round(lo)+u+'</span></div>';
-  return '<div style="display:flex;gap:6px;align-items:stretch">'+lab+'<div style="flex:1;min-width:0">'+svg+'</div></div>';
+  // register geometry + data so the hover handler can map cursor x -> nearest sample, then a crosshair + tooltip overlay
+  var id='srvc'+(_srvChartN++); _SRVCHARTS[id]={series:series,ts:opt.ts||[],n:n,lo:lo,hi:hi,unit:u,W:W,PL:PL,PR:PR,iw:iw};
+  var box='<div class="srvcbox" style="flex:1;min-width:0;position:relative;cursor:crosshair" onmousemove="srvHover(event,\''+id+'\')" onmouseleave="srvHoverOut()">'+svg
+    +'<div class="srvcx" style="position:absolute;top:0;bottom:0;width:1px;background:var(--mut);opacity:.65;display:none;pointer-events:none;margin-left:-0.5px"></div></div>';
+  return '<div style="display:flex;gap:6px;align-items:stretch">'+lab+box+'</div>';
 }
 function srvLeg(c,t){ return '<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px;font-size:11.5px;color:var(--mut)"><span style="width:11px;height:11px;border-radius:3px;background:'+c+';display:inline-block"></span>'+t+'</span>'; }
 function srvGB(b){ b=+b||0; if(b>=1e12)return (b/1099511627776).toFixed(2)+' TB'; if(b>=1e9)return (b/1073741824).toFixed(1)+' GB'; if(b>=1e6)return (b/1048576).toFixed(0)+' MB'; return (b/1024).toFixed(0)+' KB'; }
@@ -21620,11 +21730,16 @@ function srvFill(pct){ pct=Math.max(0,Math.min(100,+pct||0)); var c = pct>=90?'r
 function srvLvl(l){ var m={ok:'bdg-green',warn:'bdg-amber',critical:'bdg-red'}; return '<span class="badge '+(m[l]||'bdg-dim')+'">'+esc(l||'?')+'</span>'; }
 async function loadServerMetrics(){
   var g=document.getElementById('grid'); if(!SRV.data)g.innerHTML=empty('Reading server metrics…');
-  try{ SRV.data=await(await fetch('/api/server-metrics')).json(); }catch(e){ g.innerHTML=empty('Could not read server metrics.'); return; }
-  await srvLoadHist(); renderServerMetrics();
-  clearInterval(_srvT); _srvT=setInterval(async function(){ if(LENS!=='server'){clearInterval(_srvT);return;} try{ SRV.data=await(await fetch('/api/server-metrics')).json(); await srvLoadHist(); renderServerMetrics(); }catch(e){} }, 5000);
+  var d; try{ d=await(await fetch('/api/server-metrics')).json(); }catch(e){ if(LENS==='server')g.innerHTML=empty('Could not read server metrics.'); return; }
+  if(LENS!=='server')return;                 // navigated away while the (~2s) fetch was in flight -> don't paint over the new lens
+  SRV.data=d; await srvLoadHist(); if(LENS!=='server')return; renderServerMetrics();
+  clearInterval(_srvT); var iv=setInterval(async function(){   // capture our OWN id so we only ever clear ourselves
+    if(LENS!=='server'){clearInterval(iv);return;}
+    try{ var dd=await(await fetch('/api/server-metrics')).json(); if(LENS!=='server'){clearInterval(iv);return;} SRV.data=dd; await srvLoadHist(); if(LENS!=='server'){clearInterval(iv);return;} renderServerMetrics(); }catch(e){}
+  }, 5000); _srvT=iv;
 }
 function renderServerMetrics(){
+  if(LENS!=='server')return;                 // never paint the server view over another lens (guards a late async callback)
   var d=SRV.data||{}, g=document.getElementById('grid'); if(!g)return;
   var cores=d.cores||0, load=(d.load||[0,0,0]), lpc=d.load_per_core||0;
   var cpuBusy = d.cpu ? Math.round(100-(d.cpu.idle||0)) : 0;
@@ -21640,6 +21755,8 @@ function renderServerMetrics(){
     +'<span class="cc-chip" style="'+((thBad||(th.cpu_c!=null&&th.cpu_c>=95))?'outline:1px solid rgba(248,81,73,.8)':'')+'">'+((th.cpu_c!=null)?('Temp <b>CPU '+cToF(th.cpu_c)+'°F</b>'+(th.gpu_c!=null?(' <span class="sub">GPU '+cToF(th.gpu_c)+'°F</span>'):'')):('Thermal <b>'+esc(th.pressure||'?')+'</b>'))+'</span>'
     +(d.power?('<span class="cc-chip">Power <b>'+d.power.all_w+'W</b> <span class="sub">cpu '+d.power.cpu_w+' · gpu '+d.power.gpu_w+'</span></span>'):'')
     +'<span class="cc-chip">Procs <b>'+(d.proc_count||0)+'</b></span></div>';
+  // BREAK-GLASS reminder: how to reach Claude if this dashboard is down (the cc-lifeline console).
+  h+='<div class="cc-p-note" style="margin-bottom:12px"><b>Break-glass console:</b> if this dashboard is ever down, open Terminal on the server (or <code>ssh</code> in) and run <code>cc-lifeline</code> to reach Claude directly &mdash; an always-on session that runs independently of this server. Detach with Ctrl-b then d; it keeps running.</div>';
   // INCIDENTS: loud failures, each with an AI triage (cause + next action). Advisory -- it explains, never acts.
   var INC=SRV.incidents||[];
   if(INC.length){
@@ -21658,11 +21775,12 @@ function renderServerMetrics(){
   var RANGES=[['1h',3600],['6h',21600],['24h',86400],['3d',259200]];
   h+='<div class="cc-panel"><div class="cc-p-h"><b>History</b> <span class="cc-p-sub">'+HD.length+' samples &middot; recorded every minute, always on</span>'
     +'<span class="cc-p-act">'+RANGES.map(function(r){return '<button class="mini'+((SRV.range||21600)===r[1]?' go':'')+'" onclick="srvSetRange('+r[1]+')">'+r[0]+'</button>';}).join(' ')+'</span></div>';
-  h+='<div style="margin:9px 0 2px">'+srvLeg(CU,'CPU %')+srvLeg(CM,'Memory %')+'</div>';
-  h+=srvChart([{color:CU,data:HD.map(function(s){return s.cpu;}),area:true},{color:CM,data:HD.map(function(s){return s.mem;})}],{h:130,min:0,max:100,unit:'%'});
+  var HTS=HD.map(function(s){return s.t;});
+  h+='<div style="margin:9px 0 2px">'+srvLeg(CU,'CPU %')+srvLeg(CM,'Memory %')+' <span class="sub" style="color:var(--dim)">— hover for values</span></div>';
+  h+=srvChart([{color:CU,data:HD.map(function(s){return s.cpu;}),area:true,name:'CPU'},{color:CM,data:HD.map(function(s){return s.mem;}),name:'Memory'}],{h:130,min:0,max:100,unit:'%',ts:HTS});
   if(HD.some(function(s){return s.cf!=null;})){
-    h+='<div style="margin:15px 0 2px">'+srvLeg(CT,'CPU temp °F')+srvLeg(CG,'GPU temp °F')+'</div>';
-    h+=srvChart([{color:CT,data:HD.map(function(s){return s.cf;}),area:true},{color:CG,data:HD.map(function(s){return s.gf;})}],{h:120,min:80,max:220,unit:'°'});
+    h+='<div style="margin:15px 0 2px">'+srvLeg(CT,'CPU temp °F')+srvLeg(CG,'GPU temp °F')+' <span class="sub" style="color:var(--dim)">— hover for values</span></div>';
+    h+=srvChart([{color:CT,data:HD.map(function(s){return s.cf;}),area:true,name:'CPU temp'},{color:CG,data:HD.map(function(s){return s.gf;}),name:'GPU temp'}],{h:120,min:80,max:220,unit:'°F',ts:HTS});
   }
   h+='</div>';
   // Load + CPU + memory panel
@@ -24547,7 +24665,7 @@ function fxVoiceHelp(){
   var h='<div class="vstudio vshelp"><div class="vshead"><h2>How VoiceMatch works</h2><button class="mini" onclick="fxLearnVoice()">← back</button></div>'
    +'<div class="vshbody">'
    +'<p><b>Goal:</b> smart replies that sound like YOU, not AI — using everything we know about the client.</p><ol>'
-   +'<li><b>Learn my voice</b> reads ~150 of your Sent emails and builds a <b>style profile</b> (tone, punctuation, greetings, sign-offs, whether you use em-dashes). Stored per inbox — each inbox learns its own operator's voice.</li>'
+   +'<li><b>Learn my voice</b> reads ~150 of your Sent emails and builds a <b>style profile</b> (tone, punctuation, greetings, sign-offs, whether you use em-dashes). Stored per inbox — each inbox learns its own operator&#39;s voice.</li>'
    +'<li>You can <b>edit the profile</b> here anytime, and set <b>Hard rules</b> that are always obeyed and override everything.</li>'
    +'<li>Hit <b>Reply / Reply-all → ✨ Draft in my voice</b> and the agent writes using: your profile + <b>how you actually write to those specific people</b> (most-formal style if it’s a group) + the thread + <b>past mail with that person</b> + the <b>client’s CLAUDE.md</b> + Granola call notes + your <b>calendar</b> (when it’s about scheduling). You get <b>2–3 variants</b> to choose from.</li>'
    +'<li>It <b>never sends</b> — it fills the composer; you review, edit, and send.</li>'
@@ -24873,6 +24991,9 @@ def _autoapprove_scan():
             if CC.get("auto_accept_prompts") is False: continue
             low = pane.lower()
             if "esc to interrupt" in low: continue            # busy/working -> not actually waiting on input
+            if any(k in low for k in ("usage limit", "limit reached", "reached your", "pay-as-you-go", "extra usage",
+                    "additional usage", "out of credit", "buy credits", "upgrade to", "use the api", "billing")):
+                continue                                       # NEVER auto-answer a usage/billing prompt (would spend $)
             if "do you want to proceed?" not in low: continue # the tool-permission menu (not chat prose)
             opts = []
             for ln in pane.splitlines():                      # parse the numbered choices near the prompt
@@ -25488,6 +25609,33 @@ def _fleet_watchdog_loop():
 
 _METRICS_CACHE = {"at": 0.0, "data": None}
 _COLO_PORTS = [8799, 8800, 8801, 8802, 8803, 8804, 8805, 8806, 8807, 8851]   # co-located CC servers to poll for per-node vitals
+
+def _macmon_read(samples=8, interval=150, timeout=6):
+    """SMOOTHED SoC temps + power from macmon (Apple Silicon sensors, sudoless). Apple Silicon instant CPU temp
+    is extremely spiky -- a single sample can read 15-20 degF off the true steady value (observed 92->110->92 degF
+    inside one second), which made the live temp chip flap wildly. We take N samples over a ~1s window and AVERAGE
+    them so one reading is representative of the moment, not one random spike. Returns None if macmon is absent."""
+    for mp in ("/opt/homebrew/bin/macmon", "macmon"):
+        try: code, o, _ = sh([mp, "pipe", "-s", str(samples), "-i", str(interval)], timeout=timeout)
+        except Exception: continue
+        if code != 0 or not o.strip(): continue
+        cts, gts, aw, cw, gw = [], [], [], [], []
+        for ln in o.strip().splitlines():
+            try: mm = json.loads(ln)
+            except Exception: continue
+            t = mm.get("temp") or {}
+            if t.get("cpu_temp_avg"): cts.append(t["cpu_temp_avg"])
+            if t.get("gpu_temp_avg"): gts.append(t["gpu_temp_avg"])
+            if mm.get("all_power") is not None: aw.append(mm["all_power"])
+            if mm.get("cpu_power") is not None: cw.append(mm["cpu_power"])
+            if mm.get("gpu_power") is not None: gw.append(mm["gpu_power"])
+        if not cts and not gts: continue
+        avg = lambda xs: (sum(xs) / len(xs)) if xs else None
+        return {"cpu_c": round(avg(cts), 1) if cts else None, "gpu_c": round(avg(gts), 1) if gts else None,
+                "all_w": round(avg(aw), 1) if aw else None, "cpu_w": round(avg(cw), 1) if cw else None,
+                "gpu_w": round(avg(gw), 1) if gw else None, "n": max(len(cts), len(gts))}
+    return None
+
 def _server_metrics(ttl=8):
     """WHOLE-MACHINE health for the Server lens: cores/load, CPU%, memory, disk, thermal pressure, the heaviest
     processes, and every co-located CC node's own vitals (fds/threads/cpu). So the operator can VISUALLY confirm
@@ -25547,18 +25695,14 @@ def _server_metrics(ttl=8):
         if m and int(m.group(1)) < 100: tl = "Throttled (%s%% CPU speed)" % m.group(1)
         if "thermal warning" in ln.lower() and "no thermal" not in ln.lower(): tl = "Thermal warning"
     d["thermal"] = {"pressure": tl, "cpu_c": None, "gpu_c": None, "note": "thermal pressure (throttling signal)"}
-    # REAL sensor temps -- sudoless, via macmon (Apple Silicon SoC sensors); best-effort, falls back to pressure-only
+    # REAL sensor temps -- sudoless, via macmon (Apple Silicon SoC sensors); AVERAGED over a ~1s window so the
+    # reading is stable, not a single spiky instant sample; best-effort, falls back to pressure-only.
     try:
-        for mp in ("/opt/homebrew/bin/macmon", "macmon"):
-            code, o, _ = sh([mp, "pipe", "-s", "1", "-i", "220"], timeout=6)
-            if code == 0 and o.strip():
-                mm = json.loads(o.strip().splitlines()[-1]); t = mm.get("temp") or {}
-                if t.get("cpu_temp_avg"): d["thermal"]["cpu_c"] = round(t["cpu_temp_avg"], 1)
-                if t.get("gpu_temp_avg"): d["thermal"]["gpu_c"] = round(t["gpu_temp_avg"], 1)
-                d["thermal"]["note"] = "live SoC sensor temps via macmon (sudoless)"
-                d["power"] = {"all_w": round(mm.get("all_power", 0) or 0, 1), "cpu_w": round(mm.get("cpu_power", 0) or 0, 1),
-                              "gpu_w": round(mm.get("gpu_power", 0) or 0, 1)}
-                break
+        mm = _macmon_read()
+        if mm:
+            d["thermal"]["cpu_c"] = mm["cpu_c"]; d["thermal"]["gpu_c"] = mm["gpu_c"]
+            d["thermal"]["note"] = "live SoC sensor temps via macmon (sudoless, %d-sample avg)" % mm["n"]
+            d["power"] = {"all_w": mm["all_w"] or 0, "cpu_w": mm["cpu_w"] or 0, "gpu_w": mm["gpu_w"] or 0}
     except Exception: pass
     # heaviest processes
     _, o, _ = sh(["ps", "-A", "-o", "pid=,%cpu=,%mem=,comm="], timeout=6)
@@ -25608,13 +25752,11 @@ def _metrics_light():
         d["mem"] = int(100 * used / total) if total else 0
     except Exception: d["mem"] = 0
     try:
-        for mp in ("/opt/homebrew/bin/macmon", "macmon"):
-            code, o, _ = sh([mp, "pipe", "-s", "1", "-i", "220"], timeout=6)
-            if code == 0 and o.strip():
-                mm = json.loads(o.strip().splitlines()[-1]); t = mm.get("temp") or {}
-                if t.get("cpu_temp_avg"): d["cf"] = round(t["cpu_temp_avg"] * 9 / 5 + 32)
-                if t.get("gpu_temp_avg"): d["gf"] = round(t["gpu_temp_avg"] * 9 / 5 + 32)
-                d["w"] = round(mm.get("all_power", 0) or 0, 1); break
+        mm = _macmon_read()   # AVERAGED window -> each recorded minute-point is a stable value, not a random spike
+        if mm:
+            if mm["cpu_c"] is not None: d["cf"] = round(mm["cpu_c"] * 9 / 5 + 32)
+            if mm["gpu_c"] is not None: d["gf"] = round(mm["gpu_c"] * 9 / 5 + 32)
+            d["w"] = mm["all_w"] or 0
     except Exception: pass
     return d
 def _metrics_sample_loop():

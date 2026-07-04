@@ -3,7 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
-## 0.99.144 -- 2026-07-03  (clean-core Phase 4b: tenant residue 213 -> 47, everything buyer-facing neutral)
+## 0.99.145 -- 2026-07-04  (Ralph loop notifications + auto-nudge coordination; auto-nudge is now fleet-clean)
+- Ralph loops now PING the session that started them: on COMPLETION (as before) and after EACH ITERATION (new --
+  "finished iteration N: checked M new item(s) (Y/Z done), next: ..."). Runner `_notify`/`_notify_iteration` +
+  server `ralph_notify(body)` branches on kind (iteration=per-pass, complete=idempotent). Per-loop `notify_iters`
+  (default on). Dashboard-created loops now ping the Chief of Staff.
+- Auto-nudge no longer fights the things it shouldn't: it SKIPS a session that (a) is watching a running Ralph loop
+  (explicit notify_session link OR same-project cwd match -- works even for loops with no recorded launcher) or
+  (b) is mid graceful auto-compact (compact-lock state). Skip guards are tail-scoped (the live prompt only, not
+  message prose) so mentioning "compaction"/"usage" no longer blocks a real nudge.
+- Auto-nudge is now fleet-clean: arming a session lazy-starts the loop (pidfile-guarded, no duplicates), so the
+  dashboard toggle is never a dead button on a fresh node. Ships cc-autonudge.py + cc-ralph + the module doc.
+- Preship now has a PAGE-JS syntax gate (node --check every inline dashboard <script>) -- catches the unescaped-
+  apostrophe class that broke v0.99.144 before it can ship again.
 - Genericized the illustrative tenant residue across ~40 framework files via the hybrid convention (generic
   placeholders for paths/IDs, a fictional "Acme"/"Robin" only where a concrete example teaches). Scrubbed: 12
   product docs, 16 agent-charter + extension + install docs, 2 dense docs (security ROTATION_CHECKLIST + the engine

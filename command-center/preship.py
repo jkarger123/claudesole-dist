@@ -88,6 +88,37 @@ if _reg:
     print("  Re-baseline (only if intentional): python3 command-center/residue_lint.py --baseline")
     sys.exit(1)
 
+# PAGE-JS SYNTAX GATE: the dashboard is one big inline <script>; a single JS syntax error (e.g. an unescaped
+# apostrophe in a string) breaks the WHOLE script, so the SPA never boots and NO lens/Sessions load. Python +
+# ui_lint don't catch it. node --check every inline <script> in PAGE. This is exactly the class that broke v0.99.144.
+import subprocess as _sp, tempfile as _tf, shutil as _sh
+_jsnote = "PAGE JS parses"
+if _sh.which("node"):
+    # AST-extract EVERY module-level HTML string constant that has inline JS (PAGE + TERM_PAGE + any others) --
+    # a regex on r\"\"\"...\"\"\" truncates, and checking only PAGE misses the terminal page. node --check them all.
+    import ast as _ast
+    _blocks = []
+    try:
+        for _n in _ast.walk(_ast.parse(src)):
+            if isinstance(_n, _ast.Assign) and isinstance(_n.value, _ast.Constant) and isinstance(_n.value.value, str) \
+               and "<script>" in _n.value.value:
+                _blocks += re.findall(r'<script>(.*?)</script>', _n.value.value, re.S)
+    except Exception: pass
+    _bad = None
+    for _b in _blocks:
+        if not _b.strip(): continue
+        _t = _tf.NamedTemporaryFile("w", suffix=".js", delete=False); _t.write(_b); _t.close()
+        _r = _sp.run(["node", "--check", _t.name], capture_output=True, text=True); os.unlink(_t.name)
+        if _r.returncode != 0: _bad = _r.stderr.strip(); break
+    if _bad is not None:
+        print("PRESHIP FAIL: the dashboard PAGE JavaScript has a SYNTAX ERROR -- one bad char (e.g. an unescaped "
+              "apostrophe in a JS string) breaks the ENTIRE inline script, so NO lens/Sessions load (this is exactly "
+              "what broke v0.99.144). Fix it before shipping:")
+        for _ln in _bad.splitlines()[-4:]: print("  " + _ln[:200])
+        sys.exit(1)
+else:
+    _jsnote = "PAGE-JS gate SKIPPED (node not found)"
+
 print("PRESHIP OK: all %d local engine modules imported by server.py are in framework_paths (%s); no "
-      "kill-server footgun; UI design-system clean; no new tenant residue (clean-core: %d hits, ratcheting to 0)"
-      % (len(local), ", ".join(local), sum(_cur.values())))
+      "kill-server footgun; UI design-system clean; %s; no new tenant residue (clean-core: %d hits, ratcheting to 0)"
+      % (len(local), ", ".join(local), _jsnote, sum(_cur.values())))
