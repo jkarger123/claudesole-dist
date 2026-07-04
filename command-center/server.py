@@ -7609,6 +7609,29 @@ def instances_list():
     try: return json.load(open(INSTANCES))
     except Exception: return []
 
+def host_users():
+    """Real local macOS accounts that could HOST a node (uid 500-2000 with a /Users home), + which is current.
+    Cross-user hosting works because our bundle_root is the noowners SSD -- any account can run a bundle staged
+    there -- but only THAT account's own login session can launch/persist it (no TTY/sudo across users)."""
+    import getpass, subprocess
+    cur = getpass.getuser(); users = []
+    try:
+        r = subprocess.run(["dscl", ".", "-list", "/Users", "UniqueID"], capture_output=True, text=True, timeout=8)
+        for ln in (r.stdout or "").splitlines():
+            parts = ln.split()
+            if len(parts) < 2: continue
+            nm = parts[0]
+            try: uidn = int(parts[-1])
+            except Exception: continue
+            if 500 <= uidn < 2000 and os.path.isdir("/Users/%s" % nm):
+                users.append({"name": nm, "current": nm == cur})
+    except Exception:
+        users = []
+    if not any(u["name"] == cur for u in users):
+        users.append({"name": cur, "current": True})
+    users.sort(key=lambda x: (not x["current"], x["name"]))
+    return {"ok": True, "users": users, "current": cur}
+
 def instance_provision(p, do_launch=False, dry=False):
     """Provision a NEW, self-contained, portable ClaudeFather bundle via the deterministic engine
     cc-newinstance.sh (the "+ Add a ClaudeFather" flow). I never hand-craft layout -- the engine owns it,
@@ -7663,7 +7686,24 @@ def instance_provision(p, do_launch=False, dry=False):
             try: summ = json.loads(line[len("CC_NEWINSTANCE_JSON="):])
             except Exception: pass
     res = {"ok": True, "staged": True, "summary": summ, "log": out.strip()[-2000:]}
-    if do_launch and summ.get("bundle") and summ.get("port"):
+    # CROSS-USER host: the node is meant to run as ANOTHER account (e.g. sarahaios). We (this account) can stage
+    # the bundle -- it lives on the noowners SSD so the target account can read/write it -- but we CANNOT launch
+    # or launchctl it as them (no TTY/sudo across users). So we hand back the exact two commands they run in
+    # THEIR own login session. This mirrors how the afp (sarahaios) node is hosted.
+    tgt_user = (p.get("user") or "").strip()
+    cross_user = bool(tgt_user) and tgt_user != getpass.getuser()
+    if cross_user and summ.get("bundle") and summ.get("port"):
+        b = summ["bundle"]
+        res["cross_user"] = True; res["run_as"] = tgt_user; res["launched"] = False
+        res["launch_cmd"] = ('TMUX_TMPDIR=/tmp %s new-session -d -s cc-%s '
+                             '"CC_CONFIG=%s/cc.config.json python3 %s/command-center/server.py '
+                             '>>/tmp/cc-%s.out 2>>/tmp/cc-%s.err"') % (TMUX, iid, b, b, iid, iid)
+        _pl = summ.get("plist") or ""
+        res["persist_cmds"] = ("cp %s ~/Library/LaunchAgents/\n"
+                               "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claudefather.%s.plist" % (_pl, iid)) if _pl else ""
+        res["cross_note"] = ("Staged on the shared SSD. Launching a node as another account needs THAT account's own "
+                             "login session -- log in as %s (or open their session) and run the step(s) below." % tgt_user)
+    elif do_launch and summ.get("bundle") and summ.get("port"):
         b = summ["bundle"]; port = summ["port"]; sess = "cc-%s" % iid
         launch = ('TMUX_TMPDIR=/tmp %s new-session -d -s %s '
                   '"CC_CONFIG=%s/cc.config.json python3 %s/command-center/server.py '
@@ -15221,6 +15261,8 @@ class H(BaseHTTPRequestHandler):
             if ROLE != "org":
                 return self._s(403, json.dumps({"ok": False, "error": "provisioning is ClaudeGrandfather (overseer) only"}))
             return self._s(200, json.dumps(instance_provision(body, do_launch=bool(body.get("launch")), dry=bool(body.get("dry")))))
+        if u.path == "/api/host-users":   # local accounts that can HOST a node (for the Add-a-ClaudeFather "Run as user" picker)
+            return self._s(200, json.dumps(host_users()))
         if u.path == "/api/onboard":   # PROJECT ONBOARDING: launch the Onboarding agent (adopt existing / scaffold new)
             return self._s(200, json.dumps(onboard_start(body.get("rel", "") or "", body.get("mode", "adopt"), body.get("name", ""), body.get("model")), default=str))
         return self._s(404, "{}")
@@ -22805,18 +22847,21 @@ function cfAddWizard(){
    +cfF('adopt_source','Adopt from','Adopt only: path to EXISTING code — copied INTO the bundle so the node owns it')
    +cfF('dest','Bundle folder','blank = &lt;bundle root&gt;/claudefather-&lt;id&gt;')
    +cfF('port','Port','blank = auto (≥ 8800)')
+   +'<label class="cff">Run as user<select id="cf_user" class="mini"><option value="">(this account)</option></select></label>'
    +cfSel('storage','Storage',[['github','github'],['icloud','icloud'],['icloud+github','icloud+github']])
    +cfF('agents','Agents','blank = security,backup,usage,ideas,routines')
    +'</div>'
-   +'<div class="sub" style="margin:8px 0;line-height:1.5"><b>Install type</b> — <b>Agency</b>: runs only official, signed tools — locked &amp; safe, what a client/tenant gets. <b>Developer</b>: also lets you build + run your OWN custom tools in an operator-approved sandbox (your own installs). &nbsp;·&nbsp; <b>Tree shape</b> — <b>Product</b>: a modules tree. <b>Agency</b>: a clients + tools tree (like an agency tenant). &nbsp;·&nbsp; <b>Onboarding</b> — on first boot: <b>Adopt</b> COPIES the code in <b>Adopt from</b> INTO the bundle&rsquo;s project/ (self-contained — the node owns its code, no external split), then reads + structures it to spec; <b>Scaffold</b> builds a new shell; then hands to the Chief.</div>'
+   +'<div class="sub" style="margin:8px 0;line-height:1.5"><b>Install type</b> — <b>Agency</b>: runs only official, signed tools — locked &amp; safe, what a client/tenant gets. <b>Developer</b>: also lets you build + run your OWN custom tools in an operator-approved sandbox (your own installs). &nbsp;·&nbsp; <b>Tree shape</b> — <b>Product</b>: a modules tree. <b>Agency</b>: a clients + tools tree (like an agency tenant). &nbsp;·&nbsp; <b>Onboarding</b> — on first boot: <b>Adopt</b> COPIES the code in <b>Adopt from</b> INTO the bundle&rsquo;s project/ (self-contained — the node owns its code, no external split), then reads + structures it to spec; <b>Scaffold</b> builds a new shell; then hands to the Chief. &nbsp;·&nbsp; <b>Run as user</b> — which macOS account hosts it. <b>This account</b>: created &amp; started automatically. <b>Another account</b> (e.g. sarahaios): staged on the shared SSD, then you run two given commands in <i>that</i> account&rsquo;s login session (only it can launch/persist its own node).</div>'
    +'<label class="cfpersist"><input type="checkbox" id="cf_persist" checked><span><b>Make it permanent &amp; join the mesh</b><br>On <b>Create &amp; start</b>, install it to survive reboots and add it to the fleet — no manual steps.</span></label>'
    +'<div class="cfacts"><button class="mini" onclick="cfPlan()" title="Show the plan only — writes nothing">Preview</button>'
    +'<button class="mini go" onclick="cfProvision(false)" title="Build the folder, leave it off">Create</button>'
    +'<button class="mini go" onclick="cfProvision(true)" title="Build it, start it, finish setup">Create &amp; start</button></div>'
    +'<div class="cflegend">👁 <b>Preview</b> — plan only. &nbsp; 📦 <b>Create</b> — build it, leave it off. &nbsp; 🚀 <b>Create &amp; start</b> — build, start, finish setup, then open it and run its <b>Setup agent</b>.</div>'
    +'<pre id="cfout"></pre></div>');
+  (async function(){try{var u=await(await fetch('/api/host-users',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();var sel=document.getElementById('cf_user');
+    if(sel&&u&&u.users&&u.users.length){sel.innerHTML=u.users.map(function(x){return '<option value="'+esc(x.name)+'"'+(x.current?' selected':'')+'>'+esc(x.name)+(x.current?' (this account)':' — needs its own login to launch')+'</option>';}).join('');}}catch(e){}})();
 }
-function cfVals(){var g={};['id','name','brand','preset','node_type','integration','onboard','adopt_source','dest','port','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
+function cfVals(){var g={};['id','name','brand','preset','node_type','integration','onboard','adopt_source','dest','port','user','storage','agents'].forEach(function(k){var el=document.getElementById('cf_'+k);if(el&&el.value.trim())g[k]=el.value.trim();});return g;}
 async function cfPost(extra){
   var body=cfVals(); if(!body.id){toast('Enter an ID first.');return null;}
   Object.assign(body,extra||{});
@@ -22839,7 +22884,7 @@ async function cfProvision(launch){
   if('tailnet_url' in r)txt+='Remote access: ✅ '+r.tailnet_url+' (reachable from your other devices)'+NL;
   else if('tailnet_warn' in r)txt+='Remote access: ⚠ local only ('+r.tailnet_warn+')'+NL;
   if('chief_started' in r)txt+='Chief of Staff: '+(r.chief_started?'✅ warmed up & ready':'⚠ start it from the Chief tab')+NL;
-  if(!r.launched)txt+=NL+'It is staged but OFF. Re-run with Create & start to bring it online.'+NL;
+  if(!r.launched&&!r.cross_user)txt+=NL+'It is staged but OFF. Re-run with Create & start to bring it online.'+NL;
   txt+=NL+'➡ Next: open the '+(s.id||'')+' dashboard ('+(s.url||'')+') and run its Setup agent (Agents → setup) to configure the project.';
   // Surface the minted access token PROMINENTLY with a Copy button -- the user must paste it the instant the
   // new dashboard opens (it prompts for the token before letting them set their own). Plain text used to bury it.
@@ -22851,13 +22896,27 @@ async function cfProvision(launch){
     +'<button class="mini go" onclick="cfCopyTok()">Copy token</button></div>'
     +'<div style="margin-top:9px;font-size:12.5px;line-height:1.5;opacity:.92">You will be asked for this <b>the moment you open the new dashboard</b> — paste it to log in. After that, set your own password in <b>Settings → Login token</b>.</div>'
     +'</div>';}
-  o.innerHTML=head+'<div style="white-space:pre-wrap">'+esc(txt)+'</div>';
-  toast((r.launched?'Started ':'Created ')+(s.id||'')); setTimeout(loadPortfolio,1600);
+  // CROSS-USER: the node runs as another account -> we staged it but only that account can launch/persist it.
+  // Show the exact command(s) to run in THAT account's session, each with a Copy button.
+  var xu='';
+  if(r.cross_user){xu='<div style="border:1px solid #58a6ff55;background:rgba(88,166,255,.09);border-radius:10px;padding:12px 14px;margin:0 0 11px">'
+    +'<div style="font-weight:800;color:#58a6ff;margin-bottom:6px;font-size:13.5px">Runs as '+esc(r.run_as||'?')+' — finish in that account</div>'
+    +'<div style="font-size:12.5px;line-height:1.5;margin-bottom:4px;opacity:.92">'+esc(r.cross_note||'')+'</div>'
+    +cfCmdRow('1 · Start it',r.launch_cmd||'')
+    +(r.persist_cmds?cfCmdRow('2 · Survive reboot (optional)',r.persist_cmds):'')
+    +'</div>';}
+  o.innerHTML=head+xu+'<div style="white-space:pre-wrap">'+esc(txt)+'</div>';
+  toast((r.cross_user?'Staged for '+(r.run_as||''):(r.launched?'Started ':'Created ')+(s.id||''))); setTimeout(loadPortfolio,1600);
 }
-function cfCopyTok(){var el=document.getElementById('cfTokVal');if(!el)return;var t=(el.textContent||'').trim();
-  try{if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(function(){toast('Token copied — paste it to log into the new node');},function(){cfCopyFallback(t);});return;}}catch(e){}
+function cfCmdRow(label,cmd){var id='cfcmd'+(cfCmdRow._n=(cfCmdRow._n||0)+1);
+  return '<div style="margin-top:8px"><div style="font-size:11.5px;font-weight:700;color:#8a8a99;margin-bottom:3px">'+esc(label)+'</div>'
+    +'<div style="display:flex;gap:8px;align-items:flex-start"><pre id="'+id+'" style="flex:1;margin:0;white-space:pre-wrap;word-break:break-all;background:rgba(0,0,0,.4);padding:8px 10px;border-radius:7px;font-size:12px">'+esc(cmd)+'</pre>'
+    +'<button class="mini" onclick="cfCopyEl(\''+id+'\')">Copy</button></div></div>';}
+function cfCopyEl(id){var el=document.getElementById(id);if(!el)return;cfCopyText((el.textContent||'').trim());}
+function cfCopyTok(){var el=document.getElementById('cfTokVal');if(!el)return;cfCopyText((el.textContent||'').trim());}
+function cfCopyText(t){try{if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(function(){toast('Copied to clipboard');},function(){cfCopyFallback(t);});return;}}catch(e){}
   cfCopyFallback(t);}
-function cfCopyFallback(t){var ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.left='-9999px';document.body.appendChild(ta);ta.select();var ok=false;try{ok=document.execCommand('copy');}catch(e){}document.body.removeChild(ta);toast(ok?'Token copied — paste it to log in':'Select the token and copy it manually');}
+function cfCopyFallback(t){var ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.left='-9999px';document.body.appendChild(ta);ta.select();var ok=false;try{ok=document.execCommand('copy');}catch(e){}document.body.removeChild(ta);toast(ok?'Copied to clipboard':'Select the text and copy it manually');}
 async function chiefComms(){var t=document.getElementById('chieftarget'),m=document.getElementById('chiefmsg'),rd=document.getElementById('chiefreplies');
   var msg=((m&&m.value)||'').trim(); if(!msg){toast('Type a message first.');return;}
   var tgt=(t&&t.value)||''; if(rd)rd.innerHTML=empty('Reaching the chief(s)... a chief takes ~20-40s to reply.');

@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.150 -- 2026-07-04  (Add-a-ClaudeFather: choose which macOS account hosts the node)
+- The "Add a ClaudeFather" wizard now has a **Run as user** picker (populated from the box's real local
+  accounts via `/api/host-users`). **This account** -> created & started automatically as today. **Another
+  account** (e.g. `sarahaios`) -> the bundle is staged on the shared `noowners` SSD (so that account can run
+  it), and the result hands back the exact two commands to run in THAT account's own login session (launch +
+  optional launchd-persist), each with a Copy button, plus the login token. This mirrors how the `afp`
+  (sarahaios) node is hosted -- the platform can't launch/persist as another user (no TTY/sudo across accounts),
+  so it does everything it can and cleanly hands off the one step it can't. `--user` was already plumbed through
+  the engine; it only affected a hint before.
+
 ## 0.99.149 -- 2026-07-04  (Add-a-ClaudeFather: show the new node's access token with a Copy button)
 - The "Add a ClaudeFather" result now surfaces the **per-node access token** (minted at birth) in a prominent
   callout with a **Copy token** button and a clear message: copy it now, you enter it the moment the new
