@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.146 -- 2026-07-04  (Ralph notifications work however the loop was launched)
+- Ralph loop notifications no longer depend on launch-time wiring: (1) the runner DERIVES the notify URL from the
+  node config when CC_NOTIFY isn't in its env (a loop run directly, not via /api/ralph-launch, still notifies), and
+  (2) the server falls back to the project's CHIEF (cwd match, realpath-normalized) when a loop has no recorded
+  notify_session. Fixes iteration/completion pings silently going nowhere for agent-launched loops.
+- realpath-normalized the same-project cwd match (auto-nudge waiting_on_loop + the notify target), so /tmp vs
+  /private/tmp and other symlinked roots match correctly.
+
 ## 0.99.145 -- 2026-07-04  (Ralph loop notifications + auto-nudge coordination; auto-nudge is now fleet-clean)
 - Ralph loops now PING the session that started them: on COMPLETION (as before) and after EACH ITERATION (new --
   "finished iteration N: checked M new item(s) (Y/Z done), next: ..."). Runner `_notify`/`_notify_iteration` +

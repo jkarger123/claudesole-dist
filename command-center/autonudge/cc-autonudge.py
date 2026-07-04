@@ -98,7 +98,8 @@ def skip_reason(txt):
 def _session_cwd(session):
     try:
         r = sh([TMUX, "display-message", "-t", session, "-p", "#{pane_current_path}"])
-        return (r.stdout or "").strip().rstrip("/") if r and r.returncode == 0 else ""
+        p = (r.stdout or "").strip() if r and r.returncode == 0 else ""
+        return os.path.realpath(p) if p else ""   # realpath: /tmp vs /private/tmp, /Volumes symlinks, etc.
     except Exception:
         return ""
 
@@ -128,7 +129,8 @@ def waiting_on_loop(session):
             try: cfg = json.load(open(os.path.join(d, "loop.json")))
             except Exception: continue
             if (cfg.get("notify_session") or "") == session: return n            # (a) explicit link
-            if _same_project(scwd, (cfg.get("cwd") or "").rstrip("/")): return n  # (b) same-project link
+            lc = cfg.get("cwd") or ""
+            if lc and _same_project(scwd, os.path.realpath(lc)): return n         # (b) same-project link
     except Exception:
         pass
     return None

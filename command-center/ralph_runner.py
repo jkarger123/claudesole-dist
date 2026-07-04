@@ -99,16 +99,18 @@ def is_complete():
 
 NOTIFY_ITERS = CFG.get("notify_iters", True) is not False   # ping the launching session after each iteration too
 
+def _notify_cfg():
+    try: return json.load(open(os.environ.get("CC_CONFIG") or os.path.join(CC_HOME, "cc.config.json")))
+    except Exception: return {}
+
 def _notify(payload):
-    """POST to the server (CC_NOTIFY) so it pings the session that STARTED this loop (loop.json notify_session).
-    Best-effort + authenticated. `payload` gets {name} added; kind='iteration'|'complete' picks the message."""
-    url = os.environ.get("CC_NOTIFY")
+    """POST to the local server so it pings the session that STARTED this loop (loop.json notify_session, or the
+    project chief as a fallback). Works even when the loop was NOT launched via /api/ralph-launch: if CC_NOTIFY
+    isn't in the env, DERIVE the local URL from the node config (port), so a directly-run loop still notifies."""
+    c = _notify_cfg()
+    url = os.environ.get("CC_NOTIFY") or ("http://127.0.0.1:%s" % (c.get("port") or 8799))
     if not url: return False
-    tok = ""
-    try:
-        _cp = os.environ.get("CC_CONFIG") or os.path.join(CC_HOME, "cc.config.json")
-        tok = json.load(open(_cp)).get("auth_token") or ""
-    except Exception: pass
+    tok = c.get("auth_token") or ""
     try:
         import urllib.request
         body = dict(payload); body["name"] = NAME

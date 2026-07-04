@@ -8452,9 +8452,26 @@ def ralph_launch(name):
         "CC_NOTIFY=http://127.0.0.1:%d CC_CONFIG=%s python3 %s %s" % (PORT, _cfgpath, RUNNER, n)])
     return {"ok": True, "session": sess, "term": "/term?name=" + sess}
 
+def _loop_notify_target(cfg):
+    """Who to ping for a loop: its recorded notify_session, else a live session (chiefs first) whose cwd is the
+    loop's project. The fallback means loops launched WITHOUT a recorded launcher (directly, or not via
+    /api/ralph-launch) still reach the right agent -- the same cwd link that fixed auto-nudge skipping."""
+    ns = (cfg.get("notify_session") or "").strip()
+    if ns: return ns
+    lcwd = os.path.realpath(cfg.get("cwd")) if cfg.get("cwd") else ""   # realpath: /tmp vs /private/tmp etc.
+    if not lcwd: return ""
+    code, out, _ = sh([TMUX, "list-sessions", "-F", "#{session_name}"])
+    if code != 0: return ""
+    for s in sorted([x for x in out.split() if x], key=lambda x: 0 if x.startswith("chief-") else 1):
+        c, cwd, _ = sh([TMUX, "display-message", "-t", s, "-p", "#{pane_current_path}"])
+        cwd = os.path.realpath(cwd.strip()) if (c == 0 and cwd and cwd.strip()) else ""
+        if cwd and (cwd == lcwd or (cwd + "/").startswith(lcwd + "/") or (lcwd + "/").startswith(cwd + "/")):
+            return s
+    return ""
+
 def ralph_notify(body):
-    """Called by the runner to ping the session that STARTED the loop (loop.json notify_session), via the
-    idle-aware injector so it lands as a clean turn. Two kinds:
+    """Called by the runner to ping the session that STARTED the loop (loop.json notify_session, or the project
+    chief as a fallback), via the idle-aware injector so it lands as a clean turn. Two kinds:
       - kind='iteration' : after EACH iteration -- a progress ping (per-pass, NOT idempotent).
       - kind='complete'  : the instant the loop finishes -- idempotent (a .notified marker = deliver exactly once).
     `body` is the POST dict {name, kind, iter, checked_this, done, total, next}."""
@@ -8462,8 +8479,8 @@ def ralph_notify(body):
     name = body.get("name", ""); kind = (body.get("kind") or "complete").strip()
     d = _rdir(name)
     if not d: return {"ok": False, "error": "no such loop"}
-    cfg = _rjson(os.path.join(d, "loop.json")); ns = (cfg.get("notify_session") or "").strip()
-    if not ns: return {"ok": True, "note": "no notify_session"}
+    cfg = _rjson(os.path.join(d, "loop.json")); ns = _loop_notify_target(cfg)
+    if not ns: return {"ok": True, "note": "no notify target"}
     if sh([TMUX, "has-session", "-t", ns])[0] != 0: return {"ok": False, "error": "notify_session gone"}
     nm = _rname(name); cwd = cfg.get("cwd", "")
     if kind == "iteration":
