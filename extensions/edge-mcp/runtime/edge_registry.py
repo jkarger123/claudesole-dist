@@ -18,7 +18,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PROXY = os.path.join(HERE, "mcp_proxy_log.py")
 # Per-install runtime state lives OUTSIDE the (framework/signed) extension dir -- in the deployment's gitignored
 # data/ area -- so registry/keys/activity never ship with the core and stay tenant-neutral.
-CC_HOME = os.environ.get("CC_HOME") or os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+CC_HOME = (os.environ.get("CC_HOME")
+           or (os.path.dirname(os.environ["CC_CONFIG"]) if os.environ.get("CC_CONFIG") else "")
+           or os.path.abspath(os.path.join(HERE, "..", "..", "..")))   # auto-scope to the instance whose session
+# set CC_CONFIG (multi-instance: one `edge-mcp` command targets each instance's own registry + vault).
 STATE_DIR = os.environ.get("EDGE_MCP_STATE") or os.path.join(CC_HOME, "data", "edge-mcp")
 REGISTRY = os.path.join(STATE_DIR, "registry.json")
 ACTIVITY_DIR = os.path.join(STATE_DIR, "_mcp_activity")

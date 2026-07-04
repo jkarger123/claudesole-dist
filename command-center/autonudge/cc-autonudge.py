@@ -26,6 +26,7 @@ LOG = "/tmp/cc-autonudge.log"
 COOLDOWN = 10   # min seconds between nudges to the same session (anti double-fire; turns shorter than this are rare)
 _RALPHDIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))), "data", "ralph")  # CC_HOME/data/ralph. realpath (NOT abspath) resolves the /opt/homebrew/bin symlink to the real file -- abspath left it at /opt/data/ralph
 _COMPACT_LOCK_DIR = "/tmp/cf-compact-locks"   # server.py's graceful-auto-compact lock; state "running" == a compact is driving this session's input box right now
+_LOOP_FRESH_SEC = 1800   # a "running" ralph loop whose status.json hasn't advanced in this long is treated as wedged/backgrounded (runner died mid-iteration, or it's just parked) -> stop suppressing nudges. Generous so a legit long iteration isn't cut short.
 
 DEFAULT_MSG = ("Like always, I want the complete solution -- I do not want any shortcuts. We need to get this "
                "correct before we move on. If you really feel it is correct -- like truly as correct as we need it "
@@ -110,11 +111,15 @@ def _same_project(a, b):
     return (b + "/").startswith(a + "/") or (a + "/").startswith(b + "/")
 
 def waiting_on_loop(session):
-    """Don't nudge a session that is watching a RUNNING Ralph loop -- it is legitimately waiting. Two links, so it
-    works even for loops started WITHOUT a recorded launcher (the common case that kept nudging live 2026-07-04):
-      (a) explicit  -- loop.json notify_session == this session (set by cc-ralph / the dashboard), OR
-      (b) project   -- the loop's cwd is the SAME project as this session's cwd.
-    Auto-resumes when the loop's ralph-<name> tmux exits."""
+    """Don't nudge a session that is legitimately WAITING on an IN-FLIGHT Ralph loop. Suppression requires BOTH:
+      1. the loop is genuinely in flight -- status.json state == "running" AND fresh (advanced within
+         _LOOP_FRESH_SEC). A paused / stopped / halted / done / blocked / stalled loop, or a "running" one whose
+         status went stale (runner died mid-iteration, or it's just parked), does NOT count -- the session isn't
+         meaningfully waiting on it, so nudging resumes. (This was the bug fixed 2026-07-04: a PAUSED, unowned,
+         hours-stale loop in the same project silently suppressed an armed chief's nudge forever.)
+      2. a link to this session -- (a) loop.json notify_session == this session (set by cc-ralph / the dashboard),
+         or (b) the loop's cwd is the SAME project as this session's cwd (for loops started without a launcher).
+    Auto-resumes when the loop finishes/pauses/stalls or its ralph-<name> tmux exits."""
     try:
         if not os.path.isdir(_RALPHDIR): return None
         scwd = _session_cwd(session)
@@ -123,9 +128,14 @@ def waiting_on_loop(session):
             if n.startswith((".", "_")) or not os.path.isdir(d): continue
             r = sh([TMUX, "has-session", "-t", "ralph-" + n])   # ralph-<name> tmux alive?
             if not (r and r.returncode == 0): continue
-            try: st = json.load(open(os.path.join(d, "status.json"))).get("state") or ""
-            except Exception: st = ""
-            if st in ("done", "halted", "stopped", "stalled"): continue   # finished (even if the pane lingers) -> resume nudging
+            try: stj = json.load(open(os.path.join(d, "status.json")))
+            except Exception: stj = {}
+            st = (stj.get("state") or "").lower()
+            if st and st != "running": continue                              # not in flight (paused/done/etc.) -> resume nudging
+            upd = stj.get("updated") or stj.get("started") or 0              # "running" but STALE -> runner likely dead/parked -> resume
+            try:
+                if upd and (time.time() - float(upd)) > _LOOP_FRESH_SEC: continue
+            except Exception: pass
             try: cfg = json.load(open(os.path.join(d, "loop.json")))
             except Exception: continue
             if (cfg.get("notify_session") or "") == session: return n            # (a) explicit link

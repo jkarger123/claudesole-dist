@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.151 -- 2026-07-04  (Auto-nudge: a paused/stale Ralph loop no longer suppresses nudges forever)
+- Fix: `waiting_on_loop` (auto-nudge's "don't nudge a session that's waiting on a loop" guard) suppressed a
+  session's nudges whenever ANY same-project Ralph loop's tmux was alive and its state wasn't one of
+  done/halted/stopped/stalled -- so a **paused**, **blocked**, or hours-**stale** loop (even one the session never
+  launched, notify_session=None) silently muted an armed chief's nudges indefinitely. Now suppression requires the
+  loop to be genuinely IN FLIGHT: `state == "running"` AND its status advanced within `_LOOP_FRESH_SEC` (30 min);
+  a paused/finished/blocked/stalled or wedged-"running" loop releases the nudge. Found live on an armed CoS that
+  had a paused emulator loop in its project. NOTE: a running auto-nudge loop holds old code -- it picks up this fix
+  when its process restarts (lazy-restarts on next arm, or restart `cc-autonudge loop`).
+
 ## 0.99.150 -- 2026-07-04  (Add-a-ClaudeFather: choose which macOS account hosts the node)
 - The "Add a ClaudeFather" wizard now has a **Run as user** picker (populated from the box's real local
   accounts via `/api/host-users`). **This account** -> created & started automatically as today. **Another
