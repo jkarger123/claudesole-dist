@@ -80,6 +80,17 @@ def is_stalled_on_error(txt):
     lines = [ln for ln in txt.splitlines() if ln.strip()]
     return any(ERR_LINE.match(ln) for ln in lines[-15:])
 
+_COMPACT_LOCK_DIR = "/tmp/cf-compact-locks"
+def is_compacting(s):
+    """True while a graceful auto-compact is driving this session's input box -- defer to it (same shared
+    coordination signal auto-nudge + _mesh_deliver use), so an API error mid-compact doesn't fight the /compact."""
+    try:
+        p = os.path.join(_COMPACT_LOCK_DIR, s + ".lock")
+        if not os.path.isfile(p): return False
+        return (json.load(open(p)).get("state") or "") == "running"
+    except Exception:
+        return False
+
 def load():
     try: return json.load(open(STATE_FILE))
     except Exception: return {"watch": [], "state": {}}
@@ -133,6 +144,8 @@ def cmd_run(watch_all=False, dry=False):
         txt = pane(s)
         cur = st.get(s, {})
         stalled = is_stalled_on_error(txt)
+        if stalled and is_compacting(s):        # a graceful auto-compact owns the box -> let it finish, don't nudge
+            cur["err"] = True; st[s] = cur; continue
         if stalled:
             # require it was ALSO stalled last pass (persistence) + cooldown elapsed
             if cur.get("err") and (now - cur.get("nudge", 0) > COOLDOWN):

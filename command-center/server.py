@@ -1878,6 +1878,16 @@ def mesh_reply(to, text):
 
 _DELIVER_LOCKS = {}
 
+def _session_compacting(name):
+    """True while a graceful auto-compact is DRIVING this session's input box (compact lock state 'running').
+    Shared coordination signal: every autonomous injector (auto-nudge, the API-error watchdog, _mesh_deliver)
+    defers to it, so nothing steals the box mid-'/compact' and silently breaks the compaction."""
+    try:
+        p = _compact_lock_path(name)
+        if not os.path.isfile(p): return False
+        return (json.loads(open(p).read() or "{}") or {}).get("state") == "running"
+    except Exception:
+        return False
 def _mesh_deliver(session, text):
     """Inject `text` into a chief as a CLEAN, SEPARATE turn. Waits (in the background) until the chief is idle
     at a prompt before typing -- so a message sent while the chief is busy is NEVER merged into the in-flight
@@ -1891,6 +1901,8 @@ def _mesh_deliver(session, text):
             for _ in range(1800):   # up to ~30 min, polling ~1s
                 if sh([TMUX, "has-session", "-t", session])[0] != 0:
                     return
+                if _session_compacting(session):   # a graceful auto-compact owns the box -> wait it out, don't inject
+                    time.sleep(1); continue
                 low = sh([TMUX, "capture-pane", "-t", session, "-p"])[1].lower()
                 if "how is claude doing" in low or "rate this session" in low:   # rating modal eats keys
                     sh([TMUX, "send-keys", "-t", session, "0"]); time.sleep(0.6); continue

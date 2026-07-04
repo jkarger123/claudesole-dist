@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.147 -- 2026-07-04  (every session-injector defers to a running compact -- consistent coordination)
+- Shared coordination signal: the graceful-auto-compact lock ("running") is now honored by EVERY autonomous thing
+  that types into a session, not just auto-nudge:
+  - `_mesh_deliver` (ralph-notify, mesh replies, Slack/Telegram, superadmin) waits out a running compact instead of
+    grabbing the post-HANDOFF_DONE idle window and breaking the /compact.
+  - the API-error watchdog (cc-session-watchdog) skips nudging a session mid-compact.
+  So the compact worker cleanly OWNS the input box; nothing else fights it. (auto-nudge already did this in .145.)
+
 ## 0.99.146 -- 2026-07-04  (Ralph notifications work however the loop was launched)
 - Ralph loop notifications no longer depend on launch-time wiring: (1) the runner DERIVES the notify URL from the
   node config when CC_NOTIFY isn't in its env (a loop run directly, not via /api/ralph-launch, still notifies), and
