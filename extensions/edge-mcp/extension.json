@@ -1,0 +1,26 @@
+{
+  "id": "edge-mcp",
+  "name": "Edge MCP Host",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "EM",
+  "summary": "Run MCP servers that must live on a user's own computer (GUI apps, real browser, local files/devices) over the mesh, transparently.",
+  "description": "Some MCP servers can only run where the user actually is -- driving Adobe InDesign/Photoshop/Blender, the user's real logged-in browser, local filesystems or attached devices. Edge MCP Host runs and drives those local-only MCP servers on the user's own machine across the Tailscale mesh (no remote desktop), keeping a warm session and wrapping every call in a transparency proxy that logs args/results/latency. Register an edge host (any machine, any account; SSH key in the vault) and an MCP server via a RECIPE (plugin-app for GUI+plugin apps, browser-attach for the real browser). Driven by the `edge-mcp` CLI. Proven at scale (built a 356-page InDesign book through it).",
+  "provides": ["mcp:edge", "recipe:plugin-app", "recipe:browser-attach", "lens:edge-mcp"],
+  "requires": [
+    {"key": "EDGE_SSH_KEY", "label": "SSH private key to reach the edge host (ClaudeFather mints a dedicated one; the user authorizes it on their machine)"}
+  ],
+  "setup_doc": "SETUP.md",
+  "setup_agent": true,
+  "agent_doc": "AGENT.md",
+  "default_category": "Integrations",
+  "lens": {"id": "edge-mcp", "label": "Edge MCP", "icon": "EM",
+           "help": {"sub": "MCP servers running on users' own computers, over the mesh",
+                    "h": "Edge MCP Host runs MCP servers that must live on a user's own machine (Adobe InDesign, their real browser, local files/devices) and drives them from here, no remote desktop. Each host is a registered machine reached by SSH (key in the vault); each server runs there via a recipe (plugin-app, browser-attach). Every tool call flows through a transparency proxy -- shown here as live activity. Drive it with the edge-mcp CLI."}},
+  "tier": "free",
+  "publisher": "ClaudeFather",
+  "launch_group": "Tools",
+  "launch_points": [
+    {"path": "extensions/edge-mcp", "name": "Edge MCP Host", "description": "Register/drive local-only MCP servers on a user's machine.", "icon": "EM"}
+  ]
+}

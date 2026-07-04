@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# edge-mcp -- ClaudeFather Edge MCP Host CLI. Drive MCP servers that must run on a user's own computer
+# (GUI apps like Adobe InDesign, the user's real browser, local files/devices) over the mesh, transparently.
+#
+#   edge-mcp hosts | servers                       list registered hosts / servers
+#   edge-mcp add-host <id> <user@addr> [--platform macos|windows] [--power laptop|always-on] [--import <key>]
+#   edge-mcp add-server <id> <host> [--recipe <id>] [--autodetect sidekick] [-- <launch argv...>]
+#   edge-mcp start|status|stop|probe <server>
+#   edge-mcp call <server> <tool> '<json-args>'    invoke a tool, print JSON
+#   edge-mcp run  <server> <file.js> [desc]        run a JS file on the server (e.g. InDesign execute)
+#
+# Recipes (patterns): browser-attach (user's real Chrome), plugin-app (Sidekick/Adobe/Blender/Figma/DAWs).
+SELF="$(readlink "$0" 2>/dev/null || echo "$0")"
+RUNTIME="$(cd "$(dirname "$SELF")" && pwd)"
+cd "$RUNTIME" || exit 1
+case "${1:-}" in
+  add-host|add-server) exec python3 "$RUNTIME/edge_setup.py" "$@" ;;
+  run)                 exec python3 "$RUNTIME/idx.py" "${2:-}" exec "${3:-}" "${4:-}" ;;
+  "" |-h|--help|help)
+    grep '^#' "$0" | sed 's/^# \{0,1\}//' ; exit 0 ;;
+  *)                   exec python3 "$RUNTIME/edge_mcpd.py" "$@" ;;
+esac

@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "408216fc7c439801dc3ec315f61637db7a0732304ee0a4f88aad2af06f6334f0",
+      "claudesole.manifest.json": "571a0b4cc240351f9511f6db1e8e338cdc497076b095550691ff07ea7bd2f13d",
       "command-center/autonudge/cc-autonudge.py": "f32634fdc73fd1c587401b64bbfce9e33e4caff7c1c1c9246e42961635a2f8ba",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
       "command-center/cc-email": "4895c4eb4ca8e1c6f3b26dd260f9ee3b776c42f24ec656b8581d1cef0c4155ed",
@@ -52,7 +52,7 @@
       "command-center/ralph_runner.py": "b48395c8c36b94710e9da3cf83640eedd514347ed30e8b953043f729ef9b26e9",
       "command-center/residue_lint.py": "a48f5893bedc12816d84788dde78ffd162fff2334996c680361b843b46a22f70",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "6c789f2a8cabf496bb1c7b0b4fe11af66b94bdcff3ec8acea8d9987b6deb0eb0",
+      "command-center/server.py": "7c5961f2f64ea94a9d97be1bd2e0eab707cc1f01b920efdacebfde769652808c",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/ui_lint.py": "0cabb923f1edd1a5f9808e4e04329c46334483b3da38fcf4adba2e3e9b476132",
@@ -75,6 +75,16 @@
       "extensions/brave-search/mcp.json": "2ce5444da424d6c359ca88457e63306c4cf371e2d6043e80185f532234719b38",
       "extensions/cloudflare/extension.json": "8bc5eaf9fa5e261f38f55ea06fe6d3524fed035cfb281f74fe19542de8e34974",
       "extensions/cloudflare/mcp.json": "3216c032b71c16cc043bce893344ca721717e6058146335885ad6f1d7e5f697a",
+      "extensions/edge-mcp/config.example.json": "c33abffa1bc8019523576cd5e8a79aaf8e7412c682f0b11b3a068bb5c0f8546a",
+      "extensions/edge-mcp/extension.json": "d4832b37572e69fdedc5e692ecd0ada31964eb23b720270d47f4333c84ab14c3",
+      "extensions/edge-mcp/runtime/edge_launch.py": "95e1614de86d5cccd5d1ed4b2bb385196a9d4822388fc315db9ae14493fbd6d3",
+      "extensions/edge-mcp/runtime/edge_mcpd.py": "9f1a3d813659b7aa08566bc5cc5e56e5f1b96378dbb8d1b6141c8febb96c19d9",
+      "extensions/edge-mcp/runtime/edge_recipes.py": "953acb63582080cc61d6488c4771e8fbded9cceed00499aa267507384c231548",
+      "extensions/edge-mcp/runtime/edge_registry.py": "5cb3df1c38e92717f8e289631e6aa47dd1c6b26a3e604b8ff32146396e1acd04",
+      "extensions/edge-mcp/runtime/edge_setup.py": "c2de825c1310884f63cc5c8ca9dd7c0cc34efef6b8118f6dc7d8af8c1ff69ada",
+      "extensions/edge-mcp/runtime/idx.py": "237d411f359f86ff95eb81ef63f4bfb98cc184985241d5f23b5818d6374401fc",
+      "extensions/edge-mcp/runtime/mcp_proxy_log.py": "d33e9150caaa93d2283ef8fa19681f120740e5d22eae9db38f3e20cd1fd82a48",
+      "extensions/edge-mcp/runtime/view_activity.py": "70a902da9e8c177f59a765a628fef4586807ef59d8a188c070bd347a3efba5e0",
       "extensions/email-archive/extension.json": "692fce8b64d63503614f241f352bd983f36ddbe2990a941f83d5764f3cab99ba",
       "extensions/figma/extension.json": "7205df100a21a795350bd1dcc3c95a0c62a09542e3fa3907799f99de75fcba1f",
       "extensions/filesystem/extension.json": "a82f3a2fdc523d12f871cb6e319512a3a09b3ef572bda9f2fe2192011efef42b",
@@ -124,9 +134,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783169798,
+    "generated": 1783203503,
     "v": 1,
-    "version": "0.99.147"
+    "version": "0.99.148"
   },
-  "sig": "qkBzWZbX2Pfamzs/6ofYTUf0Om4Ck5klSMOsdtD4Yg0U7CRLckuIvlmdxaq4sqYl3QefL7c9Eaw90Tgt4PFKDw=="
+  "sig": "YTXPoiKz3qfDyPKj5ZY50dpE5WRLaMam4YW62ZUqqgf/eOoU2fqzGvZl8ZpYi8VKbWjVpI9ntgZtk0NEJPO+Cg=="
 }

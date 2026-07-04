@@ -18,7 +18,7 @@
 
 <!-- CC:CHILDREN auto-managed by the Command Center; do not hand-edit -->
 **Sub-tools in this folder** (you can launch into any of these; file a learning to the one it belongs to):
-- `ServerHeath/` -- Everything behind the dashboard's Server lens: a live, whole-machine health view of the
+- `ServerHeath/` -- >> Resume here: read _handoffs/20260704-1405__ServerHeath.md first -- it is the latest handoff.
 - `Usage/` -- >> Resume here: read _handoffs/20260702-1502__Usage.md first -- it is the latest handoff.
 - `autonudge/` -- My job: when a Claude session keeps stopping to ask "want me to keep going?", auto-send a canned push (e.g.
 - `update/` -- This folder is the home + documentation of how a ClaudeFather node gets new framework code, reliably,

@@ -1,0 +1,39 @@
+{
+  "_comment": "Example edge-mcp registry (placeholders). Real state lives per-install in runtime/_state/registry.json (gitignored). Credentials are VAULT refs, never inline. Host- and account-agnostic.",
+  "hosts": [
+    {
+      "id": "user-mac",
+      "label": "User's Mac",
+      "addr": "100.x.y.z",
+      "ssh_user": "USER",
+      "key_ref": "vault:EDGE_SSH_KEY_USER_MAC",
+      "platform": "macos",
+      "power": "laptop",
+      "node_id": null,
+      "_note": "Reachable from any node/account. Set node_id to run node-local (no ssh) when the host also runs a CF node."
+    }
+  ],
+  "servers": [
+    {
+      "id": "sidekick-indesign",
+      "host_id": "user-mac",
+      "label": "Sidekick for InDesign",
+      "recipe": "plugin-app",
+      "transport": "stdio",
+      "mode": "warm",
+      "launch": ["/path/to/node", "/path/to/indesign-sidekick/dist/index.js"],
+      "warm_probe": {"tool": "execute", "args": {"code": "return 1;", "description": "warm probe\nManual: n/a"}},
+      "_note": "recipe:plugin-app. Register via `edge-mcp add-server <id> <host> --autodetect sidekick`."
+    },
+    {
+      "id": "chrome",
+      "host_id": "user-mac",
+      "label": "User's real Chrome",
+      "recipe": "browser-attach",
+      "transport": "stdio",
+      "mode": "warm",
+      "config": {"mcp": "chrome-devtools", "debug_port": 9222},
+      "_note": "recipe:browser-attach. pre_launch starts Chrome with --remote-debugging-port; set config.user_data_dir for the real logged-in profile."
+    }
+  ]
+}

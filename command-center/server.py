@@ -4328,7 +4328,7 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
     # BASE (this command-center dir) on PATH so the cc-* CLIs (cc-secure/cc-note/cc-handoff/cc-task/cc-hold) resolve
     # as BARE commands inside every session -- without it onboarding/agents report them "not reachable" and can't
     # auto-vault secrets or file learnings (the briefs invoke them unqualified).
-    cl = 'export PATH=' + _shlex.quote(BASE) + ':"$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions' + _mdl + ' ' + CC_TITLE_FLAG
+    cl = 'export PATH=' + _shlex.quote(BASE) + ':"$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions' + _mdl + ' ' + CC_TITLE_FLAG + CC_MCP_FLAG
     if target == "studio":
         try: wd = projpath(rel) if rel else (comp_dir(cid) if cid else PROJECT)
         except Exception: wd = PROJECT
@@ -4483,8 +4483,8 @@ def chief_open():
         with open(prompt_file, "w") as f: f.write(prompt)
     except Exception: pass
     cl = (_CC_PATH + _CC_ENVP + 'export MESH_CC="http://localhost:%d"; '
-          'claude --dangerously-skip-permissions %s --settings %s "$(cat %s)"'
-          % (PORT, CC_TITLE_FLAG, shlex.quote(settings_file), shlex.quote(prompt_file)))
+          'claude --dangerously-skip-permissions %s%s --settings %s "$(cat %s)"'
+          % (PORT, CC_TITLE_FLAG, CC_MCP_FLAG, shlex.quote(settings_file), shlex.quote(prompt_file)))
     wd = PROJECT if os.path.isdir(PROJECT) else CC_HOME          # SSD-gone fallback: chief stays up, only file ops degrade
     # Persist a launch descriptor so the out-of-process launchd watchdog can revive this chief if THIS server dies.
     try:
@@ -4897,7 +4897,7 @@ def agent_open(slug):
     sess = "agt-" + slug
     if sh([TMUX, "has-session", "-t", sess])[0] == 0:
         return {"ok": True, "term": "/term?name=" + sess, "note": "resumed"}
-    cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+    cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' '
           "'You are the %s agent. Read CLAUDE.md in this folder -- it is your charter (your job, tools, and "
           "hard boundaries). Then give me a one-line status and stand by. "
           "For sudo/interactive commands you can't run (no TTY): stage them via POST /api/admin-stage "
@@ -5014,6 +5014,10 @@ def extensions_list():
 DEPLOY_ROOT = os.path.expanduser(CC.get("deploy_root") or CC_HOME)   # where per-deploy secrets/.mcp live; an APPLIANCE points this at a WRITABLE runtime dir so CORE stays read-only
 DEPLOY_ENV = os.path.join(DEPLOY_ROOT, ".env.claudefather")    # gitignored per-deployment secrets (KEY=VALUE)
 MCP_JSON = os.path.join(DEPLOY_ROOT, ".mcp.json")             # gitignored MCP server config for sessions
+# Pass the wired MCP config to every interactive work session so extension-wired MCP servers (google, etc.)
+# are available as native tools regardless of the session's cwd (Claude Code otherwise only auto-loads
+# .mcp.json when cwd==DEPLOY_ROOT). Empty (no flag) when there is no .mcp.json to load.
+CC_MCP_FLAG = ((" --mcp-config " + _shlex.quote(MCP_JSON)) if os.path.isfile(MCP_JSON) else "")
 
 # ==== EXTENSION AUTHORIZATION -- only OFFICIAL (MC-signed) or operator-APPROVED CUSTOM extensions may run ======
 # The guarantee: a tenant/appliance can NEVER load an extension we didn't ship (or the operator didn't explicitly
@@ -5966,6 +5970,45 @@ def _ext_category(eid):
         return (json.load(open(os.path.join(d, "extension.json"))) or {}).get("category", "") if d else ""
     except Exception: return ""
 
+def edge_mcp_lens():
+    """Read-only state for the Edge MCP Host lens: registered hosts (reachable?), servers (warm/ready?),
+    and the recent transparency-proxy activity. Reads the extension's runtime registry + status + jsonl."""
+    import socket as _sock
+    base = os.environ.get("EDGE_MCP_STATE") or os.path.join(CC_HOME, "data", "edge-mcp")
+    try: reg = json.load(open(os.path.join(base, "registry.json")))
+    except Exception: reg = {"hosts": [], "servers": []}
+    def _local(h): return bool(h.get("node_id")) or str(h.get("addr", "")).lower() in ("", "local", "localhost", "127.0.0.1", "::1")
+    def _reach(h):
+        if _local(h): return True
+        try: s = _sock.create_connection((h.get("addr"), 22), timeout=2); s.close(); return True
+        except Exception: return False
+    hosts = [{"id": h.get("id"), "label": h.get("label") or h.get("id"), "addr": h.get("addr"),
+              "user": h.get("ssh_user"), "platform": h.get("platform"), "power": h.get("power"),
+              "mode": "node-local" if _local(h) else "ssh", "reachable": _reach(h)} for h in reg.get("hosts", [])]
+    servers = []
+    for s in reg.get("servers", []):
+        st = {}
+        try: st = json.load(open(os.path.join(base, "%s.status.json" % s.get("id"))))
+        except Exception: pass
+        servers.append({"id": s.get("id"), "label": s.get("label") or s.get("id"), "host": s.get("host_id"),
+                        "recipe": s.get("recipe"), "mode": s.get("mode", "per-session"),
+                        "warm": bool(st.get("warm")), "ready": bool(st.get("ready")), "calls": st.get("calls", 0)})
+    activity = []
+    try:
+        logs = sorted(glob.glob(os.path.join(base, "_mcp_activity", "*.jsonl")), key=os.path.getmtime)
+        if logs:
+            lines = open(logs[-1], encoding="utf-8", errors="replace").read().splitlines()[-40:]
+            for ln in lines:
+                try:
+                    r = json.loads(ln)
+                    if r.get("ev") in ("req", "resp", "notify"):
+                        activity.append({"t": (r.get("t") or "")[11:19], "ev": r.get("ev"), "method": r.get("method"),
+                                         "dt_ms": r.get("dt_ms"), "is_error": r.get("is_error"),
+                                         "preview": (r.get("preview") or "")[:80], "server": r.get("label")})
+                except Exception: pass
+    except Exception: pass
+    return {"ok": True, "hosts": hosts, "servers": servers, "activity": activity[-30:]}
+
 def _gitignore_add(line):
     """Append a line to the deployment .gitignore if absent (so per-deployment install output never lands in
     the framework repo). Idempotent, best-effort."""
@@ -6350,7 +6393,7 @@ def extension_setup(eid):
     sess = "ext-" + eid
     if sh([TMUX, "has-session", "-t", sess])[0] == 0:
         return {"ok": True, "term": "/term?name=" + sess, "note": "resumed"}
-    cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+    cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' '
           "'You are the SETUP GUIDE for the %s ClaudeFather extension. Read SETUP.md in this folder -- it is "
           "your script. Walk me through setup ONE step at a time, wait at each step, help me create any "
           "accounts/API keys, store secrets ONLY in the gitignored deployment env (never echo or commit "
@@ -6911,7 +6954,7 @@ def skill_open(scope, slug):
     if not base or not os.path.isdir(d): return {"ok": False, "error": "no such skill"}
     sess = "skill-" + re.sub(r"[^a-z0-9]+", "-", (PROJECT_NAME + "-" + slug).lower()).strip("-")
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' '
               "'You are authoring the Agent Skill in this folder (SKILL.md). Read it, then help me write/improve "
               "it per the best practices in the ClaudeFather docs/MEMORY_SKILLS_AGENTS.md (esp: the description "
               "is the trigger; keep it lean; lock side-effect skills to manual). One-line status, then stand by.'")
@@ -7146,7 +7189,7 @@ def team_run(slug):
     try: os.makedirs(TEAM_RUNS_DIR, exist_ok=True)
     except Exception: pass
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' '
               "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
     return {"ok": True, "slug": real, "name": t.get("name") or real, "session": sess,
@@ -7236,7 +7279,7 @@ def team_session(members, assignment=""):
     )).strip().replace("'", "")   # single-quote-free: the brief is wrapped in '...' in the shell launcher
     sess = ("team-" + re.sub(r"[^a-z0-9]+", "-", (PROJECT_NAME + "-" + "-".join(p["slug"] for p in picked)).lower()).strip("-"))[:60]
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' ' + "'" + brief + "'")
+        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' ' + "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
         def _trust():
             for _ in range(10):
@@ -7547,7 +7590,7 @@ def audit_run(block, slug):
     try: os.makedirs(AUDIT_RUNS_DIR, exist_ok=True)
     except Exception: pass
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' '
+        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' '
               "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
     return {"ok": True, "block": block, "name": real, "session": sess,
@@ -8356,7 +8399,7 @@ def resume_session(machine, sid, cwd, fork=False, label=""):
         # requiring "studio" to be registered made every local resume there fail with "unknown machine").
         wd = cwd if (cwd and os.path.isdir(cwd)) else PROJECT
         sh([TMUX, "new-session", "-d", "-s", name, "-c", wd,
-            _CC_PATH + _CC_ENVP + 'claude --resume %s%s --dangerously-skip-permissions %s' % (sid, fk, CC_TITLE_FLAG)])
+            _CC_PATH + _CC_ENVP + 'claude --resume %s%s --dangerously-skip-permissions %s%s' % (sid, fk, CC_TITLE_FLAG, CC_MCP_FLAG)])
     else:
         mm = {m["id"]: m for m in load(MACHINES, {"machines": []}).get("machines", [])}.get(machine)
         if not mm:                                  # only REMOTE (ssh) machines must be in the registry
@@ -13003,7 +13046,7 @@ def task_launch(tid):
     brief += " Do NOT send anything externally without asking me first."
     name = _uniq_session("hp-task-" + (re.sub(r"[^A-Za-z0-9]+", "-", t.get("title", ""))[:24].strip("-").lower() or "task"))
     cl = (_CC_PATH + _CC_ENVP
-          + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + ' ' + _shlex.quote(brief))
+          + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' ' + _shlex.quote(brief))
     if sh([TMUX, "new-session", "-d", "-s", name, "-c", wd, cl])[0] != 0:
         return {"ok": False, "error": "could not start session"}
     task_update(tid, status="doing", session=name)
@@ -14462,6 +14505,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/entitlements":  return self._s(200, json.dumps(entitlements_status()))
         if u.path == "/api/routines":      return self._s(200, json.dumps(routines_list()))
         if u.path == "/api/ext-data":      return self._s(200, json.dumps(ext_data((q.get("ext") or [""])[0], (q.get("resource") or [""])[0], q)))
+        if u.path == "/api/edge-mcp/lens": return self._s(200, json.dumps(edge_mcp_lens()))
         if u.path == "/api/version-check": return self._s(200, json.dumps(version_check()))
         if u.path == "/api/agent-report":  return self._s(200, json.dumps(agent_report(q.get("slug", [""])[0])))
         if u.path == "/api/skills":        return self._s(200, json.dumps(skills_list()))
@@ -15310,8 +15354,9 @@ function setFont(d){FS=Math.max(8,Math.min(28,Math.round((FS+d)*2)/2));
   try{if(term.options)term.options.fontSize=FS;else term.setOption('fontSize',FS);}catch(e){}
   localStorage.setItem('hpcc_fontsize',FS);var l=document.getElementById('fsz');if(l)l.textContent=FS;
   try{fit.fit();sendResize();}catch(e){}term.focus();}
-const ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws?name='+encodeURIComponent(name));
-ws.binaryType='arraybuffer';const st=document.getElementById('st');
+let ws=null,wsClosingForGood=false,reconnN=0,reconnTimer=null;   // ws is reassignable so we can auto-reconnect through a server restart
+const WSURL=(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws?name='+encodeURIComponent(name);
+const st=document.getElementById('st');
 function sendResize(){try{ws.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}));}catch(e){}}
 // Scroll is driven server-side via tmux copy-mode (see below): the history lives in tmux (xterm only ever
 // shows the repainted visible window) AND Claude Code itself grabs mouse reporting -- so a raw wheel reaches
@@ -15327,6 +15372,7 @@ async function gracefulEnd(){if(!await confirmM('Gracefully end this session?\n\
 // to vacate the pane now (postMessage). Standalone /term tab -> return to the dashboard. Fixes the bug where a
 // gracefully-ended pane sat forever on the '[filed away]' screen (only the standalone case ever navigated).
 function leaveNow(){
+  wsClosingForGood=true;   // an intentional end/kill/file-away -> never auto-reconnect
   if(window.top!==window.self){ try{window.parent.postMessage({type:'cf-session-dead',name:name},'*');}catch(e){} }
   else { setTimeout(function(){location.href='/#sessions';}, 400); }
 }
@@ -15356,16 +15402,36 @@ function anState(){fetch('/api/autonudge-session',{method:'POST',headers:{'Conte
 function anPrompt(label,def){return new Promise(function(res){var o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center';var c=document.createElement('div');c.style.cssText='background:rgba(20,20,28,.98);border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:16px;width:min(600px,92vw)';c.innerHTML='<div style="color:rgba(230,230,240,.9);font-size:13px;margin-bottom:8px"></div><textarea id="_anin" style="width:100%;height:120px;background:rgba(0,0,0,.35);color:rgba(230,230,240,.95);border:1px solid rgba(255,255,255,.14);border-radius:6px;padding:8px;font:13px/1.45 ui-monospace,monospace;box-sizing:border-box"></textarea><div style="text-align:right;margin-top:10px"><button id="_ancx" style="margin-right:8px">Cancel</button><button id="_anok" style="color:rgba(232,197,71,1)">Save &amp; arm</button></div>';c.querySelector('div').textContent=label;o.appendChild(c);document.body.appendChild(o);var ta=c.querySelector('#_anin');ta.value=def||'';setTimeout(function(){ta.focus();},30);var fin=function(v){try{document.body.removeChild(o);}catch(e){}res(v);};c.querySelector('#_anok').onclick=function(){fin(ta.value);};c.querySelector('#_ancx').onclick=function(){fin(null);};o.onclick=function(e){if(e.target===o)fin(null);};});}
 async function toggleAn(){try{var cur=await(await fetch('/api/autonudge-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})})).json();if(cur.on){var s=await(await fetch('/api/autonudge-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:false})})).json();anPaint(s);st.textContent=name+' - Auto-nudge off';return;}var m=await anPrompt('Auto-nudge message -- auto-sent to this session every time it stops, until you switch it off. Edit or keep it:',cur.msg);if(m==null)return;var s2=await(await fetch('/api/autonudge-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:true,msg:m})})).json();anPaint(s2);st.textContent=name+' - Auto-nudge ON';}catch(e){st.textContent=name+' - Auto-nudge failed: '+e;}}
 function toggleSk(){fetch('/api/slack-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(function(cur){if(!cur.configured){st.textContent='Slack not set up -- install the Slack extension + set a comms_channel, then toggle';return;}fetch('/api/slack-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:!cur.on})}).then(r=>r.json()).then(function(s){skPaint(s);st.textContent=name+' - Slack '+(s.on?'ON (team channel + reply-in-thread)':'off');});});}
-ws.onopen=()=>{st.textContent=name+' - connected';fitNow();term.focus();applyMouse();applyAutoCopy();tgState();skState();anState();};
-ws.onmessage=(e)=>term.write(new Uint8Array(e.data));
-ws.onclose=()=>{var det=function(){st.textContent=name+' - detached (session lives on)';term.write('\r\n\x1b[33m[detached - close this tab; the session keeps running]\x1b[0m\r\n');};
-  fetch('/api/session-exists?name='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(d){
-    if(d&&d.alive===false){st.textContent=name+' - filed away';term.write('\r\n\x1b[36m[this conversation was filed away into its folder -- it is resumable from the dashboard.]\x1b[0m\r\n');
-      leaveNow(); }
-    else det();
-  }).catch(det);};
-ws.onerror=()=>{st.textContent='connection error';};
-term.onData(d=>{if(ws.readyState===1)ws.send(new TextEncoder().encode(d));});
+// Reconnecting terminal socket: a server restart (or any transient drop) used to leave this window stuck on
+// "detached" until a manual refresh. Instead we auto-reconnect -- the tmux session survives a server restart,
+// so we just re-attach the moment the server is back (~5-9s). We only STOP retrying if the session was truly
+// filed away (end/kill) or after ~3 min of failures (then show the old detached message).
+function connectWS(){
+  try{ws=new WebSocket(WSURL);}catch(e){scheduleReconnect();return;}
+  ws.binaryType='arraybuffer';
+  ws.onopen=()=>{var wasDown=connectWS._down;connectWS._down=false;reconnN=0;
+    st.textContent=name+' - connected';fitNow();term.focus();applyMouse();applyAutoCopy();tgState();skState();anState();
+    if(wasDown){try{term.write('\r\n\x1b[32m[reconnected]\x1b[0m\r\n');}catch(e){}}};
+  ws.onmessage=(e)=>term.write(new Uint8Array(e.data));
+  ws.onclose=()=>{if(wsClosingForGood)return;
+    fetch('/api/session-exists?name='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(d){
+      if(d&&d.alive===false){wsClosingForGood=true;st.textContent=name+' - filed away';term.write('\r\n\x1b[36m[this conversation was filed away into its folder -- it is resumable from the dashboard.]\x1b[0m\r\n');
+        leaveNow(); }
+      else scheduleReconnect();          // session alive, ws just dropped -> reconnect
+    }).catch(scheduleReconnect);          // server unreachable (restarting) -> reconnect
+  };
+  ws.onerror=()=>{};                       // let onclose drive reconnection; don't stomp the "reconnecting…" status
+}
+function scheduleReconnect(){
+  if(wsClosingForGood||reconnTimer)return;
+  connectWS._down=true;reconnN++;
+  if(reconnN>60){st.textContent=name+' - detached (session lives on)';try{term.write('\r\n\x1b[33m[detached - could not reconnect; refresh to retry. The session kept running.]\x1b[0m\r\n');}catch(e){}return;}
+  st.textContent=name+' - reconnecting'+(reconnN>2?(' ('+reconnN+')'):'')+'…';
+  var delay=Math.min(3000,700+reconnN*250);
+  reconnTimer=setTimeout(function(){reconnTimer=null;connectWS();},delay);
+}
+connectWS();
+term.onData(d=>{if(ws&&ws.readyState===1)ws.send(new TextEncoder().encode(d));});
 // PASTE FIX: Ctrl/Cmd+V must paste the LOCAL (browser / T490) clipboard, NOT get forwarded to the
 // remote session host (where Claude would read the STUDIO clipboard). Stop xterm sending the keystroke,
 // and inject the browser paste-event's clipboard text ourselves (works over plain http; the async
@@ -15389,7 +15455,7 @@ function fitNow(){const vv=window.visualViewport, w=document.getElementById('wra
   if(vv&&w){w.style.height=Math.round(vv.height)+'px';window.scrollTo(0,0);}   // flex column -> bars sit above the keyboard
   try{fit.fit();sendResize();}catch(e){}}
 // send a raw key sequence to the session (on-screen arrow/enter/ctrl bar). No focus -> keyboard stays down.
-function sendKey(s){try{if(ws.readyState===1)ws.send(new TextEncoder().encode(s));}catch(e){}}
+function sendKey(s){try{if(ws&&ws.readyState===1)ws.send(new TextEncoder().encode(s));}catch(e){}}
 // compose box: dictate/type into a NORMAL input (iOS dictation works there, unlike the xterm canvas where
 // it duplicates), then inject the final text + Enter into the session. Sidesteps the dictation bug entirely.
 function composeSend(){const i=document.getElementById('ci');if(!i)return;const v=i.value;if(v)sendKey(v+'\r');i.value='';i.focus();}
@@ -15642,18 +15708,25 @@ async function launch(){await fetch('/api/ralph-launch',{method:'POST',headers:{
 function connectTerm(){
   const term=new Terminal({fontSize:12.5,cursorBlink:true,scrollback:20000,theme:{background:'#0a0a0f',foreground:'#ffffff'}});
   const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(document.getElementById('term'));fit.fit();
-  const ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws?name=ralph-'+encodeURIComponent(NAME));
-  ws.binaryType='arraybuffer';
+  let ws=null,rReconn=0,rTimer=null;
+  const RWSURL=(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws?name=ralph-'+encodeURIComponent(NAME);
   function sr(){try{ws.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}));}catch(e){}}
   const SESS='ralph-'+NAME;
   window.rapplyMouse=function(){fetch('/api/term-mouse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:SESS,on:window.RMOUSE})}).catch(()=>{});
     const b=document.getElementById('rmtog');if(b){b.style.display='';b.textContent=window.RMOUSE?'🖱 scroll':'✂ select';b.title=window.RMOUSE?'wheel scrolls. Click to Select (drag to highlight, Ctrl+C to copy).':'drag to select, Ctrl+C to copy. Click to switch back to Scroll.';b.style.borderColor=window.RMOUSE?'':'#e8c547';}};
   window.rToggleMouse=function(){window.RMOUSE=!window.RMOUSE;localStorage.setItem('hpcc_mouse',window.RMOUSE?'scroll':'select');window.rapplyMouse();term.focus();};
   window.RMOUSE=localStorage.getItem('hpcc_mouse')!=='select';
-  ws.onopen=()=>{fit.fit();sr();term.focus();window.rapplyMouse();};
-  ws.onmessage=e=>term.write(new Uint8Array(e.data));
-  ws.onclose=()=>term.write('\r\n\x1b[33m[detached -- the loop keeps running; reload to reattach]\x1b[0m\r\n');
-  term.onData(d=>{if(ws.readyState===1)ws.send(new TextEncoder().encode(d));});
+  // Reconnecting loop-viewer socket: ride out a server restart (~5-9s) instead of freezing on "detached".
+  // Shorter retry cap than the main terminal -- a FINISHED loop kills its own tmux, so settle to detached fast.
+  function rmkws(){try{ws=new WebSocket(RWSURL);}catch(e){rsched();return;}ws.binaryType='arraybuffer';
+    ws.onopen=()=>{var was=rReconn>0;rReconn=0;fit.fit();sr();term.focus();window.rapplyMouse();if(was){try{term.write('\r\n\x1b[32m[reconnected]\x1b[0m\r\n');}catch(e){}}};
+    ws.onmessage=e=>term.write(new Uint8Array(e.data));
+    ws.onclose=()=>rsched();ws.onerror=()=>{};}
+  function rsched(){if(rTimer)return;rReconn++;
+    if(rReconn>12){term.write('\r\n\x1b[33m[detached -- the loop keeps running; reload to reattach]\x1b[0m\r\n');return;}
+    rTimer=setTimeout(function(){rTimer=null;rmkws();},Math.min(3000,700+rReconn*250));}
+  rmkws();
+  term.onData(d=>{if(ws&&ws.readyState===1)ws.send(new TextEncoder().encode(d));});
   function ccCopy(t){try{if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t);return;}}catch(e){}
     const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.left='-9999px';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta);term.focus();}
   term.attachCustomKeyEventHandler((e)=>{
@@ -17357,6 +17430,7 @@ function render(){
   else if(LENS=="affiliate"){loadAffiliate();return;}
   else if(LENS=="aisearch"){loadAisearch();return;}
   else if(LENS=="email-archive"){loadEmailArchive();return;}
+  else if(LENS=="edge-mcp"){loadEdgeMcp();return;}
   else if(LENS=="substack"){loadSubstack();return;}
   else if(LENS=="agency"){loadAgency();return;}
   else if(LENS=="calls"){loadCalls();return;}
@@ -21589,6 +21663,44 @@ async function loadNotes(){
 var NB={notes:[],hasVoice:false,rec:null,chunks:[],q:""};
 async function nbSearch(){var i=document.getElementById("nbSearch");NB.q=i?i.value:"";var f=i&&document.activeElement===i;var p=i?i.selectionStart:0;await loadNotebook();var i2=document.getElementById("nbSearch");if(i2&&f){i2.focus();try{i2.setSelectionRange(p,p);}catch(e){}}}
 // ---- Email Archive lens (email-archive extension): ASK (bounded AI) + faceted full-text search + threads -------
+async function loadEdgeMcp(){
+  var g=document.getElementById('grid');
+  var d; try{ d=await(await fetch('/api/edge-mcp/lens')).json(); }catch(e){ d={ok:false,error:'not reachable'}; }
+  if(!(d&&d.ok)){ g.innerHTML='<div class="modstack"><div class="cc-head"><span class="cc-h-t">Edge MCP</span><span class="cc-h-sub">'+esc((d&&d.error)||'not available')+'</span></div>'+empty('Edge MCP Host is not set up on this node.')+'</div>'; return; }
+  var hosts=d.hosts||[], servers=d.servers||[], act=d.activity||[];
+  var warm=servers.filter(function(s){return s.warm;}).length;
+  var reach=hosts.filter(function(h){return h.reachable;}).length;
+  var h='<div class="modstack">';
+  h+='<div class="cc-head"><span class="cc-h-t">Edge MCP Host</span><span class="cc-h-sub">'+hosts.length+' host'+(hosts.length==1?'':'s')+' ('+reach+' reachable) · '+servers.length+' server'+(servers.length==1?'':'s')+' ('+warm+' warm)</span></div>';
+  h+='<div class="cc-list"><div class="cc-sec">Hosts</div>';
+  if(!hosts.length) h+=empty('No hosts registered. Use edge-mcp add-host.');
+  hosts.forEach(function(x){
+    var b = x.reachable ? '<span class="badge bdg-green">reachable</span>' : (x.power=='laptop'?'<span class="badge bdg-amber">asleep?</span>':'<span class="badge bdg-red">unreachable</span>');
+    h+='<div class="cc-item"><div class="cc-main"><div class="cc-ti">'+esc(x.label)+' '+b+'</div><div class="cc-mt">'+esc(x.mode||'')+(x.user?(' · '+esc(x.user)+'@'+esc(x.addr||'')):'')+(x.platform?(' · '+esc(x.platform)):'')+(x.power?(' · '+esc(x.power)):'')+'</div></div></div>';
+  });
+  h+='</div>';
+  h+='<div class="cc-list"><div class="cc-sec">Servers</div>';
+  if(!servers.length) h+=empty('No servers registered. Use edge-mcp add-server.');
+  servers.forEach(function(s){
+    var wb = s.warm ? (s.ready?'<span class="badge bdg-green">warm</span>':'<span class="badge bdg-amber">starting</span>') : '<span class="badge bdg-gray">cold</span>';
+    h+='<div class="cc-item"><div class="cc-main"><div class="cc-ti">'+esc(s.label)+' '+wb+'</div><div class="cc-mt">'+(s.recipe?esc(s.recipe)+' · ':'')+esc(s.mode||'')+' · host '+esc(s.host||'?')+' · '+(s.calls||0)+' calls</div></div></div>';
+  });
+  h+='</div>';
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Recent activity</b> <span class="cc-p-note">every MCP tool call, captured by the transparency proxy</span></div>';
+  if(!act.length) h+=empty('No recent activity. Warm a server and make a call.');
+  else{
+    h+='<div style="margin-top:9px;font:12px/1.55 ui-monospace,monospace;overflow-x:auto">';
+    act.slice().reverse().forEach(function(a){
+      var arrow = a.ev=='req'?'→':(a.ev=='resp'?'←':'•');
+      var dt = (a.dt_ms!=null)?(Math.round(a.dt_ms)+'ms'):'';
+      var col = a.is_error?'var(--err)':'var(--mut)';
+      h+='<div style="white-space:nowrap"><span style="color:var(--dim)">'+esc(a.t||'')+'</span> '+arrow+' <b>'+esc(a.method||'')+'</b> <span style="color:'+col+'"> '+esc(dt)+'</span> <span style="color:var(--dim)">'+esc((a.preview||'').slice(0,58))+'</span></div>';
+    });
+    h+='</div>';
+  }
+  h+='</div></div>';
+  g.innerHTML=h;
+}
 let EMAILA={q:'',res:null,facets:null,contact:null,year:null,ask:null,asking:false}, _emT=null;
 async function loadEmailArchive(){
   var g=document.getElementById('grid'); var st;

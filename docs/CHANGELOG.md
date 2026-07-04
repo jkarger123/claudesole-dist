@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.148 -- 2026-07-04  (Edge MCP Host: run remote-computer MCP servers over the mesh, transparently)
+- NEW core extension **Edge MCP Host** (`extensions/edge-mcp/`, v1.0.0): run MCP servers that must live on a
+  user's OWN computer -- GUI apps (Adobe InDesign/Photoshop/Blender), their real logged-in browser, local
+  files/devices -- and drive them from ClaudeFather over the Tailscale mesh (no remote desktop). Vault-keyed
+  SSH transport, a warm daemon that keeps the session hot, and a transparency proxy that logs every tool call.
+  Recipes: `plugin-app` (app + in-app plugin, e.g. Sidekick/InDesign) and `browser-attach` (the user's real
+  Chrome). `edge-mcp` CLI (hosts/servers/start/status/call/run/probe/stop + add-host/add-server with vault key
+  mint + Mac/Windows authorize snippets). Proven at scale (built a 356-page InDesign book through it).
+- Edge MCP **dashboard lens**: hosts (reachable/asleep), servers (warm/cold), and a live transparency-proxy
+  activity feed. Read-only `/api/edge-mcp/lens`.
+- Sessions now launch with **`--mcp-config`** so extension-wired MCP servers reach every interactive work
+  session as native tools regardless of cwd (previously only sessions rooted at DEPLOY_ROOT saw `.mcp.json`).
+
 ## 0.99.147 -- 2026-07-04  (every session-injector defers to a running compact -- consistent coordination)
 - Shared coordination signal: the graceful-auto-compact lock ("running") is now honored by EVERY autonomous thing
   that types into a session, not just auto-nudge:
