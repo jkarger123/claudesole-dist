@@ -9,8 +9,8 @@ TMUX=/opt/homebrew/bin/tmux
 # Derive THIS bundle's command-center from the script's own location so a standalone/relocated bundle
 # runs its OWN server.py (portable). Falls back to the canonical path if resolution fails.
 CCDIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
-[ -f "$CCDIR/server.py" ] || CCDIR="$HOME/hptuners-control/command-center"
-CFG="${1:-$HOME/hptuners-control/instances/overseer/cc.config.json}"
+[ -f "$CCDIR/server.py" ] || CCDIR="${CC_HOME:-$HOME/claudefather}/command-center"
+CFG="${1:-${CC_HOME:-$HOME/claudefather}/instances/overseer/cc.config.json}"
 SESS="${2:-cc-overseer}"
 if ! "$TMUX" has-session -t "$SESS" 2>/dev/null; then
   "$TMUX" new-session -d -s "$SESS" -c "$CCDIR" "CC_CONFIG=$CFG python3 server.py >>/tmp/$SESS.out.log 2>>/tmp/$SESS.err.log"

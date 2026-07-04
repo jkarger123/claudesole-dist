@@ -1,7 +1,7 @@
 {
   "product": "ClaudeFather",
   "former_name": "Claudesole",
-  "version": "0.99.143",
+  "version": "0.99.144",
   "description": "Manifest that defines which paths are FRAMEWORK (ship + propagate to every ClaudeFather deployment on update) vs PRESERVE (per-deployment config/data/secrets/learnings -- never overwritten by an update).",
   "framework_paths": [
     "core.sig.json",
@@ -76,8 +76,6 @@
     "docs/CLAUDE_CODE_REFERENCE.md",
     "docs/SESSIONS_AND_SUDO.md",
     "docs/MEMORY_SKILLS_AGENTS.md",
-    "docs/SESSION_HANDOFF_COGNITION_MODULE.md",
-    "docs/ROOT_CLAUDE_SLIMDOWN_PLAN.md",
     "docs/MODULE_MAP.md",
     "docs/AGENCY_INTEGRATION.md",
     "docs/PIPELINE_LIVEVIEW.md",
@@ -123,5 +121,5 @@
       "<!-- /CC:NOTES -->"
     ]
   },
-  "update_model": "This deployment (hptuners) is the dev/master copy: features are added HERE. `cc-update.sh` overlays FRAMEWORK paths from an upstream (a git repo or a directory) onto a target deployment, never touching PRESERVE paths, and splicing back each file's CC:NOTES region. Other ClaudeFather installs run `cc-update.sh <upstream>` to pull your latest features."
+  "update_model": "The authoring / Mission-Control deployment is the dev/master copy: features are added HERE. `cc-update.sh` overlays FRAMEWORK paths from an upstream (a git repo or a directory) onto a target deployment, never touching PRESERVE paths, and splicing back each file's CC:NOTES region. Other ClaudeFather installs run `cc-update.sh <upstream>` to pull your latest features."
 }

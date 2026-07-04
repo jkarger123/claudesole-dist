@@ -4,7 +4,7 @@
 #        cc-init.sh                 (re-init / refresh from the existing cc.config.json)
 # Framework (server.py, agents/, bin/) is generic; this wires it to ONE project via cc.config.json.
 set -uo pipefail
-CC_HOME="${CC_HOME:-$HOME/hptuners-control}"
+CC_HOME="${CC_HOME:-$(cd "$(dirname "$0")" 2>/dev/null && pwd)}"
 CFG="$CC_HOME/cc.config.json"
 SEC="$CC_HOME/agents/security/tools"
 ROOT="${1:-}"; NAME="${2:-}"; BRAND="${3:-}"; STORAGE="${4:-}"   # STORAGE: github | icloud | icloud+github

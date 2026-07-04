@@ -185,7 +185,7 @@ async function apiRequest(method, pathName, body) {
   }
 }
 
-// Derive a friendly default subject from a URL's host, e.g. https://www.avenlur.com/x -> "Avenlur".
+// Derive a friendly default subject from a URL's host, e.g. https://www.acme.com/x -> "Acme".
 function siteNameFromUrl(url) {
   try {
     const host = new URL(url).hostname.replace(/^www\./i, '');

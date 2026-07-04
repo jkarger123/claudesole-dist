@@ -5,7 +5,7 @@
 #
 # Usage:
 #   bash cf-key-restore.sh --verify <bundle.cfkeys.enc>     # decrypt + list contents WITHOUT installing
-#   bash cf-key-restore.sh <bundle.cfkeys.enc> [cc_home]    # decrypt + install keys into cc_home (default ~/hptuners-control)
+#   bash cf-key-restore.sh <bundle.cfkeys.enc> [cc_home]    # decrypt + install keys into cc_home (default <CC_HOME>)
 #
 # You'll be prompted for the encryption passphrase. After a restore, restart the CC; it signs/verifies with the
 # restored keys immediately. If you're restoring the RECOVERY key as the new primary (break-glass), copy

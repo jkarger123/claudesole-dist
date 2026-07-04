@@ -57,7 +57,7 @@ remotely; it is a macOS user/disk operation.
 sudo diskutil enableOwnership /Volumes/<ssd>
 #    - Log the target user OUT.  Do everything below from a different ADMIN account.
 
-USER=<sarahaios>; SSD=/Volumes/<node-ssd>
+USER=<user>; SSD=/Volumes/<node-ssd>
 
 # 1. Copy the home to the SSD, preserving perms/ACLs/xattrs (-E) — critical for ~/Library + iCloud:
 sudo rsync -aE --delete /Users/$USER/ "$SSD/$USER/"
@@ -84,5 +84,5 @@ sudo rm -rf /Users/$USER.old   # (rename the old home to <user>.old in step 1 in
 - **Ownership:** if you skip `enableOwnership` / `chown`, the home will have wrong perms and login/iCloud break.
 - **Recovery:** if the SSD is missing at boot, the user can't log in — that's why you keep a separate admin
   account. Re-attach the SSD and reboot to recover.
-- **Per-node, repeatable:** do this once per node (carsearch, hptuners, afp), each onto its own SSD. After
+- **Per-node, repeatable:** do this once per node (e.g. node-a, node-b, node-c), each onto its own SSD. After
   that, every node's project + iCloud lives on its dedicated drive and the internal disk stays empty.

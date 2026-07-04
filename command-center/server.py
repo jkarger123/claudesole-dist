@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HP Tuners — Command Center. Always-on control panel on the Mac Studio (hptuner account).
+"""ClaudeFather — Command Center. Always-on per-node control panel (the project is set in cc.config).
 A faithful port of the Karger & Co Command Center, adapted for the HP Tuners fleet:
  - operates on the SSD canonical project tree (not iCloud)
  - sessions are tmux ON THE STUDIO (even "open on T490/T480" = a Studio tmux wrapping ssh -t),
@@ -60,7 +60,7 @@ def _cc_config():
     try: return json.load(open(_CC_CONFIG))
     except Exception: return {}
 CC = _cc_config()
-PROJECT = os.path.expanduser(CC.get("project_root") or "/Volumes/Samsung990PRO/hptuners")  # canonical project home
+PROJECT = os.path.expanduser(CC.get("project_root") or os.getcwd())  # canonical project home (from cc.config; neutral fallback)
 PROJECT_NAME = CC.get("project_name") or os.path.basename(PROJECT.rstrip("/"))
 # What the operator ACTUALLY pays per month (flat). The Usage lens contrasts this against the metered
 # per-model API value of the same usage, so you can see the subscription's leverage. Default: two Claude
@@ -198,11 +198,11 @@ def render_page():
     except Exception: _lenses = None
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
-        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "models": CC_MODELS, "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(), "backupTiers": CC.get("backup_tiers") or [],
+        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "protectedSessions": CC.get("protected_sessions") or [], "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "models": CC_MODELS, "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(), "backupTiers": CC.get("backup_tiers") or [],
         "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md"]})   # tenant desk docs come from cc.config; neutral default
     return (PAGE
-            .replace("<title>text2tune ", "<title>%s " % BRAND)
-            .replace(">text2tune<small>", ">%s<small>" % BRAND)
+            .replace("<title>ClaudeFather ", "<title>%s " % BRAND)
+            .replace(">ClaudeFather<small>", ">%s<small>" % BRAND)
             .replace(">COMMAND CENTER<", ">%s<" % PRODUCT_TAG)
             .replace('data-theme="godfather"', 'data-theme="%s"' % THEME)
             .replace("</head>", cc + "</head>"))
@@ -2047,7 +2047,7 @@ def _session_kind(name):
     """Classify a session for the taskbar: work (real launched work) | chief (a Chief-of-Staff comms endpoint) |
     service (the live product bridge/crons or a config-declared protected) | loop (a Ralph loop)."""
     if name.startswith("ralph-"): return "loop"
-    if name in ("t2tbridge", "t2tcrons") or name in (CC.get("protected_sessions") or []): return "service"
+    if name in (CC.get("protected_sessions") or []): return "service"
     if name == globals().get("CHIEF") or name.startswith("chief"): return "chief"
     return "work"
 def _is_server_session(name):
@@ -7526,7 +7526,7 @@ def instance_provision(p, do_launch=False, dry=False):
     iid = re.sub(r"[^A-Za-z0-9_-]", "", (p.get("id") or "").strip())
     if not iid:
         return {"ok": False, "error": "id required (letters, digits, _ or -)"}
-    dest = (p.get("dest") or "").strip() or ("/Volumes/Samsung990PRO/claudefather-%s" % iid)
+    dest = (p.get("dest") or "").strip() or os.path.join(os.path.expanduser(CC.get("bundle_root") or "~"), "claudefather-%s" % iid)
     # register into THIS running overseer's registry (what its Portfolio reads) -- not the engine's
     # default-config registry, which may be a different state dir (the bug that hid the first shopos).
     cmd = ["bash", eng, "--id", iid, "--dest", dest, "--register-into", INSTANCES]
@@ -10583,7 +10583,7 @@ _DRIFT_REPROPOSE_SEC = 6 * 3600        # don't re-propose the same drifting conv
 def _is_service_session(name):
     """Infra/service tmux sessions that are NOT user conversations -- never drift-sweep or auto-archive them
     (they're the node dashboards / live product / brain). Protects against retiring a running server."""
-    if name in ("hpcc", "t2tbridge", "t2tcrons"): return True
+    if name in ("hpcc",) or name in (CC.get("protected_sessions") or []): return True
     if name.startswith("cc-") and not name.startswith("cc-uw"): return True   # cc-<node> server; cc-uw-* = user work
     return False
 
@@ -15167,7 +15167,7 @@ function confirmM(msg){return new Promise(function(res){var ov=document.getEleme
 const name=new URLSearchParams(location.search).get('name')||'';document.title='Claude: '+name;
 // Protected services (the Chief of Staff mesh endpoint / live product / Ralph loops) are constant
 // singletons -- strip their end+kill buttons so they can't be closed from the terminal view.
-if(/^(chief-|ralph-)/.test(name)||name=='t2tbridge'||name=='t2tcrons'){document.querySelectorAll('#bar button').forEach(function(b){var t=(b.getAttribute('title')||'').toLowerCase();if(t.indexOf('end')>=0||t.indexOf('kill')>=0)b.remove();});}
+if(/^(chief-|ralph-)/.test(name)||((window.CC&&window.CC.protectedSessions)||[]).indexOf(name)>=0){document.querySelectorAll('#bar button').forEach(function(b){var t=(b.getAttribute('title')||'').toLowerCase();if(t.indexOf('end')>=0||t.indexOf('kill')>=0)b.remove();});}
 // MOBILE overflow menu (the ⋯ button): tuck secondary + destructive bar actions behind one tap.
 function toggleMore(){var m=document.getElementById('moremenu');if(m)m.classList.toggle('open');}
 // ---- MODEL picker (broken-out /term view): show + switch the model this session runs ----
@@ -15558,7 +15558,7 @@ function placeholder(){
 (async()=>{await refresh();if(DETAIL.alive)connectTerm();else placeholder();setInterval(refresh,5000);})();
 </script></body></html>"""
 
-PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>text2tune — Command Center</title><link rel="icon" type="image/png" href="/static/brand/claudefather_favicon.png?v=2"><link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=2"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#0a0a0f"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/light/style.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/fill/style.css"><style>
+PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ClaudeFather — Command Center</title><link rel="icon" type="image/png" href="/static/brand/claudefather_favicon.png?v=2"><link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=2"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#0a0a0f"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/light/style.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/fill/style.css"><style>
 :root{--bg:#0a0a0f;--bg2:#12121a;--card:#1a1a24;--card2:#22222e;--ink:#ffffff;--mut:#a0a0b0;--dim:#606070;--line:#2a2a3a;--accent:#c9a227;--accent-rgb:201,162,39;--accent-light:#e8c547;--accent-dark:#9a7a1a;--accent2:#7a1220;--accent2-light:#a01828;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--blue:#3b82f6;--grad:linear-gradient(135deg,#d6b23c,#c9a227);--glow:0 10px 28px rgba(0,0,0,.5)}
 /* brand lockup styled in the .brand rule below (cfmark + gold-foil serif wordmark) */
 /* Self-hosted display font for the brand title -- Cinzel Decorative (SIL OFL 1.1, commercial-OK + redistributable),
@@ -17056,7 +17056,7 @@ textarea.cc-in{width:100%;box-sizing:border-box;min-height:48px;resize:vertical;
 <script>(function(){var s=document.getElementById('splash');if(!s)return;var n=s;var go=function(){if(!n)return;n.style.opacity='0';var x=n;n=null;setTimeout(function(){if(x&&x.parentNode)x.parentNode.removeChild(x);},560);};s.addEventListener('click',go);setTimeout(go,2000);})();</script>
 <div id="app">
 <aside id="side">
-<div class="brand"><img class="cfmark" src="/static/brand/claudefather_mark.png" alt=""><span class="bword">text2tune<small>COMMAND CENTER</small></span></div>
+<div class="brand"><img class="cfmark" src="/static/brand/claudefather_mark.png" alt=""><span class="bword">ClaudeFather<small>COMMAND CENTER</small></span></div>
 <style>
 .cfdesk-cta{display:inline-flex;align-items:center;gap:5px;margin:-4px 0 10px 16px;padding:0;background:none;border:none;color:var(--mut,#8a92a3);font-size:11px;font-weight:600;letter-spacing:.01em;cursor:pointer;opacity:.8;transition:color .15s ease,opacity .15s ease}
 .cfdesk-cta i{font-size:13px}
@@ -22544,12 +22544,12 @@ function cfAddWizard(){
    +cfSel('integration','Tree shape',[['product','Product — a modules tree'],['agency','Agency — a clients + tools tree']])
    +cfSel('onboard','Onboarding',[['','— none (set it up myself) —'],['adopt','Adopt — read + structure EXISTING code'],['scaffold','Scaffold — build a new shell']])
    +cfF('adopt_source','Adopt from','Adopt only: path to EXISTING code — copied INTO the bundle so the node owns it')
-   +cfF('dest','Bundle folder','blank = /Volumes/Samsung990PRO/claudefather-<id>')
+   +cfF('dest','Bundle folder','blank = &lt;bundle root&gt;/claudefather-&lt;id&gt;')
    +cfF('port','Port','blank = auto (≥ 8800)')
    +cfSel('storage','Storage',[['github','github'],['icloud','icloud'],['icloud+github','icloud+github']])
    +cfF('agents','Agents','blank = security,backup,usage,ideas,routines')
    +'</div>'
-   +'<div class="sub" style="margin:8px 0;line-height:1.5"><b>Install type</b> — <b>Agency</b>: runs only official, signed tools — locked &amp; safe, what a client/tenant gets. <b>Developer</b>: also lets you build + run your OWN custom tools in an operator-approved sandbox (your own installs). &nbsp;·&nbsp; <b>Tree shape</b> — <b>Product</b>: a modules tree. <b>Agency</b>: a clients + tools tree (like Sarah/AFP). &nbsp;·&nbsp; <b>Onboarding</b> — on first boot: <b>Adopt</b> COPIES the code in <b>Adopt from</b> INTO the bundle&rsquo;s project/ (self-contained — the node owns its code, no external split), then reads + structures it to spec; <b>Scaffold</b> builds a new shell; then hands to the Chief.</div>'
+   +'<div class="sub" style="margin:8px 0;line-height:1.5"><b>Install type</b> — <b>Agency</b>: runs only official, signed tools — locked &amp; safe, what a client/tenant gets. <b>Developer</b>: also lets you build + run your OWN custom tools in an operator-approved sandbox (your own installs). &nbsp;·&nbsp; <b>Tree shape</b> — <b>Product</b>: a modules tree. <b>Agency</b>: a clients + tools tree (like an agency tenant). &nbsp;·&nbsp; <b>Onboarding</b> — on first boot: <b>Adopt</b> COPIES the code in <b>Adopt from</b> INTO the bundle&rsquo;s project/ (self-contained — the node owns its code, no external split), then reads + structures it to spec; <b>Scaffold</b> builds a new shell; then hands to the Chief.</div>'
    +'<label class="cfpersist"><input type="checkbox" id="cf_persist" checked><span><b>Make it permanent &amp; join the mesh</b><br>On <b>Create &amp; start</b>, install it to survive reboots and add it to the fleet — no manual steps.</span></label>'
    +'<div class="cfacts"><button class="mini" onclick="cfPlan()" title="Show the plan only — writes nothing">Preview</button>'
    +'<button class="mini go" onclick="cfProvision(false)" title="Build the folder, leave it off">Create</button>'
@@ -24508,7 +24508,7 @@ async function fxLearnVoice(){
     +'<div class="vsmeta">'+meta+'</div>'
     +'<div class="vslbl">Style profile <span class="vssub">— what the AI learned. Edit anything; this is exactly what guides your drafts.</span></div>'
     +'<textarea id="vsProfile" class="vsta" rows="13" placeholder="Build a profile from your Sent mail, or write your own style notes here.">'+e2(p.profile_md||'')+'</textarea>'
-    +'<div class="vslbl">Hard rules <span class="vssub">— ALWAYS obeyed, override everything (e.g. «always sign off &ldquo;Best, Sarah&rdquo;», «never say &ldquo;synergy&rdquo;», «no exclamation points»).</span></div>'
+    +'<div class="vslbl">Hard rules <span class="vssub">— ALWAYS obeyed, override everything (e.g. «always sign off &ldquo;Best, Robin&rdquo;», «never say &ldquo;synergy&rdquo;», «no exclamation points»).</span></div>'
     +'<textarea id="vsRules" class="vsta" rows="4" placeholder="One rule per line.">'+e2(p.hard_rules||'')+'</textarea>'
     +'<div class="vsbtns">'
       +'<button class="btn go" onclick="fxVoiceSave()">Save</button>'
@@ -24547,7 +24547,7 @@ function fxVoiceHelp(){
   var h='<div class="vstudio vshelp"><div class="vshead"><h2>How VoiceMatch works</h2><button class="mini" onclick="fxLearnVoice()">← back</button></div>'
    +'<div class="vshbody">'
    +'<p><b>Goal:</b> smart replies that sound like YOU, not AI — using everything we know about the client.</p><ol>'
-   +'<li><b>Learn my voice</b> reads ~150 of your Sent emails and builds a <b>style profile</b> (tone, punctuation, greetings, sign-offs, whether you use em-dashes). Stored per inbox — AFP learns Sarah, carsearch learns you.</li>'
+   +'<li><b>Learn my voice</b> reads ~150 of your Sent emails and builds a <b>style profile</b> (tone, punctuation, greetings, sign-offs, whether you use em-dashes). Stored per inbox — each inbox learns its own operator's voice.</li>'
    +'<li>You can <b>edit the profile</b> here anytime, and set <b>Hard rules</b> that are always obeyed and override everything.</li>'
    +'<li>Hit <b>Reply / Reply-all → ✨ Draft in my voice</b> and the agent writes using: your profile + <b>how you actually write to those specific people</b> (most-formal style if it’s a group) + the thread + <b>past mail with that person</b> + the <b>client’s CLAUDE.md</b> + Granola call notes + your <b>calendar</b> (when it’s about scheduling). You get <b>2–3 variants</b> to choose from.</li>'
    +'<li>It <b>never sends</b> — it fills the composer; you review, edit, and send.</li>'
@@ -25529,7 +25529,7 @@ def _server_metrics(ttl=8):
     except Exception: d["mem"] = {}
     # disk (the volumes that matter here)
     d["disks"] = []
-    for mnt, label in [("/System/Volumes/Data", "Internal (data)"), ("/", "Internal (system)"), ("/Volumes/Samsung990PRO", "SSD (Samsung 990 PRO)")]:
+    for mnt, label in ([("/System/Volumes/Data", "Internal (data)"), ("/", "Internal (system)")] + [tuple(x) for x in (CC.get("extra_disks") or [])]):
         _, o, _ = sh(["df", "-k", mnt], timeout=5)
         rows = o.splitlines()
         if len(rows) >= 2:

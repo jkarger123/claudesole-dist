@@ -22,7 +22,7 @@ Cloudflare's official MCP server, connectable by URL (https://mcp.cloudflare.com
 List Workers or read one zone's DNS. Real data = connected.
 
 ## Usage
-- "Is the text2tune Worker healthy? Show recent analytics."
+- "Is my Worker healthy? Show recent analytics."
 - "What DNS records are on <zone>?"
 - "Deploy/update a Worker." (after approval)
 

@@ -36,7 +36,7 @@ an access code; the worker reads that account's keys from its record and calls t
 ### B. Each account (BYOK)
 1. In **AI Visibility → Settings**, paste your OpenAI + Anthropic (+ optional Gemini/Perplexity/Google) keys.
    They are stored on YOUR account record (`api_keys`), server-side, used only for your requests.
-2. (Sarah / owner) keys are auto-filled from the prior `.dev.vars` — nothing to do.
+2. (owner) keys are auto-filled from the prior `.dev.vars` — nothing to do.
 
 ## Verify
 - `GET <AISEARCH_WORKER_URL>/api/health` → `{ok:true, supabase_url:true, supabase_key:true}`.

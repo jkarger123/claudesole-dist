@@ -54,7 +54,7 @@ def _asst_text(e):
 def _reply_after(lines, i):
     """The chief's assistant reply to the mesh message at index i. ROBUST TO INTERLEAVED OPERATOR TURNS: an
     operator turn landing between the mesh message and the chief's reply must NOT sever the forward (that bug lost
-    carsearch's Step-7.7 confirmation to MC). So: skip any operator user-turns that come BEFORE the reply has
+    a node's Step-7.7 confirmation to MC). So: skip any operator user-turns that come BEFORE the reply has
     started, capture the first assistant block, and stop only at (a) the next MESH message or (b) a genuine user
     turn AFTER the reply has begun. tool_results in between are part of the same reply."""
     parts = []

@@ -22,18 +22,18 @@ WHOLE FLEET" (the release ritual). Engine: `command-center/server.py`.
 ```
                  authoring (SOURCE — never self-updates)
    ┌─────────────────────────────────────────────────────────┐
-   │  /Users/hptuner/hptuners-control  (git: claudesole-core) │
-   │   ├─ hpcc (8799)  ├─ overseer/MC (8800)  ├─ carsearch    │  ← share one CC_HOME; all detected as source
+   │  <CC_HOME> (authoring checkout)   (git: claudesole-core) │
+   │   ├─ hpcc (8799)  ├─ overseer/MC (8800)  ├─ acme         │  ← share one CC_HOME; all detected as source
    └───────────────┬─────────────────────────────────────────┘
                    │  ship: push core + push PUBLIC dist mirror
                    ▼
-        GitHub: jkarger123/claudesole-dist  (PUBLIC)   ◄── canonical "latest"
+        GitHub: <you>/claudesole-dist  (PUBLIC)        ◄── canonical "latest"
                    │                         ▲
         local clone │ (MC's mirror for       │ raw manifest probe + git clone --depth 1
         /Users/Shared/claudefather-dist)     │
                    │                         │
    ┌───────────────┴──────────┐   ┌──────────┴───────────────┐
-   │ AFP (sarahaios, 8850/8851)│   │ shopos (8802→9802)        │   … and every future tenant
+   │ acme (userA, 8850/8851)   │   │ tenant (8802→9802)        │   … and every future tenant
    │  PULL self-update (A)     │   │  PULL self-update (A)     │
    │  + MC PUSH backstop (B)   │   │  + MC PUSH backstop (B)   │
    └───────────────────────────┘   └───────────────────────────┘
@@ -68,7 +68,7 @@ boot ── wait 150s ──┐
 
 Key properties:
 - **Idempotent & version-gated** — re-running does nothing once current; overlay happens once per target version.
-- **Self-restart is the safe path even for AFP** — the node re-execs *itself*; MC never touches another user's process.
+- **Self-restart is the safe path even for a cross-user tenant** — the node re-execs *itself*; MC never touches another user's process.
 - **Quiescence guard** — `_local_quiescent()` is false if any session shows "esc to interrupt". Grace backstop
   guarantees convergence within ~2h even on a perpetually-busy node.
 
@@ -98,11 +98,11 @@ Triggers:
 Our three local nodes are marked **both** ways (`update_role:"source"` in each cc.config **and** a `.cc-source`
 marker) so protection never depends on the git heuristic. `fleet_converge` additionally skips any node whose
 `home == CC_HOME`. **A fresh/downloaded tenant matches NONE of these → it correctly self-updates.** Tenants
-(AFP, shopos) carry no `update_role` and no marker → they self-update normally.
+(`acme`, `tenant`) carry no `update_role` and no marker → they self-update normally.
 
 ## 6. Bootstrap note (one-time, by design)
 
-The self-updater is *new code*. A node already running OLD code (shopos @ 0.28, AFP @ 0.67 pre-this-release)
+The self-updater is *new code*. A node already running OLD code (`tenant` @ 0.28, `acme` @ 0.67 pre-this-release)
 has no self-updater yet, so it can't self-converge to the release that first contains it. That first hop is
 done once via PUSH (`Update all behind` / `fleet_converge`). After a node is on a self-updater-bearing
 version, path A keeps it current forever. **This is the only time a human-initiated push is required**, and
@@ -142,7 +142,7 @@ to keep itself current. Do **not** rebuild a hand-maintained per-node push list 
 | Local mirror stale | Path A clones the public repo directly; Path B `git pull`s before pushing |
 | Node offline at release | Path A next tick + Path B backstop sweep |
 | Node always busy | grace-window force restart (≤2h) |
-| Cross-user restart (AFP) | self-restart via superadmin `restart`, never tmux/`restart:true` |
+| Cross-user restart (a tenant on another user) | self-restart via superadmin `restart`, never tmux/`restart:true` |
 | Auto-update would eat dev edits | source-node detection (two independent guards) |
 | `VERSION` file lies | manifest version is the only comparison |
 

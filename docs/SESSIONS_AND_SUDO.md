@@ -21,7 +21,7 @@ to a **real terminal the operator drives** -- that's the Admin shell.
 
 ## The Admin shell (per project)
 "🔑 Admin shell" in the Sessions tab opens (or resumes) a **plain login shell** named `admin-<project>`
-(e.g. `admin-carsearch`, `admin-hptuners`), cwd = the project root. Because it lives in the project dir,
+(e.g. `admin-acme`, `admin-widgets`), cwd = the project root. Because it lives in the project dir,
 it shows up in THIS console's Sessions tab. It is a normal interactive terminal -- sudo password entry,
 prompts, `gcloud auth login`, etc. all work here.
 

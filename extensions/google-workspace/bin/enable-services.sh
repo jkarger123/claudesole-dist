@@ -49,6 +49,6 @@ ACCOUNT="$ACCOUNT" PERMS="$FULL_PERMS" "$HERE/gauth.sh" "$@"
 
 echo
 echo "[enable] DONE. Now RESTART this node so the MCP reloads with the new tools:"
-echo "         local node   : TMUX_TMPDIR=/tmp /opt/homebrew/bin/tmux kill-session -t <hpcc|cc-overseer|cc-carsearch>"
-echo "         appliance/AFP: ask Mission Control to superadmin 'restart' this node"
+echo "         local node   : TMUX_TMPDIR=/tmp /opt/homebrew/bin/tmux kill-session -t <node-tmux-session>"
+echo "         appliance    : ask Mission Control to superadmin 'restart' this node"
 echo "[enable] Verify:  ACCOUNT=$ACCOUNT uv run --with workspace-mcp python -u $HERE/verify.py"

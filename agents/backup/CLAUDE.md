@@ -10,13 +10,13 @@ investigate failures, run backups on demand, verify pushes landed, and keep `.gi
 so nothing sensitive or oversized is ever committed.
 
 ## How I work / my tools
-The engine + gate currently live in the framework (`~/hptuners-control/command-center/`):
+The engine + gate currently live in the framework (`<CC_HOME>/command-center/`):
 - `git-backup.sh` -- ADDITIVE-ONLY engine: secret-gate -> `git add -A` -> commit -> push. Run a manual
-  backup: `bash ~/hptuners-control/command-center/git-backup.sh manual`.
+  backup: `bash <CC_HOME>/command-center/git-backup.sh manual`.
 - `git-backup-secretscan.py` -- the pre-stage secret/oversize gate (aborts the run if anything sensitive).
-- State: `_backup_state.json` (the Backup lens reads it). Log: `~/hptuners-control/data/backup.log`.
-- Schedule: launchd `com.hptuners.gitbackup`, every 4h.
-- Runbook: `/Volumes/Samsung990PRO/hptuners/BACKUP.md`.
+- State: `_backup_state.json` (the Backup lens reads it). Log: `<CC_HOME>/data/backup.log`.
+- Schedule: launchd `com.claudefather.gitbackup`, every 4h.
+- Runbook: `<project root>/BACKUP.md`.
 (Future: migrate these under `agents/backup/tools/` so this agent-tool fully owns them -- packaging step.)
 
 ## Hard boundaries
@@ -27,7 +27,7 @@ The engine + gate currently live in the framework (`~/hptuners-control/command-c
 - ASCII-only; large output to the SSD.
 
 ## Where this stands (2026-06-20)
-Backup system LIVE: private repo `github.com/jkarger123/hptuners-autonomous-control`, SSH deploy key,
+Backup system LIVE: private repo `github.com/<you>/<your-repo>`, SSH deploy key,
 4h schedule loaded, push working. Open: a big batch of uncommitted changes from this session goes up on
 the next scheduled run or a manual "Back up now". Known follow-up: after key rotation, the secret gate +
 history scrub keep the repo clean (coordinate with the [[security]] agent).

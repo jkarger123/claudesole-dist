@@ -31,7 +31,7 @@ their browser. Official extension (`id: morning-brief`, `lens:brief`, category a
 
 ## Hard rules / gotchas
 - **Read-only.** Summarize only — never send mail / edit calendar / complete a task.
-- **Browser playback only.** The server writes an audio file; it must never play audio on the host (Sarah is
+- **Browser playback only.** The server writes an audio file; it must never play audio on the host (the operator is
   on a different machine than the node). Keep `say` as a file-writer fallback (`-o`), never live playback.
 - **Per-project.** Each console briefs its own day from its own data/config.
 - **VAULT-FIRST keys.** OpenAI/ElevenLabs keys come from the vault; never echo them.

@@ -2,7 +2,7 @@
 """Notebook -- speak or write a note naturally; on finish it's structured into actionable items.
 
 Capture (type, or dictate -> the browser records + uploads audio -> server transcribes via Deepgram, key
-VAULT-FIRST, so it works from ANY device Sarah opens the dashboard on, never the server's mic). On save a
+VAULT-FIRST, so it works from ANY device the operator opens the dashboard on, never the server's mic). On save a
 headless `claude -p` (Max subscription, NO metered key) structures the raw note into {title, summary,
 tasks[], decisions[], reminders[], tags[]}. REVIEW-FIRST: nothing auto-commits -- the note's tasks land as
 SUGGESTIONS in the Tasks list when approved; the note becomes a context-layer event (so it feeds retrieval

@@ -1,8 +1,8 @@
-# google-workspace — hardening batch (from AFP field brief, 2026-06-30, v0.99.94)
+# google-workspace — hardening batch (from a field node brief, 2026-06-30, v0.99.94)
 
-> Consolidated lessons from a live scope-upgrade + SSD relocation on AFP. Goal: the extension self-diagnoses
+> Consolidated lessons from a live scope-upgrade + SSD relocation on a field node. Goal: the extension self-diagnoses
 > and self-heals the four traps so no future install hits them. Ship as ONE batch in a calm window (deferred
-> from the night of 2026-06-30 — James low-energy; nothing here blocks Sarah, whose only open step is clicking
+> from the night of 2026-06-30 to a calm window; nothing here blocks the operator, whose only open step is clicking
 > Enable on the Sheets/Docs/Forms Cloud APIs).
 
 The four traps: (1) off-SSD frozen paths → split-brain token store; (2) OAuth scope granted but Cloud API
@@ -29,7 +29,7 @@ that ERRORS if the dashboard-resolved token file (`GOOGLE_TOKENS_DIR/<acct>.json
 
 **2 — Cloud API enablement (the queued CCR).** (a) SETUP.md "Cloud Console" step: enable Sheets, Docs, Forms
 APIs too, with `https://console.developers.google.com/apis/api/{sheets,docs,forms}.googleapis.com/overview?project=<PROJECT#>`
-(derive `<PROJECT#>` from the client_id, e.g. `1050198645508` on AFP). (b) Parse a 403's `reason`:
+(derive `<PROJECT#>` from the client_id, e.g. a 12-digit number like `123456789012`). (b) Parse a 403's `reason`:
 `SERVICE_DISABLED` → print "ENABLE the API" + the exact URL; missing-scope → "RE-MINT". Do NOT conflate. Surfaces:
 `verify.py`, Doctor, dashboard `google_status`. **Fix the mis-advice `verify.py` currently prints** (it says
 "re-mint," which does NOT fix SERVICE_DISABLED).

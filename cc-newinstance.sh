@@ -25,7 +25,7 @@
 # Exit 0 = bundle staged. The caller then (with operator approval): launches it on the brain tmux server,
 # and optionally installs the launchd plist so it survives reboot.
 set -uo pipefail
-SRC="${CC_HOME:-$HOME/hptuners-control}"          # the dev/master copy we provision FROM
+SRC="${CC_HOME:-$(cd "$(dirname "$0")" 2>/dev/null && pwd)}"          # the dev/master copy we provision FROM
 ID="" DEST="" NAME="" BRAND="" PRESET="project" PORT="" STORAGE="github"
 AGENTS="security,backup,usage,ideas,routines" PROOT="" RUNUSER="$(whoami)" DRY="" JSON="" REGINTO="" INTEGRATION="" NODETYPE="" ONBOARD="" ADOPTSRC=""
 

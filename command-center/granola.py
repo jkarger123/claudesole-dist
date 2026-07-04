@@ -470,7 +470,7 @@ def _dest_slack(client, cpath, tasks, reminders, p):
 def _dest_google(client, cpath, tasks, reminders, p):
     """Google Calendar/Tasks. The Google MCP tools are connected at the session layer, not here, so this
     adapter writes a pending request the operator's chief fulfills via the Google MCP. Kept simple +
-    auditable; wired live once Sarah confirms the calendar/list."""
+    auditable; wired live once the operator confirms the calendar/list."""
     out = os.path.join(_CTX.get("STATE_DIR", "."), "_granola_google_outbox.jsonl")
     rec = {"ts": int(time.time()), "client": client, "title": p.get("title"),
            "events": [{"summary": r.get("text"), "when": r.get("when")} for r in reminders],
@@ -479,7 +479,7 @@ def _dest_google(client, cpath, tasks, reminders, p):
 
 
 def _dest_apple(client, cpath, tasks, reminders, p):
-    """Apple Reminders via osascript (runs on Sarah's Mac). Each task/reminder -> a Reminders item."""
+    """Apple Reminders via osascript (runs on the operator's Mac). Each task/reminder -> a Reminders item."""
     items = [t.get("title", "") for t in tasks] + [("Reminder: " + r.get("text", "")) for r in reminders]
     for it in items:
         if not it: continue

@@ -47,7 +47,7 @@ config-driven via `cc.config.json`. THE hard line everything here enforces:
   the package root, zips it. Deliver the zip; recipient unzips and points Claude Code at
   `claudefather/AGENT_INSTALL.md`.
 - `brain.sh` -- not an installer: opens/attaches the always-on operator Claude session
-  (tmux `hptuner-brain`, `claude --dangerously-skip-permissions`). Kept here for orientation.
+  (tmux `<node>-brain`, `claude --dangerously-skip-permissions`). Kept here for orientation.
 
 ## The framework / preserve model (`claudesole.manifest.json`)
 The manifest is the SINGLE source of truth for what propagates. Both `cc-update.sh` and
@@ -62,7 +62,7 @@ The manifest is the SINGLE source of truth for what propagates. Both `cc-update.
   `<!-- CC:NOTES append-only` and `<!-- /CC:NOTES -->` is spliced back so local learnings survive a bump.
   GOTCHA: this splice is **MD-only** -- code files (e.g. `server.py`) contain those marker strings in
   their source, so `cc-update.sh` copies code VERBATIM (splicing code would silently revert it).
-- `update_model` -- THIS deployment (hptuners) is the dev/master copy; features are added HERE, then
+- `update_model` -- THIS deployment (the authoring/Mission Control node) is the dev/master copy; features are added HERE, then
   flow outward via `cc-update.sh`.
 
 ## How a node lifecycle works
@@ -76,14 +76,14 @@ The manifest is the SINGLE source of truth for what propagates. Both `cc-update.
 5. **Recover:** `cc-recover.sh` when locked out.
 
 ## Dev -> dist mirror flow (how other nodes get updates)
-The core framework repo (`github.com/jkarger123/claudesole-core`) is PRIVATE, so nodes without GitHub
-creds (e.g. AFP on Sarah's account) can't clone it. Distribution goes through a PUBLIC mirror,
-`github.com/jkarger123/claudesole-dist`, holding framework_paths only (its `.gitignore` blocks
+The core framework repo (`github.com/<you>/claudesole-core`) is PRIVATE, so nodes without GitHub
+creds (e.g. a node running under a different user's account) can't clone it. Distribution goes through a PUBLIC mirror,
+`github.com/<you>/claudesole-dist`, holding framework_paths only (its `.gitignore` blocks
 `secrets/`, `*.env`, keys, oauth json). Local checkout: `/Users/Shared/claudefather-dist/claudefather`.
 Ship flow for a new version:
 1. Edit + bump `version` in `claudesole.manifest.json` (here in the core).
 2. Local nodes share this `server.py` -> just restart their tmux sessions.
-3. Sync the local dist checkout: `bash /Users/Shared/claudefather-dist/claudefather/cc-update.sh /Users/hptuner/hptuners-control`
+3. Sync the local dist checkout: `bash /Users/Shared/claudefather-dist/claudefather/cc-update.sh <CC_HOME>`
 4. Commit/push core AND push the mirror (`cd /Users/Shared/claudefather-dist/claudefather && git add -A && git commit && git push`).
 5. Update a remote node: have its operator run `cc-update.sh <mirror-url>` then restart via its OWN
    supervisor (launchd) -- NEVER remote `restart:true`. (Zip-based alternative: `make-install-package.sh`.)

@@ -75,7 +75,7 @@ consent) — they do **not** depend on the AI-capture toggle.
 - **🧠 Co-read** *(or `⌘⇧E`)** — a read-only right-hand panel, **off by default**. When open, each page you
   navigate to (debounced) is `POST`ed to `/api/context/page-intel` and the reply
   `{ related:[{title,source,kind,why}], flags:[…] }` is rendered as a sleek "what we already know about
-  this" panel (e.g. "🔗 ties to your 2pm with Avenlur"). Sensitive pages are skipped; the active browser
+  this" panel (e.g. "🔗 ties to your 2pm with Acme"). Sensitive pages are skipped; the active browser
   view is laid out narrower so the panel shows through.
 
 ### Server contract (added to the web app in parallel)
@@ -132,7 +132,7 @@ same auth as the bridge.
   you things, so they run regardless. `act` (click/type) is **refused** while the toggle is OFF — the agent
   is acked `{ok:false, error:'agent control off'}`. Flip it ON to allow click/type.
 - **Never silent.** Every executed agent command fires a visible, AI-accented toast (e.g. "🤖 ClaudeFather
-  opened avenlur.com / highlighted …"). A blocked `act` shows a "turn on Agent control to allow it" toast.
+  opened acme.com / highlighted …"). A blocked `act` shows a "turn on Agent control to allow it" toast.
 - **Your server only.** No server configured → no polling at all. Same base + auth (`X-CC-Token` / Bearer)
   as the bridge; nothing else is ever contacted.
 - The Workspace dashboard view is never driven — agent commands only ever target **browser** tabs.

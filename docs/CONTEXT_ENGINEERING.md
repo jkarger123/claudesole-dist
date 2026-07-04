@@ -22,7 +22,7 @@ when the operator never consciously organized it.
    - **ENABLED** extensions → full `AGENT.md` usage docs (`_ext_agent_context`; capped 1600 chars × 20).
    - **AVAILABLE but not enabled** → a tiny id+summary pointer so the assistant knows the capability exists and
      can offer to enable it, WITHOUT paying for docs it can't use (`_ext_available_brief`; Chief-only).
-   - A node never hears about an extension it doesn't have (a CarSearch node gets zero Skimlinks context).
+   - A node never hears about an extension it doesn't have (a node without Skimlinks gets zero Skimlinks context).
 5. **Self-organizing structure** — launch into an undocumented folder and the agent MUST create a CLAUDE.md (H1
    title + one plain sentence) so the folder becomes a recognized, previewable layer (`_NEW_FOLDER_BRIEF`).
 6. **Right-place output** — agents place deliverables under the module the work BELONGS to (found via the root

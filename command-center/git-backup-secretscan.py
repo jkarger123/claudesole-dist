@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-backup secret + oversize gate for the hptuners monorepo.
+"""Pre-backup secret + oversize gate for the project monorepo.
 
 Scans the files that a `git add -A` WOULD stage (modified + new, gitignore-respected) for real
 secrets and for any file that would break GitHub's 100MB push limit. Exits 0 if clean, non-zero and
@@ -13,7 +13,7 @@ in the frontend is intentional/public and is NOT flagged):
   - Supabase service_role JWTs (the secret one), NOT anon
 Placeholders / env-var references (REPLACE, YOUR, $env:, os.environ, ...) are ignored.
 
-Usage: git-backup-secretscan.py [REPO_DIR]   (default: /Volumes/Samsung990PRO/hptuners)
+Usage: git-backup-secretscan.py [REPO_DIR]   (default: <repo dir>)
 """
 import os, re, subprocess, sys
 

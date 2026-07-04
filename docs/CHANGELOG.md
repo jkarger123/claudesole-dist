@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.144 -- 2026-07-03  (clean-core Phase 4b: tenant residue 213 -> 47, everything buyer-facing neutral)
+- Genericized the illustrative tenant residue across ~40 framework files via the hybrid convention (generic
+  placeholders for paths/IDs, a fictional "Acme"/"Robin" only where a concrete example teaches). Scrubbed: 12
+  product docs, 16 agent-charter + extension + install docs, 2 dense docs (security ROTATION_CHECKLIST + the engine
+  module CLAUDE.md -- every procedure step + engineering learning preserved verbatim), ~10 code files (comments/
+  docstrings only). server.py: neutral brand default (ClaudeFather, still replaced live by the tenant's cc.config
+  brand), genericized user-facing help copy, and config-drove the last functional bits (PROJECT fallback, new-bundle
+  dest -> cc.config "bundle_root", disk gauge -> cc.config "extra_disks", protected-session checks -> exposed
+  protectedSessions). Also removed 2 internal planning/handoff docs from the ship surface (Phase 2).
+- VERIFIED lose-nothing: master renders identically (brand text2tune, SSD in the disk gauge), ralph loops alive, all
+  path derivations resolve to the same values, every syntax check passes. Residue 213 -> 47 (remaining = server.py
+  internal code comments + selftest fixture names, gated by residue_lint for a final mop-up).
+
 ## 0.99.143 -- 2026-07-03  (clean-core Phase 4a: functional path hardcodes -> derived-from-location)
 - Scrubbed the remaining HARDCODED tenant PATHS from framework scripts so a renamed/relocated tenant works, not
   just an install literally at ~/hptuners-control: ralph_runner (loop dir), git-backup.sh + git-backup-secretscan

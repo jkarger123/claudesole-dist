@@ -11,7 +11,7 @@ hacks that are impossible to extract later.
 
 ## The rules (apply to every change)
 1. **Framework-level, never one-off.** A feature must work for *any* deployment, not just this one. If it
-   only makes sense for hptuners/AFP, it's wrong. Ask: "would this help a tenant who is neither me nor any
+   only makes sense for one specific deployment, it's wrong. Ask: "would this help a tenant who is neither me nor any
    specific user?" If no, redesign it generic.
 2. **Config-driven, zero hardcoding.** Project name, paths, ports, brand, accounts, tokens, side labels,
    visibility — all from `cc.config.json` / env, never baked into code. The portability boundary is

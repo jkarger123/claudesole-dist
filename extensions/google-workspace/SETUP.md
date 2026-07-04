@@ -3,7 +3,7 @@
 Brief for the **setup agent**. Goal: the user ends with Gmail + Calendar + Drive + Sheets + Docs + Forms fully
 authorized (both the Cloud APIs ENABLED and the OAuth scopes granted -- two separate gates, see step 2) AND the
 **Google agent** (agents/google) ready to drive them, integrated with their clients + the Calls module.
-ASCII only. Be patient + concrete. Verified end-to-end on a real install (carsearch, 2026-06-23); the exact
+ASCII only. Be patient + concrete. Verified end-to-end on a real install (2026-06-23); the exact
 wiring + tools below are what actually worked -- prefer them over improvising.
 
 ## What it does

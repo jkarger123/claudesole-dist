@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Enterprise auto-backup: hptuners monorepo -> private GitHub.
+# Enterprise auto-backup: project monorepo -> private GitHub.
 # ADDITIVE ONLY: secret-gate -> add -> commit -> push. It NEVER runs a
 # destructive git op (no reset --hard / clean / checkout / rm), so it cannot
 # lose the intentionally-dirty working tree -- it only ever SAVES state.

@@ -31,7 +31,7 @@ def _cfg():
     c.setdefault("days", "weekdays"); c.setdefault("horizon_days", 14)
     c.setdefault("length", "short"); c.setdefault("tone", "warm")
     c.setdefault("sources", list(SOURCES.keys()))   # ALL registered sources ON by default (each degrades to [] if its backend isn't set up); future sources auto-included
-    # BUSINESS-HOURS awareness (Sarah): so the brief never counts evenings/weekends/non-working days as elapsed
+    # BUSINESS-HOURS awareness (operator): so the brief never counts evenings/weekends/non-working days as elapsed
     # time when judging "overdue"/"unanswered". work_days = which days I actually work; work_hours = my day.
     c.setdefault("work_days", "weekdays"); c.setdefault("work_hours", "9:00am-5:00pm")
     v = dict(c.get("voice") or {})
@@ -78,7 +78,7 @@ def _call(key, *a, **k):
 def _fmt_dt(s):
     """Best-effort: an ISO / RFC2822-email / epoch date string -> a friendly ABSOLUTE label WITH the weekday,
     e.g. 'Wed Jul 8 3:00pm' or 'Mon Jun 30'. Returns the input unchanged if unparseable. The brief MUST show the
-    model each item's real date -- a date-blind brief conflates 'the Jul 8 call' with 'today' (Sarah's reschedule)."""
+    model each item's real date -- a date-blind brief conflates 'the Jul 8 call' with 'today' (the operator's reschedule)."""
     import datetime as _dt, email.utils as _eu
     if s is None: return ""
     if isinstance(s, (int, float)):
@@ -138,7 +138,7 @@ def _src_gmail(cfg):
 @source("drive_comments", "Doc comments")
 def _src_drive_comments(cfg):
     """OPEN (unresolved) comment threads on recent Docs/Sheets/Slides, with the WHOLE thread so the brief has
-    the resolution context and never re-flags a comment that was already answered (Sarah). Server side already
+    the resolution context and never re-flags a comment that was already answered (operator). Server side already
     drops resolved threads; here we hand the model the full back-and-forth + reply count, explicitly marked OPEN."""
     cs = _call("drive_open_comments", 7) or []
     out = []
@@ -234,7 +234,7 @@ def _voice_profile():
 
 
 def _work_clause(cfg):
-    """Tell the brief to reason about elapsed time in BUSINESS hours only (Sarah: a Friday-evening comment is
+    """Tell the brief to reason about elapsed time in BUSINESS hours only (operator: a Friday-evening comment is
     not 'days old' on Monday). Uses configurable work_days + work_hours."""
     wd = cfg.get("work_days", "weekdays")
     days = ("Monday through Friday (I do NOT work weekends)" if wd == "weekdays"
@@ -314,7 +314,7 @@ def _tts(text, cfg):
             if p == "elevenlabs":
                 key = _secret("ELEVENLABS_API_KEY")
                 if not key: reasons.append("elevenlabs: no ELEVENLABS_API_KEY in vault"); continue
-                vid = v.get("voice_id") or "EXAVITQu4vr4xnSDxMaL"   # 'Sarah' default
+                vid = v.get("voice_id") or "EXAVITQu4vr4xnSDxMaL"   # default voice
                 body = json.dumps({"text": text, "model_id": "eleven_turbo_v2_5"}).encode()
                 req = urllib.request.Request(
                     "https://api.elevenlabs.io/v1/text-to-speech/" + vid, data=body,

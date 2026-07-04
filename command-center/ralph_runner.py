@@ -9,7 +9,7 @@ AND you can edit between iterations -- the loop picks up your edits on its next 
 Usage:  ralph_runner.py <loop-name> [--dry-run] [--start N]
 
 Loop dir (created by /api/ralph-create or by hand):
-  ~/hptuners-control/data/ralph/<name>/
+  <CC_HOME>/data/ralph/<name>/
     loop.json     config {cwd, max_iters, timeout_sec, model, max_turns, capstone}
     prompt.txt    iteration prompt; "$ITER" is replaced with the iteration number
     rules.md      hard rules (referenced by the prompt)
@@ -22,7 +22,7 @@ Loop dir (created by /api/ralph-create or by hand):
 import json, os, re, signal, subprocess, sys, threading, time
 
 HOME = os.path.expanduser("~")
-CC_HOME = os.environ.get("CC_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # this bundle's root (portable; = ~/hptuners-control on the master)
+CC_HOME = os.environ.get("CC_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # this bundle's root (portable; = <CC_HOME> on the authoring node)
 ap = [a for a in sys.argv[1:]]
 DRY = "--dry-run" in ap
 START = 1

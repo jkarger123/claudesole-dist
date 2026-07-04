@@ -11,7 +11,7 @@ lens) -- right next to the folder's conversations. Deliverables become discovera
   from `GET /api/module-files?rel=<module>` (scans the folder's `deliverables/`, newest first).
 - **Two open actions per file:**
   - **Open** -> reveals it in Finder on the host (`POST /api/reveal`). With iCloud storage that location is
-    synced to every Apple device -- ideal for an operator working on the host machine (e.g. Sarah's Mac).
+    synced to every Apple device -- ideal for an operator working on the host machine (e.g. the operator's Mac).
   - **Download** -> serves the file (`GET /api/file-get?path=`, PROJECT-scoped, path-traversal blocked).
     Works from anywhere (a phone over Tailscale) -- the universal fallback for mixed / non-iCloud users.
 - **Storage:** the deliverables folder inherits the project's `storage_mode` -- iCloud-synced for

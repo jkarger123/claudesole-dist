@@ -15,7 +15,7 @@ and NEVER reaches across user-home boundaries. That cross-user/SSD reach is exac
 legacy launchd job when loaded under a different user (a TCC denial with no log). So: **each node runs its own
 routines**; a routine command must target node-local paths.
 
-Hard-won design rules baked in (from the legacy Skimlinks/CarSearch setup):
+Hard-won design rules baked in (from a legacy scheduled affiliate-sync setup):
 - **De-dupe by NAME** -- a routine can't double-fire (the legacy setup had a LaunchAgent AND a duplicate
   crontab line racing the same DB rows every Sunday). The runner holds a per-name running lock.
 - **Failure alerts from day one** -- a non-zero exit / timeout fires `notify_send` (the legacy job had ZERO
@@ -45,8 +45,8 @@ the node is an extension routine host (`cc.config extension_routine_host`, defau
 install runs its own extension routines; in a multi-node fleet you set view-only tenant nodes
 (`extension_routine_host:false`, settable via superadmin `set_config`) so a tenant gets the extension's LENS/data
 but the SYNC runs on a central host (Mission Control). This is durable — it survives a reinstall (the routine
-won't re-register on a non-host), unlike manually deleting the routine entry. (Used for Skimlinks: AFP views,
-MC syncs.)
+won't re-register on a non-host), unlike manually deleting the routine entry. (Used for Skimlinks: a view-only
+tenant reads the data, MC syncs.)
 
 Still open: enable/disable + delete from the lens UI; richer alert channels (email/Slack) beyond Telegram;
 hash-dedupe of identical definitions at registration time.
@@ -59,7 +59,7 @@ hash-dedupe of identical definitions at registration time.
 
 ## Where this stands (2026-06-20)
 Stub registry only; no runner. Good first routine to ship: a DAILY security scan
-(`python3 ~/hptuners-control/agents/security/tools/scan.py`) feeding the Security lens.
+(`python3 <CC_HOME>/agents/security/tools/scan.py`) feeding the Security lens.
 
 <!-- CC:NOTES append-only; agents file learnings that belong to THIS module here -->
 ## Learnings (filed by agents; append-only)

@@ -12,7 +12,7 @@ oversized context, runaway loops.
 ## How I work / my data
 - Source: Claude Code transcripts at `~/.claude/projects/*/*.jsonl` (per-message `usage` blocks:
   input/output/cache_read/cache_creation tokens).
-- The aggregation lives in the framework (`~/hptuners-control/command-center/server.py`):
+- The aggregation lives in the framework (`<CC_HOME>/command-center/server.py`):
   `_scan_tok`, `token_totals`, `usage_payload`, `token_usage_payload`; routes `/api/usage`,
   `/api/token-usage`. The Usage lens renders rolling 1h/24h/7d/30d, by-model, by-project, composition.
 - Pricing estimate: `_PRICING` (note: we pay $0 on the Max subscription for dev; the metered PRODUCT

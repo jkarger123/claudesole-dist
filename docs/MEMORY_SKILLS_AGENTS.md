@@ -47,10 +47,10 @@ Everything in an always-loaded CLAUDE.md costs tokens every single turn, and the
 only so many instructions. Official guidance: **target < ~200 lines** for an always-on file; push detail
 DOWN into subdir CLAUDE.mds (lazy), `.claude/rules/` (path-scoped), or separate docs pulled via `@import`.
 
-> **Finding from this research (action item):** the hptuners project root CLAUDE.md is ~2,500 lines --
+> **Finding from this research (action item):** the project root CLAUDE.md is ~2,500 lines --
 > ~12x the recommended ceiling, in context every turn. It should be cut to a lean index that `@imports` /
 > links the HARD RULES and pillar detail, with the heavy content living in pillar CLAUDE.mds (already
-> lazy) + `.claude/rules/`. This is a real token tax on every hptuners session. (Separate cleanup task.)
+> lazy) + `.claude/rules/`. This is a real token tax on every session. (Separate cleanup task.)
 
 ### How ClaudeFather already does this well -- and the gap
 ClaudeFather's **module = a folder with a CLAUDE.md** is exactly the subdir-CLAUDE.md pattern, and the
@@ -97,7 +97,7 @@ The **folder name becomes the `/command`**; the `name:` field is display-only.
 ---
 name: deploy-frontend                 # optional display name (folder name drives the /command)
 description: >                         # LOAD-BEARING. What it does + WHEN to use it (put the key case first).
-  Deploy the text2tune frontend to R2. Use when asked to deploy/ship/publish the site or push index.html.
+  Deploy the site frontend to R2. Use when asked to deploy/ship/publish the site or push index.html.
 disable-model-invocation: true        # side-effect flow -> only the human runs it (/deploy-frontend)
 argument-hint: "[tier]"               # autocomplete hint
 allowed-tools: Bash(npx wrangler*), Bash(curl*)   # pre-approve only what it needs (be specific)
@@ -106,7 +106,7 @@ allowed-tools: Bash(npx wrangler*), Bash(curl*)   # pre-approve only what it nee
 ## Steps
 1. Build: `python3 build_frontend.py build index.html`
 2. PUT to R2 via the worker binding (NEVER `wrangler r2 object put`):
-   !`echo "curl -X PUT https://api.text2tune.com/api/debug-r2 ..."`
+   !`echo "curl -X PUT https://api.example.com/api/debug-r2 ..."`
 3. Verify: open the deploy URL, hard-refresh.
 
 See [reference.md](reference.md) for the full tier matrix.   # heavy detail stays out of SKILL.md
@@ -216,7 +216,7 @@ The orchestrator only ever sees **descriptions** at selection time. Everything b
    invocation, view SKILL.md inline, + New skill that scaffolds + opens to author, Edit, reversible Delete
    that `shutil.move`s to `_archive` -- never `rm`). Reads the REAL Claude Code dirs (`~/.claude/skills` user
    + `<project>/.claude/skills`) so what you see/create is actually loaded by the project's sessions. Seeded:
-   `backup-and-push`, `claudesole-restart`, `claude-md-lint` (user), `deploy-text2tune-frontend` (project).
+   `backup-and-push`, `claudesole-restart`, `claude-md-lint` (user), `deploy-frontend` (project).
    `skills_list` also attaches a per-skill `lint` list (`_skill_lint`: no description / thin description < 20
    chars / `name != dir` / no body) surfaced as a `warning` badge + a `lint:` line in the lens, so weak
    metadata that silently kills discoverability is visible at a glance.
@@ -258,7 +258,7 @@ The orchestrator only ever sees **descriptions** at selection time. Everything b
      audit-run** button on each capability that drives `/api/audit-run`. Re-run regenerates `AUDIT.md`.
      Before it, the routine had no discoverable entry point (sec 5 -- a capability only humans can find via a
      curl is a capability that rots). `loadAudit`/`auditRun` in the served page, guarded by the `AuditLens` test.
-7. **(Later) root CLAUDE.md slim-down** -- cut hptuners root from ~2,500 lines to a lean index +
+7. **(Later) root CLAUDE.md slim-down** -- cut the project root from ~2,500 lines to a lean index +
    `@imports`/rules; move HARD RULES into `.claude/rules/` path-scoped. (Separate task; run `/claude-md-lint`.)
 
 ---

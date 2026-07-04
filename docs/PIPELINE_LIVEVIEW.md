@@ -5,7 +5,7 @@ long pipeline / cron job. The lens is zero-per-node code: your pipeline writes t
 known directory, and the lens renders whatever steps you declare — a top-to-bottom run map where each step
 lights up by state, plus a **missed-run / stalled-run alarm** (the "silent until noon" failure mode).
 
-Built at Mission Control, shipped via dist (v0.8.0). Pilot: carsearch (fm_nightly).
+Built at Mission Control, shipped via dist (v0.8.0). Pilot: a node (fm_nightly).
 
 ## Where the files live
 `PIPELINE_DIR` — default `<project_root>/.pipeline/`. Override per deployment in `cc.config.json`:

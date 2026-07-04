@@ -50,7 +50,7 @@ Also ASK: the **brand** (display name, e.g. "Acme"), and the **storage mode** (s
 
 ## 4B. MIGRATE an existing project (the safety-first playbook)
 This is how an existing system (its code, services, data) becomes a ClaudeFather-operated project WITHOUT
-breaking the live original. Mirrors the proven carsearch migration.
+breaking the live original. Mirrors a proven real-world migration.
 1. **Read the original READ-ONLY first.** Map it: where it lives, its stack, services, entry points, what's
    live. Do NOT modify the original during discovery. If it runs under a different OS account or is live in
    production, treat it as untouchable ground truth.

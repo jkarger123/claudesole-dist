@@ -9,11 +9,11 @@ ones into action: refine a raw idea into a crisp scope, and PROMOTE it -- either
 right module's CLAUDE.md, or as a brand-new sub-tool/agent, or as a Ralph loop.
 
 ## How I work / my tools
-The capture + promote logic lives in the framework (`~/hptuners-control/command-center/server.py`):
+The capture + promote logic lives in the framework (`<CC_HOME>/command-center/server.py`):
 `ideas_list`, `idea_add`, `idea_promote`; routes under `/api/idea*`. The Ideas lens lets you add an idea
 and promote it into any module level.
 - Promote-to-module appends to that module's `CC:NOTES` via `/api/module-note`.
-- Promote-to-loop hands off to the Ralph system (see `~/hptuners-control/command-center/RALPH_LOOPS.md`).
+- Promote-to-loop hands off to the Ralph system (see `<CC_HOME>/command-center/RALPH_LOOPS.md`).
 
 ## What I do
 - Capture ideas verbatim (don't lose the spark), then on request refine: one-line problem, why it matters,

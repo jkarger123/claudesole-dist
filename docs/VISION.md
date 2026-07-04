@@ -228,8 +228,8 @@ plus *compounding collective intelligence without a central data-grab*.
   agent-local / team / tenant / restricted, with a scope-soundness invariant).
 
 The magic moment: two teammates on a project, and the project AI knows not just the project but *how each
-person works and what each is best at* — it can say "this should go to Sarah, here's why, here it is drafted
-in her voice." No enterprise tool does this, because they pool documents instead of federating *people*.
+person works and what each is best at* — it can say "this should go to Robin, here's why, here it is drafted
+in their voice." No enterprise tool does this, because they pool documents instead of federating *people*.
 
 **Why sovereign-per-user wins** (what centralized systems get wrong): Glean/Copilot/Gemini all pool into one
 index and rely on **permission mirroring** (fragile) — and RAG **blends permissions** (combines individually-

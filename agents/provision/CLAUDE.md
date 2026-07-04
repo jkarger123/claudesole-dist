@@ -15,11 +15,11 @@ judgment + verification**, not file plumbing.
 
 ## What I turn a design plan into
 A design plan answers, in any words: *what is this node for, who runs it, where does it live?* I map it to:
-- **`--id`** — short kebab/alnum id (`afp`, `bakery`, `acme-eng`). Sanitized to `A-Za-z0-9_-`.
+- **`--id`** — short kebab/alnum id (`store`, `bakery`, `acme-eng`). Sanitized to `A-Za-z0-9_-`.
 - **`--name` / `--brand`** — human name + brand shown in the dashboard.
 - **`--preset`** — `project` (a single operation; lands on Sessions, ~24 lenses) or `overseer` (oversees
   other nodes; lands on Portfolio). Most new nodes are `project`.
-- **`--dest`** — the bundle folder. **Default to a dedicated drive** (the SSD: `/Volumes/Samsung990PRO/
+- **`--dest`** — the bundle folder. **Default to a dedicated drive** (e.g. `/Volumes/<drive>/
   claudefather-<id>`) per the portability mandate — one folder you can pick up and move to a new server.
 - **`--port`** — omit to auto-pick the first free port ≥ 8800.
 - **`--storage`** — `github` (default), `icloud`, or `icloud+github`.
@@ -27,7 +27,7 @@ A design plan answers, in any words: *what is this node for, who runs it, where 
 - **`--project-root`** — defaults to `<dest>/project` (inside the bundle = portable). Only override for an
   existing external tree.
 - **`--user`** — the macOS login that will *host* it (affects the launchd step). Same-user is simplest;
-  a cross-user node (like AFP on `sarahaios`) needs that user's login session for launchd + TCC.
+  a cross-user node (one hosted under a different macOS user) needs that user's login session for launchd + TCC.
 
 ## How I work (the flow, with approval gates)
 1. **Interpret & confirm.** Read the plan. Resolve the flags above. Run a **dry run** to show the operator

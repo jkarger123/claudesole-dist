@@ -42,9 +42,9 @@ of the fleet (mesh), and integrates Google Workspace + Tasks + deliverables.
   launchd `KeepAlive` restarts it. This is the production path.
 - `cc-instance-supervise.sh <CC_CONFIG> <sess>` — generic supervisor for any nested instance (overseer, etc).
 - `launcher.command` — double-click/GUI launcher (kills port 8799, nohups `server.py`, opens browser).
-- `cc-launch.sh <studio|t490|t480> <name> [dir]` — creates a persistent tmux session; remote targets wrap
-  `ssh -t` into the Windows box (Windows has no tmux; the Studio tmux is the persistence layer).
-- `bridge-supervise.sh` / `crons-supervise.sh` — text2tune product runtime supervisors (not the CC itself).
+- `cc-launch.sh <local|remote-a|remote-b> <name> [dir]` — creates a persistent tmux session; remote targets wrap
+  `ssh -t` into a remote box (e.g. a Windows box with no tmux; the local tmux is the persistence layer).
+- `bridge-supervise.sh` / `crons-supervise.sh` — product runtime supervisors (not the CC itself).
 
 ## server.py — major sections (line anchors approximate)
 - **Config/boot** (1–160): imports, `cc.config.json` load, `PROJECT`/`BRAND`/`PRODUCT`/`THEME`/`STORAGE_MODE`/
@@ -57,8 +57,8 @@ of the fleet (mesh), and integrates Google Workspace + Tasks + deliverables.
 - **iCloud materialization** (175–227): force-download evictable iCloud files before reading.
 - **Mesh comms** (227–300, 1223–1400): inter-chief messaging — persistent inbox (`_mesh_inbox.json`),
   durable outbound queue with retry/backoff, the mesh worker, send/recv/reply. Pairs with `mesh_stop_hook.py`.
-- **Operator notes** (`op_note_*`, near `peers()`): a HUMAN↔human chat between node operators (e.g. James@MC ↔
-  Sarah@AFP), SEPARATE from the chief mesh. Per-node `_opnotes.json` (`{threads:{peer:[{dir,text,ts,read}]},outq}`),
+- **Operator notes** (`op_note_*`, near `peers()`): a HUMAN↔human chat between node operators (e.g. an
+  operator at Mission Control ↔ an operator at a node), SEPARATE from the chief mesh. Per-node `_opnotes.json` (`{threads:{peer:[{dir,text,ts,read}]},outq}`),
   own durable retry worker (`_opnote_worker`), rides the same X-Mesh-Token transport but delivers to
   **`/api/opnote-recv`** (in `AUTH_MESH_INGRESS`) → the peer's HUMAN, never the agent. APIs: `/api/opnotes[,-unread]`,
   `/api/opnote-send|-read|-recv`. Frontend = the **Notes** lens + the can't-miss `#opAlert` corner alert.
@@ -170,12 +170,12 @@ Brand assets in `static/brand/`; terminal via `static/xterm.js`; remote desktop 
   (lockout risk; a credential-change watch logs any change to `~/.cc-credential-changes.log`).
 - **Auth is OFF by default** (open) so existing deployments keep working; `doctor()` warns while off.
   Mesh enforcement (`MESH_ENFORCE`) is likewise carried-but-not-rejected until explicitly turned on.
-- **Run on the brain tmux server, not bare launchd** — the SSD (`/Volumes/Samsung990PRO`) needs that TCC
+- **Run on the brain tmux server, not bare launchd** — the SSD (`<SSD>`) needs that TCC
   context; bare launchd EPERMs and silently breaks the Docs/doctor/deliverables lenses.
 - **Write growing artifacts to the SSD**, never the near-full internal disk (deliverables → `DELIV_LOCAL_ROOT`).
 - **Boot must not block on I/O:** heavy housekeeping runs in a daemon thread; keep it that way (a slow iCloud
   node once "came up" but never reached `serve_forever`).
-- Sessions are tmux ON THE STUDIO (even "open on T490/T480" = a Studio tmux wrapping `ssh -t`). Agents have
+- Sessions are tmux ON THE LOCAL HOST (even "open on a remote box" = a local tmux wrapping `ssh -t`). Agents have
   no TTY → no sudo; use the Admin shell pre-type protocol (`docs/SESSIONS_AND_SUDO.md`).
 
 ## How to extend it

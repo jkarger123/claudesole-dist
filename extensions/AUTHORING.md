@@ -127,7 +127,7 @@ It MUST contain these sections, in this order:
 Ship an optional **`AGENT.md`** (agent-facing): a concise "here is the tool you have + how to use it" doc.
 The platform AUTO-INJECTS it into the launch brief of agents on this node (`_system_brief`) **only when the
 extension is INSTALLED/enabled here**. A node that doesn't have the extension never hears about it -- e.g. a
-CarSearch node without Skimlinks gets zero Skimlinks context, so agents there can't be told to use a tool that
+node without the Skimlinks extension gets zero Skimlinks context, so agents there can't be told to use a tool that
 isn't present. Keep it short (it's capped ~1.6KB), action-oriented (the APIs/commands/lens the agent should use),
 and ASCII. This is how an extension makes itself usable by AGENTS, the same way `SETUP.md` makes it usable by a person.
 

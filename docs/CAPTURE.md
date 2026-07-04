@@ -57,13 +57,13 @@ Granola, extended. Three intakes → one pipeline: (a) Zoom cloud-recording API 
 
 ### AI co-reading / page intelligence (over-the-shoulder)  — desktop browser
 Because we know your calendar, clients, emails and tools, a subtle sidebar flags what you'd miss on a page:
-"this competitor just shipped what Avenlur asked about," "this article cites a contact of yours," "ties to
+"this competitor just shipped what a client asked about," "this article cites a contact of yours," "ties to
 your 2pm." `POST /api/context/page-intel {url,title,text}` → `{related:[…], flags:[…]}` (read-only). This is
 the clearest "a chat box can't do this" moment.
 
 ### More, designed-in (build as demand warrants)
 - **Auto-reclassify** a misfiled clip to the right client on triage (entity match).
-- **Per-subject tab sets** ("open my Avenlur tabs") — browser homing.
+- **Per-subject tab sets** ("open my Acme tabs") — browser homing.
 - **Read-it-later → morning digest** (ranked by relevance to active projects).
 - **Pre-meeting auto-pull** — 20 min before a calendar event, assemble everything about that client this week.
 - **Clip → draft** an email/message about it in the user's voice (VoiceMatch).

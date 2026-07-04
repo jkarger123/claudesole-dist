@@ -16,7 +16,7 @@ mkdir -p "$REPO/.git/hooks"
 cat > "$HOOK" <<'EOF'
 #!/usr/bin/env bash
 # CC secret gate (installed by the control center Security agent-tool). Blocks commits with secrets.
-GL="$HOME/hptuners-control/bin/gitleaks"; command -v "$GL" >/dev/null 2>&1 || GL=gitleaks
+GL="${CC_HOME:-$HOME/claudefather}/bin/gitleaks"; command -v "$GL" >/dev/null 2>&1 || GL=gitleaks
 command -v "$GL" >/dev/null 2>&1 || { echo "[cc-gate] gitleaks not installed; skipping (install via the Security tab)"; exit 0; }
 if ! "$GL" git --staged --pre-commit --no-banner --redact; then
   echo "[cc-gate] secret detected in staged changes -- commit blocked. Remove it (and rotate the key)."
