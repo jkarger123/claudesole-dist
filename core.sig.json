@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "1c6fd388edec4d6d113d72df31404da23e23148e4fd08d555b7334f3654ef7c5",
+      "claudesole.manifest.json": "4f75d07abd4a4581b1f19f4a961beb45fd8e757ccf9cfea726e98bd65b633735",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
       "command-center/cc-email": "4895c4eb4ca8e1c6f3b26dd260f9ee3b776c42f24ec656b8581d1cef0c4155ed",
@@ -78,9 +78,9 @@
       "extensions/edge-mcp/config.example.json": "c33abffa1bc8019523576cd5e8a79aaf8e7412c682f0b11b3a068bb5c0f8546a",
       "extensions/edge-mcp/extension.json": "d4832b37572e69fdedc5e692ecd0ada31964eb23b720270d47f4333c84ab14c3",
       "extensions/edge-mcp/runtime/edge_launch.py": "95e1614de86d5cccd5d1ed4b2bb385196a9d4822388fc315db9ae14493fbd6d3",
-      "extensions/edge-mcp/runtime/edge_mcpd.py": "9f1a3d813659b7aa08566bc5cc5e56e5f1b96378dbb8d1b6141c8febb96c19d9",
+      "extensions/edge-mcp/runtime/edge_mcpd.py": "d865d73cf8a2efe02b27355c8aad75e563b0632294aac08f8a985d7a5903e5ad",
       "extensions/edge-mcp/runtime/edge_recipes.py": "953acb63582080cc61d6488c4771e8fbded9cceed00499aa267507384c231548",
-      "extensions/edge-mcp/runtime/edge_registry.py": "5cb3df1c38e92717f8e289631e6aa47dd1c6b26a3e604b8ff32146396e1acd04",
+      "extensions/edge-mcp/runtime/edge_registry.py": "27955ea2cd894feb5e8af96433eed015d11f2e5166c6e5a32f60cc0aaf4d6642",
       "extensions/edge-mcp/runtime/edge_setup.py": "c2de825c1310884f63cc5c8ca9dd7c0cc34efef6b8118f6dc7d8af8c1ff69ada",
       "extensions/edge-mcp/runtime/idx.py": "237d411f359f86ff95eb81ef63f4bfb98cc184985241d5f23b5818d6374401fc",
       "extensions/edge-mcp/runtime/mcp_proxy_log.py": "d33e9150caaa93d2283ef8fa19681f120740e5d22eae9db38f3e20cd1fd82a48",
@@ -134,9 +134,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783205596,
+    "generated": 1783236538,
     "v": 1,
-    "version": "0.99.151"
+    "version": "0.99.152"
   },
-  "sig": "O1BLPs493lQt4UiBpxYVqMNBdvlubhZyM/GAtG/Z9MfkF3wYFQWxfoWlYkgYHsDh4V2TbtHiBwgnPGnLF62tCQ=="
+  "sig": "V7xIHYMSj/q0v+HxZJyCbCHo4MDvT0dmMiKkSFN76dIhTbKBqaQleIyoLYFpqjDwQrbDR8TpE8Xv+Z//PFyJBQ=="
 }

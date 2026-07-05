@@ -35,7 +35,12 @@ through the stack (hundreds of execute/snapshot calls, a 12k-char script). Done:
   (attach the user's real Chrome). Both proven live.
 - **`edge-mcp` CLI on PATH** (hosts/servers/start/status/call/run/probe/stop + add-host/add-server); AGENT.md refreshed.
 - Two-sided install (vault-minted SSH key + Mac/Windows authorize snippets).
-- Hardening from the InDesign work: tool timeout 90s->600s (no more micro-batching); Sidekick = plugin-app instance.
+- Hardening from the InDesign work: transport timeout 90s->600s; Sidekick = plugin-app instance. NOTE: the
+  plugin app ITSELF still caps responses at ~30s -> long ops must fire-and-poll a completion marker (see AGENT.md).
+- Driving lessons baked into AGENT.md (so no install relearns them): snapshot is ~72dpi (rough layout only ->
+  export a 200dpi raster + `edge-mcp pull` to verify detail); every script sets NEVER_INTERACT or a modal freezes
+  the engine; snapshot renders `app.activeDocument`; no remote screen capture (TCC); real shell+scp via
+  `edge-mcp sh|pull|push`; UXP enum-identity + reduced-opacity-image gotchas.
 
 PENDING (fleet ship, gated): edge-mcp **lens** (hosts/servers/live activity -- server.py+PAGE, needs restart) +
 Design Canvas; `--mcp-config` on spawn for native in-session tools; then **sign + converge** (Mission Control ceremony).

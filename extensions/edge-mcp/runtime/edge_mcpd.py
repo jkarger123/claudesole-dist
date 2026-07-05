@@ -301,6 +301,45 @@ def probe_once(sid):
         sess.stop()
 
 
+def _host_key(reg, host_id):
+    """Print where the host's ssh key lives (vault -> materialized 0600 temp) + the user@addr target, so an
+    agent can scp/ssh by hand without hunting for edge_key_*.pem in /var/folders."""
+    host = R.get_host(reg, host_id)
+    if not host: return {"ok": False, "error": "unknown host %r" % host_id}
+    if R.is_local_host(host): return {"ok": True, "node_local": True, "note": "node-local host; no ssh key needed"}
+    return {"ok": True, "key_path": R.resolve_key(host.get("key_ref")),
+            "target": "%s@%s" % (host.get("ssh_user"), host.get("addr"))}
+
+
+def _host_sh(reg, host_id, cmd):
+    """Run a shell command ON an edge host (ssh, or locally for node-local)."""
+    host = R.get_host(reg, host_id)
+    if not host: return {"ok": False, "error": "unknown host %r" % host_id}
+    rc, out, err = R.host_run(reg, host, cmd, timeout=120)
+    return {"ok": rc == 0, "rc": rc, "stdout": out, "stderr": err}
+
+
+def _scp(reg, host_id, local, remote, direction):
+    """scp a file to/from an edge host using the vault-materialized key. direction: 'push' (local->host) or
+    'pull' (host->local). Far more robust than base64-chunking binaries through a plugin tool."""
+    host = R.get_host(reg, host_id)
+    if not host: return {"ok": False, "error": "unknown host %r" % host_id}
+    if R.is_local_host(host):
+        return {"ok": False, "error": "host %r is node-local; use a normal filesystem path, not scp" % host_id}
+    kp = R.resolve_key(host.get("key_ref"))
+    target = "%s@%s" % (host.get("ssh_user"), host.get("addr"))
+    opts = ["-i", kp, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    if direction == "push":
+        argv = ["scp"] + opts + [local, "%s:%s" % (target, remote)]
+    else:
+        argv = ["scp"] + opts + ["%s:%s" % (target, remote), local]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+        return {"ok": r.returncode == 0, "rc": r.returncode, "stderr": r.stderr.strip()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def main():
     ap = argparse.ArgumentParser(prog="edge-mcp")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -308,6 +347,10 @@ def main():
     for c in ("start", "status", "stop", "probe"):
         sub.add_parser(c).add_argument("server")
     pc = sub.add_parser("call"); pc.add_argument("server"); pc.add_argument("tool"); pc.add_argument("args", nargs="?", default="{}")
+    sub.add_parser("host-key").add_argument("host")
+    hs = sub.add_parser("sh"); hs.add_argument("host"); hs.add_argument("command")
+    pl = sub.add_parser("pull"); pl.add_argument("host"); pl.add_argument("remote"); pl.add_argument("local")
+    ph = sub.add_parser("push"); ph.add_argument("host"); ph.add_argument("local"); ph.add_argument("remote")
     sub.add_parser("_daemon").add_argument("server")   # internal
     a = ap.parse_args()
 
@@ -329,6 +372,14 @@ def main():
         print(json.dumps(_start(a.server), indent=2)); return
     if a.cmd == "probe":
         print(json.dumps(probe_once(a.server), indent=2)); return
+    if a.cmd == "host-key":
+        print(json.dumps(_host_key(_reg(), a.host), indent=2)); return
+    if a.cmd == "sh":
+        print(json.dumps(_host_sh(_reg(), a.host, a.command), indent=2)); return
+    if a.cmd == "pull":
+        print(json.dumps(_scp(_reg(), a.host, a.remote, a.local, "pull"), indent=2)); return
+    if a.cmd == "push":
+        print(json.dumps(_scp(_reg(), a.host, a.local, a.remote, "push"), indent=2)); return
     if not _running(a.server) and a.cmd in ("status", "call", "stop"):
         if a.cmd == "call":
             r = _start(a.server)

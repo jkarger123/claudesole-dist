@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.152 -- 2026-07-05  (Edge MCP: Sidekick/InDesign driving lessons made standard-issue)
+- Baked the hard-won Sidekick/InDesign driving knowledge into `extensions/edge-mcp/AGENT.md` so no future
+  install relearns it the slow way. Corrected the misleading "long ops are fine / no micro-batch" note: the
+  600s transport timeout is real, but a `plugin-app` (Sidekick/InDesign) has its OWN ~30s response cap -- a
+  long script returns "Plugin response timeout" while it keeps running, so long ops must **fire-and-poll** a
+  completion marker. Added the InDesign rules that cost real hours: `snapshot` is ~72dpi (rough layout ONLY --
+  export a 200dpi raster to verify color/opacity/edges); export path must be a plain string in a real user
+  folder (UXP File / InDesign File / /tmp all fail -- sandbox); every script must set `NEVER_INTERACT` or a
+  modal freezes the engine; `snapshot` renders `app.activeDocument` (set it first); no remote screen capture
+  (macOS TCC); UXP enum-identity (`String(page.side)`) + reduced-opacity-image (bake watermarks flat) gotchas.
+- `edge-mcp` CLI: added first-class `sh` / `pull` / `push` / `host-key` so the host shell+scp workflow (pull an
+  export back to inspect, push an asset up) is a documented command instead of hunting for `edge_key_*.pem`
+  under `/var/folders`.
+
 ## 0.99.151 -- 2026-07-04  (Auto-nudge: a paused/stale Ralph loop no longer suppresses nudges forever)
 - Fix: `waiting_on_loop` (auto-nudge's "don't nudge a session that's waiting on a loop" guard) suppressed a
   session's nudges whenever ANY same-project Ralph loop's tmux was alive and its state wasn't one of
