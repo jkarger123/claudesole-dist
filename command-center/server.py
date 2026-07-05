@@ -11834,8 +11834,10 @@ def _save_attachment_bytes(rel, mid, att_id, filename, size=0, mime=""):
 # (deliverables_root/SSD when set, else <install>/_uploads) -- never a hardcoded path; size cap from config.
 SESSION_UPLOAD_ROOT = os.path.join((DELIV_LOCAL_ROOT or CC_HOME), "_uploads")
 def _session_upload_cap_mb():
-    try: return max(1, int(CC.get("max_upload_mb") or 50))
-    except Exception: return 50
+    # 500MB default: the streaming attach (/api/session-upload-raw) writes to disk in chunks, so a big video
+    # never sits in memory. (Config max_upload_mb overrides.) The legacy base64 path is bounded by the browser.
+    try: return max(1, int(CC.get("max_upload_mb") or 500))
+    except Exception: return 500
 
 def session_upload(session, filename, mime, b64data, note="", enter=False):
     """Accept a base64-encoded file from the dashboard, save it under SESSION_UPLOAD_ROOT with a safe unique
@@ -11902,6 +11904,52 @@ def _deliver_to_session(sess, filename, mime, raw, note="", enter=False):
         return {"ok": False, "error": str(e)[:120]}
     out = _inject_path_into_session(sess, dest, note, enter)
     out["bytes"] = len(raw)
+    return out
+
+def _stream_upload_to_session(sess, filename, mime, rfile, content_length, note="", enter=False):
+    """Like session_upload but STREAMS the raw request body straight to disk in 1MB chunks -- no base64, nothing
+    held whole in memory (browser OR server). THIS is the mobile-reliable path: a browser streams a File body
+    natively, whereas base64-encoding a video in mobile Safari silently OOMs (even a 6s clip) -> the old attach
+    'prepared then did nothing'. Same cap + safe-naming + path-injection as session_upload."""
+    sess = re.sub(r"[^A-Za-z0-9_-]", "", sess or "")[:64]
+    if not sess: return {"ok": False, "error": "no session given"}
+    if sh([TMUX, "has-session", "-t", sess])[0] != 0:
+        return {"ok": False, "error": "session not found (it may have closed)"}
+    cap = _session_upload_cap_mb() * 1024 * 1024
+    if content_length and content_length > cap:
+        return {"ok": False, "error": "file exceeds %d MB limit" % _session_upload_cap_mb(), "toobig": True}
+    fn = _ensure_ext(_sanitize_filename(filename or "upload"), mime or "")
+    stem, ext = os.path.splitext(fn)
+    uniq = "%s_%s%s" % (stem[:60] or "file", secrets.token_hex(4), ext)
+    try: os.makedirs(SESSION_UPLOAD_ROOT, exist_ok=True)
+    except Exception as e: return {"ok": False, "error": "uploads dir: " + str(e)[:80]}
+    dest = os.path.join(SESSION_UPLOAD_ROOT, uniq)
+    if _path_has_secret(dest): return {"ok": False, "error": "refusing to write to a secret path"}
+    written = 0; over = False
+    try:
+        remaining = int(content_length) if content_length else None
+        with open(dest, "wb") as f:
+            while True:
+                want = 1048576 if remaining is None else min(1048576, remaining - written)
+                if want <= 0: break
+                chunk = rfile.read(want)
+                if not chunk: break
+                f.write(chunk); written += len(chunk)
+                if written > cap: over = True; break
+    except Exception as e:
+        try: os.remove(dest)
+        except Exception: pass
+        return {"ok": False, "error": str(e)[:120]}
+    if over:
+        try: os.remove(dest)
+        except Exception: pass
+        return {"ok": False, "error": "file exceeds %d MB limit" % _session_upload_cap_mb(), "toobig": True}
+    if not written:
+        try: os.remove(dest)
+        except Exception: pass
+        return {"ok": False, "error": "empty file"}
+    out = _inject_path_into_session(sess, dest, note, enter)
+    out["bytes"] = written
     return out
 
 # ======================================================================================================
@@ -14773,6 +14821,16 @@ class H(BaseHTTPRequestHandler):
         return self._s(404, "{}")
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
+        if u.path == "/api/session-upload-raw":   # STREAMING upload: the request body IS the raw file bytes (no
+            # base64, no JSON) -> handle BEFORE the generic body read so we can stream rfile straight to disk.
+            if not self._authed(): return self._s(403, json.dumps({"ok": False, "error": "auth"}))
+            q = urllib.parse.parse_qs(u.query)
+            def _q(k): return urllib.parse.unquote((q.get(k, [""])[0] or ""))
+            try: clen = int(self.headers.get("Content-Length", 0) or 0)
+            except Exception: clen = 0
+            res = _stream_upload_to_session(_q("session"), _q("filename"), _q("mime"), self.rfile, clen,
+                                            note=_q("note"), enter=(_q("enter") == "1"))
+            return self._s(200 if res.get("ok") else (413 if res.get("toobig") else 400), json.dumps(res))
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or "{}")
         if u.path == "/api/login":
             if AUTH_TOKEN and hmac.compare_digest((body.get("token", "") or ""), AUTH_TOKEN):
@@ -15649,18 +15707,29 @@ var TMAXMB=(window.CC&&window.CC.maxUploadMb)||50;
   window.addEventListener('drop',function(e){e.preventDefault();depth=0;show(false);
     var f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];if(f)tUpload(f);});
 })();
-function tPick(){var inp=document.createElement('input');inp.type='file';inp.style.display='none';
-  inp.onchange=function(){var f=inp.files&&inp.files[0];if(f)tUpload(f);try{document.body.removeChild(inp);}catch(_){ }};
-  document.body.appendChild(inp);inp.click();}
-function tUpload(f){if(!f)return;if(f.size>TMAXMB*1024*1024){st.textContent='file too large (max '+TMAXMB+'MB)';return;}
-  st.textContent='uploading '+f.name+'…';var rd=new FileReader();
-  rd.onerror=function(){st.textContent='could not read the file';};
-  rd.onload=function(){var d=String(rd.result||'');var b=d.indexOf(',')>=0?d.split(',')[1]:d;
-    fetch('/api/session-upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:name,filename:f.name,mime:f.type||'',data:b})})
-      .then(function(r){return r.json();})
-      .then(function(r){st.textContent=(r&&r.ok)?('📎 attached '+r.name+' — review & press Enter'):('upload failed: '+((r||{}).error||'?'));})
-      .catch(function(){st.textContent='upload failed';});};
-  rd.readAsDataURL(f);}
+// A visible, centered toast (the #st status pill is invisible on mobile -> upload feedback used to vanish).
+function tToast(msg,ms){var t=document.getElementById('cliptoast');if(!t){st.textContent=msg;return;}
+  t.textContent=msg;t.classList.remove('show');void t.offsetWidth;t.classList.add('show');
+  clearTimeout(tToast._t);if(ms)tToast._t=setTimeout(function(){t.classList.remove('show');},ms);}
+// iOS-safe picker: a PERSISTENT input (created once, offscreen not display:none -- iOS ignores display:none
+// inputs) with accept=* so photo-library videos are selectable. Reused every tap.
+function tPick(){var inp=document.getElementById('_tfile');
+  if(!inp){inp=document.createElement('input');inp.type='file';inp.id='_tfile';inp.setAttribute('accept','*/*');
+    inp.style.cssText='position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0';
+    inp.addEventListener('change',function(){var f=inp.files&&inp.files[0];inp.value='';if(f)tUpload(f);});
+    document.body.appendChild(inp);}
+  inp.click();}
+// STREAMING upload: send the File as the raw body -> browser streams it natively (no FileReader/base64, which
+// silently OOMs mobile Safari on video). Server writes it to disk in chunks and types its path into the session.
+function tUpload(f){if(!f)return;
+  if(f.size>TMAXMB*1024*1024){tToast('Too big: '+(f.size/1048576|0)+'MB (max '+TMAXMB+'MB)',4000);return;}
+  tToast('Uploading '+f.name+' ('+(f.size/1048576).toFixed(1)+'MB)…',0);
+  var qs='session='+encodeURIComponent(name)+'&filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'');
+  fetch('/api/session-upload-raw?'+qs,{method:'POST',body:f})
+    .then(function(r){return r.json().catch(function(){return {ok:false,error:'HTTP '+r.status};});})
+    .then(function(r){if(r&&r.ok){tToast('📎 Attached '+r.name+' — review & press Enter',3500);}
+      else{tToast('Upload failed: '+((r||{}).error||'?'),5000);}})
+    .catch(function(e){tToast('Upload failed: '+(e&&e.message||'network'),5000);});}
 </script></body></html>"""
 
 RALPH_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ralph loop</title>

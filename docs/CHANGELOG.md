@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.153 -- 2026-07-05  (Session file attach: streaming upload -- videos + mobile now work)
+- The terminal attach (📎 / drag-drop) used to base64-encode the whole file in the browser then POST it as JSON.
+  On mobile Safari that silently OOMs on ANY video (even a 6s clip) -> the picker "prepared" the file then did
+  nothing, and the only error went to a status pill invisible on phones. FIX: new **`/api/session-upload-raw`**
+  streams the File body straight to disk in 1MB chunks (no base64, nothing whole in memory, browser OR server);
+  the client now sends the File directly and shows a **visible centered toast** for uploading/attached/too-big/
+  failed. iOS picker hardened (persistent offscreen input w/ accept, not a display:none throwaway). Default upload
+  cap raised 50MB -> **500MB** (safe now that it streams to disk; `max_upload_mb` still overrides). Desktop
+  drag-drop uses the same streaming path.
+
 ## 0.99.152 -- 2026-07-05  (Edge MCP: Sidekick/InDesign driving lessons made standard-issue)
 - Baked the hard-won Sidekick/InDesign driving knowledge into `extensions/edge-mcp/AGENT.md` so no future
   install relearns it the slow way. Corrected the misleading "long ops are fine / no micro-batch" note: the
