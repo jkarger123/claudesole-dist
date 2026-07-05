@@ -14520,7 +14520,12 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/update-status": return self._s(200, json.dumps(update_status()))
         if u.path == "/api/settings": return self._s(200, json.dumps(settings_get()))
         if u.path == "/api/chief": return self._s(200, json.dumps(chief_overview()))
-        if u.path == "/term": return self._s(200, TERM_PAGE, "text/html; charset=utf-8")
+        if u.path == "/term":
+            # /term is a standalone page (no window.CC bootstrap like the main PAGE) -> inject the bits it reads
+            # (the REAL upload cap + protected sessions) so the attach uses the config cap, not the ||50 fallback.
+            _boot = "<script>window.CC=Object.assign(window.CC||{},%s);</script>" % json.dumps(
+                {"maxUploadMb": _session_upload_cap_mb(), "protectedSessions": CC.get("protected_sessions") or [], "chiefSession": CHIEF})
+            return self._s(200, TERM_PAGE.replace("<body>", "<body>" + _boot, 1), "text/html; charset=utf-8")
         if u.path == "/ralph": return self._s(200, RALPH_PAGE, "text/html; charset=utf-8")
         if u.path.startswith("/static/"): return self.serve_static(u.path[len("/static/"):])
         if u.path == "/": return self._s(200, render_page(), "text/html; charset=utf-8")
@@ -15695,7 +15700,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.getElement
 // GIVE CLAUDE A FILE: drag a file onto this terminal page (or use the 📎 button) -> upload + the server
 // types the file's absolute path into this session so Claude reads it. This page is its own document (no
 // nested iframe), so a drop on the body works directly -- the dashboard handles the iframe-overlay case.
-var TMAXMB=(window.CC&&window.CC.maxUploadMb)||50;
+var TMAXMB=(window.CC&&window.CC.maxUploadMb)||500;   // matches the server default; /term now injects the real cap
 (function(){var ov=document.createElement('div');ov.id='dropov';
   ov.style.cssText='position:fixed;inset:0;z-index:60;display:none;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:rgba(10,10,15,.86);border:3px dashed #e8c547;color:#fff;font:600 17px -apple-system,sans-serif;text-align:center;padding:24px';
   ov.innerHTML='<div style="font-size:42px">&#128206;</div><div>Drop to give Claude this file</div><div style="font-weight:400;font-size:13px;color:#a0a0b0">it uploads, then its path is typed into this session</div>';

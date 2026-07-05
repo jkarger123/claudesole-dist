@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.154 -- 2026-07-05  (Attach cap: /term now uses the real 500MB limit, not the 50MB fallback)
+- 0.99.153 raised the upload cap to 500MB, but the terminal attach still rejected anything over 50MB: the `/term`
+  page is served as a standalone string with NO `window.CC` bootstrap (only the main dashboard PAGE gets it), so
+  `TMAXMB=(window.CC&&window.CC.maxUploadMb)||50` fell through to the hardcoded 50. FIX: `/term` now injects a tiny
+  `window.CC` (real `maxUploadMb` from config + protectedSessions + chiefSession) so the attach uses the true cap;
+  client fallback bumped 50->500 to match the server default.
+
 ## 0.99.153 -- 2026-07-05  (Session file attach: streaming upload -- videos + mobile now work)
 - The terminal attach (📎 / drag-drop) used to base64-encode the whole file in the browser then POST it as JSON.
   On mobile Safari that silently OOMs on ANY video (even a 6s clip) -> the picker "prepared" the file then did
