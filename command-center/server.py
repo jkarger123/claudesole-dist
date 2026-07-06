@@ -14349,6 +14349,8 @@ def _studio_render_worker(jid, body):
     """AUTO-BUILD render: shells the engine's studio.py (deterministic auto-cut, beat-synced, impact FX) -> MP4."""
     try:
         _studio_set(jid, state="running", pct=10, msg="starting")
+        if not _studio_ensure_bins(lambda m: _studio_set(jid, msg=m)):
+            return _studio_set(jid, state="error", pct=100, error="media tools (ffmpeg/yt-dlp) unavailable on this node")
         os.makedirs(STUDIO_OUT_DIR, exist_ok=True)
         out = os.path.join(STUDIO_OUT_DIR, "studio_%s.mp4" % jid)
         clips = [c for c in (body.get("clips") or []) if c and os.path.exists(c)]
@@ -14382,6 +14384,42 @@ def _studio_render_worker(jid, body):
 
 def studio_job(jid):
     with _STUDIO_LOCK: return dict(_STUDIO_JOBS.get(jid) or {"state": "unknown"})
+
+STUDIO_BIN = os.path.join(CC_HOME, "bin")
+_STUDIO_BIN_LOCK = threading.Lock()
+def _studio_bins_present():
+    return all(os.path.exists(os.path.join(STUDIO_BIN, x)) for x in ("ffmpeg", "ffprobe", "yt-dlp"))
+
+def _studio_ensure_bins(note=None):
+    """P5 packaging: the render engine needs static ffmpeg/ffprobe/yt-dlp in bin/ (node-local, not shipped). On a
+    node that lacks them, download once from stable sources so Studio renders EVERYWHERE, not just the build Mac.
+    macOS only (the fleet is macOS). Returns True if present/installed."""
+    if _studio_bins_present(): return True
+    import platform, urllib.request, zipfile, io
+    with _STUDIO_BIN_LOCK:
+        if _studio_bins_present(): return True
+        os.makedirs(STUDIO_BIN, exist_ok=True)
+        UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ClaudeFather-Studio"}
+        def _get(u): return urllib.request.urlopen(urllib.request.Request(u, headers=UA), timeout=240).read()
+        arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "amd64"
+        base = "https://ffmpeg.martin-riedl.de/redirect/latest/macos/%s/release" % arch
+        try:
+            for tool in ("ffmpeg", "ffprobe"):
+                dest = os.path.join(STUDIO_BIN, tool)
+                if os.path.exists(dest): continue
+                if note: note("installing %s (one-time, ~30MB)" % tool)
+                z = zipfile.ZipFile(io.BytesIO(_get("%s/%s.zip" % (base, tool))))
+                nm = next(n for n in z.namelist() if n.rstrip("/").endswith(tool))
+                open(dest, "wb").write(z.read(nm)); os.chmod(dest, 0o755)
+            yt = os.path.join(STUDIO_BIN, "yt-dlp")
+            if not os.path.exists(yt):
+                if note: note("installing yt-dlp (one-time)")
+                open(yt, "wb").write(_get("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"))
+                os.chmod(yt, 0o755)
+        except Exception as e:
+            if note: note("media-tools install failed: %s" % str(e)[:100])
+            return False
+        return _studio_bins_present()
 
 def _studio_engine_json(args, timeout=900):
     """Run an engine CLI (project.py / edl.py) and parse its (possibly multi-line pretty) JSON stdout robustly."""
@@ -14443,6 +14481,8 @@ def _studio_build_worker(jid, body):
     """AUTO-BUILD -> a SAVED, editable project (+ filmstrips + waveform). The timeline then loads & edits it."""
     try:
         _studio_set(jid, state="running", pct=10, msg="resolving music")
+        if not _studio_ensure_bins(lambda m: _studio_set(jid, msg=m)):
+            return _studio_set(jid, state="error", pct=100, error="media tools (ffmpeg/yt-dlp) unavailable on this node")
         clips = [c for c in (body.get("clips") or []) if c and os.path.exists(c)]
         music = (body.get("music") or "").strip()
         if not clips: return _studio_set(jid, state="error", pct=100, error="no clips uploaded")
@@ -14487,6 +14527,8 @@ def _studio_capcut_worker(jid, body):
         if not isinstance(proj, dict) or not proj.get("tracks"):
             return _studio_set(jid, state="error", pct=100, error="no project to export")
         _studio_set(jid, state="running", pct=20, msg="cutting clips for CapCut")
+        if not _studio_ensure_bins(lambda m: _studio_set(jid, msg=m)):
+            return _studio_set(jid, state="error", pct=100, error="media tools (ffmpeg) unavailable on this node")
         os.makedirs(STUDIO_OUT_DIR, exist_ok=True); os.makedirs(STUDIO_CACHE, exist_ok=True)
         tmp_json = os.path.join(STUDIO_CACHE, "_cc_%s.json" % jid)
         with open(tmp_json, "w") as f: json.dump(proj, f)
@@ -14512,6 +14554,8 @@ def _studio_render_project_worker(jid, body):
             return _studio_set(jid, state="error", pct=100, error="no project to render")
         proxy = bool(body.get("proxy"))
         _studio_set(jid, state="running", pct=15, msg="proxy preview" if proxy else "rendering")
+        if not _studio_ensure_bins(lambda m: _studio_set(jid, msg=m)):
+            return _studio_set(jid, state="error", pct=100, error="media tools (ffmpeg) unavailable on this node")
         os.makedirs(STUDIO_OUT_DIR, exist_ok=True)
         tmp_json = os.path.join(STUDIO_CACHE, "_render_%s.json" % jid)
         os.makedirs(STUDIO_CACHE, exist_ok=True)
@@ -15113,6 +15157,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(studio_project_load(q.get("id", [""])[0])))
         if u.path == "/api/studio/projects":
             return self._s(200, json.dumps({"ok": True, "projects": studio_projects_list()}))
+        if u.path == "/api/studio/tools":
+            return self._s(200, json.dumps({"ok": True, "present": _studio_bins_present()}))
         if u.path == "/api/studio/media":     # Range/206-capable media serve for <video> (file-get is whole-file-in-memory)
             return self._studio_media(q)
         return self._s(404, "{}")

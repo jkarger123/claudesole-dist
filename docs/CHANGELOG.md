@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.159 -- 2026-07-05  (Video Studio P5: media-tools bootstrap -> renders on every node)
+- Video Studio needs static **ffmpeg/ffprobe/yt-dlp** in the node's `bin/` (node-local, not shipped in the
+  framework -- ~110MB of binaries don't belong in git). Until now Studio only rendered on the build Mac.
+- **Bootstrap:** on the first render/build/export, if those binaries are missing, the node now downloads them
+  ONCE from stable sources (ffmpeg/ffprobe: martin-riedl.de static macOS build; yt-dlp: its GitHub release) into
+  `bin/`, with a "installing... (one-time)" job status. A fast no-op where they already exist. So Studio now works
+  on ANY macOS fleet node, not just here -- the packaged-product goal. Fails cleanly (clear error) with no network.
+- `GET /api/studio/tools` reports whether the media tools are present (diagnostics/Doctor).
+- Video Studio P1-P5 COMPLETE: auto-build -> timeline editor -> MP4 + CapCut export, renderable fleet-wide.
+
 ## 0.99.158 -- 2026-07-05  (Video Studio P4: CapCut export)
 - **Export -> CapCut** button in the editor. Produces a zip (lands in Files) with, most-reliable-first:
   `clips/clip_NN.mp4` (every cut, in order, speed baked in, normalized to canvas) + `music.mp3` +
