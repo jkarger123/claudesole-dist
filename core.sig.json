@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "3da68efb081a3ebfaf88f5c22e88a86313e0c9391150d72fae0dfb5221cd5403",
+      "claudesole.manifest.json": "4ef5b9f6e3106130b117b9bc6b02f2ede0c377f80dc7e8e64dec9cd161319acc",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
       "command-center/cc-email": "4895c4eb4ca8e1c6f3b26dd260f9ee3b776c42f24ec656b8581d1cef0c4155ed",
@@ -49,7 +49,7 @@
       "command-center/morning_brief.py": "1403f522f540b6447fe8a9aa9f19fe1cb4308115889fb798292a38ad12786701",
       "command-center/notebook.py": "c681d06cef3f433fb5de9965661310828ef059ae8b9cca44a268883ee7f1bdac",
       "command-center/preship.py": "960fd8365858089451e33740af7a2e1bb1cc44d09219c63ee6b244b86d24c3e9",
-      "command-center/ralph_runner.py": "cfe1c598b0c7d167e354ef097d6e8489ed854967a223eab5d154e2dc44369b85",
+      "command-center/ralph_runner.py": "516905583666730da9a9022e2213c7bb01afe2d9faa99d4e31093a2d6ad099e5",
       "command-center/residue_lint.py": "a48f5893bedc12816d84788dde78ffd162fff2334996c680361b843b46a22f70",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
       "command-center/server.py": "69352acf8a85d60a0e4d2d2bd8b665edfc36533d844c21e5ba2ed03cd2eae6b0",
@@ -145,9 +145,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783363396,
+    "generated": 1783372438,
     "v": 1,
-    "version": "0.99.177"
+    "version": "0.99.178"
   },
-  "sig": "UBSfVxtx8YPe8reVify3U6rzNFka9fxaZOn5j5O1LA16leY7oW6cFA+2Pa/fWT7qv8M7Jui4lNa5DLQSa93bDQ=="
+  "sig": "3vysuNFu8O1Usf5yI15QDr3m+bQtoGqeeDto8enDTy+MBfZB8SnFqVoXBnepUcOWHH6T0R3X4j4NoBPW4LfVCg=="
 }

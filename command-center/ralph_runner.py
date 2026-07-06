@@ -250,8 +250,26 @@ def run_iteration(n):
     if stop["why"] == "pause": log("  iteration interrupted (pause requested)."); return "pause"
     return "ok"
 
+# ---- the live-view sibling tab ----------------------------------------------
+def _ensure_live_tab():
+    """Spawn the `ralph-<name>-live` tab the moment the runner starts, so BOTH windows appear together no matter
+    HOW the loop was launched (API, cc-ralph, or an agent starting the runner directly). Idempotent + best-effort;
+    only when we're inside tmux (a normal ralph launch), never during a bare direct-run test."""
+    if not os.environ.get("TMUX"): return
+    try:
+        import shutil as _sh
+        tmux = _sh.which("tmux") or "/opt/homebrew/bin/tmux"
+        live = "ralph-%s-live" % NAME
+        if subprocess.run([tmux, "has-session", "-t", live], capture_output=True).returncode == 0: return
+        here = os.path.dirname(os.path.abspath(__file__))
+        subprocess.run([tmux, "new-session", "-d", "-s", live, "-c", here,
+                        "CC_HOME=%s python3 %s %s" % (CC_HOME, os.path.join(here, "ralph_live.py"), NAME)],
+                       capture_output=True, timeout=10)
+    except Exception: pass
+
 # ---- main loop ---------------------------------------------------------------
 def main():
+    _ensure_live_tab()                          # bring up the live-iteration tab immediately, alongside the runner
     log("")
     log("  ========================================================")
     log("  =  RALPH LOOP -- %s" % NAME)

@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.178 -- 2026-07-06  (Ralph: live tab comes up WITH the runner, every launch path)
+- The runner now spawns its own `ralph-<name>-live` tab at startup, so BOTH windows appear together the instant a
+  loop starts -- no matter how it was launched (dashboard, cc-ralph, or an agent starting the runner directly).
+  Before, only the API-launch path spawned it up front; a directly-launched loop got its live tab ~90s late (only
+  when the self-heal ran on the next dashboard poll). Idempotent; the server-side launch spawn + self-heal remain
+  as backups.
+
 ## 0.99.177 -- 2026-07-06  (Ralph: keep the RUNNER tab clean -- detail belongs in the live tab)
 - The runner tab is back to how it was before the live tab existed: just the iteration number + the little
   end-of-iteration blurb (the final result text + turns/time). The per-step activity (> Bash, > Read, mid-run
