@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.158 -- 2026-07-05  (Video Studio P4: CapCut export)
+- **Export -> CapCut** button in the editor. Produces a zip (lands in Files) with, most-reliable-first:
+  `clips/clip_NN.mp4` (every cut, in order, speed baked in, normalized to canvas) + `music.mp3` +
+  `EDIT_PLAN.txt` (clip order/durations, flash + zoom times, titles) -- drop the clips into any CapCut template
+  on the beat (CapCut auto-fits) and follow the plan. Plus an EXPERIMENTAL `draft_content.json`
+  (pyJianYingDraft-style, microsecond timeranges) to try opening the draft directly. Honest: the clips+plan
+  always work; the auto-draft may need CapCut-version tweaks (README in the zip explains both).
+- NEW `engine/capcut.py` (`export(project, out.zip)`); server `/api/studio/export-capcut` (background job);
+  the zip downloads via the Range media route (application/zip).
+- Video Studio now covers P1-P4: auto-build -> timeline editor (trim/speed/reorder/flash/zoom/titles) -> MP4
+  export + CapCut export. Remaining: P5 packaging (distribute the ffmpeg/yt-dlp binaries so every node renders).
+
 ## 0.99.157 -- 2026-07-05  (Video Studio P3: titles, zoom, cleaner auto-build)
 - **Titles track:** add a title (+Title button or tap the titles lane), tap a title to edit/delete. Burns in over
   the video (white text + box, top-third). Renders via the existing drawtext path.

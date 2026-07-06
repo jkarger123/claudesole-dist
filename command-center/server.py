@@ -14472,6 +14472,36 @@ def studio_render_project_start(body):
     threading.Thread(target=_studio_render_project_worker, args=(jid, body), daemon=True).start()
     return {"ok": True, "job_id": jid}
 
+def studio_capcut_start(body):
+    jid = secrets.token_hex(6)
+    _studio_set(jid, state="queued", pct=0, msg="queued")
+    threading.Thread(target=_studio_capcut_worker, args=(jid, body), daemon=True).start()
+    return {"ok": True, "job_id": jid}
+
+def _studio_capcut_worker(jid, body):
+    """Export a CapCut bundle (zip: cut clips + music + EDIT_PLAN.txt + experimental draft_content.json) -> Files."""
+    try:
+        proj = body.get("project")
+        if not proj and body.get("id"):
+            r = studio_project_load(body["id"]); proj = r.get("project") if r.get("ok") else None
+        if not isinstance(proj, dict) or not proj.get("tracks"):
+            return _studio_set(jid, state="error", pct=100, error="no project to export")
+        _studio_set(jid, state="running", pct=20, msg="cutting clips for CapCut")
+        os.makedirs(STUDIO_OUT_DIR, exist_ok=True); os.makedirs(STUDIO_CACHE, exist_ok=True)
+        tmp_json = os.path.join(STUDIO_CACHE, "_cc_%s.json" % jid)
+        with open(tmp_json, "w") as f: json.dump(proj, f)
+        out = os.path.join(STUDIO_OUT_DIR, "capcut_%s.zip" % jid)
+        res = _studio_engine_json(["python3", os.path.join(STUDIO_ENGINE, "capcut.py"), tmp_json, out])
+        try: os.remove(tmp_json)
+        except Exception: pass
+        if res.get("ok") and os.path.exists(out):
+            _studio_set(jid, state="done", pct=100, msg="ready", path=out, clips=res.get("clips"),
+                        rel="command-center/deliverables/capcut_%s.zip" % jid)
+        else:
+            _studio_set(jid, state="error", pct=100, error=str(res.get("error", "export failed"))[:300])
+    except Exception as e:
+        _studio_set(jid, state="error", pct=100, error=str(e)[:200])
+
 def _studio_render_project_worker(jid, body):
     """Render an edited project (posted inline, or by id) -> MP4 via edl.py. proxy=1 -> a fast 480p preview."""
     try:
@@ -15126,6 +15156,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(studio_build_project_start(body)))
         if u.path == "/api/studio/render-project":
             return self._s(200, json.dumps(studio_render_project_start(body)))
+        if u.path == "/api/studio/export-capcut":
+            return self._s(200, json.dumps(studio_capcut_start(body)))
         if u.path == "/api/studio/project-save":
             return self._s(200, json.dumps(studio_project_save(body)))
         if u.path == "/api/close-session":
@@ -16132,6 +16164,7 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
     <button class="btn sm" id="eBack">&larr; Build</button>
     <input id="eName" type="text" style="flex:1;min-width:100px" placeholder="Project name">
     <button class="btn sm" id="eAddText">+ Title</button>
+    <button class="btn sm" id="eCapcut">&#10515; CapCut</button>
     <button class="btn sm" id="eZoomOut">&minus;</button><button class="btn sm" id="eZoomIn">+</button>
   </div>
   <video id="eVideo" controls playsinline preload="metadata"></video>
@@ -16343,6 +16376,17 @@ function checkRender(id,proxy){fetch('/api/studio/job?id='+id).then(function(r){
     var v=$('eVideo');v.src=media(j.path)+'&t='+Date.now();v.load();
     $('eStatus').innerHTML=proxy?'Preview ready - play above.':'Exported '+(j.duration||'')+'s &#10003; saved to Files. <a class="dl" download href="'+media(j.path)+'">Download</a>';
   }else if(j.state==='error'){stopPoll();$('ePreview').disabled=false;$('eExport').disabled=false;$('eStatus').textContent='Failed: '+(j.error||'?');}
+}).catch(function(){});}
+$('eCapcut').onclick=function(){if(!proj)return;$('eCapcut').disabled=true;$('eStatus').textContent='Building CapCut bundle (cutting clips)...';
+  fetch('/api/studio/export-capcut',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:proj})}).then(function(r){return r.json();}).then(function(r){
+    if(!r||!r.job_id){$('eCapcut').disabled=false;$('eStatus').textContent='Could not start CapCut export';return;}
+    stopPoll();poll=setInterval(function(){checkCapcut(r.job_id);},1500);
+  }).catch(function(){$('eCapcut').disabled=false;$('eStatus').textContent='Network error';});};
+function checkCapcut(id){fetch('/api/studio/job?id='+id).then(function(r){return r.json();}).then(function(j){
+  $('eStatus').textContent='CapCut '+(j.msg||'')+' '+(j.pct||0)+'%';
+  if(j.state==='done'){stopPoll();$('eCapcut').disabled=false;
+    $('eStatus').innerHTML='CapCut bundle ready ('+(j.clips||'')+' clips) &#10003; in Files. <a class="dl" download href="'+media(j.path)+'">Download .zip</a> &mdash; drop clips/ into a CapCut template.';}
+  else if(j.state==='error'){stopPoll();$('eCapcut').disabled=false;$('eStatus').textContent='CapCut export failed: '+(j.error||'?');}
 }).catch(function(){});}
 loadRecent();
 </script></body></html>"""
