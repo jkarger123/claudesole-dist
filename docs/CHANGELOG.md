@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.174 -- 2026-07-06  (Ralph: watch the current iteration LIVE in its own tab)
+- Every Ralph loop now has a SECOND tab -- `ralph-<name>-live` -- that shows what the CURRENT iteration is doing,
+  live (tool calls, edits, commands, the assistant's text, the result), and auto-refreshes each iteration. Tab 1
+  stays the clean runner/control view; tab 2 is the live agent activity, exactly the two-tab split requested.
+- How: the runner now invokes each iteration as `claude -p --verbose --output-format stream-json`, tees that event
+  stream to `<loop>/live.jsonl` (reset per iteration), and keeps a compact one-line-per-event summary in its own
+  pane. `ralph_live.py` follows that file and pretty-prints it in the live tab. The loop's anti-gaming/convergence
+  logic is untouched (it never parsed stdout -- it counts progress.md + verify.py).
+- The live tab spawns on launch, is reaped when the loop ends (any path), shows as "Ralph: <name> (live)" in
+  Sessions, and each running/paused loop card gets a "watch live" button.
+
 ## 0.99.173 -- 2026-07-06  (Resilience: MCP / extension process-hygiene reaper -- every install self-cleans)
 - **Self-healing reaper for leaked MCP servers.** Third-party Claude Desktop MCP extensions that don't exit on
   disconnect orphan to launchd and busy-spin; dozens pile up and wedge the machine (real case: 41 leaked "Sidekick

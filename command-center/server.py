@@ -2009,6 +2009,7 @@ def _session_label(name):
     if name == globals().get("CHIEF"): return "Chief of Staff"
     if name in _AGENT_TITLES: return _AGENT_TITLES[name]   # the agent named this session itself
     if name in _SESSLABEL: return _SESSLABEL[name]
+    if name.startswith("ralph-") and name.endswith("-live"): return "Ralph: " + name[6:-5] + " (live)"
     if name.startswith("ralph-"): return "Ralph: " + name[6:]
     m = re.match(r"hp-(fork|r)-(.+)", name)
     if m:
@@ -8465,6 +8466,18 @@ def resume_session(machine, sid, cwd, fork=False, label=""):
 # ---- Ralph loops: file-driven, reusable, parallel agent loops ----------------
 RALPHDIR = os.path.join(CC_HOME, "data", "ralph")   # one dir per loop (on the SSD)
 RUNNER   = os.path.join(BASE, "ralph_runner.py")
+RALPH_LIVE = os.path.join(BASE, "ralph_live.py")    # the "live iteration" second-tab renderer (follows live.jsonl)
+
+def _ralph_live_spawn(n):
+    """Spawn (or re-attach) the `ralph-<n>-live` tab -- a terminal that renders the CURRENT iteration's activity
+    live. Idempotent: no-op if it's already running. Best-effort (a loop must never fail to start over this)."""
+    live = "ralph-" + n + "-live"
+    try:
+        if sh([TMUX, "has-session", "-t", live])[0] == 0: return live
+        sh([TMUX, "new-session", "-d", "-s", live, "-c", BASE,
+            "CC_HOME=%s python3 %s %s" % (CC_HOME, RALPH_LIVE, n)])
+    except Exception: pass
+    return live
 RFILES   = {"progress": "progress.md", "notes": "notes.md", "rules": "rules.md", "prompt": "prompt.txt"}
 
 def _rname(name):
@@ -8498,6 +8511,11 @@ def ralph_list():
             alive = _ralive(name)
             state = st.get("state", "idle")
             if not alive and state in ("running", "paused"): state = "stopped"   # session died
+            if not alive:                                                        # runner gone -> reap any orphan live tab
+                try:
+                    if sh([TMUX, "has-session", "-t", "ralph-" + name + "-live"])[0] == 0:
+                        sh([TMUX, "kill-session", "-t", "ralph-" + name + "-live"])
+                except Exception: pass
             out.append({"name": name, "state": state, "alive": alive, "iteration": st.get("iteration", 0),
                         "progress": st.get("progress", {}), "current": st.get("current", ""),
                         "goal": cfg.get("goal", ""), "cwd": cfg.get("cwd", ""), "updated": st.get("updated", 0)})
@@ -8514,9 +8532,11 @@ def ralph_detail(name):
                     "rules": _rread(os.path.join(PROJECT, "ralph_%s_rules.md" % n)),
                     "prompt": _rread(os.path.join(PROJECT, "ralph_%s_prompt.txt" % n)), "log": ""}
         return {"error": "no such loop"}
+    _lv = "ralph-" + _rname(name) + "-live"
     return {"name": _rname(name), "config": _rjson(os.path.join(d, "loop.json")),
             "status": _rjson(os.path.join(d, "status.json")), "alive": _ralive(name),
             "session": "ralph-" + _rname(name),
+            "live_session": _lv, "live_alive": sh([TMUX, "has-session", "-t", _lv])[0] == 0,
             "progress": _rread(os.path.join(d, "progress.md")), "notes": _rread(os.path.join(d, "notes.md")),
             "rules": _rread(os.path.join(d, "rules.md")), "prompt": _rread(os.path.join(d, "prompt.txt")),
             "log": _rread(os.path.join(d, "run.log"), 300)}
@@ -8536,7 +8556,9 @@ def ralph_launch(name):
     d = _rdir(name)
     if not d: return {"ok": False, "error": "no such loop"}
     n = _rname(name); sess = "ralph-" + n
-    if _ralive(name): return {"ok": True, "session": sess, "term": "/term?name=" + sess, "note": "already running"}
+    if _ralive(name):
+        _lv = _ralph_live_spawn(n)               # keep the live tab available even on a re-open
+        return {"ok": True, "session": sess, "term": "/term?name=" + sess, "live": _lv, "live_term": "/term?name=" + _lv, "note": "already running"}
     if _ral_done_at_launch(d):   # LAUNCH-TIME completion guard: never respawn a finished loop -> the (unidentified) relaunch trigger becomes a no-op, ending the churn
         return {"ok": True, "session": sess, "complete": True, "note": "loop is complete -- not relaunched (archive it, or add unchecked items to resume)"}
     for ctl in ("halt", "pause"):
@@ -8546,7 +8568,8 @@ def ralph_launch(name):
     _cfgpath = os.environ.get("CC_CONFIG") or os.path.join(CC_HOME, "cc.config.json")
     sh([TMUX, "new-session", "-d", "-s", sess, "-c", BASE,
         "CC_NOTIFY=http://127.0.0.1:%d CC_CONFIG=%s python3 %s %s" % (PORT, _cfgpath, RUNNER, n)])
-    return {"ok": True, "session": sess, "term": "/term?name=" + sess}
+    _lv = _ralph_live_spawn(n)                    # second tab: watch the current iteration live
+    return {"ok": True, "session": sess, "term": "/term?name=" + sess, "live": _lv, "live_term": "/term?name=" + _lv}
 
 def _loop_notify_target(cfg):
     """Who to ping for a loop: its recorded notify_session, else a live session (chiefs first) whose cwd is the
@@ -8611,6 +8634,7 @@ def ralph_control(name, action):
     elif action == "kill":                                                    # immediate
         open(os.path.join(d, "halt"), "w").close()
         sh([TMUX, "kill-session", "-t", "ralph-" + n])
+        sh([TMUX, "kill-session", "-t", "ralph-" + n + "-live"])              # tear down the live tab too
     elif action == "archive":                                                 # move to Previous loops
         if _ralive(name): return {"ok": False, "error": "still running -- halt it first"}
         src = os.path.join(RALPHDIR, n)
@@ -18980,8 +19004,9 @@ function ralphCard(r){
   const col=RCOL[r.state]||"#a0a0b0";
   const bar='<div style="height:6px;background:#22222e;border-radius:3px;overflow:hidden;margin:7px 0"><div style="height:100%;width:'+pct+'%;background:'+col+'"></div></div>';
   let btns='';
-  if(r.state=="running") btns='<button class="mini" onclick="ralphAct(\''+esc(r.name)+'\',\'pause\')">pause</button><button class="mini danger" onclick="ralphAct(\''+esc(r.name)+'\',\'halt\')">halt</button>';
-  else if(r.state=="paused") btns='<button class="mini go" onclick="ralphAct(\''+esc(r.name)+'\',\'resume\')">▶ resume</button><button class="mini danger" onclick="ralphAct(\''+esc(r.name)+'\',\'halt\')">halt</button>';
+  const watchBtn='<button class="mini" title="watch the current iteration live in its own tab" onclick="ralphWatchLive(\''+esc(r.name)+'\')">watch live</button>';
+  if(r.state=="running") btns=watchBtn+'<button class="mini" onclick="ralphAct(\''+esc(r.name)+'\',\'pause\')">pause</button><button class="mini danger" onclick="ralphAct(\''+esc(r.name)+'\',\'halt\')">halt</button>';
+  else if(r.state=="paused") btns=watchBtn+'<button class="mini go" onclick="ralphAct(\''+esc(r.name)+'\',\'resume\')">▶ resume</button><button class="mini danger" onclick="ralphAct(\''+esc(r.name)+'\',\'halt\')">halt</button>';
   else { const ran=(r.state=="done"||r.state=="halted"||r.state=="stopped");
     btns='<button class="mini go" title="start this loop" onclick="ralphLaunch(\''+esc(r.name)+'\')">▶ '+(ran?'relaunch':'launch')+'</button>'
         +'<button class="mini" title="move to Previous (completed)" onclick="ralphAct(\''+esc(r.name)+'\',\'archive\')">✓ complete</button>'
@@ -18996,6 +19021,7 @@ async function ralphLaunch(n){toast("Launching "+n+"…");const r=await(await fe
 async function ralphAct(n,a){await fetch("/api/ralph-control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,action:a})});toast(a+" → "+n);setTimeout(loadRalph,800);}
 async function ralphDel(n){if(!await confirmM('Delete loop "'+n+'"?\n\nMoves it to _trash (reversible) and removes it from the list.'))return;const r=await(await fetch("/api/ralph-control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,action:"delete"})})).json();if(r&&r.ok){toast("Deleted "+n);loadRalph();}else toast("Failed: "+((r||{}).error||"?"),5000);}
 function openRalph(n){location.href="/ralph?name="+encodeURIComponent(n);}
+function ralphWatchLive(n){var s='ralph-'+n+'-live';_openTerm({session:s,term:'/term?name='+encodeURIComponent(s)});}
 async function newRalph(){
   const name=(await promptM("New loop name (letters/numbers/-_):")||"").trim(); if(!name)return;
   const goal=(await promptM("One-line goal:")||"").trim();

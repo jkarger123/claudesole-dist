@@ -167,6 +167,24 @@ def on_sigint(sig, frame):
 signal.signal(signal.SIGINT, on_sigint)
 
 # ---- one iteration -----------------------------------------------------------
+def _pane_summary(raw):
+    """Turn a stream-json event into a SHORT line for the runner's own pane (tool names + brief text + the result).
+    The rich, full view lives in the `ralph-<name>-live` tab; this keeps tab 1 a compact control+activity trail."""
+    try: e = json.loads(raw)
+    except Exception: return raw[:200]                 # non-JSON (shouldn't happen with stream-json) -> show it
+    t = e.get("type")
+    if t == "assistant":
+        outs = []
+        for b in (e.get("message", {}).get("content") or []):
+            if b.get("type") == "tool_use": outs.append("> " + str(b.get("name", "")))
+            elif b.get("type") == "text":
+                tx = (b.get("text") or "").strip().replace("\n", " ")
+                if tx: outs.append(tx[:120])
+        return "   ".join(outs)
+    if t == "result":
+        return "= %s  (%s turns, %.1fs)" % (e.get("subtype", ""), e.get("num_turns"), (e.get("duration_ms") or 0) / 1000.0)
+    return ""                                          # skip system/user/rate-limit noise in the runner pane
+
 def run_iteration(n):
     prompt = read(lp("prompt.txt")).replace("$ITER", str(n))
     if not prompt.strip():
@@ -191,9 +209,15 @@ def run_iteration(n):
             time.sleep(1)
         return "ok"
 
-    cmd = ["claude", "--dangerously-skip-permissions", "--max-turns", str(MAX_TURNS), "-p"]
+    # stream-json -> we can render the iteration LIVE in the `ralph-<name>-live` tab (ralph_live.py follows live.jsonl)
+    cmd = ["claude", "--dangerously-skip-permissions", "--max-turns", str(MAX_TURNS), "--verbose", "--output-format", "stream-json", "-p"]
     if MODEL: cmd[1:1] = ["--model", MODEL]
     env = dict(os.environ); env["PATH"] = env.get("PATH", "") + ":" + os.path.join(HOME, ".local/bin") + ":/opt/homebrew/bin"
+    _lf = None                               # ONE handle for the whole iteration: truncate (reset the live tab) + keep open to stream into
+    try:
+        _lf = open(lp("live.jsonl"), "w", encoding="utf-8")
+        _lf.write(json.dumps({"type": "cc_iter", "iter": n, "ts": time.time()}) + "\n"); _lf.flush()
+    except Exception: _lf = None
     try:
         proc = subprocess.Popen(cmd, cwd=CWD, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
@@ -216,7 +240,16 @@ def run_iteration(n):
             time.sleep(2)
     t = threading.Thread(target=watch, daemon=True); t.start()
     for line in proc.stdout:
-        log("  " + line.rstrip("\n"))
+        raw = line.rstrip("\n")
+        if not raw: continue
+        if _lf:                                   # feed the live tab (ralph_live.py renders this stream)
+            try: _lf.write(raw + "\n"); _lf.flush()
+            except Exception: pass
+        s = _pane_summary(raw)                     # keep the runner pane a COMPACT control+activity view
+        if s: log("  " + s)
+    try:
+        if _lf: _lf.close()
+    except Exception: pass
     proc.wait(); INTERRUPTED["proc"] = None
     if stop["why"] == "timeout":
         log("  ITERATION TIMED OUT (%ds) -- killed." % TIMEOUT); return "timeout"
