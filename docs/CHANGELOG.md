@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.175 -- 2026-07-06  (cc-ralph: stop/restart verbs)
+- `cc-ralph` gains `restart` / `halt` / `kill` / `pause` / `resume` (were: only new/launch/list). `restart <name>`
+  stops a loop and relaunches it -- it resumes from its saved progress AND picks up the latest runner code (so an
+  agent can move a loop onto the new live-iteration tab with one command). Thin wrappers over /api/ralph-control.
+
 ## 0.99.174 -- 2026-07-06  (Ralph: watch the current iteration LIVE in its own tab)
 - Every Ralph loop now has a SECOND tab -- `ralph-<name>-live` -- that shows what the CURRENT iteration is doing,
   live (tool calls, edits, commands, the assistant's text, the result), and auto-refreshes each iteration. Tab 1

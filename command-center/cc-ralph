@@ -6,9 +6,13 @@ Run it from INSIDE your session (an agent's tmux) so the loop records who to not
 
   cc-ralph new <name> [goal words...]   # create + launch a loop; records THIS session as the notify target
   cc-ralph launch <name>                # (re)launch an existing loop (keeps its recorded notify target)
+  cc-ralph restart <name>               # stop it + relaunch it (resumes from progress; picks up new runner code)
+  cc-ralph halt <name>                  # graceful stop (finishes the current iteration, then stops)
+  cc-ralph kill <name>                  # immediate stop (terminates the current iteration now)
+  cc-ralph pause <name> | resume <name> # pause / resume between iterations
   cc-ralph list                         # active loops + state
 """
-import json, os, subprocess, sys, urllib.request
+import json, os, subprocess, sys, time, urllib.request
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.dirname(BASE)
@@ -49,6 +53,28 @@ def main():
     elif cmd == "launch":
         if len(a) < 2: print("usage: cc-ralph launch <name>"); return 1
         print(json.dumps(_api("/api/ralph-launch", {"name": a[1]})))
+    elif cmd in ("halt", "kill", "pause", "resume"):
+        if len(a) < 2: print("usage: cc-ralph %s <name>" % cmd); return 1
+        r = _api("/api/ralph-control", {"name": a[1], "action": cmd})
+        print(("%s -> %s" % (cmd, a[1])) if r.get("ok") else ("%s failed: %s" % (cmd, r.get("error"))))
+        return 0 if r.get("ok") else 1
+    elif cmd == "restart":
+        if len(a) < 2: print("usage: cc-ralph restart <name>"); return 1
+        name = a[1]
+        r = _api("/api/ralph-control", {"name": name, "action": "kill"})   # immediate stop (loop resumes from progress.md)
+        if not r.get("ok") and "no such" in str(r.get("error", "")).lower():
+            print("no such loop: " + name); return 1
+        for _ in range(15):                                                # wait for the runner session to actually die
+            time.sleep(1)
+            try:
+                if not any(l.get("name") == name and l.get("alive") for l in (_api("/api/ralph", None, "GET") or [])): break
+            except Exception: break
+        r2 = _api("/api/ralph-launch", {"name": name})
+        if r2.get("ok"):
+            print("restarted '%s' -- resumes from its saved progress; both the runner and the live-iteration tab are up." % name)
+        else:
+            print("stopped but relaunch failed: " + str(r2.get("error"))); return 1
+        return 0
     elif cmd == "list":
         try:
             r = _api("/api/ralph", None, "GET")

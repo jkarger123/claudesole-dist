@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "fb0ad2aa55792b238d0d5b299f8a699f899bfe03a443c136d0a1d837d95804ca",
+      "claudesole.manifest.json": "7125ec1f1e530e9765ec61db72e691e9ce97825e77f3b58c7cb3e1697174a6ff",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
       "command-center/cc-email": "4895c4eb4ca8e1c6f3b26dd260f9ee3b776c42f24ec656b8581d1cef0c4155ed",
@@ -33,7 +33,7 @@
       "command-center/cc-instance-supervise.sh": "beea47d824ee357c126ee00309b0885dc092275207e9dbe4cda50e3d784d6e40",
       "command-center/cc-note": "dbc9030471f758aa1d74935da94212f16f11baa5f7d72ebed2f469f3ddaf9631",
       "command-center/cc-onboard": "afc6b5960da7953aa0e531ffa05a0f93b287ef1c2c8aa07b6f1b453839c94400",
-      "command-center/cc-ralph": "0dfc02b885a3db292d7b07c962b24392c7c0a85db605a4fc40433b842a008f4e",
+      "command-center/cc-ralph": "6aebcda3f266d1ba64c176f9ff901b7116c3af7b6b4566c84c1d9e97b605570d",
       "command-center/cc-review": "96d59acedf812feaee46977bac613899bf8937e8cd2763399d1b481cba5255f9",
       "command-center/cc-secure": "905c3ff71dc61697942f5c4fe5202924641b3faab8e4720029f2fca27793323e",
       "command-center/cc-session-watchdog.py": "6cb591292aa495484964c6a51e26f9ac5cf7d1d411d8c130a63fd4b3e891eccb",
@@ -145,9 +145,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783362073,
+    "generated": 1783362572,
     "v": 1,
-    "version": "0.99.174"
+    "version": "0.99.175"
   },
-  "sig": "yYI2e+8GQNVem/NCDEzsuscLVpKoF50Kqn2QLBtrwPgFo/Ccie+M15mncMtgiyY4+LsBzTLcAIneXsp8ULgcDA=="
+  "sig": "qxQKNWQflAbyaQ/yAzeZoqoHSUtAaUnGa9DvCxPSqANGCs4t1WZHBwM2VpDggm/Ll6kOL23CnbgVPFmqdwVzBw=="
 }
