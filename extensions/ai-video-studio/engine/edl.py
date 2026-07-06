@@ -31,16 +31,24 @@ def _tracks(project, kind):
     return [c for t in project.get("tracks", []) if t.get("kind") == kind for c in t.get("clips", [])]
 
 
-def _segment(src_path, in_t, out_t, speed, w, h, fps, dest, proxy=False):
-    """Cut [in..out] of a source, apply speed (speed<1 => slow-mo), normalize to the canvas. Output length =
-    (out-in)/speed. `proxy` = a fast small preview encode."""
+def _segment(src_path, in_t, out_t, speed, w, h, fps, dest, proxy=False, color=None, fit="cover"):
+    """Cut [in..out] of a source, apply speed (speed<1 => slow-mo), CROP/FIT to the canvas, and optional COLOR
+    correction. Output length = (out-in)/speed. `fit`: cover (fill+crop, default) | contain (fit+letterbox)."""
     src_len = max(0.05, float(out_t) - float(in_t))
     sp = float(speed) if speed else 1.0                    # speed FACTOR: <1 = slow-mo (output longer)
     ow = 480 if proxy else w
     oh = int(ow * h / w)
-    nf = "scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1,fps=%d" % (ow, oh, ow, oh, fps)
-    # setpts multiplier = 1/speed  (speed 0.5 -> setpts 2*PTS -> 2x slower). output len = src_len / speed.
-    vf = ("setpts=%.4f*PTS," % (1.0 / sp) if sp != 1.0 else "setpts=PTS,") + nf
+    if fit == "contain":
+        nf = ("scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,"
+              "setsar=1,fps=%d" % (ow, oh, ow, oh, fps))
+    else:                                                  # cover: fill the frame, crop the overflow (= crop-to-9:16)
+        nf = "scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1,fps=%d" % (ow, oh, ow, oh, fps)
+    chain = [("setpts=%.4f*PTS" % (1.0 / sp)) if sp != 1.0 else "setpts=PTS", nf]
+    if color:                                              # color correction: brightness / contrast / saturation
+        b = float(color.get("b", 0)); c = float(color.get("c", 1)); s = float(color.get("s", 1))
+        if abs(b) > 0.001 or abs(c - 1) > 0.001 or abs(s - 1) > 0.001:
+            chain.append("eq=brightness=%.3f:contrast=%.3f:saturation=%.3f" % (b, c, s))
+    vf = ",".join(chain)
     preset = "ultrafast" if proxy else "veryfast"
     ac._run([FFMPEG, "-y", "-ss", "%.3f" % max(0, float(in_t)), "-i", src_path, "-t", "%.3f" % src_len, "-an",
              "-vf", vf, "-c:v", "libx264", "-preset", preset, "-pix_fmt", "yuv420p", "-r", str(fps), dest])
@@ -102,7 +110,8 @@ def render(project, out, progress_cb=None, proxy=False):
         sp = srcs.get(c.get("source"), {}).get("path")
         if not sp or not os.path.exists(sp): continue
         dest = os.path.join(work, "s%03d.mp4" % i)
-        if _segment(sp, c.get("in", 0), c.get("out", 1), c.get("speed", 1.0), w, h, fps, dest, proxy=proxy) > 0.04:
+        if _segment(sp, c.get("in", 0), c.get("out", 1), c.get("speed", 1.0), w, h, fps, dest, proxy=proxy,
+                    color=c.get("color"), fit=c.get("fit", "cover")) > 0.04:
             segs.append(dest)
         if progress_cb: progress_cb(int(55 * (i + 1) / len(vclips)), "cutting")
     if not segs: return {"ok": False, "error": "no segments built"}

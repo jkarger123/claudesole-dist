@@ -14544,6 +14544,71 @@ def _studio_capcut_worker(jid, body):
     except Exception as e:
         _studio_set(jid, state="error", pct=100, error=str(e)[:200])
 
+def studio_new_manual_start(body):
+    jid = secrets.token_hex(6); _studio_set(jid, state="queued", pct=0, msg="queued")
+    threading.Thread(target=_studio_manual_worker, args=(jid, body), daemon=True).start()
+    return {"ok": True, "job_id": jid}
+
+def _studio_manual_worker(jid, body):
+    """MANUAL project: import clips onto the timeline at full length (no beat-cutting). Music optional."""
+    try:
+        _studio_set(jid, state="running", pct=15, msg="importing clips")
+        if not _studio_ensure_bins(lambda m: _studio_set(jid, msg=m)):
+            return _studio_set(jid, state="error", pct=100, error="media tools unavailable on this node")
+        clips = [c for c in (body.get("clips") or []) if c and os.path.exists(c)]
+        if not clips: return _studio_set(jid, state="error", pct=100, error="no clips uploaded")
+        pid = _studio_pid(); os.makedirs(STUDIO_PROJECTS, exist_ok=True)
+        cache = os.path.join(STUDIO_CACHE, pid); os.makedirs(cache, exist_ok=True)
+        out_json = studio_project_path(pid)
+        args = ["python3", os.path.join(STUDIO_ENGINE, "project.py"), "manual", out_json, cache]
+        if body.get("music"): args += ["--music", str(body["music"])]
+        if body.get("section"): args += ["--section", str(body["section"])]
+        args += clips
+        _studio_set(jid, pct=45, msg="building timeline")
+        res = _studio_engine_json(args)
+        if res.get("ok") and os.path.isfile(out_json):
+            proj = res["project"]; proj["id"] = pid; proj["name"] = (body.get("name") or "My video")[:80]
+            with open(out_json, "w") as f: json.dump(proj, f, indent=2)
+            _studio_set(jid, state="done", pct=100, msg="ready to edit", project_id=pid)
+        else:
+            _studio_set(jid, state="error", pct=100, error=str(res.get("error", "import failed"))[:300])
+    except Exception as e:
+        _studio_set(jid, state="error", pct=100, error=str(e)[:200])
+
+def studio_add_clip(body):
+    """Add one already-uploaded clip to an existing project (probe + filmstrip). Synchronous (fast)."""
+    pid = body.get("id"); path = body.get("path")
+    if not _studio_pid_valid(pid): return {"ok": False, "error": "bad project id"}
+    if not path or not os.path.exists(path): return {"ok": False, "error": "file not found"}
+    cache = os.path.join(STUDIO_CACHE, pid)
+    return _studio_engine_json(["python3", os.path.join(STUDIO_ENGINE, "project.py"), "addclip", cache, path], timeout=150)
+
+def studio_add_audio_start(body):
+    jid = secrets.token_hex(6); _studio_set(jid, state="queued", pct=0, msg="queued")
+    threading.Thread(target=_studio_audio_worker, args=(jid, body), daemon=True).start()
+    return {"ok": True, "job_id": jid}
+
+def _studio_audio_worker(jid, body):
+    """Resolve an audio source (upload path or YouTube URL) for an existing project -> {path,dur,wave}."""
+    try:
+        _studio_set(jid, state="running", pct=20, msg="resolving audio")
+        if not _studio_ensure_bins(lambda m: _studio_set(jid, msg=m)):
+            return _studio_set(jid, state="error", pct=100, error="media tools unavailable on this node")
+        pid = body.get("id"); src = (body.get("source") or "").strip()
+        if not _studio_pid_valid(pid) or not src:
+            return _studio_set(jid, state="error", pct=100, error="need a project + an audio source")
+        cache = os.path.join(STUDIO_CACHE, pid); os.makedirs(cache, exist_ok=True)
+        args = ["python3", os.path.join(STUDIO_ENGINE, "project.py"), "resolve", cache, src]
+        if body.get("section"): args.append(str(body["section"]))
+        _studio_set(jid, pct=45, msg="fetching + analyzing")
+        res = _studio_engine_json(args)
+        if res.get("ok"):
+            _studio_set(jid, state="done", pct=100, msg="done", audio=res)
+        else:
+            _studio_set(jid, state="error", pct=100, error=str(res.get("error", "audio failed"))[:300])
+    except Exception as e:
+        _studio_set(jid, state="error", pct=100, error=str(e)[:200])
+
 def _studio_render_project_worker(jid, body):
     """Render an edited project (posted inline, or by id) -> MP4 via edl.py. proxy=1 -> a fast 480p preview."""
     try:
@@ -15200,6 +15265,12 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(studio_render_start(body)))
         if u.path == "/api/studio/build-project":
             return self._s(200, json.dumps(studio_build_project_start(body)))
+        if u.path == "/api/studio/new-manual":
+            return self._s(200, json.dumps(studio_new_manual_start(body)))
+        if u.path == "/api/studio/add-clip":
+            return self._s(200, json.dumps(studio_add_clip(body)))
+        if u.path == "/api/studio/add-audio":
+            return self._s(200, json.dumps(studio_add_audio_start(body)))
         if u.path == "/api/studio/render-project":
             return self._s(200, json.dumps(studio_render_project_start(body)))
         if u.path == "/api/studio/export-capcut":
@@ -16176,15 +16247,19 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
 
 <!-- ============ BUILDER ============ -->
 <div id="builder">
-<p class="sub">Drop in clips, bring the music, and Auto-build a beat-synced cut &mdash; then fine-tune it on the timeline.</p>
+<p class="sub">Add your clips, then <b>Start editing</b> &mdash; trim, crop, color, add audio, titles, effects. (Auto-cut to a beat &amp; CapCut export are optional extras.)</p>
 <div class="card">
-  <h2>1 &middot; Clips</h2>
+  <h2>Clips</h2>
   <div id="drop" class="drop">Tap to add video clips &mdash; or drag them here</div>
   <input id="file" type="file" accept="video/*" multiple style="display:none">
   <div id="clips"></div>
 </div>
-<div class="card">
-  <h2>2 &middot; Music</h2>
+<button id="startEdit" class="btn go">Start editing &rarr;</button>
+<div class="muted" style="text-align:center;margin:8px 0 2px">You&rsquo;ll get a timeline &mdash; add audio &amp; effects there. Or use the beat auto-cut below.</div>
+
+<div class="card" style="margin-top:14px">
+  <h2>Optional &middot; Auto-cut to a beat</h2>
+  <div class="muted" style="margin:0 0 10px">Beat-detect a song and cut your clips to it automatically. You can still edit everything after.</div>
   <label>YouTube link (or paste a track URL)</label>
   <input id="yt" type="text" placeholder="https://www.youtube.com/watch?v=...">
   <div class="row" style="margin-top:10px"><div style="flex:1;min-width:150px">
@@ -16193,17 +16268,13 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
   </div></div>
   <div class="muted">&hellip;or <a href="#" id="musicUpBtn" class="dl">upload an audio file</a> <span id="musicName"></span></div>
   <input id="musicFile" type="file" accept="audio/*" style="display:none">
-</div>
-<div class="card">
-  <h2>3 &middot; Pace</h2>
-  <div class="seg" id="pace">
+  <div class="seg" id="pace" style="margin-top:12px">
     <button data-v="frantic">Frantic</button><button data-v="punchy" class="on">Punchy</button><button data-v="cinematic">Cinematic</button>
   </div>
-  <div class="muted">Beats between cuts. You can retime every clip afterward on the timeline.</div>
+  <button id="build" class="btn" style="width:100%;margin-top:12px">&#9889; Auto-cut to the beat</button>
 </div>
-<button id="build" class="btn go">&#9889; Auto-build &rarr; edit</button>
 <div class="card" id="result" style="display:none;margin-top:13px">
-  <h2 id="rTitle">Building&hellip;</h2>
+  <h2 id="rTitle">Working&hellip;</h2>
   <div class="bar"><i id="rBar"></i></div>
   <div class="muted" id="rMsg">starting</div>
 </div>
@@ -16217,8 +16288,12 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
   <div class="tbar">
     <button class="btn sm" id="eBack">&larr; Build</button>
     <input id="eName" type="text" style="flex:1;min-width:100px" placeholder="Project name">
+    <button class="btn sm" id="eAddClip">+ Clip</button>
+    <button class="btn sm" id="eAddAudio">+ Audio</button>
     <button class="btn sm" id="eAddText">+ Title</button>
     <button class="btn sm" id="eAddPip">+ PiP</button>
+    <input id="eClipFile" type="file" accept="video/*" multiple style="display:none">
+    <input id="eAudioFile" type="file" accept="audio/*" style="display:none">
     <button class="btn sm" id="eCapcut">&#10515; CapCut</button>
     <button class="btn sm" id="eZoomOut">&minus;</button><button class="btn sm" id="eZoomIn">+</button>
   </div>
@@ -16252,6 +16327,14 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
     <div class="ir"><span class="k">Speed</span>
       <span class="seg" id="iSpeed"><button data-s="0.4">0.4x</button><button data-s="0.5">&frac12;x</button><button data-s="1">1x</button><button data-s="2">2x</button></span>
       <span class="chip" id="iLen">len 0.0s</span>
+    </div>
+    <div class="ir"><span class="k">Crop</span>
+      <span class="seg" id="iFit"><button data-f="cover">Fill</button><button data-f="contain">Fit</button></span>
+      <span class="k" style="min-width:0">Color</span>
+      <span class="stepper" title="brightness"><button data-a="br-">&minus;</button><span id="iBr">&#9728;</span><button data-a="br+">+</button></span>
+      <span class="stepper" title="contrast"><button data-a="ct-">&minus;</button><span id="iCt">&#9681;</span><button data-a="ct+">+</button></span>
+      <span class="stepper" title="saturation"><button data-a="sa-">&minus;</button><span id="iSa">&#127752;</span><button data-a="sa+">+</button></span>
+      <button class="btn sm" data-a="ccreset">reset</button>
     </div>
     <div class="ir">
       <button class="btn sm" data-a="left">&larr; move</button>
@@ -16306,22 +16389,26 @@ $('musicFile').onchange=function(){var f=this.files[0];if(!f)return;if(f.size>MA
 Array.prototype.forEach.call($('pace').children,function(b){b.onclick=function(){Array.prototype.forEach.call($('pace').children,function(x){x.classList.remove('on');});b.classList.add('on');pace=b.getAttribute('data-v');};});
 function stopPoll(){if(poll){clearInterval(poll);poll=null;}}
 
-$('build').onclick=function(){
+function buildFlow(endpoint,extra,btn,title){
   var ready=clips.filter(function(c){return c.path;});
   if(!ready.length){toast('Add at least one clip first',3500);return;}
+  btn.disabled=true;$('result').style.display='block';$('rTitle').textContent=title;$('rBar').style.width='0';$('rMsg').textContent='starting';
+  var body=Object.assign({clips:ready.map(function(c){return c.path;})},extra||{});
+  fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(r){
+    if(!r||!r.job_id){btn.disabled=false;toast('Could not start',4000);return;}
+    stopPoll();poll=setInterval(function(){checkBuild(r.job_id,btn);},1500);
+  }).catch(function(){btn.disabled=false;toast('Network error',4000);});
+}
+$('startEdit').onclick=function(){buildFlow('/api/studio/new-manual',{},$('startEdit'),'Importing your clips...');};
+$('build').onclick=function(){
   var music=musicPath||$('yt').value.trim();
-  if(!music){toast('Add music - a YouTube link or an uploaded track',4000);return;}
-  $('build').disabled=true;$('result').style.display='block';$('rTitle').textContent='Building...';$('rBar').style.width='0';$('rMsg').textContent='starting';
-  var body={clips:ready.map(function(c){return c.path;}),music:music,section:$('section').value.trim(),pace:pace};
-  fetch('/api/studio/build-project',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(r){
-    if(!r||!r.job_id){$('build').disabled=false;toast('Could not start',4000);return;}
-    stopPoll();poll=setInterval(function(){checkBuild(r.job_id);},1500);
-  }).catch(function(){$('build').disabled=false;toast('Network error',4000);});
+  if(!music){toast('Auto-cut needs a song - a YouTube link or an uploaded track. (Or just Start editing.)',4500);return;}
+  buildFlow('/api/studio/build-project',{music:music,section:$('section').value.trim(),pace:pace},$('build'),'Beat-cutting...');
 };
-function checkBuild(id){fetch('/api/studio/job?id='+id).then(function(r){return r.json();}).then(function(j){
+function checkBuild(id,btn){fetch('/api/studio/job?id='+id).then(function(r){return r.json();}).then(function(j){
   $('rBar').style.width=(j.pct||0)+'%';if(j.msg)$('rMsg').textContent=j.msg;
-  if(j.state==='done'){stopPoll();$('build').disabled=false;$('result').style.display='none';openProject(j.project_id);}
-  else if(j.state==='error'){stopPoll();$('build').disabled=false;$('rTitle').textContent='Build failed';$('rMsg').textContent=j.error||'error';}
+  if(j.state==='done'){stopPoll();if(btn)btn.disabled=false;$('result').style.display='none';openProject(j.project_id);}
+  else if(j.state==='error'){stopPoll();if(btn)btn.disabled=false;$('rTitle').textContent='Failed';$('rMsg').textContent=j.error||'error';}
 }).catch(function(){});}
 
 function loadRecent(){fetch('/api/studio/projects').then(function(r){return r.json();}).then(function(d){
@@ -16367,13 +16454,13 @@ function musicEl(){if(!proj)return null;var a=atrack().clips[0];if(!a)return nul
 function clipAt(t){var cs=vtrack().clips;for(var i=0;i<cs.length;i++){if(t>=cs[i].start-0.001&&t<cs[i].start+clen(cs[i]))return cs[i];}return cs.length?cs[cs.length-1]:null;}
 function _zoomAt(t){var z=0;fxtrack().clips.forEach(function(f){if(f.type==='zoom'){var half=(f.dur||0.5)/2,d=Math.abs(t-f.at);if(d<half)z=Math.max(z,((f.amount||1.4)-1)*(1-d/half));}});return 1+z;}
 function _flashAt(t){return fxtrack().clips.some(function(f){return (f.type||'impact')==='impact'&&Math.abs(t-f.at)<0.06;});}
-function _fitDraw(g,v,cw,ch,zf){var vw=v.videoWidth,vh=v.videoHeight;if(!vw||!vh)return;var s=Math.max(cw/vw,ch/vh)*(zf||1),dw=vw*s,dh=vh*s;try{g.drawImage(v,(cw-dw)/2,(ch-dh)/2,dw,dh);}catch(e){}}
+function _fitDraw(g,v,cw,ch,zf,fit){var vw=v.videoWidth,vh=v.videoHeight;if(!vw||!vh)return;var s=(fit==='contain'?Math.min(cw/vw,ch/vh):Math.max(cw/vw,ch/vh))*(zf||1),dw=vw*s,dh=vh*s;try{g.drawImage(v,(cw-dw)/2,(ch-dh)/2,dw,dh);}catch(e){}}
 function showLive(){$('pvcanvas').style.display='';$('eVideo').style.display='none';$('ePvMode').textContent='live preview';}
 function showRendered(){$('pvcanvas').style.display='none';$('eVideo').style.display='';$('ePvMode').textContent='rendered';}
 function scrubPreview(){var cv=$('pvcanvas');if(!cv||!proj)return;var g=cv.getContext('2d'),cw=cv.width,ch=cv.height,t=window._phT||0;
   $('ePvT').textContent=t.toFixed(2)+'s';g.fillStyle='#000';g.fillRect(0,0,cw,ch);
   var cl=clipAt(t);if(!cl)return;var v=srcVideo(cl.source);if(!v)return;var srcT=Math.max(0,cl['in']+(t-cl.start)*(cl.speed||1));
-  function paint(){_fitDraw(g,v,cw,ch,_zoomAt(t));
+  function paint(){var col=cl.color;if(col){g.filter='brightness('+(1+(col.b||0)*1.6).toFixed(2)+') contrast('+(col.c||1)+') saturate('+(col.s||1)+')';}_fitDraw(g,v,cw,ch,_zoomAt(t),cl.fit);g.filter='none';
     otrack().clips.forEach(function(oc){var ln=(oc.out-oc['in'])/(oc.speed||1);if(t>=oc.start&&t<oc.start+ln){var ov=srcVideo(oc.source);if(ov&&ov.readyState>=2&&ov.videoWidth){var tr=oc.transform||{},ow=cw*(tr.scale||0.4),oh=ow*ov.videoHeight/ov.videoWidth,ox=cw*(tr.x||0.05),oy=ch*(tr.y||0.05);try{ov.currentTime=Math.max(0,oc['in']+(t-oc.start)*(oc.speed||1));}catch(e){}try{g.drawImage(ov,ox,oy,ow,oh);}catch(e){}g.strokeStyle='#b98cff';g.lineWidth=2;g.strokeRect(ox,oy,ow,oh);}}});
     ttrack().clips.forEach(function(tc){if(t>=tc.start&&t<=tc.end){var s=tc.style||{},txt=(tc.text||'').toUpperCase();g.font='bold '+Math.round(ch*0.052)+'px Impact,Arial,sans-serif';g.textAlign='center';var ty=ch*(s.y||0.12)+ch*0.05;g.lineWidth=ch*0.008;g.strokeStyle='#000';g.strokeText(txt,cw/2,ty);g.fillStyle='#fff';g.fillText(txt,cw/2,ty);}});
     if(_flashAt(t)){g.fillStyle='rgba(255,255,255,0.85)';g.fillRect(0,0,cw,ch);}}
@@ -16441,11 +16528,43 @@ $('trkFx').onclick=function(ev){var r=$('trkFx').getBoundingClientRect();var t=s
 $('trkT').onclick=function(ev){var r=$('trkT').getBoundingClientRect();addText(Math.max(0,(ev.clientX-r.left)/zoom));};
 $('eAddText').onclick=function(){addText(window._phT||0.3);};
 $('eAddPip').onclick=function(){addPip();};
+$('eAddClip').onclick=function(){$('eClipFile').click();};
+$('eClipFile').onchange=function(){var fs=this.files;this.value='';Array.prototype.forEach.call(fs,function(f){
+  if(f.size>MAXMB*1048576){toast(f.name+' is too large',4000);return;}
+  $('eStatus').textContent='Uploading '+f.name+'...';
+  upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'video/mp4')).then(function(r){
+    if(!r||!r.ok){$('eStatus').textContent='Upload failed';return;}
+    $('eStatus').textContent='Adding clip...';
+    fetch('/api/studio/add-clip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:pid,path:r.path})}).then(function(x){return x.json();}).then(function(x){
+      if(!x||!x.ok){$('eStatus').textContent='Add failed: '+((x||{}).error||'?');return;}
+      proj.sources[x.id]=x.source;var dur=x.source.dur||3;
+      vtrack().clips.push({source:x.id,'in':0,out:dur,start:proj.duration||0,speed:1,volume:0});
+      reflow();showLive();renderTL();scrubPreview();$('eStatus').textContent='Clip added ✓';dirty=true;
+    }).catch(function(){$('eStatus').textContent='Add error';});
+  }).catch(function(){$('eStatus').textContent='Upload error';});});};
+$('eAddAudio').onclick=function(){var url=prompt('Audio: paste a YouTube link or track URL (leave blank to upload a file):','');
+  if(url===null)return;if(!url){$('eAudioFile').click();return;}
+  var sec=prompt('Use just a section? (mm:ss-mm:ss, or blank for the whole track):','')||'';addAudioSource(url,sec);};
+$('eAudioFile').onchange=function(){var f=this.files[0];this.value='';if(!f)return;
+  if(f.size>MAXMB*1048576){toast('Track too large',4000);return;}
+  $('eStatus').textContent='Uploading '+f.name+'...';
+  upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'audio/mpeg')).then(function(r){
+    if(r&&r.ok)addAudioSource(r.path,'');else $('eStatus').textContent='Upload failed';});};
+function addAudioSource(src,sec){$('eStatus').textContent='Adding audio...';
+  fetch('/api/studio/add-audio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:pid,source:src,section:sec})}).then(function(r){return r.json();}).then(function(r){
+    if(!r||!r.job_id){$('eStatus').textContent='Could not start';return;}stopPoll();poll=setInterval(function(){checkAudio(r.job_id);},1500);}).catch(function(){$('eStatus').textContent='Network error';});}
+function checkAudio(id){fetch('/api/studio/job?id='+id).then(function(r){return r.json();}).then(function(j){
+  $('eStatus').textContent='Audio '+(j.msg||'')+' '+(j.pct||0)+'%';
+  if(j.state==='done'){stopPoll();var a=j.audio||{};proj.sources.music={kind:'audio',path:a.path,dur:a.dur,wave:a.wave||[]};
+    atrack().clips=[{source:'music','in':0,out:proj.duration||a.dur||0,start:0,volume:1}];
+    window._mus=null;dirty=true;drawWave();renderTL();scrubPreview();$('eStatus').textContent='Audio added ✓ (drag the music lane volume in Export)';}
+  else if(j.state==='error'){stopPoll();$('eStatus').textContent='Audio failed: '+(j.error||'?');}
+}).catch(function(){});}
 $('ruler').addEventListener('pointerdown',function(ev){var r=$('rcanvas').getBoundingClientRect();stopPlay();showLive();
   function set(x){window._phT=Math.max(0,Math.min(proj?proj.duration:0,(x-r.left)/zoom));$('ph').style.left=(window._phT*zoom)+'px';if(window.scrubPreview)scrubPreview();}
   set((ev.touches?ev.touches[0]:ev).clientX);sdrag(ev,function(dx,x){set(x);});});
 
-function drawWave(W){var src=proj&&atrack()&&proj.sources[atrack().clips[0].source];var wave=src&&src.wave||[];
+function drawWave(W){var a0=proj&&atrack()&&atrack().clips[0];var src=a0&&proj.sources[a0.source];var wave=src&&src.wave||[];
   var dur=proj.duration||1;W=W||Math.max(320,dur*zoom);var wc=$('wcanvas'),dpr=window.devicePixelRatio||1;
   wc.width=W*dpr;wc.height=34*dpr;wc.style.width=W+'px';wc.style.height='34px';var g=wc.getContext('2d');g.scale(dpr,dpr);g.clearRect(0,0,W,34);
   if(!wave.length)return;g.fillStyle='rgba(91,140,255,.4)';var n=wave.length;
@@ -16455,11 +16574,14 @@ function selectClip(i){sel=i;renderTL();renderInsp();}
 function renderInsp(){var c=vtrack().clips[sel];if(!c){$('insp').style.display='none';return;}
   $('insp').style.display='block';$('iTitle').textContent='Clip '+(sel+1)+' / '+vtrack().clips.length;
   $('iIn').textContent=c['in'].toFixed(2)+'s';$('iOut').textContent=c.out.toFixed(2)+'s';$('iLen').textContent='len '+clen(c).toFixed(2)+'s';
-  Array.prototype.forEach.call($('iSpeed').children,function(b){b.classList.toggle('on',parseFloat(b.getAttribute('data-s'))==(c.speed||1));});}
+  Array.prototype.forEach.call($('iSpeed').children,function(b){b.classList.toggle('on',parseFloat(b.getAttribute('data-s'))==(c.speed||1));});
+  var col=c.color||{};$('iBr').textContent=col.b?((col.b>0?'+':'')+Math.round(col.b*100)):'0';$('iCt').textContent=Math.round((col.c||1)*100);$('iSa').textContent=Math.round((col.s||1)*100);
+  Array.prototype.forEach.call($('iFit').children,function(b){b.classList.toggle('on',b.getAttribute('data-f')===(c.fit||'cover'));});}
 
-$('insp').addEventListener('click',function(ev){var a=ev.target.getAttribute&&ev.target.getAttribute('data-a');var sp=ev.target.getAttribute&&ev.target.getAttribute('data-s');
+$('insp').addEventListener('click',function(ev){var a=ev.target.getAttribute&&ev.target.getAttribute('data-a');var sp=ev.target.getAttribute&&ev.target.getAttribute('data-s');var ff=ev.target.getAttribute&&ev.target.getAttribute('data-f');
   var c=vtrack().clips[sel];if(!c)return;
   if(sp){c.speed=parseFloat(sp);reflow();renderTL();renderInsp();return;}
+  if(ff){c.fit=ff;dirty=true;renderTL();renderInsp();scrubPreview();return;}
   if(!a)return;var src=proj.sources[c.source]||{},sdur=src.dur||99;
   if(a==='in-')c['in']=Math.max(0,+(c['in']-0.1).toFixed(2));
   else if(a==='in+')c['in']=Math.min(c.out-0.1,+(c['in']+0.1).toFixed(2));
@@ -16469,8 +16591,12 @@ $('insp').addEventListener('click',function(ev){var a=ev.target.getAttribute&&ev
   else if(a==='right'&&sel<vtrack().clips.length-1){var t2=vtrack().clips;t2.splice(sel+1,0,t2.splice(sel,1)[0]);sel++;}
   else if(a==='flash'){addFx(snapBeat(c.start+0.05),c.hero);}
   else if(a==='zoom'){addZoom(snapBeat(c.start+0.05));}
-  else if(a==='del'){vtrack().clips.splice(sel,1);sel=-1;$('insp').style.display='none';}
-  reflow();renderTL();renderInsp();});
+  else if(a==='br-'||a==='br+'){c.color=c.color||{};c.color.b=Math.max(-0.5,Math.min(0.5,+((c.color.b||0)+(a==='br+'?0.06:-0.06)).toFixed(3)));}
+  else if(a==='ct-'||a==='ct+'){c.color=c.color||{};c.color.c=Math.max(0.4,Math.min(2,+((c.color.c||1)+(a==='ct+'?0.1:-0.1)).toFixed(3)));}
+  else if(a==='sa-'||a==='sa+'){c.color=c.color||{};c.color.s=Math.max(0,Math.min(2.5,+((c.color.s||1)+(a==='sa+'?0.12:-0.12)).toFixed(3)));}
+  else if(a==='ccreset'){c.color=null;c.fit='cover';}
+  else if(a==='del'){vtrack().clips.splice(sel,1);sel=-1;$('insp').style.display='none';reflow();renderTL();return;}
+  reflow();renderTL();renderInsp();scrubPreview();});
 
 function addFx(t,big){fxtrack().clips.push({at:Math.round(t*100)/100,type:'impact',big:!!big});dirty=true;renderTL();toast('Flash added on the beat',1200);}
 function addZoom(t){fxtrack().clips.push({at:Math.round(t*100)/100,type:'zoom',amount:1.4,dur:0.5});dirty=true;renderTL();toast('Zoom punch added',1200);}
@@ -18302,12 +18428,32 @@ async function dlFile(rel,name){
   }
   toast('Still syncing from iCloud — give it a few seconds and click again.',6000);
 }
-function loadStudio(){
-  // Native lens: the Studio tool runs in-shell (same as how Sessions embeds /term). embed=1 drops the tool's own
-  // header so the dashboard provides the section header; the tool inherits the dashboard palette.
+async function loadStudio(){
+  // NATIVE lens (not an iframe): render the Studio tool directly INTO #main so it's a first-class lens -- the
+  // dashboard's nav/back-forward, search, and help all apply. We reuse the single STUDIO_PAGE source: fetch it,
+  // scope its CSS under #studioHost (so it can never touch the rest of the dashboard), and run its JS in an IIFE
+  // (no global collisions). Blast radius is contained to this lens.
   var m=document.getElementById('main');if(!m)return;
-  m.innerHTML='<div class="cc-head"><span class="cc-h-t">Studio</span><span class="cc-h-sub">Beat-synced video editor — auto-build, trim, effects, titles, PiP, export</span></div>'
-    +'<iframe id="studioFrame" src="/studio?embed=1" style="width:100%;height:calc(100vh - 132px);min-height:520px;border:1px solid var(--line);border-radius:12px;background:var(--card);display:block"></iframe>';
+  m.innerHTML='<div class="cc-head"><span class="cc-h-t">Studio</span><span class="cc-h-sub">Beat-synced video editor — build, trim, crop, color, audio, effects, export</span></div>'
+    +'<div id="studioHost"><div style="padding:26px;color:var(--mut,#8a92a3)">Loading…</div></div>';
+  var host=document.getElementById('studioHost');
+  try{
+    var html=await (await fetch('/studio?embed=1',{cache:'no-store'})).text();
+    var sm=html.match(/<style>([\s\S]*?)<\/style>/);var raw=sm?sm[1]:'';
+    var bm=html.match(/<body[^>]*>([\s\S]*?)<\/body>/);var bodyHtml=bm?bm[1]:html;
+    var jm=bodyHtml.match(/<script>([\s\S]*?)<\/script>/);var js=jm?jm[1]:'';
+    bodyHtml=bodyHtml.replace(/<script>[\s\S]*?<\/script>/g,'');
+    if(!document.getElementById('studioCss')&&raw){
+      var scoped=raw.replace(/:root/g,'#studioHost').replace(/(^|\})\s*([^@}{][^{}]*)\{/g,function(mm,br,sel){
+        var s=sel.split(',').map(function(x){x=x.trim();if(!x)return x;if(x.indexOf('#studioHost')===0)return x;if(x.indexOf('html')===0)return '#studioHost';if(x.indexOf('body')===0)return '#studioHost'+x.slice(4);return '#studioHost '+x;}).join(',');
+        return br+' '+s+'{';});
+      scoped+='\n#studioHost>.wrap>h1{display:none}#studioHost .wrap{max-width:100%;padding:2px 2px 60px}#studioHost video,#studioHost #pvcanvas{max-height:46vh}';
+      var el=document.createElement('style');el.id='studioCss';el.textContent=scoped;document.head.appendChild(el);
+    }
+    host.innerHTML=bodyHtml;
+    js=js.replace('function $(i){return document.getElementById(i);}','function $(i){var h=document.getElementById("studioHost");return (h&&h.querySelector("#"+i))||document.getElementById(i);}').split('if(window.scrubPreview)scrubPreview()').join('scrubPreview()');
+    var s2=document.createElement('script');s2.textContent='(function(){\n'+js+'\n})();';document.body.appendChild(s2);
+  }catch(e){host.innerHTML='<div style="padding:26px;color:var(--err,#ef4444)">Studio failed to load: '+(e&&e.message||e)+'</div>';}
 }
 async function load(){D=await(await fetch("/api/data")).json();render();fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;if(LENS=="machines")render();});}
 function render(){

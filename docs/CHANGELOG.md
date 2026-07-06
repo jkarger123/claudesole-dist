@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.164 -- 2026-07-05  (Video Studio: a real editor first + a native inline lens)
+- **Reframed as a general editor, not a beat-cut tool.** The primary flow is now **Start editing** -> a timeline
+  where you trim, crop, color-correct, reorder, add audio + titles + effects. Beat **Auto-cut** and CapCut export
+  are clearly-labeled OPTIONAL extras (you no longer must supply music up front). New `project.py manual` mode +
+  `/api/studio/new-manual` place your clips full-length on the timeline.
+- **Add media inside the editor:** **+ Clip** (upload -> appended to the timeline; `/api/studio/add-clip`) and
+  **+ Audio** (upload a track OR paste a YouTube link, whole or a section; `/api/studio/add-audio`).
+- **Color correction + crop:** per-clip brightness / contrast / saturation (ffmpeg `eq`) and Fill-vs-Fit crop
+  (`edl._segment`), live in the canvas preview (canvas filter) and baked into MP4 + CapCut exports.
+- **Native inline lens (was an iframe).** Clicking Studio now renders the tool directly into the dashboard
+  (`loadStudio` fetches the tool, scopes its CSS under `#studioHost` so it can never touch the rest of the
+  dashboard, and runs its JS in an IIFE) -- so it's a first-class lens with the dashboard's back/forward, search,
+  and help, in the gold theme. No more navigating out to a separate page.
+- Fixed a crash opening a project with no audio track (`drawWave` assumed an audio clip existed).
+
 ## 0.99.163 -- 2026-07-05  (Video Studio: make it a NATIVE in-shell lens in the dashboard style)
 - Fixed two real problems: the Studio tab (1) opened a separate page that navigated you OUT of the dashboard, and
   (2) used a blue theme that didn't match ClaudeFather's gold/dark design.

@@ -95,9 +95,87 @@ def emit(out_json, cache_dir, music_source, clips, section=None, pace="punchy", 
     return {"ok": True, "project": proj, "path": out_json, "music_source": m.get("source")}
 
 
+def _probe_source(cache_dir, path):
+    """Probe one video source (dims + duration) + make its filmstrip. Returns the sources[] entry dict."""
+    sid = "src_" + str(abs(hash(path)) % 10**8)
+    dur = round(ac._dur(path), 3); w, h = _dims(path)
+    s = {"kind": "video", "path": path, "dur": dur, "w": w, "h": h}
+    os.makedirs(cache_dir, exist_ok=True)
+    spr = os.path.join(cache_dir, "strip_%s.jpg" % sid)
+    fs = filmstrip(path, spr)
+    if fs: s["thumb"] = spr; s["strip"] = fs
+    return sid, s
+
+
+def manual(out_json, cache_dir, clips, music_source=None, section=None):
+    """MANUAL project: lay each clip on the timeline at FULL length in order (no beat-cutting). Optional music."""
+    os.makedirs(cache_dir, exist_ok=True)
+    sources, sidmap, vclips, pos = {}, {}, [], 0.0
+    for c in clips:
+        if not os.path.exists(c): continue
+        if c not in sidmap:
+            sid, s = _probe_source(cache_dir, c); sidmap[c] = sid; sources[sid] = s
+        sid = sidmap[c]; dur = sources[sid]["dur"] or 3.0
+        vclips.append({"source": sid, "in": 0.0, "out": round(dur, 3), "start": round(pos, 3),
+                       "speed": 1.0, "volume": 0.0})
+        pos += dur
+    if not vclips: return {"ok": False, "error": "no usable clips"}
+    tracks = [{"id": "v1", "kind": "video", "clips": vclips},
+              {"id": "fx1", "kind": "effects", "clips": []},
+              {"id": "txt1", "kind": "text", "clips": []},
+              {"id": "ov1", "kind": "overlay", "clips": []}]
+    music = {}
+    if music_source:
+        r = resolve_audio(cache_dir, music_source, section=section)
+        if r.get("ok"):
+            sources["music"] = {"kind": "audio", "path": r["path"], "dur": r["dur"], "wave": r["wave"]}
+            tracks.append({"id": "a1", "kind": "audio", "clips": [{"source": "music", "in": 0.0,
+                           "out": round(pos, 2), "start": 0.0, "volume": 1.0}]})
+    if "music" not in sources:
+        tracks.append({"id": "a1", "kind": "audio", "clips": []})
+    project = {"version": 1, "canvas": {"w": ac.W, "h": ac.H, "fps": ac.FPS}, "duration": round(pos, 2),
+               "mode": "manual", "sources": sources, "tracks": tracks, "music": music}
+    with open(out_json, "w") as f: json.dump(project, f, indent=2)
+    return {"ok": True, "project": project, "path": out_json}
+
+
+def resolve_audio(cache_dir, source, section=None):
+    """Resolve an audio source (uploaded file OR YouTube/URL) -> a cached mp3 + waveform (add/replace the track)."""
+    m = musicmod.get_music(source, section=section)
+    if not m.get("ok"): return {"ok": False, "error": m.get("error")}
+    os.makedirs(cache_dir, exist_ok=True)
+    dest = os.path.join(cache_dir, "audio_%s.mp3" % (abs(hash(source)) % 10**8))
+    try:
+        ac._run([FFMPEG, "-y", "-i", m["path"], "-c", "copy", dest])
+        mp = dest if (os.path.exists(dest) and os.path.getsize(dest) > 500) else m["path"]
+    except Exception:
+        mp = m["path"]
+    return {"ok": True, "path": mp, "dur": round(ac._dur(mp), 3), "wave": waveform(mp), "source": m.get("source")}
+
+
+def add_clip(cache_dir, path):
+    """Probe + filmstrip one new clip added inside the editor -> {ok, id, source}."""
+    if not os.path.exists(path): return {"ok": False, "error": "file not found"}
+    sid, s = _probe_source(cache_dir, path)
+    return {"ok": True, "id": sid, "source": s}
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
-    if a and a[0] == "thumbs":
+    if a and a[0] == "manual":
+        out_json, cache_dir = a[1], a[2]; rest = a[3:]; music = section = None; clips = []
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--music": music = rest[i + 1]; i += 2
+            elif rest[i] == "--section": section = rest[i + 1]; i += 2
+            else: clips.append(rest[i]); i += 1
+        print(json.dumps(manual(out_json, cache_dir, clips, music_source=music, section=section)))
+    elif a and a[0] == "resolve":
+        sec = a[3] if len(a) > 3 else None
+        print(json.dumps(resolve_audio(a[1], a[2], section=sec)))
+    elif a and a[0] == "addclip":
+        print(json.dumps(add_clip(a[1], a[2])))
+    elif a and a[0] == "thumbs":
         n = int(a[3]) if len(a) > 3 else SPRITE_N
         print(json.dumps(filmstrip(a[1], a[2], n)))
     elif a and a[0] == "emit":

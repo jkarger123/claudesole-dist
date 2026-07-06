@@ -102,7 +102,8 @@ def export(project, out_zip):
         sp = srcs.get(c.get("source"), {}).get("path")
         if not sp or not os.path.exists(sp): continue
         dest = os.path.join(clipdir, "clip_%02d.mp4" % i)
-        edl._segment(sp, c["in"], c["out"], c.get("speed", 1), W, H, FPS, dest)
+        edl._segment(sp, c["in"], c["out"], c.get("speed", 1), W, H, FPS, dest,
+                     color=c.get("color"), fit=c.get("fit", "cover"))
         if ac._dur(dest) > 0.04: clip_files.append(dest)
     if not clip_files: return {"ok": False, "error": "no clips rendered"}
     # music
