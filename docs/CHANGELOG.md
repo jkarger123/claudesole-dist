@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.157 -- 2026-07-05  (Video Studio P3: titles, zoom, cleaner auto-build)
+- **Titles track:** add a title (+Title button or tap the titles lane), tap a title to edit/delete. Burns in over
+  the video (white text + box, top-third). Renders via the existing drawtext path.
+- **Zoom punch effect:** add from a clip's inspector (or it shares the impacts lane). A scale/crop zoom-in on the
+  beat (scale eval=frame -> time-varying, then fixed crop). New `edl.apply_zooms`; the impacts lane shows flash
+  pins (amber) vs zoom pins (violet).
+- **Cleaner auto-build:** cuts now target a LENGTH by pace (frantic ~0.55s / punchy ~0.95s / cinematic ~1.7s)
+  instead of a fixed beat count -- no more 0.5s machine-gun when the tempo detector doubles (a 13s song went from
+  ~23 choppy cuts to ~12). Cut boundaries still snap to beats.
+- **In-point clamp:** a clip's trim never runs past its source end anymore (was silently truncating cuts near a
+  short clip's tail, shrinking the final video); render duration now matches the timeline.
+- Clip inspector: trim in/out, speed (0.4/0.5/1/2x), reorder, flash, zoom, delete -- all live on mobile + desktop.
+
 ## 0.99.156 -- 2026-07-05  (Video Studio P2: the manual timeline editor)
 - Auto-build now produces a SAVED, editable **project** (not just an MP4) and drops you into a real timeline
   editor. Fine-tune, then Preview (fast 480p proxy) or Export (full MP4 to Files).

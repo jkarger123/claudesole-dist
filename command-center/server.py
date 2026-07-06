@@ -16059,7 +16059,9 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
 .ruler{position:relative;height:26px;cursor:pointer}
 .ruler canvas{display:block}
 .trk{position:relative;margin-top:6px;border-radius:8px;background:var(--card2)}
-.trk.video{height:56px} .trk.fx{height:22px;background:transparent} .trk.music{height:34px}
+.trk.video{height:56px} .trk.fx{height:22px;background:transparent} .trk.txt{height:22px;background:transparent} .trk.music{height:34px}
+.tblock{position:absolute;top:1px;height:20px;background:rgba(46,181,107,.22);border:1px solid var(--go);border-radius:5px;font-size:10px;color:#c7f0da;padding:1px 5px;overflow:hidden;white-space:nowrap;cursor:pointer}
+.fxpin.zoom i{background:#b98cff} .fxpin.zoom b{background:#b98cff}
 .trklab{position:absolute;left:4px;top:2px;font-size:9px;letter-spacing:.05em;color:var(--dim);z-index:3;text-transform:uppercase;pointer-events:none}
 .cblock{position:absolute;top:0;height:100%;border:1.5px solid var(--line);border-radius:6px;overflow:hidden;cursor:pointer;background-color:#000;background-repeat:no-repeat}
 .cblock.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
@@ -16128,7 +16130,8 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
 <div id="editor">
   <div class="tbar">
     <button class="btn sm" id="eBack">&larr; Build</button>
-    <input id="eName" type="text" style="flex:1;min-width:120px" placeholder="Project name">
+    <input id="eName" type="text" style="flex:1;min-width:100px" placeholder="Project name">
+    <button class="btn sm" id="eAddText">+ Title</button>
     <button class="btn sm" id="eZoomOut">&minus;</button><button class="btn sm" id="eZoomIn">+</button>
   </div>
   <video id="eVideo" controls playsinline preload="metadata"></video>
@@ -16136,7 +16139,8 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
   <div class="tlwrap" id="tlwrap"><div class="tl" id="tl">
     <div class="ruler" id="ruler"><canvas id="rcanvas" height="26"></canvas></div>
     <div class="trk video" id="trkV"><span class="trklab">video</span></div>
-    <div class="trk fx" id="trkFx"><span class="trklab" style="top:-1px">impacts &mdash; tap lane to add</span></div>
+    <div class="trk fx" id="trkFx"><span class="trklab" style="top:-1px">impacts / zoom &mdash; tap lane to add flash</span></div>
+    <div class="trk txt" id="trkT"><span class="trklab" style="top:-1px">titles &mdash; tap lane to add</span></div>
     <div class="trk music" id="trkM"><span class="trklab">music</span><canvas id="wcanvas" height="34" style="position:absolute;left:0;top:0"></canvas></div>
     <div class="playhead" id="ph" style="height:100%"></div>
   </div></div>
@@ -16155,8 +16159,9 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
     <div class="ir">
       <button class="btn sm" data-a="left">&larr; move</button>
       <button class="btn sm" data-a="right">move &rarr;</button>
-      <button class="btn sm" data-a="flash">&#9889; flash here</button>
-      <button class="btn sm" data-a="del" style="color:var(--fxbig)">Delete clip</button>
+      <button class="btn sm" data-a="flash">&#9889; flash</button>
+      <button class="btn sm" data-a="zoom">&#128269; zoom</button>
+      <button class="btn sm" data-a="del" style="color:var(--fxbig)">Delete</button>
     </div>
   </div>
 
@@ -16241,6 +16246,7 @@ $('eZoomOut').onclick=function(){zoom=Math.max(14,zoom/1.4);renderTL();};
 function vtrack(){return proj.tracks.find(function(t){return t.kind==='video';});}
 function fxtrack(){return proj.tracks.find(function(t){return t.kind==='effects';});}
 function atrack(){return proj.tracks.find(function(t){return t.kind==='audio';});}
+function ttrack(){var t=proj.tracks.find(function(t){return t.kind==='text';});if(!t){t={id:'txt1',kind:'text',clips:[]};proj.tracks.push(t);}return t;}
 function clen(c){return Math.max(0.05,(c.out-c['in'])/(c.speed||1));}
 function reflow(){var t=vtrack(),p=0;t.clips.forEach(function(c){c.start=Math.round(p*1000)/1000;p+=clen(c);});proj.duration=Math.round(p*100)/100;var a=atrack();if(a&&a.clips[0]){a.clips[0].out=proj.duration;}dirty=true;}
 function beats(){return (proj.music&&proj.music.beats)||[];}
@@ -16265,15 +16271,23 @@ function renderTL(){
       b.style.backgroundPositionX=(-(c['in']/sdur)*tot)+'px';}
     b.innerHTML=(c.hero?'<span class="he">HERO</span>':'')+'<span class="cl">'+clen(c).toFixed(1)+'s'+((c.speed||1)!=1?' '+c.speed+'x':'')+'</span>';
     b.onclick=function(ev){ev.stopPropagation();selectClip(i);};tv.appendChild(b);});
-  // fx pins
+  // fx pins (impacts + zooms)
   var tf=$('trkFx');tf.querySelectorAll('.fxpin').forEach(function(e){e.remove();});
-  fxtrack().clips.forEach(function(f,i){var p=document.createElement('div');p.className='fxpin'+(f.big?' big':'');
+  fxtrack().clips.forEach(function(f,i){var isZ=f.type==='zoom';var p=document.createElement('div');
+    p.className='fxpin'+(f.big?' big':'')+(isZ?' zoom':'');p.title=isZ?'zoom':'flash';
     p.style.left=(f.at*zoom)+'px';p.innerHTML='<b></b><i></i>';
     p.onclick=function(ev){ev.stopPropagation();fxMenu(i);};tf.appendChild(p);});
+  // title blocks
+  var tt=$('trkT');tt.querySelectorAll('.tblock').forEach(function(e){e.remove();});
+  ttrack().clips.forEach(function(tc,i){var b=document.createElement('div');b.className='tblock';
+    b.style.left=(tc.start*zoom)+'px';b.style.width=Math.max(30,((tc.end||0)-(tc.start||0))*zoom)+'px';b.textContent=tc.text||'title';
+    b.onclick=function(ev){ev.stopPropagation();textMenu(i);};tt.appendChild(b);});
   $('ph').style.left=((window._phT||0)*zoom)+'px';
   drawWave(W);
 }
 $('trkFx').onclick=function(ev){var r=$('trkFx').getBoundingClientRect();var t=snapBeat((ev.clientX-r.left)/zoom);addFx(t,false);};
+$('trkT').onclick=function(ev){var r=$('trkT').getBoundingClientRect();addText(Math.max(0,(ev.clientX-r.left)/zoom));};
+$('eAddText').onclick=function(){addText(window._phT||0.3);};
 $('ruler').onclick=function(ev){var r=$('rcanvas').getBoundingClientRect();window._phT=Math.max(0,(ev.clientX-r.left)/zoom);$('ph').style.left=(window._phT*zoom)+'px';};
 
 function drawWave(W){var src=proj&&atrack()&&proj.sources[atrack().clips[0].source];var wave=src&&src.wave||[];
@@ -16299,11 +16313,20 @@ $('insp').addEventListener('click',function(ev){var a=ev.target.getAttribute&&ev
   else if(a==='left'&&sel>0){var t=vtrack().clips;t.splice(sel-1,0,t.splice(sel,1)[0]);sel--;}
   else if(a==='right'&&sel<vtrack().clips.length-1){var t2=vtrack().clips;t2.splice(sel+1,0,t2.splice(sel,1)[0]);sel++;}
   else if(a==='flash'){addFx(snapBeat(c.start+0.05),c.hero);}
+  else if(a==='zoom'){addZoom(snapBeat(c.start+0.05));}
   else if(a==='del'){vtrack().clips.splice(sel,1);sel=-1;$('insp').style.display='none';}
   reflow();renderTL();renderInsp();});
 
-function addFx(t,big){fxtrack().clips.push({at:Math.round(t*100)/100,type:'impact',big:!!big});dirty=true;renderTL();toast('Flash added',1200);}
-function fxMenu(i){var f=fxtrack().clips[i];if(confirm('Flash at '+f.at+'s'+(f.big?' (big)':'')+' - OK = toggle big, Cancel = delete?')){f.big=!f.big;}else{fxtrack().clips.splice(i,1);}dirty=true;renderTL();}
+function addFx(t,big){fxtrack().clips.push({at:Math.round(t*100)/100,type:'impact',big:!!big});dirty=true;renderTL();toast('Flash added on the beat',1200);}
+function addZoom(t){fxtrack().clips.push({at:Math.round(t*100)/100,type:'zoom',amount:1.4,dur:0.5});dirty=true;renderTL();toast('Zoom punch added',1200);}
+function fxMenu(i){var f=fxtrack().clips[i];
+  if(f.type==='zoom'){if(!confirm('Zoom punch at '+f.at+'s - OK to keep, Cancel to delete'))fxtrack().clips.splice(i,1);}
+  else{if(confirm('Flash at '+f.at+'s'+(f.big?' (big)':'')+' - OK = toggle big, Cancel = delete')){f.big=!f.big;}else{fxtrack().clips.splice(i,1);}}
+  dirty=true;renderTL();}
+function addText(t){var s=prompt('Title text:','');if(s===null||!s)return;
+  ttrack().clips.push({start:Math.round(t*100)/100,end:Math.round((t+1.8)*100)/100,text:s,style:{size:110,y:0.12,box:true}});dirty=true;renderTL();toast('Title added',1200);}
+function textMenu(i){var tc=ttrack().clips[i];var s=prompt('Edit title (blank = delete):',tc.text||'');
+  if(s===null)return;if(!s){ttrack().clips.splice(i,1);}else{tc.text=s;}dirty=true;renderTL();}
 
 $('eName').onchange=function(){if(proj){proj.name=this.value;dirty=true;}};
 $('eSave').onclick=function(){if(!proj)return;fetch('/api/studio/project-save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:pid,name:proj.name,project:proj})}).then(function(r){return r.json();}).then(function(r){if(r&&r.ok){dirty=false;toast('Saved &#10003;',1500);}else toast('Save failed',3000);});};

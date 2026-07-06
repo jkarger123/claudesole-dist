@@ -186,28 +186,32 @@ def build_project(clips, music, beats_per_cut=1, shot_plan=None, lead=0.25, hero
         if not moments: return {"ok": False, "error": "no motion moments found"}
         moments.sort(key=lambda m: -m["score"])
         hero = dict(moments[0], hero=True); rest = moments[1:] or [dict(moments[0])]
-        n = max(len(rest), len(grid) // bpc + 2)
-        sequence = [dict(rest[k % len(rest)]) for k in range(n)]
-        sequence.insert(int(len(sequence) * 0.66), hero); mode = "deterministic"
+        mode = "deterministic"
     last = len(grid) - 1
     if mode == "ai":
         N = len(sequence)
         bounds = [min(last, int(round(k * last / N))) for k in range(N + 1)]
         slots = list(zip(bounds[:-1], bounds[1:]))
     else:
+        # Target a cut LENGTH by pace (decouple from raw beat density) -- keeps cuts landing on beats but stops the
+        # 0.5s machine-gun when the tempo detector doubles. Still snaps every cut boundary to a beat.
+        target = {1: 0.55, 2: 0.95, 4: 1.7}.get(bpc, 0.95)
         slots, i = [], 0
-        for shot in sequence:
-            if i >= last: break
-            span = min((bpc + 1) if shot.get("hero") else bpc, last - i)
-            if span < 1: break
-            slots.append((i, i + span)); i += span
-        sequence = sequence[:len(slots)]
+        while i < last and len(slots) < 40:
+            j = i + 1
+            while j < last and (grid[j] - grid[i]) < target: j += 1
+            slots.append((i, j)); i = j
+        n = len(slots)
+        sequence = [dict(rest[k % len(rest)]) for k in range(n)]
+        if n: sequence[min(n - 1, int(n * 0.66))] = hero      # the finisher lands ~2/3 through, in slow-mo
 
     sources, sidmap = {}, {}
     def sid(path):
         if path not in sidmap:
             k = "src%d" % len(sidmap); sidmap[path] = k; sources[k] = {"kind": "video", "path": path}
         return sidmap[path]
+    durc = {}
+    def _durc(p): return durc.setdefault(p, _dur(p))
     vclips, fxclips, out_pos = [], [], 0.0
     for shot, (a, e) in zip(sequence, slots):
         if e <= a: continue
@@ -219,7 +223,10 @@ def build_project(clips, music, beats_per_cut=1, shot_plan=None, lead=0.25, hero
             in_t = max(0.0, ti - lead)
         else:
             in_t = max(0.0, float(shot["t"]) - 0.15)
-        vclips.append({"source": sid(shot["clip"]), "in": round(in_t, 3), "out": round(in_t + slot_len * speed, 3),
+        window = slot_len * speed                 # how much SOURCE this slot needs
+        sd = _durc(shot["clip"])                  # clamp so in+window never runs past the source end (no short/frozen cut)
+        if sd > window: in_t = max(0.0, min(in_t, sd - window - 0.03))
+        vclips.append({"source": sid(shot["clip"]), "in": round(in_t, 3), "out": round(in_t + window, 3),
                        "start": round(out_pos, 3), "speed": round(speed, 3), "hero": is_hero, "volume": 0.0})
         if is_impact:
             fxclips.append({"at": round(out_pos + lead / speed, 3), "type": "impact", "big": is_hero})

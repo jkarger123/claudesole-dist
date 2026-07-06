@@ -62,6 +62,22 @@ def _drawtext_chain(text_clips):
     return ",".join(parts)
 
 
+def apply_zooms(video, out, zooms, w, h):
+    """Zoom-PUNCH at exact output timestamps: scale up (eval=frame -> time-varying) then fixed crop back to canvas.
+    One pass -- Z is the sum of every zoom window (triangular bump around each `at`). Never read+write same file."""
+    dst = out if out != video else out + ".zm.mp4"
+    Z = "1"
+    for z in zooms:
+        amt = float(z.get("amount", 1.35)); at = float(z.get("at", 0)); half = max(0.12, float(z.get("dur", 0.5)) / 2)
+        Z += "+%.3f*max(0,1-abs(t-%.3f)/%.3f)" % (amt - 1.0, at, half)   # quotes below protect the commas
+    vf = "scale=w='%d*(%s)':h='%d*(%s)':eval=frame,crop=%d:%d,setsar=1" % (w, Z, h, Z, w, h)
+    ac._run([FFMPEG, "-y", "-i", video, "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", dst])
+    if ac._dur(dst) > 0.04:
+        if dst != out: os.replace(dst, out)
+        return True
+    return False
+
+
 def render(project, out, progress_cb=None, proxy=False):
     """Render the project JSON to `out` (MP4). Returns {ok, output, duration, n_cuts, error?}."""
     canvas = project.get("canvas") or {"w": 1080, "h": 1920, "fps": 30}
@@ -107,6 +123,10 @@ def render(project, out, progress_cb=None, proxy=False):
         fxd = os.path.join(work, "fx.mp4")
         ac.apply_flashes(body, fxd, flashes)
         if ac._dur(fxd) > 0.04: body = fxd
+    zooms = [e for e in _tracks(project, "effects") if e.get("type") == "zoom"]
+    if zooms and not proxy:
+        zd = os.path.join(work, "zoom.mp4")
+        if apply_zooms(body, zd, zooms, w, h): body = zd
     if progress_cb: progress_cb(85, "effects")
 
     # audio: music clip -> trim/delay/mux
