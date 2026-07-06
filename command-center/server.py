@@ -14471,6 +14471,25 @@ def studio_projects_list():
     except FileNotFoundError: pass
     return sorted(out, key=lambda x: -(x.get("mtime") or 0))[:100]
 
+def studio_delete_project(pid):
+    """Delete a project + its media cache (filmstrips, copied music, proxies) from disk -> frees space. The
+    project's .json and its whole cache dir go; source uploads + finished renders (in Files) are left alone."""
+    if not _studio_pid_valid(pid): return {"ok": False, "error": "bad id"}
+    removed, freed = [], 0
+    try:
+        p = studio_project_path(pid)
+        if p and os.path.isfile(p): freed += os.path.getsize(p); os.remove(p); removed.append("project")
+        cache = os.path.join(STUDIO_CACHE, pid)
+        if os.path.realpath(cache).startswith(os.path.realpath(STUDIO_CACHE)) and os.path.isdir(cache):
+            for root, _, files in os.walk(cache):
+                for fn in files:
+                    try: freed += os.path.getsize(os.path.join(root, fn))
+                    except Exception: pass
+            shutil.rmtree(cache, ignore_errors=True); removed.append("cache")
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+    return {"ok": True, "removed": removed, "freed_mb": round(freed / 1048576.0, 1)}
+
 def studio_build_project_start(body):
     jid = secrets.token_hex(6)
     _studio_set(jid, state="queued", pct=0, msg="queued")
@@ -15277,6 +15296,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(studio_capcut_start(body)))
         if u.path == "/api/studio/project-save":
             return self._s(200, json.dumps(studio_project_save(body)))
+        if u.path == "/api/studio/delete-project":
+            return self._s(200, json.dumps(studio_delete_project(body.get("id"))))
         if u.path == "/api/close-session":
             return self._s(200, json.dumps(close_session(body["name"], body.get("force", False))))
         if u.path == "/api/claude-account/snapshot":
@@ -16201,7 +16222,9 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
 .seg button.on{background:var(--accent);color:#fff}
 .row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
 .projitem{display:flex;justify-content:space-between;align-items:center;background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:8px;cursor:pointer}
-.projitem:hover{border-color:var(--accent)} .projitem .pd{color:var(--dim);font-size:12px}
+.projitem:hover{border-color:var(--accent)} .projitem .pd{color:var(--dim);font-size:12px;margin-left:auto;margin-right:10px} .projitem .pn{font-weight:600}
+.projitem .pdel{color:var(--dim);cursor:pointer;font-size:15px;padding:2px 4px;border-radius:6px}
+.projitem .pdel:hover{color:var(--fxbig);background:rgba(255,93,93,.12)}
 /* ---- editor ---- */
 #editor{display:none}
 .tbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
@@ -16278,7 +16301,8 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
     <input id="eAudioFile" type="file" accept="audio/*" style="display:none">
     <button class="btn sm" id="eBeatcut">&#9889; Beat-cut</button>
     <button class="btn sm" id="eCapcut">&#10515; CapCut</button>
-    <button class="btn sm" id="eZoomOut">&minus;</button><button class="btn sm" id="eZoomIn">+</button>
+    <button class="btn sm" id="eFit" title="Fit timeline to width">Fit</button>
+    <button class="btn sm" id="eZoomOut" title="Zoom out">&minus;</button><button class="btn sm" id="eZoomIn" title="Zoom in">+</button>
   </div>
   <div class="card" id="beatcutPanel" style="display:none;margin-bottom:10px">
     <h2>Auto-cut to a beat</h2>
@@ -16424,10 +16448,14 @@ function checkBuild(id,btn){fetch('/api/studio/job?id='+id).then(function(r){ret
 }).catch(function(){});}
 
 function loadRecent(){fetch('/api/studio/projects').then(function(r){return r.json();}).then(function(d){
-  var ps=(d&&d.projects)||[];if(!ps.length)return;$('recent').style.display='block';var el=$('projlist');el.innerHTML='';
-  ps.slice(0,8).forEach(function(p){var d2=document.createElement('div');d2.className='projitem';
-    d2.innerHTML='<span></span><span class="pd">'+(p.clips||0)+' clips - '+(p.duration||0)+'s</span>';
-    d2.firstChild.textContent=p.name||'Untitled';d2.onclick=function(){openProject(p.id);};el.appendChild(d2);});});}
+  var ps=(d&&d.projects)||[];if(!ps.length){$('recent').style.display='none';return;}$('recent').style.display='block';var el=$('projlist');el.innerHTML='';
+  ps.slice(0,24).forEach(function(p){var d2=document.createElement('div');d2.className='projitem';
+    d2.innerHTML='<span class="pn"></span><span class="pd">'+(p.clips||0)+' clips &middot; '+(p.duration||0)+'s</span><span class="pdel" title="Delete + free space">&#128465;</span>';
+    d2.querySelector('.pn').textContent=p.name||'Untitled';
+    d2.onclick=function(e){if((e.target.className||'').indexOf('pdel')>=0)return;openProject(p.id);};
+    d2.querySelector('.pdel').onclick=function(e){e.stopPropagation();delProject(p.id,p.name);};el.appendChild(d2);});});}
+function delProject(id,name){if(!confirm('Delete "'+(name||'this project')+'" and its files from the server? Frees disk space; can\'t be undone.'))return;
+  fetch('/api/studio/delete-project',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.json();}).then(function(r){if(r&&r.ok){toast('Deleted — space freed',1600);loadRecent();}else toast('Delete failed: '+((r||{}).error||'?'),3500);}).catch(function(){toast('Delete failed',3000);});}
 
 /* ---------- editor ---------- */
 function openProject(id){fetch('/api/studio/project?id='+id).then(function(r){return r.json();}).then(function(d){
@@ -16436,11 +16464,17 @@ function openProject(id){fetch('/api/studio/project?id='+id).then(function(r){re
   _svid={};window._mus=null;window._phT=0;stopPlay();
   $('builder').style.display='none';$('editor').style.display='block';window.scrollTo(0,0);
   $('eVideo').removeAttribute('src');$('eVideo').load();$('eStatus').textContent='Scrub to preview, or Play. Then Export.';
-  showLive();drawWave();renderTL();prebuffer();scrubPreview();});}
+  showLive();drawWave();fitZoom();renderTL();prebuffer();scrubPreview();});}
+function fitZoom(){var w=(($('tlwrap')||{}).clientWidth)||600;var dur=(proj&&proj.duration)||10;zoom=Math.max(6,Math.min(240,(w-18)/dur));}   // default: fit the timeline to the container width (no off-screen stretch)
 $('ePlay').onclick=playToggle;
 $('eBack').onclick=function(){stopPlay();if(dirty&&!confirm('Leave without saving?'))return;$('editor').style.display='none';$('builder').style.display='block';loadRecent();};
-$('eZoomIn').onclick=function(){zoom=Math.min(220,zoom*1.4);renderTL();};
-$('eZoomOut').onclick=function(){zoom=Math.max(14,zoom/1.4);renderTL();};
+$('eZoomIn').onclick=function(){zoom=Math.min(400,zoom*1.4);renderTL();};
+$('eZoomOut').onclick=function(){zoom=Math.max(6,zoom/1.4);renderTL();};
+$('eFit').onclick=function(){fitZoom();renderTL();$('tlwrap').scrollLeft=0;};
+$('tlwrap').addEventListener('wheel',function(e){if(!proj)return;e.preventDefault();var wrap=$('tlwrap'),rect=wrap.getBoundingClientRect(),oldz=zoom;
+  var t=(e.clientX-rect.left+wrap.scrollLeft)/oldz;                  // timeline time under the cursor
+  zoom=Math.max(6,Math.min(400,zoom*((e.deltaY<0)?1.15:0.87)));renderTL();
+  wrap.scrollLeft=Math.max(0,t*zoom-(e.clientX-rect.left));},{passive:false});   // wheel = ZOOM (centered on cursor), not horizontal stretch
 
 function vtrack(){return proj.tracks.find(function(t){return t.kind==='video';});}
 function fxtrack(){return proj.tracks.find(function(t){return t.kind==='effects';});}

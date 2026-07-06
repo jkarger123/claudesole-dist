@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.169 -- 2026-07-06  (Video Studio: fit-to-width timeline, wheel-zoom, delete projects + free disk)
+- **Timeline fits its area by default** (no more stretching off-screen) -- opens at a zoom that fits the whole
+  video into the panel width, with a **Fit** button to snap back.
+- **Scroll-wheel over the timeline zooms** (centered on the cursor) instead of stretching/scrolling it off-screen;
+  + / - buttons still work.
+- **Delete old projects + free disk:** each item in "Recent projects" now has a trash button that removes the
+  project's .json AND its whole media cache (filmstrips, copied music, proxies) from the server. New
+  `/api/studio/delete-project` (guarded to the studio cache dir; reports MB freed). Finished MP4s live in Files
+  and are deletable there.
+
 ## 0.99.168 -- 2026-07-06  (Video Studio: fix + Clip; live trim preview)
 - **+ Clip now actually adds the clip.** The handler cleared the file input (`this.value=''`) BEFORE iterating the
   FileList, which empties it -> nothing uploaded. Now it copies the files to an array first. (Backend add-clip was
