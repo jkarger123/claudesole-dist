@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "042bea69831acb08ef061890405debbadb760c0a81856b2da56b674c85f66344",
+      "claudesole.manifest.json": "150058889dd3cbd59ea048bfb23c8e570373d3825f79feefcfcf9ede22a2558f",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
       "command-center/cc-email": "4895c4eb4ca8e1c6f3b26dd260f9ee3b776c42f24ec656b8581d1cef0c4155ed",
@@ -52,7 +52,7 @@
       "command-center/ralph_runner.py": "b48395c8c36b94710e9da3cf83640eedd514347ed30e8b953043f729ef9b26e9",
       "command-center/residue_lint.py": "a48f5893bedc12816d84788dde78ffd162fff2334996c680361b843b46a22f70",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "eb9263a7c131c18d25862abaa576aeb42ee65ffca55a4682d6d4ecbbf1e76867",
+      "command-center/server.py": "48d1c37f9bc5a1f0c778b5bae3cac1596d0b88bf4808189522cf5d6762500e75",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/ui_lint.py": "0cabb923f1edd1a5f9808e4e04329c46334483b3da38fcf4adba2e3e9b476132",
@@ -72,7 +72,7 @@
       "extensions/ai-video-studio/engine/providers.py": "6ab7e6c74eb14eb04b8cc52eb5e76fbe5d9d30a9a24236133ef71a0ca3e5139b",
       "extensions/ai-video-studio/engine/studio.py": "cee7df024c3ed68aebbeeb97e439e6685c7f84056178d74f2bcbc16f6cf30bd5",
       "extensions/ai-video-studio/engine/timecode.py": "6810b74cb4dda491dbf20695d7d14a1f50cc9a642b213f675bceb44acaf18f8a",
-      "extensions/ai-video-studio/extension.json": "499e4fb62b1dd4569d3571a01f332efc92df4e0b6e5b0cf9aa7547546220127f",
+      "extensions/ai-video-studio/extension.json": "15dcf80661e9cb99734d61fa20375723758e641bb355a99b573df82cc0a39bb2",
       "extensions/airtable/extension.json": "9a2a44c283c72dde6a1ae250582223d7d4516d113be764420bc7c692267a05c7",
       "extensions/airtable/mcp.json": "b17477d3c5cf8cfb02ade4c97e2d1da55e463cfaa947928eee77b41a7f8a4e15",
       "extensions/aisearch-pro/extension.json": "52c3abc07c674c463ac50210a8459de801043adabd4b90894b229391d4fd554e",
@@ -144,9 +144,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783310349,
+    "generated": 1783311007,
     "v": 1,
-    "version": "0.99.162"
+    "version": "0.99.163"
   },
-  "sig": "kbAjtvZp9RbLAr+lfPxEbkoI8u5pzCROvnwY7LPuWTShKb4EmxzFLZcnS0A5XOlN9Y/Nf6s+zIJufVCX0MlTAg=="
+  "sig": "wfv0S1R46dChb9FHjpyXAYannL2Y0+4mAYfxmrzUASi5Vm3g+3SJyyjCRvvz2LfBjIPRsmwVF3YQJrJGJmIECA=="
 }

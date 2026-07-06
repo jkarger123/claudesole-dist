@@ -16095,7 +16095,10 @@ function tUpload(f){if(!f)return;
 
 STUDIO_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>Video Studio</title>
 <style>
-:root{--bg:#0b0d12;--card:#141821;--card2:#1b2130;--line:#28303f;--txt:#e7ecf3;--dim:#8b95a7;--accent:#5b8cff;--go:#2fb56b;--warn:#e5a13a;--fx:#e5a13a;--fxbig:#ff5d5d}
+:root{--bg:#0a0a0f;--card:#1a1a24;--card2:#22222e;--line:#2a2a3a;--txt:#ffffff;--dim:#a0a0b0;--accent:#c9a227;--go:#22c55e;--warn:#f59e0b;--fx:#e5a13a;--fxbig:#ff5d5d}
+body.embed{background:transparent}
+body.embed>.wrap>h1,body.embed>.wrap>#builder>.sub{display:none}
+body.embed .wrap{padding-top:4px}
 *{box-sizing:border-box}
 html,body{overflow-x:hidden;max-width:100%}
 body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
@@ -16269,6 +16272,7 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
 <div id="toast" class="toast"></div>
 <script>
 var CC=window.CC||{}, MAXMB=CC.maxUploadMb||500;
+if(location.search.indexOf('embed')>=0)document.body.classList.add('embed');   // rendered inside the dashboard lens (iframe) -> drop the standalone header
 var clips=[], musicPath="", pace="punchy", poll=null;
 var proj=null, pid=null, zoom=48, sel=-1, dirty=false;
 function $(i){return document.getElementById(i);}
@@ -18298,6 +18302,13 @@ async function dlFile(rel,name){
   }
   toast('Still syncing from iCloud — give it a few seconds and click again.',6000);
 }
+function loadStudio(){
+  // Native lens: the Studio tool runs in-shell (same as how Sessions embeds /term). embed=1 drops the tool's own
+  // header so the dashboard provides the section header; the tool inherits the dashboard palette.
+  var m=document.getElementById('main');if(!m)return;
+  m.innerHTML='<div class="cc-head"><span class="cc-h-t">Studio</span><span class="cc-h-sub">Beat-synced video editor — auto-build, trim, effects, titles, PiP, export</span></div>'
+    +'<iframe id="studioFrame" src="/studio?embed=1" style="width:100%;height:calc(100vh - 132px);min-height:520px;border:1px solid var(--line);border-radius:12px;background:var(--card);display:block"></iframe>';
+}
 async function load(){D=await(await fetch("/api/data")).json();render();fetch("/api/status").then(r=>r.json()).then(s=>{ST=s;if(LENS=="machines")render();});}
 function render(){
   lensTopbar();
@@ -18331,6 +18342,7 @@ function render(){
   else if(LENS=="substack"){loadSubstack();return;}
   else if(LENS=="agency"){loadAgency();return;}
   else if(LENS=="calls"){loadCalls();return;}
+  else if(LENS=="studio"){loadStudio();return;}
   else if(LENS=="capture"){loadCapture();return;}
   else if(LENS=="context"){loadContext();return;}
   else if(LENS=="comms"){loadComms();return;}
@@ -24273,6 +24285,7 @@ function busyOn(msg,sub){ var o=document.getElementById('cfbusy'); if(!o){ o=doc
 function busyOff(){ var o=document.getElementById('cfbusy'); if(o) o.style.display='none'; }
 // ---- "How this works" explainers: per-feature, auto-shows once, dismissible + never-again, reopen via the ? button ----
 var HELP={
+  studio:{t:'Studio',sub:'Beat-synced video editor -- build, trim, effects, titles, PiP, export.',h:'<p><b>What:</b> a built-in video editor. Drop in clips, add music (upload a track or paste a YouTube link), and <b>Auto-build</b> a beat-synced cut -- then fine-tune it on the timeline.</p><p><b>Timeline:</b> tap a clip to trim (drag its edges), change speed, reorder, or add a flash/zoom on the beat; add titles; drop a clip on the PiP lane for picture-in-picture. Scrub to preview, or Play.</p><p><b>Export:</b> render an MP4 (lands in Files) or a CapCut bundle. Runs on the node&rsquo;s bundled ffmpeg -- no API key needed; works on real footage (no generative model).</p>'},
   agentlab:{t:'Agent Lab',sub:'Experimental \u2014 run specialist subagents as one-shot functions and parallel panels',h:'<p><span class="badge bdg-amber">Experimental</span> Agent Lab is a workbench for our specialist subagents (code-reviewer, cost-reporter, deploy-checker, incident-scanner, security-auditor, and any others the node exposes). Features here are being worked out; when one proves itself it graduates into core or ships as an extension.</p><p><b>Run a specialist</b> \u2014 pick one agent, type a task, and Run it as a one-shot function; you get the answer plus its cost and duration.</p><p><b>Panel</b> \u2014 select several specialists and give them ONE task; they run in parallel and answers land side by side as each finishes, a quick dynamic mini-workflow.</p><p>Every run uses the node&rsquo;s own subscription login.</p>'},
  pillars:{t:'Pillars',sub:'The major building blocks of your product, each with a status and what is in progress.',h:'<p><b>What:</b> the big pieces your product is made of -- each a card showing its health and the item being worked on right now.</p><p><b>Why:</b> one glance tells you what exists and where the active work is, without digging through folders.</p><p><b>How:</b> click a card to drill into its areas, or use the launch button to start a working session focused on that pillar.</p>'},
  routines:{t:'Routines',sub:'Recurring jobs that run on a schedule -- a nightly report, a weekly cleanup, and so on.',h:'<p><b>What:</b> a routine is a task that runs itself on a schedule (daily, weekly, or on demand) instead of you remembering to trigger it.</p><p><b>Why:</b> the repeatable chores -- a morning digest, a backup, a sync -- happen on their own, and this tab shows when each last ran and whether it worked.</p><p><b>How:</b> hit Run now to fire one immediately, or ask your Chief of Staff: \'set up a routine that emails me a summary every weekday at 8am.\'</p>'},

@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.163 -- 2026-07-05  (Video Studio: make it a NATIVE in-shell lens in the dashboard style)
+- Fixed two real problems: the Studio tab (1) opened a separate page that navigated you OUT of the dashboard, and
+  (2) used a blue theme that didn't match ClaudeFather's gold/dark design.
+- Now a **native lens**: clicking Studio renders in-shell (a `cc-head` header + the tool embedded, the same way
+  Sessions embeds the terminal /term) -- no navigation away. Recolored the tool to the dashboard palette
+  (gold accent #c9a227, matching cards/lines/fonts); an `?embed=1` mode drops the tool's own header so the
+  dashboard provides the section header. Added HELP.studio. The standalone /studio page still works as a deep link.
+
 ## 0.99.162 -- 2026-07-05  (Video Studio: pin the Studio tab top-level)
 - The Studio nav tab landed in the collapsed "Team" category (easy to miss). Pinned "studio" in NAV_PINNED so it
   stays a top-level daily-driver tab wherever the ai-video-studio extension is installed. (Reminder: the dashboard

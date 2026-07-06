@@ -13,7 +13,6 @@
     "id": "studio",
     "label": "Studio",
     "icon": "🎬",
-    "page": "/studio",
     "help": {
       "sub": "Beat-synced video editor",
       "h": "<p>Drop in clips, add music (an uploaded track or a YouTube link), pick a pace, and <b>Auto-build</b> a beat-synced cut. The render lands in the <b>Files</b> lens and plays right in the page.</p><p>The full multi-track timeline editor (mark points, trim, insert, effects, CapCut export) is coming next.</p>"
