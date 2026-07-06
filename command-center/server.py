@@ -16436,7 +16436,7 @@ function openProject(id){fetch('/api/studio/project?id='+id).then(function(r){re
   _svid={};window._mus=null;window._phT=0;stopPlay();
   $('builder').style.display='none';$('editor').style.display='block';window.scrollTo(0,0);
   $('eVideo').removeAttribute('src');$('eVideo').load();$('eStatus').textContent='Scrub to preview, or Play. Then Export.';
-  showLive();drawWave();renderTL();scrubPreview();});}
+  showLive();drawWave();renderTL();prebuffer();scrubPreview();});}
 $('ePlay').onclick=playToggle;
 $('eBack').onclick=function(){stopPlay();if(dirty&&!confirm('Leave without saving?'))return;$('editor').style.display='none';$('builder').style.display='block';loadRecent();};
 $('eZoomIn').onclick=function(){zoom=Math.min(220,zoom*1.4);renderTL();};
@@ -16469,19 +16469,38 @@ function _flashAt(t){return fxtrack().clips.some(function(f){return (f.type||'im
 function _fitDraw(g,v,cw,ch,zf,fit){var vw=v.videoWidth,vh=v.videoHeight;if(!vw||!vh)return;var s=(fit==='contain'?Math.min(cw/vw,ch/vh):Math.max(cw/vw,ch/vh))*(zf||1),dw=vw*s,dh=vh*s;try{g.drawImage(v,(cw-dw)/2,(ch-dh)/2,dw,dh);}catch(e){}}
 function showLive(){$('pvcanvas').style.display='';$('eVideo').style.display='none';$('ePvMode').textContent='live preview';}
 function showRendered(){$('pvcanvas').style.display='none';$('eVideo').style.display='';$('ePvMode').textContent='rendered';}
+function prebuffer(){if(!proj)return;Object.keys(proj.sources||{}).forEach(function(sid){if((proj.sources[sid]||{}).kind==='video'){var v=srcVideo(sid);if(v){try{v.load();}catch(e){}}}});var m=musicEl();if(m){try{m.load();}catch(e){}}}
+function drawBase(g,cl,v,t,cw,ch){var col=cl.color;if(col){g.filter='brightness('+(1+(col.b||0)*1.6).toFixed(2)+') contrast('+(col.c||1)+') saturate('+(col.s||1)+')';}_fitDraw(g,v,cw,ch,_zoomAt(t),cl.fit);g.filter='none';}
+function drawOverlays(g,t,cw,ch){
+  otrack().clips.forEach(function(oc){var ln=(oc.out-oc['in'])/(oc.speed||1);if(t>=oc.start&&t<oc.start+ln){var ov=srcVideo(oc.source);if(ov&&ov.readyState>=2&&ov.videoWidth){var tr=oc.transform||{},ow=cw*(tr.scale||0.4),oh=ow*ov.videoHeight/ov.videoWidth,ox=cw*(tr.x||0.05),oy=ch*(tr.y||0.05);if(!_playing){try{ov.currentTime=Math.max(0,oc['in']+(t-oc.start)*(oc.speed||1));}catch(e){}}try{g.drawImage(ov,ox,oy,ow,oh);}catch(e){}g.strokeStyle='#b98cff';g.lineWidth=2;g.strokeRect(ox,oy,ow,oh);}}});
+  ttrack().clips.forEach(function(tc){if(t>=tc.start&&t<=tc.end){var s=tc.style||{},txt=(tc.text||'').toUpperCase();g.font='bold '+Math.round(ch*0.052)+'px Impact,Arial,sans-serif';g.textAlign='center';var ty=ch*(s.y||0.12)+ch*0.05;g.lineWidth=ch*0.008;g.strokeStyle='#000';g.strokeText(txt,cw/2,ty);g.fillStyle='#fff';g.fillText(txt,cw/2,ty);}});
+  if(_flashAt(t)){g.fillStyle='rgba(255,255,255,0.85)';g.fillRect(0,0,cw,ch);}}
 function scrubPreview(){var cv=$('pvcanvas');if(!cv||!proj)return;var g=cv.getContext('2d'),cw=cv.width,ch=cv.height,t=window._phT||0;
   $('ePvT').textContent=t.toFixed(2)+'s';g.fillStyle='#000';g.fillRect(0,0,cw,ch);
   var cl=clipAt(t);if(!cl)return;var v=srcVideo(cl.source);if(!v)return;var srcT=Math.max(0,cl['in']+(t-cl.start)*(cl.speed||1));
-  function paint(){var col=cl.color;if(col){g.filter='brightness('+(1+(col.b||0)*1.6).toFixed(2)+') contrast('+(col.c||1)+') saturate('+(col.s||1)+')';}_fitDraw(g,v,cw,ch,_zoomAt(t),cl.fit);g.filter='none';
-    otrack().clips.forEach(function(oc){var ln=(oc.out-oc['in'])/(oc.speed||1);if(t>=oc.start&&t<oc.start+ln){var ov=srcVideo(oc.source);if(ov&&ov.readyState>=2&&ov.videoWidth){var tr=oc.transform||{},ow=cw*(tr.scale||0.4),oh=ow*ov.videoHeight/ov.videoWidth,ox=cw*(tr.x||0.05),oy=ch*(tr.y||0.05);try{ov.currentTime=Math.max(0,oc['in']+(t-oc.start)*(oc.speed||1));}catch(e){}try{g.drawImage(ov,ox,oy,ow,oh);}catch(e){}g.strokeStyle='#b98cff';g.lineWidth=2;g.strokeRect(ox,oy,ow,oh);}}});
-    ttrack().clips.forEach(function(tc){if(t>=tc.start&&t<=tc.end){var s=tc.style||{},txt=(tc.text||'').toUpperCase();g.font='bold '+Math.round(ch*0.052)+'px Impact,Arial,sans-serif';g.textAlign='center';var ty=ch*(s.y||0.12)+ch*0.05;g.lineWidth=ch*0.008;g.strokeStyle='#000';g.strokeText(txt,cw/2,ty);g.fillStyle='#fff';g.fillText(txt,cw/2,ty);}});
-    if(_flashAt(t)){g.fillStyle='rgba(255,255,255,0.85)';g.fillRect(0,0,cw,ch);}}
-  if(v.readyState>=2&&Math.abs(v.currentTime-srcT)<0.05){paint();}else{try{v.currentTime=srcT;}catch(e){}v.onseeked=function(){v.onseeked=null;paint();};}}
-var _playing=false,_raf=null,_t0=0,_pStart=0;
-function stopPlay(){_playing=false;if(_raf)cancelAnimationFrame(_raf);var m=musicEl();if(m){try{m.pause();}catch(e){}}$('ePlay').innerHTML='&#9654; Play';}
-function startPlay(){if(!proj)return;showLive();_playing=true;$('ePlay').innerHTML='&#10073;&#10073; Pause';_t0=(window._phT||0)>=proj.duration?0:(window._phT||0);_pStart=performance.now();
+  function done(){g.fillStyle='#000';g.fillRect(0,0,cw,ch);if(v.videoWidth)drawBase(g,cl,v,t,cw,ch);drawOverlays(g,t,cw,ch);}
+  if(v.readyState>=2&&Math.abs(v.currentTime-srcT)<0.05){done();}else{try{v.currentTime=srcT;}catch(e){}v.onseeked=function(){v.onseeked=null;if(!_playing)done();};}}
+var _playing=false,_raf=null,_t0=0,_pStart=0,_activeIdx=-1;
+function stopPlay(){_playing=false;if(_raf)cancelAnimationFrame(_raf);for(var s in _svid){try{_svid[s].pause();}catch(e){}}var m=musicEl();if(m){try{m.pause();}catch(e){}}var pb=$('ePlay');if(pb)pb.innerHTML='&#9654; Play';}
+function startPlay(){if(!proj)return;showLive();stopPlay();_playing=true;$('ePlay').innerHTML='&#10073;&#10073; Pause';
+  _t0=(window._phT||0)>=(proj.duration||0)?0:(window._phT||0);_pStart=performance.now();_activeIdx=-1;
   var m=musicEl();if(m){try{m.currentTime=_t0;m.play();}catch(e){}}
-  (function loop(){if(!_playing)return;var t=_t0+(performance.now()-_pStart)/1000;if(t>=proj.duration){window._phT=proj.duration;stopPlay();scrubPreview();return;}window._phT=t;$('ph').style.left=(t*zoom)+'px';scrubPreview();_raf=requestAnimationFrame(loop);})();}
+  playLoop();}
+// PLAY the active clip's <video> NATIVELY (smooth) + draw its current frame each rAF; SEEK only at clip boundaries
+// (per-frame seeking is what made it stutter to black). Clock-driven playhead; playbackRate=speed keeps slow-mo synced.
+function playLoop(){
+  if(!_playing)return;
+  var t=_t0+(performance.now()-_pStart)/1000;
+  if(t>=(proj.duration||0)){window._phT=proj.duration||0;stopPlay();scrubPreview();return;}
+  window._phT=t;$('ph').style.left=(t*zoom)+'px';var pt=$('ePvT');if(pt)pt.textContent=t.toFixed(2)+'s';
+  var cv=$('pvcanvas');if(cv){var g=cv.getContext('2d'),cw=cv.width,ch=cv.height,clips=vtrack().clips,ci=-1;
+    for(var i=0;i<clips.length;i++){if(t>=clips[i].start&&t<clips[i].start+clen(clips[i])){ci=i;break;}}
+    g.fillStyle='#000';g.fillRect(0,0,cw,ch);
+    if(ci>=0){var c=clips[ci],v=srcVideo(c.source);
+      if(ci!==_activeIdx){_activeIdx=ci;for(var s in _svid){if(_svid[s]!==v){try{_svid[s].pause();}catch(e){}}}var srcT=Math.max(0,c['in']+(t-c.start)*(c.speed||1));try{v.currentTime=srcT;v.playbackRate=Math.max(0.1,Math.min(4,(c.speed||1)));if(_playing)v.play();}catch(e){}}
+      if(v.readyState>=2&&v.videoWidth)drawBase(g,c,v,t,cw,ch);
+      drawOverlays(g,t,cw,ch);}}
+  _raf=requestAnimationFrame(playLoop);}
 function playToggle(){if(_playing)stopPlay();else startPlay();}
 function renderTL(){
   if(!proj)return;var dur=proj.duration||1,W=Math.max(320,dur*zoom);

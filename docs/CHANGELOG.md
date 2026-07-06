@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.167 -- 2026-07-06  (Video Studio: smooth live-preview playback -- stop the black-out)
+- The live-preview Play went black after a couple seconds because it SEEKED the source <video> every single frame
+  (video.currentTime=... 60x/sec) -- seeking isn't built for playback, so the decoder fell behind and drew nothing.
+- Now it PLAYS the active clip's <video> natively (smooth) and draws its current frame each rAF, seeking ONLY at
+  clip boundaries; playbackRate=clip speed keeps slow-mo in sync; the playhead is clock-driven and music plays
+  continuously. Plus prebuffer(): all source videos + the audio are .load()ed when a project opens so they're
+  buffered ahead. (For a pixel-exact smooth pass with every effect baked, Preview/Export still render a proxy MP4.)
+
 ## 0.99.166 -- 2026-07-06  (Video Studio: fix "add media" + move beat-cut into the editor)
 - **Critical fix: the whole Studio was non-interactive as a lens.** loadStudio grabbed the FIRST <script> in the
   embed page -- which is a tiny boot script (window.CC=...) injected before the real one -- so the studio JS never
