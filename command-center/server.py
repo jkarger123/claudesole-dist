@@ -16523,10 +16523,10 @@ function renderTL(){
     b.onclick=function(ev){ev.stopPropagation();selectClip(i);};
     if(i===sel){ // drag the edges to trim (in / out), live
       var hl=document.createElement('div');hl.className='h l';var hr=document.createElement('div');hr.className='h r';
-      hl.addEventListener('pointerdown',function(ev){var sd=(proj.sources[c.source]||{}).dur||99,o=c['in'];
-        sdrag(ev,function(dx){c['in']=Math.max(0,Math.min(c.out-0.1,+(o+dx).toFixed(2)));reflow();renderTL();},function(){renderInsp();});});
-      hr.addEventListener('pointerdown',function(ev){var sd=(proj.sources[c.source]||{}).dur||99,o=c.out;
-        sdrag(ev,function(dx){c.out=Math.max(c['in']+0.1,Math.min(sd,+(o+dx).toFixed(2)));reflow();renderTL();},function(){renderInsp();});});
+      hl.addEventListener('pointerdown',function(ev){var sd=(proj.sources[c.source]||{}).dur||99,o=c['in'];stopPlay();showLive();
+        sdrag(ev,function(dx){c['in']=Math.max(0,Math.min(c.out-0.1,+(o+dx).toFixed(2)));reflow();renderTL();window._phT=c.start;scrubPreview();},function(){renderInsp();});});   // preview the trim-IN frame live
+      hr.addEventListener('pointerdown',function(ev){var sd=(proj.sources[c.source]||{}).dur||99,o=c.out;stopPlay();showLive();
+        sdrag(ev,function(dx){c.out=Math.max(c['in']+0.1,Math.min(sd,+(o+dx).toFixed(2)));reflow();renderTL();window._phT=Math.max(0,c.start+clen(c)-0.03);scrubPreview();},function(){renderInsp();});});   // preview the trim-OUT frame live
       b.appendChild(hl);b.appendChild(hr);}
     tv.appendChild(b);});
   // fx pins (impacts + zooms) -- drag to move (beat-snap), tap for menu
@@ -16560,7 +16560,7 @@ $('trkT').onclick=function(ev){var r=$('trkT').getBoundingClientRect();addText(M
 $('eAddText').onclick=function(){addText(window._phT||0.3);};
 $('eAddPip').onclick=function(){addPip();};
 $('eAddClip').onclick=function(){$('eClipFile').click();};
-$('eClipFile').onchange=function(){var fs=this.files;this.value='';Array.prototype.forEach.call(fs,function(f){
+$('eClipFile').onchange=function(){var fs=Array.prototype.slice.call(this.files);this.value='';fs.forEach(function(f){   // COPY the FileList first -- clearing value empties it before we iterate
   if(f.size>MAXMB*1048576){toast(f.name+' is too large',4000);return;}
   $('eStatus').textContent='Uploading '+f.name+'...';
   upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'video/mp4')).then(function(r){

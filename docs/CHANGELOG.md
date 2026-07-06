@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.168 -- 2026-07-06  (Video Studio: fix + Clip; live trim preview)
+- **+ Clip now actually adds the clip.** The handler cleared the file input (`this.value=''`) BEFORE iterating the
+  FileList, which empties it -> nothing uploaded. Now it copies the files to an array first. (Backend add-clip was
+  always fine.)
+- **Trim preview:** dragging a clip's left/right trim handle now shows that exact frame in the preview canvas live
+  -- drag the in-handle and you see the new start frame; drag the out-handle and you see the new end frame -- so
+  you can see precisely where the cut lands.
+
 ## 0.99.167 -- 2026-07-06  (Video Studio: smooth live-preview playback -- stop the black-out)
 - The live-preview Play went black after a couple seconds because it SEEKED the source <video> every single frame
   (video.currentTime=... 60x/sec) -- seeking isn't built for playback, so the decoder fell behind and drew nothing.
