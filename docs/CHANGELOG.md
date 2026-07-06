@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.177 -- 2026-07-06  (Ralph: keep the RUNNER tab clean -- detail belongs in the live tab)
+- The runner tab is back to how it was before the live tab existed: just the iteration number + the little
+  end-of-iteration blurb (the final result text + turns/time). The per-step activity (> Bash, > Read, mid-run
+  text) was leaking into the runner pane after the stream-json switch; it now goes ONLY to the `-live` tab. Clean
+  separation: tab 1 = control/overview, tab 2 = the live play-by-play.
+
 ## 0.99.176 -- 2026-07-06  (fix: the Ralph "live" tab now actually shows on the node)
 - The live-iteration tab spawned but was INVISIBLE on a node (it showed only on the overseer): the node's
   session-scoping stripped "ralph-" and looked up "<loop>-live" as a loop (which doesn't exist) -> didn't claim

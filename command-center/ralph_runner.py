@@ -168,22 +168,15 @@ signal.signal(signal.SIGINT, on_sigint)
 
 # ---- one iteration -----------------------------------------------------------
 def _pane_summary(raw):
-    """Turn a stream-json event into a SHORT line for the runner's own pane (tool names + brief text + the result).
-    The rich, full view lives in the `ralph-<name>-live` tab; this keeps tab 1 a compact control+activity trail."""
+    """The runner's OWN pane stays clean -- just the end-of-iteration blurb (as it was before the live tab existed).
+    All the per-step activity (tool calls, mid-iteration text) lives in the `ralph-<name>-live` tab now."""
     try: e = json.loads(raw)
-    except Exception: return raw[:200]                 # non-JSON (shouldn't happen with stream-json) -> show it
-    t = e.get("type")
-    if t == "assistant":
-        outs = []
-        for b in (e.get("message", {}).get("content") or []):
-            if b.get("type") == "tool_use": outs.append("> " + str(b.get("name", "")))
-            elif b.get("type") == "text":
-                tx = (b.get("text") or "").strip().replace("\n", " ")
-                if tx: outs.append(tx[:120])
-        return "   ".join(outs)
-    if t == "result":
-        return "= %s  (%s turns, %.1fs)" % (e.get("subtype", ""), e.get("num_turns"), (e.get("duration_ms") or 0) / 1000.0)
-    return ""                                          # skip system/user/rate-limit noise in the runner pane
+    except Exception: return ""                        # non-JSON stderr -> keep the runner pane clean (it's in the live tab)
+    if e.get("type") == "result":                      # the "little blurb when the iteration finished"
+        txt = (e.get("result") or "").strip().replace("\n", " ")
+        stats = "%s turns, %.1fs" % (e.get("num_turns"), (e.get("duration_ms") or 0) / 1000.0)
+        return ("%s  (%s)" % (txt[:220], stats)) if txt else ("iteration %s (%s)" % (e.get("subtype", "done"), stats))
+    return ""                                          # everything else -> the live tab only
 
 def run_iteration(n):
     prompt = read(lp("prompt.txt")).replace("$ITER", str(n))
