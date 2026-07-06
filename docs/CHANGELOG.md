@@ -3,6 +3,24 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.155 -- 2026-07-05  (Video Studio P1: auto-build a beat-synced video from clips + a song)
+- NEW **Video Studio** -- a built-in video editor (Phase 1: one-tap Auto-build). Drop in clips, add music (upload
+  a track or paste a YouTube link + optional section), pick a pace, and it beat-detects the song, motion-detects
+  the clips, cuts every cut onto a beat, slow-mos the finisher, fires impact flashes on the big hits, and renders
+  an MP4 that lands in the Files lens. Works on real family footage -- analytical editing (no generative model,
+  so no child-safety block); runs on the bundled ffmpeg, no API key required.
+- Opens as a dedicated **/studio** page (the /term /ralph pattern), mobile + desktop; a **Studio** nav tab appears
+  when the `ai-video-studio` extension is installed. Foundation for the full multi-track timeline editor (mark
+  points, trim, insert, effects lanes, CapCut-draft export) landing in later phases.
+- Engine (`extensions/ai-video-studio/engine/`): NEW `edl.py` renders one shared project/EDL JSON -> MP4 (the
+  single source of truth the auto-build, the coming timeline, and a CapCut exporter all speak);
+  `autocut.build_project()` emits that project; `music.py` hardened (retry + full-download-then-local-trim
+  fallback so YouTube's intermittent range-fetch 403s don't kill a render).
+- Server (`server.py`): `/studio` page + `/api/studio/{render,job,upload,media}` routes; a background
+  `threading.Thread` render-job worker (never blocks the request); a NEW HTTP **Range/206** media route so
+  `<video>` can seek renders (the whole-file `/api/file-get` can't). NOTE: rendering needs the node's `bin/`
+  media tools (ffmpeg/yt-dlp); binary distribution to every node is a later-phase packaging item.
+
 ## 0.99.154 -- 2026-07-05  (Attach cap: /term now uses the real 500MB limit, not the 50MB fallback)
 - 0.99.153 raised the upload cap to 500MB, but the terminal attach still rejected anything over 50MB: the `/term`
   page is served as a standalone string with NO `window.CC` bootstrap (only the main dashboard PAGE gets it), so

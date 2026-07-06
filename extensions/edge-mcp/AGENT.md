@@ -45,6 +45,31 @@ strings ("11pt","0.5in"); paragraph break `\r`; when text oversets read `frame.p
 (frame.paragraphs omits overset ones); a reduced-opacity placed image renders as an uneven wash -- bake watermarks
 to FLAT OPAQUE art instead. `snapshot` args: {target:"page"|"spread", index:<0-based>}.
 
+LAYOUT DOCTRINE (building a multi-page book/magazine/devotional -- read this BEFORE placing repeating elements):
+- **THE THREE RULES: constants -> PARENT pages; look -> named STYLES; content -> document pages.** Never draw a
+  repeating element per-page, and never direct-format repeating text. Edit the parent (or the style) once -> every page
+  follows. Both halves of the mistake -- furniture drawn per-page AND repeating text direct-formatted -- force a full
+  refactor of hundreds of pages later (that exact rework is why this exists).
+- Classify EVERY element before building: fixed-position constant (folio/running-head/rule/watermark) -> **parent**;
+  changing-content-consistent-look (date/verse/body/divider) -> **document page but formatted by paragraph/character/
+  object STYLES**; running head that CHANGES (chapter/month) -> **Running Header text variable**; watermark/background
+  -> **locked layer**; page numbering -> **AUTO_PAGE_NUMBER marker + Numbering/Section Options**; the words -> **page,
+  editable**. Test: "change it -> one page or all?" all=constant; "same formatting every page?" -> it's a style.
+- **Styles coexist with a computed per-page value** via: apply style -> `clearOverrides()` -> re-apply ONLY the one
+  intended per-page attribute (e.g. the body's auto-fit point size -- the ONE thing that stays per-page; everything else
+  about the body is style-controlled). Helper `applyStyleKeepOverrides(text, style, {pointSize})`. Repeated vector art
+  (dividers) = **object styles** (`applyObjectStyle`).
+- UXP quirks (each cost real time): running-header var -> `variableType = VariableTypes.MATCH_CHARACTER_STYLE_TYPE`,
+  set `variable.variableOptions.appliedCharacterStyle`, **no `insertVariable()`** (do `ip.textVariableInstances.add()`
+  then set `inst.associatedTextVariable`). Parent lookup: set `namePrefix` (`baseName` unreliable). Build parent
+  furniture with `item.duplicate(masterPage)` (preserves exact coords). Verso/recto: `String(page.side)` (enum === fails).
+- **Proven helpers + full doctrine ship with this extension** -- don't rediscover the UXP APIs:
+  `runtime/indesign/layout_helpers.js` (getParent, dupeToParent, addFolio, setupRunningHeader, insertVariableInstance,
+  applyStyleKeepOverrides, applyObjectStyle, getBackgroundLayer, applyParentAndStrip, **preflight**) and
+  `runtime/indesign/LAYOUT_DOCTRINE.md`. Prepend the helpers you need to your `execute` script (no module system in a
+  UXP call). Run `CF.preflight(doc)` before AND after building -- it flags constants duplicated per-page ("should be a
+  parent"), repeating text with direct formatting ("should be a paragraph style"), and missing/substituted fonts.
+
 BROWSER (recipe browser-attach) -- attaches to the user's real Chrome (chrome-devtools-mcp): navigate_page,
 take_screenshot, take_snapshot, click, fill_form, list_pages, etc. Gives the user's real logged-in sessions.
 

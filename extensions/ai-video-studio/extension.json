@@ -1,0 +1,23 @@
+{
+  "id": "ai-video-studio",
+  "name": "Video Studio",
+  "category": "integration",
+  "version": "1.0.0",
+  "icon": "🎬",
+  "summary": "Turn raw clips + a song into a beat-synced hype video. Auto-build now; a full timeline editor is landing.",
+  "description": "A built-in video editor. Drop in phone clips, bring the music (upload a track or paste a YouTube link), and it beat-detects the song, finds the money moments in each clip, cuts every cut onto a beat, slow-mos the finisher, and fires impact flashes on the big hits -- then renders an MP4 that lands in Files. Works on real family footage (analytical editing, no generative model, so no child-safety block). Runs entirely on the bundled ffmpeg -- no API key required; BYO keys unlock optional generative/voiceover extras. Opens as a dedicated /studio page (mobile + desktop).",
+  "provides": ["lens:studio"],
+  "requires": [],
+  "default_category": "Team",
+  "lens": {
+    "id": "studio",
+    "label": "Studio",
+    "icon": "🎬",
+    "page": "/studio",
+    "help": {
+      "sub": "Beat-synced video editor",
+      "h": "<p>Drop in clips, add music (an uploaded track or a YouTube link), pick a pace, and <b>Auto-build</b> a beat-synced cut. The render lands in the <b>Files</b> lens and plays right in the page.</p><p>The full multi-track timeline editor (mark points, trim, insert, effects, CapCut export) is coming next.</p>"
+    }
+  },
+  "setup_doc": "SETUP.md"
+}

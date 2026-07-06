@@ -15,10 +15,23 @@ Capabilities:
   tts         -- text-to-speech (the announcer / narrator voice)
 """
 
-CAPS = ["understand", "plan", "image", "video", "tts"]
+CAPS = ["understand", "plan", "image", "video", "tts", "autoedit"]
+# NOTE two DISTINCT families of video AI (learned the hard way 2026-07-05):
+#   GENERATIVE (video/image caps: Veo, Imagen, Omni) -- rebuild pixels -> REFUSE real children (Prohibited Use
+#     policy; tested + confirmed blocked on real toddler footage). Great for products/pets/synthetic, not kids.
+#   CONTENT-AWARE EDITORS ("autoedit" cap: OpusClip, VEED) -- an LLM+vision model WATCHES real footage, finds the
+#     highlights, cuts to the beat, renders -- WITHOUT regenerating anyone. These accept real family footage.
+#   So for an "epic edit" of real people (esp. kids), route to an autoedit provider, NOT a generative one.
 
 # Each provider: which vault key NAME(s) unlock it (any one), and the default model per capability it can do.
 PROVIDERS = {
+    # ---- BUILT-IN analytical editor (OUR engine: motion/highlight detection + beat-sync auto-cut + speed ramps).
+    # No key, ALWAYS available. This is the real-footage path (works on kids -- no generative model, no block). ----
+    "builtin": {
+        "label": "Studio Editor (built-in)",
+        "keys": [],   # empty -> always available (no API key required)
+        "caps": {"autoedit": "studio-beatcut"},
+    },
     "gemini": {
         "label": "Google Gemini",
         "keys": ["GEMINI_API_KEY", "GOOGLE_AI_API_KEY"],
@@ -56,13 +69,24 @@ PROVIDERS = {
     "runway": {
         "label": "Runway",
         "keys": ["RUNWAY_API_KEY", "RUNWAYML_API_SECRET"],
-        "caps": {"video": "gen3a_turbo"},
+        "caps": {"video": "gen3a_turbo"},  # generative -> blocks kids
+    },
+    # ---- CONTENT-AWARE EDITORS (analytical AI: watch -> cut -> render; accept real family footage) ----
+    "opusclip": {
+        "label": "OpusClip",
+        "keys": ["OPUSCLIP_API_KEY", "OPUS_API_KEY"],
+        "caps": {"autoedit": "opusclip-montage"},
+    },
+    "veed": {
+        "label": "VEED",
+        "keys": ["VEED_API_KEY"],
+        "caps": {"autoedit": "veed-edit"},
     },
 }
 
 # When more than one provider can do a capability, prefer in this order (Gemini first -- covers the most and is
 # our set-up default). Purely a default; the user can override per capability in the lens.
-PREFERENCE = ["gemini", "openai", "anthropic", "elevenlabs", "runway"]
+PREFERENCE = ["opusclip", "veed", "builtin", "gemini", "openai", "anthropic", "elevenlabs", "runway"]
 
 
 def _norm(names):
@@ -75,6 +99,9 @@ def available_providers(vault_key_names):
     have = _norm(vault_key_names)
     out = {}
     for pid, p in PROVIDERS.items():
+        if not p["keys"]:                                   # keyless provider (our built-in engine) -> always on
+            out[pid] = {"label": p["label"], "key": None, "caps": dict(p["caps"])}
+            continue
         unlock = next((k for k in p["keys"] if k.upper() in have), None)
         if unlock:
             out[pid] = {"label": p["label"], "key": unlock, "caps": dict(p["caps"])}
@@ -105,7 +132,8 @@ def resolve(vault_key_names, overrides=None):
         "missing_caps": missing,
         # can we do the core job (edit existing clips with a voiceover) vs the full generative studio?
         "can_edit": all(c in picks for c in ("understand", "plan")),
-        "can_generate_video": "video" in picks,
+        "can_generate_video": "video" in picks,        # generative (blocks kids)
+        "can_autoedit": "autoedit" in picks,            # content-aware editor (works on real footage incl. kids)
         "can_voiceover": "tts" in picks,
     }
 

@@ -22,6 +22,13 @@ in a transparency proxy that logs every tool call + latency.
     Chrome w/ a debug port). Next: `plugin-app` (Sidekick/Adobe/Blender), `os-automation`, `session-pairing`, `stdio-bridge`.
   - `mcp_proxy_log.py` -- byte-exact transparency proxy (tees every JSON-RPC frame + latency to jsonl).
   - `view_activity.py` -- timeline viewer (terminal precursor to the lens).
+  - `indesign/` -- app-specific layout know-how shipped so no InDesign job relearns it:
+    - `LAYOUT_DOCTRINE.md` -- the Template Architecture doctrine (three rules: constants -> parent pages; look ->
+      named styles; content -> document pages). Running-header text variables; auto folios; locked watermark layer;
+      the element-classification table; the clearOverrides pattern (style + one computed per-page value); 3-check preflight.
+    - `layout_helpers.js` -- proven UXP snippet library (getParent, dupeToParent, addFolio, setupRunningHeader,
+      insertVariableInstance, applyStyleKeepOverrides, applyObjectStyle, getBackgroundLayer, applyParentAndStrip,
+      preflight = lintConstants + lintDirectFormatting + lintFonts). Prepend into an `execute` call.
 
 **Design + rationale:** `../../mcp/EDGE_MCP_DESIGN.md` (the forward-looking blueprint) and the proven PoC in
 `../../mcp/proxy/`. Sidekick/InDesign is the first reference instance of the general capability.
@@ -41,6 +48,12 @@ through the stack (hundreds of execute/snapshot calls, a 12k-char script). Done:
   export a 200dpi raster + `edge-mcp pull` to verify detail); every script sets NEVER_INTERACT or a modal freezes
   the engine; snapshot renders `app.activeDocument`; no remote screen capture (TCC); real shell+scp via
   `edge-mcp sh|pull|push`; UXP enum-identity + reduced-opacity-image gotchas.
+- **Template Architecture doctrine shipped** (from a live 355-entry-book job): three rules -- constants -> PARENT
+  pages (never per-page); look -> named paragraph/character/object STYLES (never direct-format repeating text);
+  content -> document pages. Running heads that change = Running Header text variables; auto folios; watermark on a
+  locked layer; the clearOverrides pattern (a style + one computed per-page value, e.g. auto-fit body size); a 3-check
+  `preflight` (constants-should-be-parent, text-should-be-styled, missing/substituted fonts). Doctrine block in
+  AGENT.md + full `runtime/indesign/LAYOUT_DOCTRINE.md` + proven `runtime/indesign/layout_helpers.js` snippet library.
 
 PENDING (fleet ship, gated): edge-mcp **lens** (hosts/servers/live activity -- server.py+PAGE, needs restart) +
 Design Canvas; `--mcp-config` on spawn for native in-session tools; then **sign + converge** (Mission Control ceremony).

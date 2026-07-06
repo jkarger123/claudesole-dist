@@ -6728,6 +6728,7 @@ def _ext_lenses():
         if _ext_is_paid(m) and not _entitled(eid, m): continue
         out.append({"id": L["id"], "label": L.get("label", eid), "icon": L.get("icon", "🧩"), "ext": eid,
                     "category": m.get("default_category") or L.get("category") or "Integrations",
+                    "page": L.get("page"),   # a lens can open a dedicated full page (e.g. /studio) instead of a PAGE branch
                     "help": L.get("help") or m.get("help")})   # extension.json lens.help ({sub,h} or a string) -> per-tab help header
     return out
 
@@ -14291,6 +14292,92 @@ button{width:100%;margin-top:12px;background:linear-gradient(135deg,#d6b23c,#c9a
 var r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t})});
 if(r.ok){location.reload();}else{document.getElementById('e').textContent='Invalid token.';}return false;}</script></body></html>"""
 
+# ============================ VIDEO STUDIO (core) ============================
+# Auto-build + render backend for the /studio page. The engine lives in extensions/ai-video-studio/engine/;
+# renders run in a background thread (never block the request) and land in the Files lens. See the plan at
+# ~/.claude/plans/linear-hatching-fox.md.
+STUDIO_ENGINE = os.path.join(CC_HOME, "extensions", "ai-video-studio", "engine")
+STUDIO_MEDIA = os.path.join(DELIV_LOCAL_ROOT or CC_HOME, "_studio_media")   # uploaded clips
+STUDIO_OUT_DIR = os.path.join(BASE, "deliverables")                        # renders -> show in Files lens
+_STUDIO_JOBS = {}
+_STUDIO_LOCK = threading.Lock()
+
+def _studio_set(jid, **kw):
+    with _STUDIO_LOCK:
+        j = _STUDIO_JOBS.setdefault(jid, {"id": jid}); j.update(kw); j["ts"] = time.time()
+
+def studio_upload_stream(rfile, clen, filename, mime):
+    """Stream an uploaded clip (raw request body) straight to _studio_media; return its path. No session needed."""
+    try: os.makedirs(STUDIO_MEDIA, exist_ok=True)
+    except Exception as e: return {"ok": False, "error": str(e)[:120]}
+    fn = _ensure_ext(_sanitize_filename(filename or "clip"), mime or "")
+    stem, ext = os.path.splitext(fn)
+    dest = os.path.join(STUDIO_MEDIA, "%s_%s%s" % (stem[:50] or "clip", secrets.token_hex(4), ext))
+    cap = _session_upload_cap_mb() * 1024 * 1024
+    written = 0
+    try:
+        with open(dest, "wb") as f:
+            remaining = clen if clen else None
+            while True:
+                want = 1048576 if remaining is None else min(1048576, remaining - written)
+                if want <= 0: break
+                chunk = rfile.read(want)
+                if not chunk: break
+                f.write(chunk); written += len(chunk)
+                if written > cap: break
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+    if not written or written > cap:
+        try: os.remove(dest)
+        except Exception: pass
+        return {"ok": False, "error": "empty or over the %dMB cap" % _session_upload_cap_mb(), "toobig": written > cap}
+    return {"ok": True, "path": dest, "name": os.path.basename(dest), "bytes": written}
+
+def studio_render_start(body):
+    jid = secrets.token_hex(6)
+    _studio_set(jid, state="queued", pct=0, msg="queued")
+    threading.Thread(target=_studio_render_worker, args=(jid, body), daemon=True).start()
+    return {"ok": True, "job_id": jid}
+
+def _studio_render_worker(jid, body):
+    """AUTO-BUILD render: shells the engine's studio.py (deterministic auto-cut, beat-synced, impact FX) -> MP4."""
+    try:
+        _studio_set(jid, state="running", pct=10, msg="starting")
+        os.makedirs(STUDIO_OUT_DIR, exist_ok=True)
+        out = os.path.join(STUDIO_OUT_DIR, "studio_%s.mp4" % jid)
+        clips = [c for c in (body.get("clips") or []) if c and os.path.exists(c)]
+        music = (body.get("music") or "").strip()
+        if not clips: return _studio_set(jid, state="error", pct=100, error="no clips uploaded")
+        if not music: return _studio_set(jid, state="error", pct=100, error="no music (upload a track or paste a YouTube URL)")
+        args = ["python3", os.path.join(STUDIO_ENGINE, "studio.py"), "--music", music, "--out", out,
+                "--pace", (body.get("pace") or "punchy")]
+        if body.get("section"): args += ["--section", str(body["section"])]
+        args += clips
+        _studio_set(jid, pct=30, msg="beat-detecting + cutting")
+        r = subprocess.run(args, capture_output=True, text=True, cwd=STUDIO_ENGINE, timeout=900)
+        # studio.py prints its result as pretty (multi-line) JSON to stdout -> parse the whole blob, not one line.
+        res = None
+        out_txt = (r.stdout or "").strip()
+        try: res = json.loads(out_txt)
+        except Exception:
+            m = re.search(r"\{.*\}", out_txt, re.S)   # tolerate any leading noise: grab the JSON object
+            if m:
+                try: res = json.loads(m.group(0))
+                except Exception: res = None
+        if res is None:
+            res = {"ok": False, "error": ((r.stderr or out_txt) or "render failed")[-300:]}
+        if res.get("ok") and os.path.exists(out):
+            _studio_set(jid, state="done", pct=100, msg="done", duration=res.get("duration"), path=out,
+                        rel="command-center/deliverables/studio_%s.mp4" % jid)
+        else:
+            _studio_set(jid, state="error", pct=100, error=str(res.get("error", "render failed"))[:300])
+    except Exception as e:
+        _studio_set(jid, state="error", pct=100, error=str(e)[:200])
+
+def studio_job(jid):
+    with _STUDIO_LOCK: return dict(_STUDIO_JOBS.get(jid) or {"state": "unknown"})
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _cookies(self):
@@ -14350,6 +14437,46 @@ class H(BaseHTTPRequestHandler):
         # (like the clean download URLs) don't take effect until a manual hard-refresh.
         if "text/html" in ct: self.send_header("Cache-Control", "no-store, must-revalidate")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def _studio_media(self, q):
+        """Stream a Studio render/clip with HTTP Range support so <video> can seek (the whole-file /api/file-get
+        can't). Accepts ?path= (absolute, or project-relative); restricted to the studio/deliverables roots."""
+        raw = urllib.parse.unquote(q.get("path", [""])[0] or "")
+        if not raw: return self._s(400, "no path")
+        try: ab = raw if os.path.isabs(raw) else projpath(raw)
+        except Exception: return self._s(400, "bad path")
+        real = os.path.realpath(ab)
+        roots = [os.path.realpath(p) for p in [STUDIO_OUT_DIR, STUDIO_MEDIA, (DELIV_LOCAL_ROOT or CC_HOME)] if p]
+        if _path_has_secret(real) or not any(real == r or real.startswith(r + os.sep) for r in roots):
+            return self._s(403, "forbidden")
+        if not os.path.isfile(real): return self._s(404, "not found")
+        import mimetypes
+        ct = mimetypes.guess_type(real)[0] or "application/octet-stream"
+        size = os.path.getsize(real); start, end = 0, size - 1
+        rng = self.headers.get("Range", "")
+        partial = rng.startswith("bytes=")
+        if partial:
+            try:
+                a, _, b = rng[6:].partition("-")
+                start = int(a) if a else 0
+                end = int(b) if b else size - 1
+            except Exception: start, end, partial = 0, size - 1, False
+            end = min(end, size - 1); start = max(0, min(start, end))
+        length = end - start + 1
+        self.send_response(206 if partial else 200)
+        self.send_header("Content-Type", ct)
+        self.send_header("Accept-Ranges", "bytes")
+        if partial: self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+        self.send_header("Content-Length", str(length))
+        self.end_headers()
+        try:
+            with open(real, "rb") as f:
+                f.seek(start); remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(262144, remaining))
+                    if not chunk: break
+                    self.wfile.write(chunk); remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError): pass
+        except Exception: pass
     def serve_static(self, rel):
         rel = rel.split("?")[0].lstrip("/")
         # allow nested paths (noVNC ships a tree of ESM modules) but block traversal
@@ -14527,6 +14654,9 @@ class H(BaseHTTPRequestHandler):
                 {"maxUploadMb": _session_upload_cap_mb(), "protectedSessions": CC.get("protected_sessions") or [], "chiefSession": CHIEF})
             return self._s(200, TERM_PAGE.replace("<body>", "<body>" + _boot, 1), "text/html; charset=utf-8")
         if u.path == "/ralph": return self._s(200, RALPH_PAGE, "text/html; charset=utf-8")
+        if u.path == "/studio":
+            _boot = "<script>window.CC=Object.assign(window.CC||{},%s);</script>" % json.dumps({"maxUploadMb": _session_upload_cap_mb()})
+            return self._s(200, STUDIO_PAGE.replace("<body>", "<body>" + _boot, 1), "text/html; charset=utf-8")
         if u.path.startswith("/static/"): return self.serve_static(u.path[len("/static/"):])
         if u.path == "/": return self._s(200, render_page(), "text/html; charset=utf-8")
         if u.path == "/manifest.webmanifest": return self._s(200, json.dumps(_web_manifest()), "application/manifest+json")
@@ -14823,6 +14953,10 @@ class H(BaseHTTPRequestHandler):
             try: ab = projpath(rel)
             except: return self._s(400, "{}")
             return self._s(200, json.dumps({"brief": brief_summary(ab), "files": list_files(ab)}))
+        if u.path == "/api/studio/job":
+            return self._s(200, json.dumps(studio_job(q.get("id", [""])[0])))
+        if u.path == "/api/studio/media":     # Range/206-capable media serve for <video> (file-get is whole-file-in-memory)
+            return self._studio_media(q)
         return self._s(404, "{}")
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
@@ -14835,6 +14969,14 @@ class H(BaseHTTPRequestHandler):
             except Exception: clen = 0
             res = _stream_upload_to_session(_q("session"), _q("filename"), _q("mime"), self.rfile, clen,
                                             note=_q("note"), enter=(_q("enter") == "1"))
+            return self._s(200 if res.get("ok") else (413 if res.get("toobig") else 400), json.dumps(res))
+        if u.path == "/api/studio/upload":   # STREAMING clip upload for the Studio (raw body, no session needed)
+            if not self._authed(): return self._s(403, json.dumps({"ok": False, "error": "auth"}))
+            q = urllib.parse.parse_qs(u.query)
+            def _q(k): return urllib.parse.unquote((q.get(k, [""])[0] or ""))
+            try: clen = int(self.headers.get("Content-Length", 0) or 0)
+            except Exception: clen = 0
+            res = studio_upload_stream(self.rfile, clen, _q("filename"), _q("mime"))
             return self._s(200 if res.get("ok") else (413 if res.get("toobig") else 400), json.dumps(res))
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or "{}")
         if u.path == "/api/login":
@@ -14850,6 +14992,8 @@ class H(BaseHTTPRequestHandler):
         if not self._auth_gate(u.path): return
         if u.path == "/api/launch":
             return self._s(200, json.dumps(launch(body.get("target", "studio"), body.get("name", "session"), body.get("component"), body.get("rel") or None)))
+        if u.path == "/api/studio/render":
+            return self._s(200, json.dumps(studio_render_start(body)))
         if u.path == "/api/close-session":
             return self._s(200, json.dumps(close_session(body["name"], body.get("force", False))))
         if u.path == "/api/claude-account/snapshot":
@@ -15735,6 +15879,166 @@ function tUpload(f){if(!f)return;
     .then(function(r){if(r&&r.ok){tToast('📎 Attached '+r.name+' — review & press Enter',3500);}
       else{tToast('Upload failed: '+((r||{}).error||'?'),5000);}})
     .catch(function(e){tToast('Upload failed: '+(e&&e.message||'network'),5000);});}
+</script></body></html>"""
+
+STUDIO_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Video Studio</title>
+<style>
+:root{--bg:#0b0d12;--card:#141821;--card2:#1b2130;--line:#28303f;--txt:#e7ecf3;--dim:#8b95a7;--accent:#5b8cff;--go:#2fb56b;--warn:#e5a13a}
+*{box-sizing:border-box}
+html,body{overflow-x:hidden;max-width:100%}
+body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{width:100%;max-width:760px;margin:0 auto;padding:18px 16px 60px}
+.sub,.drop,.muted{overflow-wrap:anywhere}
+h1{font-size:20px;margin:6px 0 2px;display:flex;align-items:center;gap:10px}
+.sub{color:var(--dim);font-size:13px;margin:0 0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:0 0 14px}
+.card h2{font-size:13px;letter-spacing:.04em;text-transform:uppercase;color:var(--dim);margin:0 0 12px}
+label{display:block;font-size:12px;color:var(--dim);margin:0 0 5px}
+input[type=text],select{width:100%;background:var(--card2);color:var(--txt);border:1px solid var(--line);border-radius:10px;padding:11px 12px;font-size:15px;outline:none}
+input[type=text]:focus,select:focus{border-color:var(--accent)}
+.row{display:flex;gap:10px;flex-wrap:wrap}
+.row>div{flex:1;min-width:130px}
+.btn{appearance:none;border:1px solid var(--line);background:var(--card2);color:var(--txt);border-radius:10px;padding:11px 16px;font-size:15px;font-weight:600;cursor:pointer}
+.btn:active{transform:translateY(1px)}
+.btn.go{background:var(--accent);border-color:var(--accent);color:#fff;width:100%;padding:15px;font-size:16px;margin-top:4px}
+.btn.go:disabled{opacity:.5;cursor:default}
+.btn.ghost{background:transparent}
+.drop{border:1.5px dashed var(--line);border-radius:12px;padding:22px 14px;text-align:center;color:var(--dim);cursor:pointer}
+.drop.on{border-color:var(--accent);color:var(--txt);background:rgba(91,140,255,.06)}
+.clip{display:flex;align-items:center;gap:10px;background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-top:8px;font-size:13px}
+.clip .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.clip .x{color:var(--dim);cursor:pointer;font-size:18px;line-height:1;padding:0 4px}
+.clip .sz{color:var(--dim);font-size:12px}
+.muted{color:var(--dim);font-size:12px;margin-top:8px}
+.bar{height:8px;background:var(--card2);border-radius:6px;overflow:hidden;margin:12px 0 6px}
+.bar>i{display:block;height:100%;width:0;background:var(--go);transition:width .4s}
+video{width:100%;border-radius:12px;background:#000;margin-top:6px}
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:#000;color:#fff;padding:11px 16px;border-radius:10px;font-size:14px;max-width:90%;opacity:0;transition:opacity .25s;pointer-events:none;z-index:9}
+.toast.show{opacity:.95}
+a.dl{color:var(--accent);text-decoration:none;font-weight:600}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg button{background:var(--card2);color:var(--dim);border:0;padding:10px 14px;font-size:14px;cursor:pointer}
+.seg button.on{background:var(--accent);color:#fff}
+</style></head><body>
+<div class="wrap">
+<h1>&#127916; Video Studio</h1>
+<p class="sub">Drop in clips, bring the music, and let it build a beat-synced hype cut. (Auto-build &mdash; the full timeline editor is coming next.)</p>
+
+<div class="card">
+  <h2>1 &middot; Clips</h2>
+  <div id="drop" class="drop">Tap to add video clips &mdash; or drag them here</div>
+  <input id="file" type="file" accept="video/*" multiple style="display:none">
+  <div id="clips"></div>
+</div>
+
+<div class="card">
+  <h2>2 &middot; Music</h2>
+  <label>YouTube link (or paste a track URL)</label>
+  <input id="yt" type="text" placeholder="https://www.youtube.com/watch?v=...">
+  <div class="row" style="margin-top:10px">
+    <div>
+      <label>Section (optional, mm:ss-mm:ss)</label>
+      <input id="section" type="text" placeholder="3:11-3:25">
+    </div>
+  </div>
+  <div class="muted">&hellip;or <a href="#" id="musicUpBtn" class="dl">upload an audio file</a> <span id="musicName"></span></div>
+  <input id="musicFile" type="file" accept="audio/*" style="display:none">
+</div>
+
+<div class="card">
+  <h2>3 &middot; Pace</h2>
+  <div class="seg" id="pace">
+    <button data-v="frantic">Frantic</button>
+    <button data-v="punchy" class="on">Punchy</button>
+    <button data-v="cinematic">Cinematic</button>
+  </div>
+  <div class="muted">How many beats between cuts &mdash; frantic = a cut every beat, cinematic = every 4th.</div>
+</div>
+
+<button id="build" class="btn go">&#9889; Auto-build the video</button>
+
+<div class="card" id="result" style="display:none;margin-top:14px">
+  <h2 id="rTitle">Building&hellip;</h2>
+  <div class="bar"><i id="rBar"></i></div>
+  <div class="muted" id="rMsg">starting</div>
+  <div id="rOut"></div>
+</div>
+</div>
+<div id="toast" class="toast"></div>
+<script>
+var CC=window.CC||{}; var MAXMB=CC.maxUploadMb||500;
+var clips=[]; var musicPath=""; var pace="punchy"; var poll=null;
+function $(i){return document.getElementById(i);}
+function toast(m,ms){var t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(function(){t.classList.remove('show');},ms||3000);}
+function fmt(b){return b>1048576?(b/1048576).toFixed(1)+'MB':(b/1024).toFixed(0)+'KB';}
+
+function renderClips(){var c=$('clips');c.innerHTML='';clips.forEach(function(cl,i){
+  var d=document.createElement('div');d.className='clip';
+  d.innerHTML='<span class="nm"></span><span class="sz"></span><span class="x">&times;</span>';
+  d.querySelector('.nm').textContent=cl.name; d.querySelector('.sz').textContent=fmt(cl.bytes);
+  d.querySelector('.x').onclick=function(){clips.splice(i,1);renderClips();};
+  c.appendChild(d);});}
+
+function upload(file, qs){return fetch('/api/studio/upload?'+qs,{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file}).then(function(r){return r.json();});}
+
+function addClips(files){
+  Array.prototype.forEach.call(files,function(f){
+    if(f.size>MAXMB*1048576){toast(f.name+' is over the '+MAXMB+'MB limit',5000);return;}
+    var tmp={name:f.name+' (uploading&hellip;)',bytes:f.size}; clips.push(tmp); renderClips();
+    upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'video/mp4')).then(function(r){
+      var i=clips.indexOf(tmp);
+      if(r&&r.ok){clips[i]={name:f.name,bytes:r.bytes,path:r.path};}
+      else{clips.splice(i,1);toast('Upload failed: '+((r||{}).error||'?'),5000);}
+      renderClips();
+    }).catch(function(e){var i=clips.indexOf(tmp);if(i>=0)clips.splice(i,1);renderClips();toast('Upload error',5000);});
+  });}
+
+$('drop').onclick=function(){$('file').click();};
+$('file').onchange=function(){addClips(this.files);this.value='';};
+['dragover','dragenter'].forEach(function(ev){$('drop').addEventListener(ev,function(e){e.preventDefault();$('drop').classList.add('on');});});
+['dragleave','drop'].forEach(function(ev){$('drop').addEventListener(ev,function(e){e.preventDefault();$('drop').classList.remove('on');});});
+$('drop').addEventListener('drop',function(e){if(e.dataTransfer&&e.dataTransfer.files)addClips(e.dataTransfer.files);});
+
+$('musicUpBtn').onclick=function(e){e.preventDefault();$('musicFile').click();};
+$('musicFile').onchange=function(){var f=this.files[0];if(!f)return;
+  if(f.size>MAXMB*1048576){toast('Track is over the '+MAXMB+'MB limit',5000);return;}
+  $('musicName').textContent='('+f.name+' &mdash; uploading&hellip;)';
+  upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'audio/mpeg')).then(function(r){
+    if(r&&r.ok){musicPath=r.path;$('musicName').innerHTML='&#10003; '+f.name;$('yt').value='';}
+    else{$('musicName').textContent='';toast('Track upload failed',5000);}});};
+
+Array.prototype.forEach.call($('pace').children,function(b){b.onclick=function(){
+  Array.prototype.forEach.call($('pace').children,function(x){x.classList.remove('on');});
+  b.classList.add('on');pace=b.getAttribute('data-v');};});
+
+function stopPoll(){if(poll){clearInterval(poll);poll=null;}}
+$('build').onclick=function(){
+  var ready=clips.filter(function(c){return c.path;});
+  if(!ready.length){toast('Add at least one clip first',3500);return;}
+  var music=musicPath||$('yt').value.trim();
+  if(!music){toast('Add music &mdash; a YouTube link or an uploaded track',4000);return;}
+  $('build').disabled=true; $('result').style.display='block'; $('rTitle').textContent='Building…';
+  $('rBar').style.width='0'; $('rOut').innerHTML=''; $('rMsg').textContent='starting';
+  var body={clips:ready.map(function(c){return c.path;}),music:music,section:$('section').value.trim(),pace:pace};
+  fetch('/api/studio/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+   .then(function(r){return r.json();}).then(function(r){
+     if(!r||!r.job_id){$('build').disabled=false;toast('Could not start render',4000);return;}
+     stopPoll(); poll=setInterval(function(){checkJob(r.job_id);},1500);
+   }).catch(function(){$('build').disabled=false;toast('Network error',4000);});
+};
+
+function checkJob(id){
+  fetch('/api/studio/job?id='+id).then(function(r){return r.json();}).then(function(j){
+    var pct=j.pct||0; $('rBar').style.width=pct+'%'; if(j.msg)$('rMsg').textContent=j.msg;
+    if(j.state==='done'){stopPoll();$('build').disabled=false;$('rTitle').textContent='✅ Done'+(j.duration?' · '+j.duration+'s':'');
+      var src='/api/studio/media?path='+encodeURIComponent(j.path||'');
+      $('rOut').innerHTML='<video controls playsinline preload="metadata"></video><div style="margin-top:8px"><a class="dl" download href="'+src+'">&#11015; Download MP4</a></div>';
+      $('rOut').querySelector('video').src=src; $('rMsg').textContent='saved to Files';
+    } else if(j.state==='error'){stopPoll();$('build').disabled=false;$('rTitle').textContent='⚠️ Render failed';
+      $('rMsg').textContent=j.error||'unknown error';
+    }
+  }).catch(function(){});
+}
 </script></body></html>"""
 
 RALPH_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ralph loop</title>
@@ -24151,6 +24455,7 @@ function applyPreset(){
     NAV[x.id]=x.label||x.id;
     var b=document.createElement('button'); b.setAttribute('data-l',x.id);
     b.innerHTML='<i class="ph-light ph-link"></i>'+(x.label||x.id);
+    if(x.page){ b.onclick=function(e){e.stopPropagation();e.preventDefault();location.href=x.page;}; }  // lens opens a dedicated full page
     var nav=document.getElementById('lens'), anchor=document.querySelector('#lens button[data-l="marketplace"]');
     if(anchor&&anchor.parentNode===nav){nav.insertBefore(b,anchor);}else if(nav){nav.appendChild(b);}
   });}catch(e){}
