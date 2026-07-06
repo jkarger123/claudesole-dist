@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.162 -- 2026-07-05  (Video Studio: pin the Studio tab top-level)
+- The Studio nav tab landed in the collapsed "Team" category (easy to miss). Pinned "studio" in NAV_PINNED so it
+  stays a top-level daily-driver tab wherever the ai-video-studio extension is installed. (Reminder: the dashboard
+  is an SPA -- hard-refresh the tab after a restart, or a newly-installed lens won't show in an already-open tab.)
+
 ## 0.99.161 -- 2026-07-05  (Video Studio: multi-track / picture-in-picture -- the "didn't build" list, pt 2)
 - **PiP / overlay track:** tap a clip -> **+ PiP** drops it on a new overlay lane, composited on top of the base
   video. Tap the PiP block to cycle **position** (TL/TR/BL/BR/center) + **size** (25/35/50/70%) or delete; drag it

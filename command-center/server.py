@@ -25017,7 +25017,7 @@ function treeRemoveLens(tree,l){for(var i=tree.length-1;i>=0;i--){var n=tree[i];
 // ---- DEFAULT CATEGORIES: out of the box the nav is grouped into collapsed categories (declutter), seeded once.
 // Users can still drag/rename/add/delete + "flatten" to the old most-used list. Built-ins map here; extension
 // lenses carry their own category (extension.json default_category -> extLenses[].category). "reset" re-seeds this.
-var NAV_PINNED=["portfolio","sessions","chief","comms","notebook","notes","tasks","files"];   // stay top-level (daily drivers)
+var NAV_PINNED=["portfolio","sessions","chief","comms","notebook","notes","tasks","files","studio"];   // stay top-level (daily drivers)
 var NAV_CAT_ORDER=["Google","Workspace","Agency","Team","Integrations","Experimental","System"];
 var NAV_CAT={
   agentlab:"Experimental",
