@@ -14302,6 +14302,7 @@ STUDIO_MEDIA = os.path.join(DELIV_LOCAL_ROOT or CC_HOME, "_studio_media")   # up
 STUDIO_PROJECTS = os.path.join(STUDIO_ROOT, "projects")                     # <id>.json (editable EDLs)
 STUDIO_CACHE = os.path.join(STUDIO_ROOT, "cache")                          # <id>/ filmstrips, music, proxies
 STUDIO_OUT_DIR = os.path.join(BASE, "deliverables")                        # renders -> show in Files lens
+STUDIO_UPLOAD_CAP_MB = int(CC.get("studio_upload_mb") or 8192)              # video/drone/4K clips are big -> 8GB cap
 _STUDIO_JOBS = {}
 _STUDIO_LOCK = threading.Lock()
 
@@ -14319,7 +14320,7 @@ def studio_upload_stream(rfile, clen, filename, mime):
     fn = _ensure_ext(_sanitize_filename(filename or "clip"), mime or "")
     stem, ext = os.path.splitext(fn)
     dest = os.path.join(STUDIO_MEDIA, "%s_%s%s" % (stem[:50] or "clip", secrets.token_hex(4), ext))
-    cap = _session_upload_cap_mb() * 1024 * 1024
+    cap = STUDIO_UPLOAD_CAP_MB * 1024 * 1024
     written = 0
     try:
         with open(dest, "wb") as f:
@@ -14336,7 +14337,7 @@ def studio_upload_stream(rfile, clen, filename, mime):
     if not written or written > cap:
         try: os.remove(dest)
         except Exception: pass
-        return {"ok": False, "error": "empty or over the %dMB cap" % _session_upload_cap_mb(), "toobig": written > cap}
+        return {"ok": False, "error": "empty or over the %dMB cap" % STUDIO_UPLOAD_CAP_MB, "toobig": written > cap}
     return {"ok": True, "path": dest, "name": os.path.basename(dest), "bytes": written}
 
 def studio_render_start(body):
@@ -14977,7 +14978,7 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, TERM_PAGE.replace("<body>", "<body>" + _boot, 1), "text/html; charset=utf-8")
         if u.path == "/ralph": return self._s(200, RALPH_PAGE, "text/html; charset=utf-8")
         if u.path == "/studio":
-            _boot = "<script>window.CC=Object.assign(window.CC||{},%s);</script>" % json.dumps({"maxUploadMb": _session_upload_cap_mb()})
+            _boot = "<script>window.CC=Object.assign(window.CC||{},%s);</script>" % json.dumps({"maxUploadMb": STUDIO_UPLOAD_CAP_MB})
             return self._s(200, STUDIO_PAGE.replace("<body>", "<body>" + _boot, 1), "text/html; charset=utf-8")
         if u.path.startswith("/static/"): return self.serve_static(u.path[len("/static/"):])
         if u.path == "/": return self._s(200, render_page(), "text/html; charset=utf-8")
@@ -16428,9 +16429,18 @@ var clips=[], musicPath="", pace="punchy", poll=null;
 var proj=null, pid=null, zoom=48, sel=-1, dirty=false;
 function $(i){return document.getElementById(i);}
 function toast(m,ms){var t=$('toast');t.innerHTML=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(function(){t.classList.remove('show');},ms||3000);}
-function fmt(b){return b>1048576?(b/1048576).toFixed(1)+'MB':(b/1024).toFixed(0)+'KB';}
+function fmt(b){return b>=1073741824?(b/1073741824).toFixed(1)+'GB':(b>=1048576?(b/1048576).toFixed(0)+'MB':(b/1024).toFixed(0)+'KB');}
+function capLabel(){return MAXMB>=1024?(MAXMB/1024)+'GB':MAXMB+'MB';}
+function checkSize(f){                                    // returns true if OK to upload; warns on big, blocks on over-cap
+  if(f.size>MAXMB*1048576){toast(f.name+' is '+fmt(f.size)+' — that\'s over the '+capLabel()+' upload limit, so it won\'t upload. Trim or compress it first.',8000);return false;}
+  if(f.size>100*1048576){toast('Heads up: '+f.name+' is big ('+fmt(f.size)+'). It will upload, but delete the project when you\'re done to free that space.',6500);}
+  return true;
+}
 function media(p){return '/api/studio/media?path='+encodeURIComponent(p||'');}
-function upload(file,qs){return fetch('/api/studio/upload?'+qs,{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file}).then(function(r){return r.json();});}
+function upload(file,qs,onprog){return new Promise(function(res){var xhr=new XMLHttpRequest();xhr.open('POST','/api/studio/upload?'+qs);xhr.setRequestHeader('Content-Type','application/octet-stream');
+  if(onprog&&xhr.upload)xhr.upload.onprogress=function(e){if(e.lengthComputable)onprog(e.loaded/e.total);};
+  xhr.onload=function(){try{res(JSON.parse(xhr.responseText));}catch(e){res({ok:false,error:'bad response ('+xhr.status+')'});}};
+  xhr.onerror=function(){res({ok:false,error:'network error'});};xhr.send(file);});}
 
 /* ---------- builder ---------- */
 function renderClips(){var c=$('clips');c.innerHTML='';clips.forEach(function(cl,i){
@@ -16439,10 +16449,10 @@ function renderClips(){var c=$('clips');c.innerHTML='';clips.forEach(function(cl
   d.querySelector('.nm').textContent=cl.name;d.querySelector('.sz').textContent=fmt(cl.bytes);
   d.querySelector('.x').onclick=function(){clips.splice(i,1);renderClips();};c.appendChild(d);});}
 function addClips(files){Array.prototype.forEach.call(files,function(f){
-  if(f.size>MAXMB*1048576){toast(f.name+' is over the '+MAXMB+'MB limit',5000);return;}
-  var tmp={name:f.name+' (uploading...)',bytes:f.size};clips.push(tmp);renderClips();
-  upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'video/mp4')).then(function(r){
-    var i=clips.indexOf(tmp);if(r&&r.ok){clips[i]={name:f.name,bytes:r.bytes,path:r.path};}else{clips.splice(i,1);toast('Upload failed: '+((r||{}).error||'?'),5000);}renderClips();
+  if(!checkSize(f))return;
+  var tmp={name:f.name+' (uploading 0%)',bytes:f.size};clips.push(tmp);renderClips();
+  upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'video/mp4'),function(p){tmp.name=f.name+' (uploading '+Math.round(p*100)+'%)';renderClips();}).then(function(r){
+    var i=clips.indexOf(tmp);if(r&&r.ok){clips[i]={name:f.name,bytes:r.bytes,path:r.path};}else{clips.splice(i,1);toast('Upload failed: '+((r||{}).error||'?'),6000);}renderClips();
   }).catch(function(){var i=clips.indexOf(tmp);if(i>=0)clips.splice(i,1);renderClips();toast('Upload error',5000);});});}
 $('drop').onclick=function(){$('file').click();};
 $('file').onchange=function(){addClips(this.files);this.value='';};
@@ -16450,7 +16460,7 @@ $('file').onchange=function(){addClips(this.files);this.value='';};
 ['dragleave','drop'].forEach(function(ev){$('drop').addEventListener(ev,function(e){e.preventDefault();$('drop').classList.remove('on');});});
 $('drop').addEventListener('drop',function(e){if(e.dataTransfer&&e.dataTransfer.files)addClips(e.dataTransfer.files);});
 $('musicUpBtn').onclick=function(e){e.preventDefault();$('musicFile').click();};
-$('musicFile').onchange=function(){var f=this.files[0];if(!f)return;if(f.size>MAXMB*1048576){toast('Track too large',5000);return;}
+$('musicFile').onchange=function(){var f=this.files[0];if(!f)return;if(!checkSize(f))return;
   $('musicName').textContent='('+f.name+' - uploading...)';
   upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'audio/mpeg')).then(function(r){
     if(r&&r.ok){musicPath=r.path;$('musicName').innerHTML='&#10003; '+f.name;$('yt').value='';}else{$('musicName').textContent='';toast('Track upload failed',5000);}});};
@@ -16650,10 +16660,10 @@ $('eAddText').onclick=function(){addText(window._phT||0.3);};
 $('eAddPip').onclick=function(){addPip();};
 $('eAddClip').onclick=function(){$('eClipFile').click();};
 $('eClipFile').onchange=function(){var fs=Array.prototype.slice.call(this.files);this.value='';fs.forEach(function(f){   // COPY the FileList first -- clearing value empties it before we iterate
-  if(f.size>MAXMB*1048576){toast(f.name+' is too large',4000);return;}
-  $('eStatus').textContent='Uploading '+f.name+'...';
-  upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'video/mp4')).then(function(r){
-    if(!r||!r.ok){$('eStatus').textContent='Upload failed';return;}
+  if(!checkSize(f))return;
+  $('eStatus').textContent='Uploading '+f.name+' 0%';
+  upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'video/mp4'),function(p){$('eStatus').textContent='Uploading '+f.name+' '+Math.round(p*100)+'%';}).then(function(r){
+    if(!r||!r.ok){$('eStatus').textContent='Upload failed: '+((r||{}).error||'?');return;}
     $('eStatus').textContent='Adding clip...';
     fetch('/api/studio/add-clip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:pid,path:r.path})}).then(function(x){return x.json();}).then(function(x){
       if(!x||!x.ok){$('eStatus').textContent='Add failed: '+((x||{}).error||'?');return;}
@@ -16666,7 +16676,7 @@ $('eAddAudio').onclick=function(){var url=prompt('Audio: paste a YouTube link or
   if(url===null)return;if(!url){$('eAudioFile').click();return;}
   var sec=prompt('Use just a section? (mm:ss-mm:ss, or blank for the whole track):','')||'';addAudioSource(url,sec);};
 $('eAudioFile').onchange=function(){var f=this.files[0];this.value='';if(!f)return;
-  if(f.size>MAXMB*1048576){toast('Track too large',4000);return;}
+  if(!checkSize(f))return;
   $('eStatus').textContent='Uploading '+f.name+'...';
   upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'audio/mpeg')).then(function(r){
     if(r&&r.ok)addAudioSource(r.path,'');else $('eStatus').textContent='Upload failed';});};

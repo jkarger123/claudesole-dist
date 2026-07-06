@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.171 -- 2026-07-06  (Video Studio: big-file uploads -- 8GB cap, warnings, progress %)
+- **Upload cap for the studio raised to 8GB** (was 500MB) -- 4K / drone clips are big. A 2GB drone MP4 was
+  silently rejected before; now it uploads. (Config: cc.config `studio_upload_mb`.)
+- **Clear messages:** over the cap -> "<name> is 2.1GB -- over the 8GB limit, so it won't upload. Trim/compress
+  first." Over 100MB but under cap -> a heads-up: "<name> is big (2.1GB); it'll upload, but delete the project
+  when you're done to free that space."
+- **Upload progress:** uploads now show a live % (XHR upload.onprogress) in the clip row / status line, so a big
+  multi-minute upload clearly shows it's working instead of looking frozen.
+
 ## 0.99.170 -- 2026-07-06  (Video Studio: images, split/cut + timeline delete, upload cleanup, agent-drivable)
 - **Images:** upload photos (jpg/png/webp/heic/...) alongside video. Each lands on the timeline at a default 5s
   and is trimmable either way to make it shorter/longer; renders as a held still (ffmpeg -loop). Shows in the live
