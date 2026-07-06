@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.160 -- 2026-07-05  (Video Studio: direct drag-manipulation + live preview -- the "didn't build" list, pt 1)
+- **Drag manipulation** (was inspector-steppers only): select a clip -> drag its edge **handles to trim** in/out
+  live; **drag impact/zoom pins** and **title blocks** to reposition (beat-snapped, tap still opens the menu);
+  **scrub the ruler** by dragging the playhead. Pointer events -> works on touch + mouse.
+- **Live preview compositor** (was proxy-render only): a real Canvas + `<video>` + WebAudio engine composites the
+  frame at the playhead -- footage + zoom + flash + titles -- as you scrub, and a **Play** button plays it through
+  with the music. (Considered but rejected for this: ffmpeg.wasm = 25MB + 5-20x slower + no HW accel; Etro/Omniclip
+  need a build step our no-build embedded page can't use -- a focused vanilla compositor fits and is faster.) The
+  proxy/Export render remains the pixel-exact smooth output; the canvas is the instant scrub/rough-play preview.
+- Still on the list (next): multi-track / picture-in-picture compositing, and a verified CapCut draft via the
+  Apache-2.0 pyJianYingDraft schema (replacing the hand-rolled draft_content.json).
+
 ## 0.99.159 -- 2026-07-05  (Video Studio P5: media-tools bootstrap -> renders on every node)
 - Video Studio needs static **ffmpeg/ffprobe/yt-dlp** in the node's `bin/` (node-local, not shipped in the
   framework -- ~110MB of binaries don't belong in git). Until now Studio only rendered on the build Mac.

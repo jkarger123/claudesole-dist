@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "45989a21f8c41f1ca1f9dfd3ba5b5b3b92f7a0b4cbae9f3f2e8d2d41de46497d",
+      "claudesole.manifest.json": "d4dbe0bd3f92d7b925f29f51dc89794009abe9ecf5df675a998f91da6987815e",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
       "command-center/cc-email": "4895c4eb4ca8e1c6f3b26dd260f9ee3b776c42f24ec656b8581d1cef0c4155ed",
@@ -52,7 +52,7 @@
       "command-center/ralph_runner.py": "b48395c8c36b94710e9da3cf83640eedd514347ed30e8b953043f729ef9b26e9",
       "command-center/residue_lint.py": "a48f5893bedc12816d84788dde78ffd162fff2334996c680361b843b46a22f70",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "d3063598d3168c4f277f47e64f9abb0a07041d6b69108b59d3cd62d8fd401eb9",
+      "command-center/server.py": "3b5ebbc3f97867afbd307476c7ed5380d0729ae7797f28a0f00a9b8ea90950e3",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/ui_lint.py": "0cabb923f1edd1a5f9808e4e04329c46334483b3da38fcf4adba2e3e9b476132",
@@ -144,9 +144,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783307129,
+    "generated": 1783309485,
     "v": 1,
-    "version": "0.99.159"
+    "version": "0.99.160"
   },
-  "sig": "twBTSz3mNKT5p/CcEQXBHOlcYkpybeoM3BAwwEldcZKYIRTxof7GnW2D7yYuZuxxMgRuTKo49PHr6+gHkPkkBQ=="
+  "sig": "E2SGPxtVluIQCOyMLortml3zhcG0SXupsZ0ts4/bonRBDOKMCrbl4ei2GCjeXmBuq05eDEuPt86p/0FkbrmWAQ=="
 }
