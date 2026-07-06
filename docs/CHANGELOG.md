@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.176 -- 2026-07-06  (fix: the Ralph "live" tab now actually shows on the node)
+- The live-iteration tab spawned but was INVISIBLE on a node (it showed only on the overseer): the node's
+  session-scoping stripped "ralph-" and looked up "<loop>-live" as a loop (which doesn't exist) -> didn't claim
+  it -> hid it. Now the `-live` suffix is stripped so the live tab shares its runner's owner. Both tabs now show.
+- Made the live tab SELF-HEALING: `ralph_list` (every dashboard poll) now (re)spawns the live tab whenever the
+  loop is running but its tab is missing, and reaps it when the runner is gone -- instead of only spawning once at
+  launch. So a transient never leaves a running loop without its live tab for the rest of the run.
+
 ## 0.99.175 -- 2026-07-06  (cc-ralph: stop/restart verbs)
 - `cc-ralph` gains `restart` / `halt` / `kill` / `pause` / `resume` (were: only new/launch/list). `restart <name>`
   stops a loop and relaunches it -- it resumes from its saved progress AND picks up the latest runner code (so an

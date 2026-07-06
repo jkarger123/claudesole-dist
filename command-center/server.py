@@ -2093,7 +2093,9 @@ def tmux_sessions():
             is_chief = (nm == globals().get("CHIEF"))
             mine = is_chief or _session_in_project(cwd)     # belongs to THIS console (its chief + its project work)
             if not mine and nm.startswith("ralph-"):        # a Ralph loop -> owned by the node whose PROJECT it runs
-                _ln = _rname(nm[len("ralph-"):])            # ON (loop.json records that cwd). RALPHDIR is CC_HOME/
+                _base = nm[len("ralph-"):]
+                if _base.endswith("-live"): _base = _base[:-5]   # the live-view tab shares its runner's loop -> same owner
+                _ln = _rname(_base)                         # ON (loop.json records that cwd). RALPHDIR is CC_HOME/
                 _lcwd = _rjson(os.path.join(RALPHDIR, _ln, "loop.json")).get("cwd", "") if _ln else ""  # data/ralph,
                 mine = bool(_lcwd and _session_in_project(_lcwd))    # SHARED across co-located trio nodes, so the old
                                                             # dir-exists test claimed EVERY node's loop -> it leaked
@@ -8511,11 +8513,11 @@ def ralph_list():
             alive = _ralive(name)
             state = st.get("state", "idle")
             if not alive and state in ("running", "paused"): state = "stopped"   # session died
-            if not alive:                                                        # runner gone -> reap any orphan live tab
-                try:
-                    if sh([TMUX, "has-session", "-t", "ralph-" + name + "-live"])[0] == 0:
-                        sh([TMUX, "kill-session", "-t", "ralph-" + name + "-live"])
-                except Exception: pass
+            try:                                                                 # keep the live tab in lockstep with the runner (self-healing, not just launch-time)
+                _live_up = sh([TMUX, "has-session", "-t", "ralph-" + name + "-live"])[0] == 0
+                if alive and not _live_up:      _ralph_live_spawn(name)           # loop running but live tab missing -> (re)spawn it
+                elif (not alive) and _live_up:  sh([TMUX, "kill-session", "-t", "ralph-" + name + "-live"])   # runner gone -> reap orphan live tab
+            except Exception: pass
             out.append({"name": name, "state": state, "alive": alive, "iteration": st.get("iteration", 0),
                         "progress": st.get("progress", {}), "current": st.get("current", ""),
                         "goal": cfg.get("goal", ""), "cwd": cfg.get("cwd", ""), "updated": st.get("updated", 0)})
