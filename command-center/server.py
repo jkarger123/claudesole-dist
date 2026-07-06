@@ -14471,11 +14471,34 @@ def studio_projects_list():
     except FileNotFoundError: pass
     return sorted(out, key=lambda x: -(x.get("mtime") or 0))[:100]
 
+def _studio_referenced_uploads(exclude_pid=None):
+    """Set of realpath'd upload files (under STUDIO_MEDIA) still referenced by SOME project (optionally excluding
+    one). Used so we never delete an uploaded clip another project is still using."""
+    med = os.path.realpath(STUDIO_MEDIA); refs = set()
+    try:
+        for fn in os.listdir(STUDIO_PROJECTS):
+            if not fn.endswith(".json") or (exclude_pid and fn == exclude_pid + ".json"): continue
+            try:
+                p = json.load(open(os.path.join(STUDIO_PROJECTS, fn)))
+                for s in (p.get("sources") or {}).values():
+                    rp = os.path.realpath(s.get("path") or "")
+                    if rp.startswith(med): refs.add(rp)
+            except Exception: pass
+    except FileNotFoundError: pass
+    return refs
+
 def studio_delete_project(pid):
-    """Delete a project + its media cache (filmstrips, copied music, proxies) from disk -> frees space. The
-    project's .json and its whole cache dir go; source uploads + finished renders (in Files) are left alone."""
+    """Delete a project + its media cache + its own uploaded source clips (the ones that pile up) -- but only
+    uploads no OTHER project still references. Finished renders (in Files) are left alone."""
     if not _studio_pid_valid(pid): return {"ok": False, "error": "bad id"}
     removed, freed = [], 0
+    med = os.path.realpath(STUDIO_MEDIA)
+    my_uploads = []
+    r = studio_project_load(pid)                                  # capture this project's upload paths BEFORE deleting it
+    if r.get("ok"):
+        for s in (r["project"].get("sources") or {}).values():
+            rp = os.path.realpath(s.get("path") or "")
+            if rp.startswith(med) and os.path.isfile(rp): my_uploads.append(rp)
     try:
         p = studio_project_path(pid)
         if p and os.path.isfile(p): freed += os.path.getsize(p); os.remove(p); removed.append("project")
@@ -14486,8 +14509,25 @@ def studio_delete_project(pid):
                     try: freed += os.path.getsize(os.path.join(root, fn))
                     except Exception: pass
             shutil.rmtree(cache, ignore_errors=True); removed.append("cache")
+        still = _studio_referenced_uploads()                     # remaining projects' uploads (this one's json is gone)
+        for up in my_uploads:
+            if up in still: continue
+            try: freed += os.path.getsize(up); os.remove(up); removed.append("upload")
+            except Exception: pass
     except Exception as e:
         return {"ok": False, "error": str(e)[:120]}
+    return {"ok": True, "removed": removed, "freed_mb": round(freed / 1048576.0, 1)}
+
+def studio_cleanup_uploads():
+    """Sweep: delete every uploaded clip/track in STUDIO_MEDIA that NO project references anymore (orphans that
+    piled up from adding media). Reports count + MB freed."""
+    if not os.path.isdir(STUDIO_MEDIA): return {"ok": True, "removed": 0, "freed_mb": 0}
+    refs = _studio_referenced_uploads(); removed, freed = 0, 0
+    for fn in os.listdir(STUDIO_MEDIA):
+        fp = os.path.join(STUDIO_MEDIA, fn)
+        if not os.path.isfile(fp) or os.path.realpath(fp) in refs: continue
+        try: freed += os.path.getsize(fp); os.remove(fp); removed += 1
+        except Exception: pass
     return {"ok": True, "removed": removed, "freed_mb": round(freed / 1048576.0, 1)}
 
 def studio_build_project_start(body):
@@ -15298,6 +15338,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(studio_project_save(body)))
         if u.path == "/api/studio/delete-project":
             return self._s(200, json.dumps(studio_delete_project(body.get("id"))))
+        if u.path == "/api/studio/cleanup-uploads":
+            return self._s(200, json.dumps(studio_cleanup_uploads()))
         if u.path == "/api/close-session":
             return self._s(200, json.dumps(close_session(body["name"], body.get("force", False))))
         if u.path == "/api/claude-account/snapshot":
@@ -16246,6 +16288,8 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
 .cblock .h.l{left:0} .cblock .h.r{right:0}
 .cblock .h:after{content:'';position:absolute;top:38%;height:24%;width:3px;background:#fff;border-radius:2px;left:5px;box-shadow:0 0 3px #000}
 .cblock.drag{opacity:.85;z-index:7} .tblock,.fxpin{touch-action:none}
+.cblock .cdel{position:absolute;top:2px;right:2px;z-index:8;width:18px;height:18px;line-height:16px;text-align:center;border-radius:5px;background:rgba(0,0,0,.55);color:#fff;font-size:14px;cursor:pointer}
+.cblock .cdel:hover{background:var(--fxbig)}
 .cblock .he{position:absolute;left:3px;top:2px;font-size:9px;background:var(--accent);color:#fff;border-radius:3px;padding:0 3px}
 .fxpin{position:absolute;top:0;width:12px;height:100%;margin-left:-6px;cursor:pointer}
 .fxpin i{display:block;width:2px;height:100%;margin:0 auto;background:var(--fx)}
@@ -16273,8 +16317,8 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
 <p class="sub">Add your clips, then <b>Start editing</b> &mdash; trim, crop, color, add audio, titles, effects, export. (Beat auto-cut &amp; CapCut are options inside the editor.)</p>
 <div class="card">
   <h2>Clips</h2>
-  <div id="drop" class="drop">Tap to add video clips &mdash; or drag them here</div>
-  <input id="file" type="file" accept="video/*" multiple style="display:none">
+  <div id="drop" class="drop">Tap to add video clips or images &mdash; or drag them here</div>
+  <input id="file" type="file" accept="video/*,image/*" multiple style="display:none">
   <div id="clips"></div>
 </div>
 <button id="startEdit" class="btn go">Start editing &rarr;</button>
@@ -16285,6 +16329,7 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
 </div>
 <div class="card" id="recent" style="display:none">
   <h2>Recent projects</h2><div id="projlist"></div>
+  <button id="eCleanup" class="btn sm" style="margin-top:10px">&#128465; Clean up unused uploads (free disk)</button>
 </div>
 </div>
 
@@ -16295,9 +16340,10 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
     <input id="eName" type="text" style="flex:1;min-width:100px" placeholder="Project name">
     <button class="btn sm" id="eAddClip">+ Clip</button>
     <button class="btn sm" id="eAddAudio">+ Audio</button>
+    <button class="btn sm" id="eSplit" title="Split the clip at the playhead (S)">&#9986; Split</button>
     <button class="btn sm" id="eAddText">+ Title</button>
     <button class="btn sm" id="eAddPip">+ PiP</button>
-    <input id="eClipFile" type="file" accept="video/*" multiple style="display:none">
+    <input id="eClipFile" type="file" accept="video/*,image/*" multiple style="display:none">
     <input id="eAudioFile" type="file" accept="audio/*" style="display:none">
     <button class="btn sm" id="eBeatcut">&#9889; Beat-cut</button>
     <button class="btn sm" id="eCapcut">&#10515; CapCut</button>
@@ -16454,8 +16500,11 @@ function loadRecent(){fetch('/api/studio/projects').then(function(r){return r.js
     d2.querySelector('.pn').textContent=p.name||'Untitled';
     d2.onclick=function(e){if((e.target.className||'').indexOf('pdel')>=0)return;openProject(p.id);};
     d2.querySelector('.pdel').onclick=function(e){e.stopPropagation();delProject(p.id,p.name);};el.appendChild(d2);});});}
-function delProject(id,name){if(!confirm('Delete "'+(name||'this project')+'" and its files from the server? Frees disk space; can\'t be undone.'))return;
-  fetch('/api/studio/delete-project',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.json();}).then(function(r){if(r&&r.ok){toast('Deleted — space freed',1600);loadRecent();}else toast('Delete failed: '+((r||{}).error||'?'),3500);}).catch(function(){toast('Delete failed',3000);});}
+function delProject(id,name){if(!confirm('Delete "'+(name||'this project')+'" and its files from the server (including its uploaded clips no other project uses)? Frees disk space; can\'t be undone.'))return;
+  fetch('/api/studio/delete-project',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.json();}).then(function(r){if(r&&r.ok){toast('Deleted — '+(r.freed_mb||0)+' MB freed',2200);loadRecent();}else toast('Delete failed: '+((r||{}).error||'?'),3500);}).catch(function(){toast('Delete failed',3000);});}
+$('eCleanup').onclick=function(){if(!confirm('Delete all uploaded clips/audio that no saved project uses anymore? Frees disk; files still in a project are kept.'))return;
+  var b=$('eCleanup');b.disabled=true;b.textContent='Cleaning…';
+  fetch('/api/studio/cleanup-uploads',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(function(r){return r.json();}).then(function(r){b.disabled=false;b.innerHTML='&#128465; Clean up unused uploads (free disk)';if(r&&r.ok){toast('Removed '+(r.removed||0)+' unused file(s) — '+(r.freed_mb||0)+' MB freed',3200);}else toast('Cleanup failed',3000);}).catch(function(){b.disabled=false;toast('Cleanup failed',3000);});};
 
 /* ---------- editor ---------- */
 function openProject(id){fetch('/api/studio/project?id='+id).then(function(r){return r.json();}).then(function(d){
@@ -16495,24 +16544,27 @@ function sdrag(e,onMove,onEnd){if(e.preventDefault)e.preventDefault();if(e.stopP
 
 /* ---- live canvas preview: composite the frame at the playhead (footage + zoom + flash + titles) ---- */
 var _svid={};
-function srcVideo(sid){var s=proj&&proj.sources[sid];if(!s)return null;if(!_svid[sid]){var v=document.createElement('video');v.src=media(s.path);v.muted=true;v.playsInline=true;v.preload='auto';_svid[sid]=v;}return _svid[sid];}
+function srcVideo(sid){var s=proj&&proj.sources[sid];if(!s)return null;if(!_svid[sid]){var el;if(s.kind==='image'){el=new Image();el.src=media(s.path);}else{el=document.createElement('video');el.src=media(s.path);el.muted=true;el.playsInline=true;el.preload='auto';}_svid[sid]=el;}return _svid[sid];}
+function _elReady(v){return v&&((v.videoWidth||v.naturalWidth)>0);}
 function musicEl(){if(!proj)return null;var a=atrack().clips[0];if(!a)return null;if(!window._mus||window._musSrc!==a.source){window._mus=new Audio(media(proj.sources[a.source].path));window._musSrc=a.source;}return window._mus;}
 function clipAt(t){var cs=vtrack().clips;for(var i=0;i<cs.length;i++){if(t>=cs[i].start-0.001&&t<cs[i].start+clen(cs[i]))return cs[i];}return cs.length?cs[cs.length-1]:null;}
 function _zoomAt(t){var z=0;fxtrack().clips.forEach(function(f){if(f.type==='zoom'){var half=(f.dur||0.5)/2,d=Math.abs(t-f.at);if(d<half)z=Math.max(z,((f.amount||1.4)-1)*(1-d/half));}});return 1+z;}
 function _flashAt(t){return fxtrack().clips.some(function(f){return (f.type||'impact')==='impact'&&Math.abs(t-f.at)<0.06;});}
-function _fitDraw(g,v,cw,ch,zf,fit){var vw=v.videoWidth,vh=v.videoHeight;if(!vw||!vh)return;var s=(fit==='contain'?Math.min(cw/vw,ch/vh):Math.max(cw/vw,ch/vh))*(zf||1),dw=vw*s,dh=vh*s;try{g.drawImage(v,(cw-dw)/2,(ch-dh)/2,dw,dh);}catch(e){}}
+function _fitDraw(g,v,cw,ch,zf,fit){var vw=v.videoWidth||v.naturalWidth,vh=v.videoHeight||v.naturalHeight;if(!vw||!vh)return;var s=(fit==='contain'?Math.min(cw/vw,ch/vh):Math.max(cw/vw,ch/vh))*(zf||1),dw=vw*s,dh=vh*s;try{g.drawImage(v,(cw-dw)/2,(ch-dh)/2,dw,dh);}catch(e){}}
 function showLive(){$('pvcanvas').style.display='';$('eVideo').style.display='none';$('ePvMode').textContent='live preview';}
 function showRendered(){$('pvcanvas').style.display='none';$('eVideo').style.display='';$('ePvMode').textContent='rendered';}
 function prebuffer(){if(!proj)return;Object.keys(proj.sources||{}).forEach(function(sid){if((proj.sources[sid]||{}).kind==='video'){var v=srcVideo(sid);if(v){try{v.load();}catch(e){}}}});var m=musicEl();if(m){try{m.load();}catch(e){}}}
 function drawBase(g,cl,v,t,cw,ch){var col=cl.color;if(col){g.filter='brightness('+(1+(col.b||0)*1.6).toFixed(2)+') contrast('+(col.c||1)+') saturate('+(col.s||1)+')';}_fitDraw(g,v,cw,ch,_zoomAt(t),cl.fit);g.filter='none';}
 function drawOverlays(g,t,cw,ch){
-  otrack().clips.forEach(function(oc){var ln=(oc.out-oc['in'])/(oc.speed||1);if(t>=oc.start&&t<oc.start+ln){var ov=srcVideo(oc.source);if(ov&&ov.readyState>=2&&ov.videoWidth){var tr=oc.transform||{},ow=cw*(tr.scale||0.4),oh=ow*ov.videoHeight/ov.videoWidth,ox=cw*(tr.x||0.05),oy=ch*(tr.y||0.05);if(!_playing){try{ov.currentTime=Math.max(0,oc['in']+(t-oc.start)*(oc.speed||1));}catch(e){}}try{g.drawImage(ov,ox,oy,ow,oh);}catch(e){}g.strokeStyle='#b98cff';g.lineWidth=2;g.strokeRect(ox,oy,ow,oh);}}});
+  otrack().clips.forEach(function(oc){var ln=(oc.out-oc['in'])/(oc.speed||1);if(t>=oc.start&&t<oc.start+ln){var ov=srcVideo(oc.source);if(ov&&_elReady(ov)){var vw=ov.videoWidth||ov.naturalWidth,vh=ov.videoHeight||ov.naturalHeight,tr=oc.transform||{},ow=cw*(tr.scale||0.4),oh=ow*vh/vw,ox=cw*(tr.x||0.05),oy=ch*(tr.y||0.05);if(!_playing&&ov.play){try{ov.currentTime=Math.max(0,oc['in']+(t-oc.start)*(oc.speed||1));}catch(e){}}try{g.drawImage(ov,ox,oy,ow,oh);}catch(e){}g.strokeStyle='#b98cff';g.lineWidth=2;g.strokeRect(ox,oy,ow,oh);}}});
   ttrack().clips.forEach(function(tc){if(t>=tc.start&&t<=tc.end){var s=tc.style||{},txt=(tc.text||'').toUpperCase();g.font='bold '+Math.round(ch*0.052)+'px Impact,Arial,sans-serif';g.textAlign='center';var ty=ch*(s.y||0.12)+ch*0.05;g.lineWidth=ch*0.008;g.strokeStyle='#000';g.strokeText(txt,cw/2,ty);g.fillStyle='#fff';g.fillText(txt,cw/2,ty);}});
   if(_flashAt(t)){g.fillStyle='rgba(255,255,255,0.85)';g.fillRect(0,0,cw,ch);}}
 function scrubPreview(){var cv=$('pvcanvas');if(!cv||!proj)return;var g=cv.getContext('2d'),cw=cv.width,ch=cv.height,t=window._phT||0;
   $('ePvT').textContent=t.toFixed(2)+'s';g.fillStyle='#000';g.fillRect(0,0,cw,ch);
-  var cl=clipAt(t);if(!cl)return;var v=srcVideo(cl.source);if(!v)return;var srcT=Math.max(0,cl['in']+(t-cl.start)*(cl.speed||1));
-  function done(){g.fillStyle='#000';g.fillRect(0,0,cw,ch);if(v.videoWidth)drawBase(g,cl,v,t,cw,ch);drawOverlays(g,t,cw,ch);}
+  var cl=clipAt(t);if(!cl)return;var v=srcVideo(cl.source);if(!v)return;
+  function done(){g.fillStyle='#000';g.fillRect(0,0,cw,ch);if(_elReady(v))drawBase(g,cl,v,t,cw,ch);drawOverlays(g,t,cw,ch);}
+  if(!v.play){if(v.complete&&v.naturalWidth){done();}else{v.onload=function(){done();};}return;}   // image source: no seek
+  var srcT=Math.max(0,cl['in']+(t-cl.start)*(cl.speed||1));
   if(v.readyState>=2&&Math.abs(v.currentTime-srcT)<0.05){done();}else{try{v.currentTime=srcT;}catch(e){}v.onseeked=function(){v.onseeked=null;if(!_playing)done();};}}
 var _playing=false,_raf=null,_t0=0,_pStart=0,_activeIdx=-1;
 function stopPlay(){_playing=false;if(_raf)cancelAnimationFrame(_raf);for(var s in _svid){try{_svid[s].pause();}catch(e){}}var m=musicEl();if(m){try{m.pause();}catch(e){}}var pb=$('ePlay');if(pb)pb.innerHTML='&#9654; Play';}
@@ -16531,8 +16583,8 @@ function playLoop(){
     for(var i=0;i<clips.length;i++){if(t>=clips[i].start&&t<clips[i].start+clen(clips[i])){ci=i;break;}}
     g.fillStyle='#000';g.fillRect(0,0,cw,ch);
     if(ci>=0){var c=clips[ci],v=srcVideo(c.source);
-      if(ci!==_activeIdx){_activeIdx=ci;for(var s in _svid){if(_svid[s]!==v){try{_svid[s].pause();}catch(e){}}}var srcT=Math.max(0,c['in']+(t-c.start)*(c.speed||1));try{v.currentTime=srcT;v.playbackRate=Math.max(0.1,Math.min(4,(c.speed||1)));if(_playing)v.play();}catch(e){}}
-      if(v.readyState>=2&&v.videoWidth)drawBase(g,c,v,t,cw,ch);
+      if(ci!==_activeIdx){_activeIdx=ci;for(var s in _svid){if(_svid[s]!==v&&_svid[s].pause){try{_svid[s].pause();}catch(e){}}}if(v.play){var srcT=Math.max(0,c['in']+(t-c.start)*(c.speed||1));try{v.currentTime=srcT;v.playbackRate=Math.max(0.1,Math.min(4,(c.speed||1)));if(_playing)v.play();}catch(e){}}}
+      if(_elReady(v))drawBase(g,c,v,t,cw,ch);
       drawOverlays(g,t,cw,ch);}}
   _raf=requestAnimationFrame(playLoop);}
 function playToggle(){if(_playing)stopPlay();else startPlay();}
@@ -16561,7 +16613,10 @@ function renderTL(){
         sdrag(ev,function(dx){c['in']=Math.max(0,Math.min(c.out-0.1,+(o+dx).toFixed(2)));reflow();renderTL();window._phT=c.start;scrubPreview();},function(){renderInsp();});});   // preview the trim-IN frame live
       hr.addEventListener('pointerdown',function(ev){var sd=(proj.sources[c.source]||{}).dur||99,o=c.out;stopPlay();showLive();
         sdrag(ev,function(dx){c.out=Math.max(c['in']+0.1,Math.min(sd,+(o+dx).toFixed(2)));reflow();renderTL();window._phT=Math.max(0,c.start+clen(c)-0.03);scrubPreview();},function(){renderInsp();});});   // preview the trim-OUT frame live
-      b.appendChild(hl);b.appendChild(hr);}
+      b.appendChild(hl);b.appendChild(hr);
+      var xb=document.createElement('div');xb.className='cdel';xb.innerHTML='&times;';xb.title='Delete clip';
+      xb.addEventListener('pointerdown',function(ev){ev.stopPropagation();});
+      xb.onclick=function(ev){ev.stopPropagation();delClip(i);};b.appendChild(xb);}
     tv.appendChild(b);});
   // fx pins (impacts + zooms) -- drag to move (beat-snap), tap for menu
   var tf=$('trkFx');tf.querySelectorAll('.fxpin').forEach(function(e){e.remove();});
@@ -16602,7 +16657,7 @@ $('eClipFile').onchange=function(){var fs=Array.prototype.slice.call(this.files)
     $('eStatus').textContent='Adding clip...';
     fetch('/api/studio/add-clip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:pid,path:r.path})}).then(function(x){return x.json();}).then(function(x){
       if(!x||!x.ok){$('eStatus').textContent='Add failed: '+((x||{}).error||'?');return;}
-      proj.sources[x.id]=x.source;var dur=x.source.dur||3;
+      proj.sources[x.id]=x.source;var dur=(x.source.kind==='image')?5:(x.source.dur||3);
       vtrack().clips.push({source:x.id,'in':0,out:dur,start:proj.duration||0,speed:1,volume:0});
       reflow();showLive();renderTL();scrubPreview();$('eStatus').textContent='Clip added ✓';dirty=true;
     }).catch(function(){$('eStatus').textContent='Add error';});
@@ -16636,6 +16691,18 @@ function drawWave(W){var a0=proj&&atrack()&&atrack().clips[0];var src=a0&&proj.s
   for(var x=0;x<W;x++){var idx=Math.floor(x/W*n),v=wave[idx]||0,h=v*30;g.fillRect(x,17-h/2,1,h);}}
 
 function selectClip(i){sel=i;renderTL();renderInsp();}
+function delClip(i){var t=vtrack().clips;if(i<0||i>=t.length)return;t.splice(i,1);if(sel===i){sel=-1;$('insp').style.display='none';}else if(sel>i){sel--;}reflow();renderTL();scrubPreview();toast('Clip deleted',1200);dirty=true;}
+function splitAtPlayhead(){if(!proj)return;var tt=window._phT||0,clips=vtrack().clips,ci=-1;
+  for(var i=0;i<clips.length;i++){if(tt>clips[i].start+0.05&&tt<clips[i].start+clen(clips[i])-0.05){ci=i;break;}}
+  if(ci<0){toast('Move the playhead over the middle of a clip, then Split',3800);return;}
+  var c=clips[ci],off=tt-c.start,c2=JSON.parse(JSON.stringify(c));c2.hero=false;
+  if((proj.sources[c.source]||{}).kind==='image'){var origDur=c.out-c['in'];c.out=+(c['in']+off).toFixed(3);c2['in']=0;c2.out=+(origDur-off).toFixed(3);}
+  else{var splitSrc=c['in']+off*(c.speed||1);c2['in']=+splitSrc.toFixed(3);c.out=+splitSrc.toFixed(3);}
+  clips.splice(ci+1,0,c2);sel=ci;reflow();renderTL();renderInsp();scrubPreview();toast('Split — delete the middle piece to cut a section',2400);dirty=true;}
+$('eSplit').onclick=function(){splitAtPlayhead();};
+document.addEventListener('keydown',function(e){if($('editor').style.display==='none')return;var tag=(e.target.tagName||'').toLowerCase();if(tag==='input'||tag==='textarea')return;
+  if(e.key==='Delete'||e.key==='Backspace'){if(sel>=0){e.preventDefault();delClip(sel);}}
+  else if(e.key==='s'||e.key==='S'){e.preventDefault();splitAtPlayhead();}});
 function renderInsp(){var c=vtrack().clips[sel];if(!c){$('insp').style.display='none';return;}
   $('insp').style.display='block';$('iTitle').textContent='Clip '+(sel+1)+' / '+vtrack().clips.length;
   $('iIn').textContent=c['in'].toFixed(2)+'s';$('iOut').textContent=c.out.toFixed(2)+'s';$('iLen').textContent='len '+clen(c).toFixed(2)+'s';

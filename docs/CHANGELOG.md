@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.170 -- 2026-07-06  (Video Studio: images, split/cut + timeline delete, upload cleanup, agent-drivable)
+- **Images:** upload photos (jpg/png/webp/heic/...) alongside video. Each lands on the timeline at a default 5s
+  and is trimmable either way to make it shorter/longer; renders as a held still (ffmpeg -loop). Shows in the live
+  preview + bakes into MP4/CapCut.
+- **Split / cut tool (Premiere-style):** a **Split** button (or press **S**) cuts the clip at the playhead into
+  two. Two splits + delete the middle = cut a section out of the middle of a clip.
+- **Timeline delete:** every selected clip gets an **x** to delete it right on the timeline, and **Delete/Backspace**
+  removes the selected clip. Reflows automatically.
+- **Free disk from uploaded clips:** deleting a project now also removes its uploaded source clips that no other
+  project uses; a **Clean up unused uploads** button sweeps all orphaned uploads. (New /api/studio/cleanup-uploads;
+  delete-project reports MB freed.)
+- **Agent-drivable (like every extension):** added `AGENT.md` -- agents on any node with the extension now know how
+  to build a finished video for a user (the one-shot `studio.py` CLI, the project/EDL model, CapCut export), so
+  "generate a video from these clips + this song" is a first-class agent capability. Analytical only (no
+  generative model on real people).
+
 ## 0.99.169 -- 2026-07-06  (Video Studio: fit-to-width timeline, wheel-zoom, delete projects + free disk)
 - **Timeline fits its area by default** (no more stretching off-screen) -- opens at a zoom that fits the whole
   video into the panel width, with a **Fit** button to snap back.

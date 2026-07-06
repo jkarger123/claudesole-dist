@@ -95,13 +95,23 @@ def emit(out_json, cache_dir, music_source, clips, section=None, pace="punchy", 
     return {"ok": True, "project": proj, "path": out_json, "music_source": m.get("source")}
 
 
+IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic", ".heif", ".tif", ".tiff")
+
 def _probe_source(cache_dir, path):
-    """Probe one video source (dims + duration) + make its filmstrip. Returns the sources[] entry dict."""
+    """Probe one source -> sources[] entry. VIDEO: dims+dur+filmstrip. IMAGE: dims + a big dur cap (so the trim
+    handles can extend the on-screen time freely) + a single-tile thumbnail."""
     sid = "src_" + str(abs(hash(path)) % 10**8)
-    dur = round(ac._dur(path), 3); w, h = _dims(path)
-    s = {"kind": "video", "path": path, "dur": dur, "w": w, "h": h}
     os.makedirs(cache_dir, exist_ok=True)
     spr = os.path.join(cache_dir, "strip_%s.jpg" % sid)
+    if os.path.splitext(path)[1].lower() in IMAGE_EXT:
+        w, h = _dims(path); tw = int(SPRITE_H * 9 / 16)
+        s = {"kind": "image", "path": path, "dur": 600.0, "w": w, "h": h}
+        ac._run([FFMPEG, "-y", "-i", path, "-vf", "scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d"
+                 % (tw, SPRITE_H, tw, SPRITE_H), "-frames:v", "1", spr])
+        if os.path.exists(spr): s["thumb"] = spr; s["strip"] = {"path": spr, "n": 1, "tile_w": tw, "tile_h": SPRITE_H, "dur": 600.0}
+        return sid, s
+    dur = round(ac._dur(path), 3); w, h = _dims(path)
+    s = {"kind": "video", "path": path, "dur": dur, "w": w, "h": h}
     fs = filmstrip(path, spr)
     if fs: s["thumb"] = spr; s["strip"] = fs
     return sid, s
@@ -115,10 +125,11 @@ def manual(out_json, cache_dir, clips, music_source=None, section=None):
         if not os.path.exists(c): continue
         if c not in sidmap:
             sid, s = _probe_source(cache_dir, c); sidmap[c] = sid; sources[sid] = s
-        sid = sidmap[c]; dur = sources[sid]["dur"] or 3.0
-        vclips.append({"source": sid, "in": 0.0, "out": round(dur, 3), "start": round(pos, 3),
+        sid = sidmap[c]; src = sources[sid]
+        out = 5.0 if src.get("kind") == "image" else (src["dur"] or 3.0)   # images default to 5s on screen (trimmable)
+        vclips.append({"source": sid, "in": 0.0, "out": round(out, 3), "start": round(pos, 3),
                        "speed": 1.0, "volume": 0.0})
-        pos += dur
+        pos += out
     if not vclips: return {"ok": False, "error": "no usable clips"}
     tracks = [{"id": "v1", "kind": "video", "clips": vclips},
               {"id": "fx1", "kind": "effects", "clips": []},
