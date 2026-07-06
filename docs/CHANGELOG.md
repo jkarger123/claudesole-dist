@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.166 -- 2026-07-06  (Video Studio: fix "add media" + move beat-cut into the editor)
+- **Critical fix: the whole Studio was non-interactive as a lens.** loadStudio grabbed the FIRST <script> in the
+  embed page -- which is a tiny boot script (window.CC=...) injected before the real one -- so the studio JS never
+  ran (add media / buttons did nothing). Now it concatenates ALL <script> blocks, so every handler binds. Add
+  media, Start editing, and every editor control work.
+- **Restructured per feedback:** the first screen is now just *add clips -> Start editing*. Beat auto-cut is no
+  longer a big card up front -- it's a small **Beat-cut** toggle in the editor toolbar that re-cuts your current
+  timeline clips to a song (paste a link / upload / or use the current audio track), so it's an option once you're
+  editing, not an assumption.
+
 ## 0.99.165 -- 2026-07-05  (Video Studio: render as a proper full-width native lens)
 - Fixed the "shoved to the left / doesn't feel native" problem. Root causes: (1) loadStudio rendered into #main
   (the flex SHELL that holds the nav) instead of #grid (the real content area every lens uses), so it became a

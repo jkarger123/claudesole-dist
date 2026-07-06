@@ -16247,7 +16247,7 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
 
 <!-- ============ BUILDER ============ -->
 <div id="builder">
-<p class="sub">Add your clips, then <b>Start editing</b> &mdash; trim, crop, color, add audio, titles, effects. (Auto-cut to a beat &amp; CapCut export are optional extras.)</p>
+<p class="sub">Add your clips, then <b>Start editing</b> &mdash; trim, crop, color, add audio, titles, effects, export. (Beat auto-cut &amp; CapCut are options inside the editor.)</p>
 <div class="card">
   <h2>Clips</h2>
   <div id="drop" class="drop">Tap to add video clips &mdash; or drag them here</div>
@@ -16255,24 +16255,6 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
   <div id="clips"></div>
 </div>
 <button id="startEdit" class="btn go">Start editing &rarr;</button>
-<div class="muted" style="text-align:center;margin:8px 0 2px">You&rsquo;ll get a timeline &mdash; add audio &amp; effects there. Or use the beat auto-cut below.</div>
-
-<div class="card" style="margin-top:14px">
-  <h2>Optional &middot; Auto-cut to a beat</h2>
-  <div class="muted" style="margin:0 0 10px">Beat-detect a song and cut your clips to it automatically. You can still edit everything after.</div>
-  <label>YouTube link (or paste a track URL)</label>
-  <input id="yt" type="text" placeholder="https://www.youtube.com/watch?v=...">
-  <div class="row" style="margin-top:10px"><div style="flex:1;min-width:150px">
-    <label>Section (optional, mm:ss-mm:ss)</label>
-    <input id="section" type="text" placeholder="3:11-3:25">
-  </div></div>
-  <div class="muted">&hellip;or <a href="#" id="musicUpBtn" class="dl">upload an audio file</a> <span id="musicName"></span></div>
-  <input id="musicFile" type="file" accept="audio/*" style="display:none">
-  <div class="seg" id="pace" style="margin-top:12px">
-    <button data-v="frantic">Frantic</button><button data-v="punchy" class="on">Punchy</button><button data-v="cinematic">Cinematic</button>
-  </div>
-  <button id="build" class="btn" style="width:100%;margin-top:12px">&#9889; Auto-cut to the beat</button>
-</div>
 <div class="card" id="result" style="display:none;margin-top:13px">
   <h2 id="rTitle">Working&hellip;</h2>
   <div class="bar"><i id="rBar"></i></div>
@@ -16294,8 +16276,24 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
     <button class="btn sm" id="eAddPip">+ PiP</button>
     <input id="eClipFile" type="file" accept="video/*" multiple style="display:none">
     <input id="eAudioFile" type="file" accept="audio/*" style="display:none">
+    <button class="btn sm" id="eBeatcut">&#9889; Beat-cut</button>
     <button class="btn sm" id="eCapcut">&#10515; CapCut</button>
     <button class="btn sm" id="eZoomOut">&minus;</button><button class="btn sm" id="eZoomIn">+</button>
+  </div>
+  <div class="card" id="beatcutPanel" style="display:none;margin-bottom:10px">
+    <h2>Auto-cut to a beat</h2>
+    <div class="muted" style="margin:0 0 8px">Re-cut your clips to a song's beat (you can keep editing after).</div>
+    <label>YouTube link (or paste a track URL)</label>
+    <input id="yt" type="text" placeholder="https://www.youtube.com/watch?v=...">
+    <div class="row" style="margin-top:8px"><div style="flex:1;min-width:150px">
+      <label>Section (optional, mm:ss-mm:ss)</label><input id="section" type="text" placeholder="3:11-3:25">
+    </div></div>
+    <div class="muted">&hellip;or <a href="#" id="musicUpBtn" class="dl">upload an audio file</a> <span id="musicName"></span> &middot; or leave blank to use the current audio track</div>
+    <input id="musicFile" type="file" accept="audio/*" style="display:none">
+    <div class="seg" id="pace" style="margin-top:10px">
+      <button data-v="frantic">Frantic</button><button data-v="punchy" class="on">Punchy</button><button data-v="cinematic">Cinematic</button>
+    </div>
+    <button id="build" class="btn" style="width:100%;margin-top:10px">&#9889; Beat-cut now</button>
   </div>
   <div id="pvwrap" style="position:relative;text-align:center">
     <canvas id="pvcanvas" width="405" height="720" style="width:auto;max-width:100%;max-height:52vh;border-radius:12px;background:#000"></canvas>
@@ -16400,11 +16398,25 @@ function buildFlow(endpoint,extra,btn,title){
   }).catch(function(){btn.disabled=false;toast('Network error',4000);});
 }
 $('startEdit').onclick=function(){buildFlow('/api/studio/new-manual',{},$('startEdit'),'Importing your clips...');};
-$('build').onclick=function(){
+$('eBeatcut').onclick=function(){var p=$('beatcutPanel');p.style.display=(p.style.display==='none'||!p.style.display)?'block':'none';};
+$('build').onclick=function(){   // beat-cut the CURRENT project's clips to a song (in the editor now, not the builder)
+  if(!proj){toast('Open a project first',3000);return;}
   var music=musicPath||$('yt').value.trim();
-  if(!music){toast('Auto-cut needs a song - a YouTube link or an uploaded track. (Or just Start editing.)',4500);return;}
-  buildFlow('/api/studio/build-project',{music:music,section:$('section').value.trim(),pace:pace},$('build'),'Beat-cutting...');
+  if(!music){var a0=atrack().clips[0];if(a0&&proj.sources[a0.source])music=proj.sources[a0.source].path;}
+  if(!music){toast('Add a song — a YouTube link or upload above, or use + Audio first',4800);return;}
+  var paths=[];vtrack().clips.forEach(function(c){var p=(proj.sources[c.source]||{}).path;if(p&&paths.indexOf(p)<0)paths.push(p);});
+  if(!paths.length){toast('No clips to cut',3000);return;}
+  $('build').disabled=true;$('eStatus').textContent='Beat-cutting your clips…';
+  fetch('/api/studio/build-project',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clips:paths,music:music,section:$('section').value.trim(),pace:pace})}).then(function(r){return r.json();}).then(function(r){
+    if(!r||!r.job_id){$('build').disabled=false;$('eStatus').textContent='Could not start';return;}
+    stopPoll();poll=setInterval(function(){checkBeatcut(r.job_id);},1500);
+  }).catch(function(){$('build').disabled=false;$('eStatus').textContent='Network error';});
 };
+function checkBeatcut(id){fetch('/api/studio/job?id='+id).then(function(r){return r.json();}).then(function(j){
+  $('eStatus').textContent='Beat-cut '+(j.msg||'')+' '+(j.pct||0)+'%';
+  if(j.state==='done'){stopPoll();$('build').disabled=false;$('beatcutPanel').style.display='none';openProject(j.project_id);toast('Beat-cut done',1500);}
+  else if(j.state==='error'){stopPoll();$('build').disabled=false;$('eStatus').textContent='Beat-cut failed: '+(j.error||'?');}
+}).catch(function(){});}
 function checkBuild(id,btn){fetch('/api/studio/job?id='+id).then(function(r){return r.json();}).then(function(j){
   $('rBar').style.width=(j.pct||0)+'%';if(j.msg)$('rMsg').textContent=j.msg;
   if(j.state==='done'){stopPoll();if(btn)btn.disabled=false;$('result').style.display='none';openProject(j.project_id);}
@@ -18441,7 +18453,7 @@ async function loadStudio(){
     var html=await (await fetch('/studio?embed=1',{cache:'no-store'})).text();
     var sm=html.match(/<style>([\s\S]*?)<\/style>/);var raw=sm?sm[1]:'';
     var bm=html.match(/<body[^>]*>([\s\S]*?)<\/body>/);var bodyHtml=bm?bm[1]:html;
-    var jm=bodyHtml.match(/<script>([\s\S]*?)<\/script>/);var js=jm?jm[1]:'';
+    var js='';var _re=/<script>([\s\S]*?)<\/script>/g,_m;while((_m=_re.exec(bodyHtml))){js+=_m[1]+'\n';}   // grab ALL scripts (the embed page injects a boot <script> before the main one)
     bodyHtml=bodyHtml.replace(/<script>[\s\S]*?<\/script>/g,'');
     if(!document.getElementById('studioCss')&&raw){
       var scoped=raw.replace(/:root/g,'#studioHost').replace(/(^|\})\s*([^@}{][^{}]*)\{/g,function(mm,br,sel){
