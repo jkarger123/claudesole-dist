@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.172 -- 2026-07-06  (Video Studio: generate clips with AI -- Veo/Gemini, BYO-key)
+- **Generate a video clip from a text prompt** (or animate a still) with AI, using the deployment's own vaulted
+  key (Google Gemini -> Veo 3.1). Two entry points, exactly as asked:
+  1. **Builder "Generate a clip with AI" card** -> describe a shot -> it generates an 8s clip and OPENS THE EDITOR
+     with that clip loaded.
+  2. **Editor "AI clip" button** -> generate a clip and it drops straight onto the current timeline.
+- Landscape/Portrait + Fast/Best (Veo fast vs full). ~1-2 min, 720p with audio. Generated clips become normal
+  timeline clips (trim/split/color/speed/etc.).
+- **Provider-gated + BYO-key:** the AI controls only appear when a generative-video key is vaulted
+  (`providers.resolve` -> `can_generate_video`); the key is resolved server-side from the vault and passed via env
+  (never in argv/logs). New engine module `engine/generate.py`; routes `/api/studio/generate` + `/api/studio/tools`
+  now reports provider status. Agent-drivable (AGENT.md updated).
+- **Guardrail kept explicit:** generative video can't depict real people/children (provider policy) -> the UI says
+  so; that's what the analytical editor is for.
+
 ## 0.99.171 -- 2026-07-06  (Video Studio: big-file uploads -- 8GB cap, warnings, progress %)
 - **Upload cap for the studio raised to 8GB** (was 500MB) -- 4K / drone clips are big. A 2GB drone MP4 was
   silently rejected before; now it uploads. (Config: cc.config `studio_upload_mb`.)

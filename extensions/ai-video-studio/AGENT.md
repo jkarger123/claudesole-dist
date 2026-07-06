@@ -2,7 +2,8 @@
 
 You can produce a FINISHED video for a user with this tool. It is an **analytical** editor (no generative model):
 it runs on the node's bundled `bin/ffmpeg` + `bin/yt-dlp`, needs **no API key**, and works on **real footage,
-photos, and music** (including real people/kids — nothing is regenerated).
+photos, and music** (including real people/kids — nothing is regenerated). It ALSO has an optional **generative**
+mode (text/image -> new video clips via Veo) when a key is vaulted — see "Generate NET-NEW clips" below.
 
 ## Fastest path — one command makes a beat-synced video
 Engine lives in `extensions/ai-video-studio/engine/`:
@@ -35,6 +36,23 @@ Everything is ONE project JSON (all times = seconds on the OUTPUT timeline) that
 - Manual (no beat-cut) project: `python3 project.py manual out.json <cache_dir> [--music M] clip1 clip2 …`
   (each clip full length; images default to 5s). Then edit the JSON and `python3 edl.py out.json final.mp4`.
 - CapCut bundle (cut clips + edit-plan + draft): `python3 capcut.py project.json out.zip`.
+
+## Generate NET-NEW clips with AI (optional, needs a key)
+If the node's vault has a generative-video key (Gemini `GEMINI_API_KEY` -> Veo), you can GENERATE clips from a
+text prompt (or animate a still image) and drop them into a project:
+
+    cd extensions/ai-video-studio/engine
+    STUDIO_GEN_KEY=<the key> python3 generate.py --prompt "a cinematic drone shot over red canyon at sunset" \
+        --out /abs/gen.mp4 --aspect 16:9 [--model veo-3.1-fast-generate-preview] [--image /abs/still.jpg]
+
+Prints `{ok, path, model}`. It submits a long-running job, polls, and downloads the MP4 (~1-2 min, 8s 720p clip
+with audio). Then treat `path` like any uploaded clip (add it to a project via `project.py addclip` or the
+`/api/studio/add-clip` route). From the dashboard this is the Studio's **Generate (AI)** card / **AI clip** button;
+`/api/studio/generate` runs the same thing as a job and the server resolves the key from the vault for you.
+- `--aspect 16:9` (landscape) or `9:16` (portrait). `--image` = animate a still. `--negative` = things to avoid.
+- HARD LIMIT: generative video REBUILDS pixels, so the provider REFUSES real people/children (returns a filtered
+  result, no video). Use it for products/pets/scenery/synthetic/b-roll/intros ONLY. Real family footage -> the
+  analytical editor above.
 
 ## The human UI
 Operators get a `/studio` lens — an in-dashboard timeline editor (trim, split, crop, color, audio, titles, PiP,

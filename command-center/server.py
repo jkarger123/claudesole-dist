@@ -14422,9 +14422,9 @@ def _studio_ensure_bins(note=None):
             return False
         return _studio_bins_present()
 
-def _studio_engine_json(args, timeout=900):
+def _studio_engine_json(args, timeout=900, env=None):
     """Run an engine CLI (project.py / edl.py) and parse its (possibly multi-line pretty) JSON stdout robustly."""
-    r = subprocess.run(args, capture_output=True, text=True, cwd=STUDIO_ENGINE, timeout=timeout)
+    r = subprocess.run(args, capture_output=True, text=True, cwd=STUDIO_ENGINE, timeout=timeout, env=env)
     out_txt = (r.stdout or "").strip()
     try: return json.loads(out_txt)
     except Exception:
@@ -14697,6 +14697,70 @@ def _studio_render_project_worker(jid, body):
                         rel="command-center/deliverables/studio_%s.mp4" % jid)
         else:
             _studio_set(jid, state="error", pct=100, error=str(res.get("error", "render failed"))[:300])
+    except Exception as e:
+        _studio_set(jid, state="error", pct=100, error=str(e)[:200])
+
+
+def _studio_providers():
+    """Which AI providers this node's VAULT unlocks (names only -> providers.resolve). Drives the generative UI:
+    the 'Generate (AI)' controls only appear when can_generate_video is true (a Veo/Runway key is vaulted)."""
+    try:
+        if STUDIO_ENGINE not in sys.path: sys.path.insert(0, STUDIO_ENGINE)
+        import providers as _prov
+        names = [k for p in _prov.PROVIDERS.values() for k in p.get("keys", []) if _deploy_env(k)]
+        r = _prov.resolve(names)
+        vp = (r.get("picks") or {}).get("video") or {}
+        return {"can_generate_video": r.get("can_generate_video", False),
+                "video_provider": vp.get("label"), "video_model": vp.get("model"),
+                "available": sorted(r.get("available", {}).keys())}
+    except Exception as e:
+        return {"can_generate_video": False, "error": str(e)[:120], "available": []}
+
+def studio_generate_start(body):
+    jid = secrets.token_hex(6); _studio_set(jid, state="queued", pct=0, msg="queued")
+    threading.Thread(target=_studio_generate_worker, args=(jid, body), daemon=True).start()
+    return {"ok": True, "job_id": jid}
+
+def _studio_generate_worker(jid, body):
+    """GENERATE a net-new clip from a text prompt (or an image to animate) via a generative provider (Veo).
+    Downloads the MP4 into STUDIO_MEDIA so the rest of the Studio treats it exactly like an uploaded clip."""
+    try:
+        _studio_set(jid, state="running", pct=6, msg="checking provider")
+        if STUDIO_ENGINE not in sys.path: sys.path.insert(0, STUDIO_ENGINE)
+        import providers as _prov
+        names = [k for p in _prov.PROVIDERS.values() for k in p.get("keys", []) if _deploy_env(k)]
+        pick = (_prov.resolve(names).get("picks") or {}).get("video")
+        if not pick:
+            return _studio_set(jid, state="error", pct=100,
+                error="No generative-video provider is set up. Add a Gemini API key in the Vault to enable AI generation.")
+        key = _deploy_env(pick["key"])
+        if not key:
+            return _studio_set(jid, state="error", pct=100, error="the %s key isn't resolvable in this node's vault" % pick["key"])
+        prompt = (body.get("prompt") or "").strip()
+        image = body.get("image")
+        if image and not os.path.exists(image): image = None
+        if not prompt and not image:
+            return _studio_set(jid, state="error", pct=100, error="enter a prompt describing the clip to generate")
+        aspect = body.get("aspect") if body.get("aspect") in ("16:9", "9:16") else "16:9"
+        model = pick["model"]
+        if "veo" in (model or ""):
+            model = {"fast": "veo-3.1-fast-generate-preview", "best": "veo-3.1-generate-preview"}.get(body.get("quality"), model)
+        if not _studio_ensure_bins(lambda m: _studio_set(jid, msg=m)):
+            return _studio_set(jid, state="error", pct=100, error="media tools unavailable on this node")
+        os.makedirs(STUDIO_MEDIA, exist_ok=True)
+        out = os.path.join(STUDIO_MEDIA, "gen_%s.mp4" % jid)
+        _studio_set(jid, state="running", pct=15, msg="generating with %s (~1-2 min)" % (pick.get("label") or "AI"))
+        args = ["python3", os.path.join(STUDIO_ENGINE, "generate.py"), "--out", out, "--model", model, "--aspect", aspect]
+        if prompt: args += ["--prompt", prompt]
+        if image: args += ["--image", image]
+        if body.get("negative"): args += ["--negative", str(body["negative"])]
+        genenv = dict(os.environ); genenv["STUDIO_GEN_KEY"] = key      # key via env, never argv/ps
+        res = _studio_engine_json(args, timeout=780, env=genenv)
+        if res.get("ok") and os.path.exists(out):
+            _studio_set(jid, state="done", pct=100, msg="done", path=out, media_path=out, name=os.path.basename(out))
+        else:
+            _studio_set(jid, state="error", pct=100, error=str(res.get("error", "generation failed"))[:400],
+                        filtered=bool(res.get("filtered")))
     except Exception as e:
         _studio_set(jid, state="error", pct=100, error=str(e)[:200])
 
@@ -15283,7 +15347,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/studio/projects":
             return self._s(200, json.dumps({"ok": True, "projects": studio_projects_list()}))
         if u.path == "/api/studio/tools":
-            return self._s(200, json.dumps({"ok": True, "present": _studio_bins_present()}))
+            return self._s(200, json.dumps({"ok": True, "present": _studio_bins_present(), "gen": _studio_providers()}))
         if u.path == "/api/studio/media":     # Range/206-capable media serve for <video> (file-get is whole-file-in-memory)
             return self._studio_media(q)
         return self._s(404, "{}")
@@ -15327,6 +15391,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(studio_build_project_start(body)))
         if u.path == "/api/studio/new-manual":
             return self._s(200, json.dumps(studio_new_manual_start(body)))
+        if u.path == "/api/studio/generate":
+            return self._s(200, json.dumps(studio_generate_start(body)))
         if u.path == "/api/studio/add-clip":
             return self._s(200, json.dumps(studio_add_clip(body)))
         if u.path == "/api/studio/add-audio":
@@ -16322,6 +16388,17 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
   <input id="file" type="file" accept="video/*,image/*" multiple style="display:none">
   <div id="clips"></div>
 </div>
+<div class="card" id="genCard" style="display:none">
+  <h2>&#10024; Generate a clip with AI</h2>
+  <div class="muted" style="margin:0 0 8px">Describe a shot and AI creates an 8-second video clip, then opens it in the editor. Great for b-roll, scenery, products, intros. <b>Note:</b> generative video can't depict real people or children &mdash; use your own footage for those.</div>
+  <textarea id="gPrompt" rows="2" placeholder="e.g. a cinematic aerial drone shot sweeping over red rock canyon at golden sunset, epic scale"></textarea>
+  <div class="row" style="margin-top:8px;align-items:center;gap:14px;flex-wrap:wrap">
+    <div><label style="display:block">Shape</label><div class="seg" id="gAspect"><button data-v="16:9" class="on">Landscape</button><button data-v="9:16">Portrait</button></div></div>
+    <div><label style="display:block">Quality</label><div class="seg" id="gQual"><button data-v="fast" class="on">Fast</button><button data-v="best">Best</button></div></div>
+  </div>
+  <button id="gGo" class="btn go" style="width:100%;margin-top:11px">&#10024; Generate &amp; open editor</button>
+  <div class="muted" id="gStatus" style="min-height:16px;margin-top:6px"></div>
+</div>
 <button id="startEdit" class="btn go">Start editing &rarr;</button>
 <div class="card" id="result" style="display:none;margin-top:13px">
   <h2 id="rTitle">Working&hellip;</h2>
@@ -16346,6 +16423,7 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
     <button class="btn sm" id="eAddPip">+ PiP</button>
     <input id="eClipFile" type="file" accept="video/*,image/*" multiple style="display:none">
     <input id="eAudioFile" type="file" accept="audio/*" style="display:none">
+    <button class="btn sm" id="eGen" style="display:none" title="Generate a new clip with AI">&#10024; AI clip</button>
     <button class="btn sm" id="eBeatcut">&#9889; Beat-cut</button>
     <button class="btn sm" id="eCapcut">&#10515; CapCut</button>
     <button class="btn sm" id="eFit" title="Fit timeline to width">Fit</button>
@@ -16365,6 +16443,16 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
       <button data-v="frantic">Frantic</button><button data-v="punchy" class="on">Punchy</button><button data-v="cinematic">Cinematic</button>
     </div>
     <button id="build" class="btn" style="width:100%;margin-top:10px">&#9889; Beat-cut now</button>
+  </div>
+  <div class="card" id="genPanel" style="display:none;margin-bottom:10px">
+    <h2>&#10024; Generate an AI clip</h2>
+    <div class="muted" style="margin:0 0 8px">Describe a shot; AI creates an 8s clip and drops it on your timeline. No real people/children &mdash; use your own footage for those.</div>
+    <textarea id="egPrompt" rows="2" placeholder="e.g. slow-motion product shot of a sports car on a mountain road at dusk"></textarea>
+    <div class="row" style="margin-top:8px;align-items:center;gap:14px;flex-wrap:wrap">
+      <div><label style="display:block">Shape</label><div class="seg" id="egAspect"><button data-v="16:9" class="on">Landscape</button><button data-v="9:16">Portrait</button></div></div>
+      <div><label style="display:block">Quality</label><div class="seg" id="egQual"><button data-v="fast" class="on">Fast</button><button data-v="best">Best</button></div></div>
+    </div>
+    <button id="egGo" class="btn" style="width:100%;margin-top:11px">&#10024; Generate &amp; add to timeline</button>
   </div>
   <div id="pvwrap" style="position:relative;text-align:center">
     <canvas id="pvcanvas" width="405" height="720" style="width:auto;max-width:100%;max-height:52vh;border-radius:12px;background:#000"></canvas>
@@ -16787,6 +16875,40 @@ function checkCapcut(id){fetch('/api/studio/job?id='+id).then(function(r){return
     $('eStatus').innerHTML='CapCut bundle ready ('+(j.clips||'')+' clips) &#10003; in Files. <a class="dl" download href="'+media(j.path)+'">Download .zip</a> &mdash; drop clips/ into a CapCut template.';}
   else if(j.state==='error'){stopPoll();$('eCapcut').disabled=false;$('eStatus').textContent='CapCut export failed: '+(j.error||'?');}
 }).catch(function(){});}
+/* ---------- generative AI clips (Veo/Gemini via the vault) ---------- */
+function segVal(id,def){var s=$(id);if(!s)return def;var b=s.querySelector('button.on');return b?b.getAttribute('data-v'):def;}
+function segBind(id){var s=$(id);if(!s)return;s.querySelectorAll('button').forEach(function(b){b.onclick=function(){s.querySelectorAll('button').forEach(function(x){x.classList.remove('on');});b.classList.add('on');};});}
+['gAspect','gQual','egAspect','egQual'].forEach(segBind);
+function checkGen(){fetch('/api/studio/tools').then(function(r){return r.json();}).then(function(d){
+  window._gen=(d&&d.gen)||{};var can=!!window._gen.can_generate_video;
+  if($('genCard'))$('genCard').style.display=can?'block':'none';
+  if($('eGen'))$('eGen').style.display=can?'':'none';}).catch(function(){});}
+function doGenerate(prompt,aspect,quality,btn,setStatus,onDone){
+  if(!prompt||!prompt.trim()){toast('Describe the clip you want to generate',3800);return;}
+  btn.disabled=true;var t0=Date.now();setStatus('Generating with AI… this takes ~1-2 min, keep this open.');
+  fetch('/api/studio/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:prompt.trim(),aspect:aspect,quality:quality})}).then(function(r){return r.json();}).then(function(r){
+    if(!r||!r.job_id){btn.disabled=false;setStatus('Could not start');return;}
+    stopPoll();poll=setInterval(function(){fetch('/api/studio/job?id='+r.job_id).then(function(x){return x.json();}).then(function(j){
+      if(j.state==='queued'||j.state==='running'){setStatus('Generating with AI… '+Math.round((Date.now()-t0)/1000)+'s ('+(j.msg||'working')+')');return;}
+      stopPoll();btn.disabled=false;
+      if(j.state==='done'&&(j.media_path||j.path)){setStatus('Generated ✓');onDone(j.media_path||j.path);}
+      else{setStatus('');toast((j.filtered?'⚠ ':'')+((j.error)||'Generation failed'),8000);}
+    }).catch(function(){});},2500);
+  }).catch(function(){btn.disabled=false;setStatus('Network error');});}
+if($('gGo'))$('gGo').onclick=function(){doGenerate($('gPrompt').value,segVal('gAspect','16:9'),segVal('gQual','fast'),$('gGo'),function(m){$('gStatus').textContent=m;},function(path){
+  $('gStatus').textContent='Opening editor…';
+  fetch('/api/studio/new-manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clips:[path],name:'AI video'})}).then(function(r){return r.json();}).then(function(r){
+    if(!r||!r.job_id){toast('Could not open editor',3500);return;}stopPoll();poll=setInterval(function(){checkBuild(r.job_id,null);},1500);}).catch(function(){});});};
+if($('eGen'))$('eGen').onclick=function(){var p=$('genPanel');p.style.display=(p.style.display==='none'||!p.style.display)?'block':'none';};
+if($('egGo'))$('egGo').onclick=function(){if(!proj){toast('Open a project first',3000);return;}doGenerate($('egPrompt').value,segVal('egAspect','16:9'),segVal('egQual','fast'),$('egGo'),function(m){$('eStatus').textContent=m;},function(path){
+  $('eStatus').textContent='Adding AI clip…';
+  fetch('/api/studio/add-clip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:pid,path:path})}).then(function(r){return r.json();}).then(function(x){
+    if(!x||!x.ok){$('eStatus').textContent='Add failed: '+((x||{}).error||'?');return;}
+    proj.sources[x.id]=x.source;var dur=x.source.dur||8;
+    vtrack().clips.push({source:x.id,'in':0,out:dur,start:proj.duration||0,speed:1,volume:1});
+    $('genPanel').style.display='none';$('egPrompt').value='';reflow();showLive();renderTL();scrubPreview();$('eStatus').textContent='AI clip added ✓';dirty=true;
+  }).catch(function(){$('eStatus').textContent='Add error';});});};
+checkGen();
 loadRecent();
 </script></body></html>"""
 
