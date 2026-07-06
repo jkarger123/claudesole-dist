@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.165 -- 2026-07-05  (Video Studio: render as a proper full-width native lens)
+- Fixed the "shoved to the left / doesn't feel native" problem. Root causes: (1) loadStudio rendered into #main
+  (the flex SHELL that holds the nav) instead of #grid (the real content area every lens uses), so it became a
+  squished flex child; (2) the tool's own container has class "wrap", which collided with the dashboard's global
+  .wrap{display:grid}, forcing the tool into the dashboard's card-grid layout.
+- Now renders into #grid, framed in the dashboard's own cc-head + a full-width cc-panel (grid-column:1/-1), with
+  the tool's .wrap layout reset to block -- so it's full-width and looks/feels like a first-class lens (dashboard
+  header, back/forward, search, help, gold theme).
+
 ## 0.99.164 -- 2026-07-05  (Video Studio: a real editor first + a native inline lens)
 - **Reframed as a general editor, not a beat-cut tool.** The primary flow is now **Start editing** -> a timeline
   where you trim, crop, color-correct, reorder, add audio + titles + effects. Beat **Auto-cut** and CapCut export

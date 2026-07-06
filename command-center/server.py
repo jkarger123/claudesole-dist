@@ -18429,13 +18429,13 @@ async function dlFile(rel,name){
   toast('Still syncing from iCloud — give it a few seconds and click again.',6000);
 }
 async function loadStudio(){
-  // NATIVE lens (not an iframe): render the Studio tool directly INTO #main so it's a first-class lens -- the
-  // dashboard's nav/back-forward, search, and help all apply. We reuse the single STUDIO_PAGE source: fetch it,
-  // scope its CSS under #studioHost (so it can never touch the rest of the dashboard), and run its JS in an IIFE
-  // (no global collisions). Blast radius is contained to this lens.
-  var m=document.getElementById('main');if(!m)return;
-  m.innerHTML='<div class="cc-head"><span class="cc-h-t">Studio</span><span class="cc-h-sub">Beat-synced video editor — build, trim, crop, color, audio, effects, export</span></div>'
-    +'<div id="studioHost"><div style="padding:26px;color:var(--mut,#8a92a3)">Loading…</div></div>';
+  // NATIVE lens: render into #grid (the real content area, like every other lens -- NOT #main, which is the flex
+  // shell), framed in the dashboard's own cc-head + cc-panel so it's full-width and native. We reuse the single
+  // STUDIO_PAGE source: fetch it, scope its CSS under #studioHost (can't touch the dashboard), run its JS in an
+  // IIFE (no global collisions). Blast radius is contained to this lens.
+  var grid=document.getElementById('grid');if(!grid)return;
+  grid.innerHTML='<div class="cc-head"><span class="cc-h-t">Studio</span><span class="cc-h-sub">Video editor — build, trim, crop, color, audio, titles, effects, export</span></div>'
+    +'<div class="cc-panel" style="grid-column:1/-1;padding:0;overflow:hidden"><div id="studioHost"><div style="padding:26px;color:var(--dim)">Loading…</div></div></div>';
   var host=document.getElementById('studioHost');
   try{
     var html=await (await fetch('/studio?embed=1',{cache:'no-store'})).text();
@@ -18447,7 +18447,9 @@ async function loadStudio(){
       var scoped=raw.replace(/:root/g,'#studioHost').replace(/(^|\})\s*([^@}{][^{}]*)\{/g,function(mm,br,sel){
         var s=sel.split(',').map(function(x){x=x.trim();if(!x)return x;if(x.indexOf('#studioHost')===0)return x;if(x.indexOf('html')===0)return '#studioHost';if(x.indexOf('body')===0)return '#studioHost'+x.slice(4);return '#studioHost '+x;}).join(',');
         return br+' '+s+'{';});
-      scoped+='\n#studioHost>.wrap>h1{display:none}#studioHost .wrap{max-width:100%;padding:2px 2px 60px}#studioHost video,#studioHost #pvcanvas{max-height:46vh}';
+      // the studio's container has class "wrap", which collides with the dashboard's global .wrap{display:grid} ->
+      // force the studio's own block layout back + full width.
+      scoped+='\n#studioHost>.wrap>h1{display:none}#studioHost .wrap{display:block!important;grid-template-columns:none!important;max-width:100%!important;width:100%;margin:0!important;padding:16px 16px 30px}#studioHost video,#studioHost #pvcanvas{max-height:46vh}';
       var el=document.createElement('style');el.id='studioCss';el.textContent=scoped;document.head.appendChild(el);
     }
     host.innerHTML=bodyHtml;
