@@ -8910,6 +8910,17 @@ def doctor():
         if _DEGRADED.get("since"):
             issues.append({"sev": "err", "path": "resources", "msg": "server is DEGRADED: a core tmux/subprocess call failed (%s) -- session/chief listings may read empty. This is fail-loud (never a silent empty). Clears automatically once calls succeed." % _DEGRADED.get("reason", "?")})
     except Exception: pass
+    try:                                                       # MCP HYGIENE: surface leaky extensions we're auto-cleaning (so a chronic offender gets updated/reported, not silently reaped forever)
+        if "mcp_hygiene_status" in globals():
+            _mh = mcp_hygiene_status()
+            live = _mcp_scan(reap=False) if "_mcp_scan" in globals() else []
+            if live:
+                nm = ", ".join(sorted({h["name"] for h in live}))
+                issues.append({"sev": "warn", "path": "mcp", "msg": "%d orphaned/stuck MCP server(s) present right now (%s) -- auto-reaped within ~2 min. A Claude Desktop extension isn't exiting on disconnect; update or report it upstream so it stops leaking." % (len(live), nm)})
+            elif _mh.get("reaped_24h"):
+                nm = ", ".join("%s x%d" % (k, v) for k, v in (_mh.get("by_name") or {}).items())
+                issues.append({"sev": "warn", "path": "mcp", "msg": "process hygiene cleaned up %d orphaned MCP server(s) in the last 24h (%s). ClaudeFather auto-reaps these; the leak is in the extension -- worth updating/reporting it." % (_mh["reaped_24h"], nm)})
+    except Exception: pass
     try:                                                       # mesh reply-forwarding must be wired or a chief's replies to peers silently never arrive
         _hk = os.path.join(STATE_DIR, "_mesh_hook_settings.json")
         if not (os.path.isfile(_hk) and "mesh_stop_hook" in _read(_hk)):
@@ -15130,6 +15141,7 @@ class H(BaseHTTPRequestHandler):
             return self._s(403, json.dumps({"instances": [], "roll": {}, "n": 0, "role": ROLE, "gated": True, "error": "portfolio is ClaudeGrandfather (overseer) only"}))
         if u.path == "/api/peers":         return self._s(200, json.dumps({"peers": peers(), "self": INSTANCE_ID}))
         if u.path == "/api/daemons":       return self._s(200, json.dumps(daemons_status(), default=str))
+        if u.path == "/api/mcp-hygiene":   return self._s(200, json.dumps(mcp_hygiene_status(), default=str))
         if u.path == "/api/autoapprove-log":   # audit trail of auto-accepted permission prompts (catalog C3)
             try:
                 tail = open(_AUTOAPPROVE_LOG, errors="ignore").read()[-8000:] if os.path.isfile(_AUTOAPPROVE_LOG) else ""
@@ -27256,6 +27268,153 @@ def _metrics_light():
             d["w"] = mm["all_w"] or 0
     except Exception: pass
     return d
+
+# ==================== MCP / EXTENSION PROCESS HYGIENE (self-healing reaper) ====================
+# Enterprise safety net, born from a real case: 41 leaked copies of a third-party "Sidekick for InDesign" MCP
+# server (East Pole) had orphaned to launchd and busy-spun on an idle laptop -> load 200 + ~5GB RAM. MCP servers
+# are supposed to exit when their client (Claude Desktop) disconnects; some don't -- they reparent to PID 1 and
+# keep spinning, and dozens pile up. ClaudeFather is installable on strangers' machines, so this ships in CORE and
+# runs on EVERY node: it CONSERVATIVELY reaps ORPHANED (parent-died -> ppid 1) MCP/extension processes that are
+# stuck (burning CPU or running a while) -- it NEVER touches a live/attached session (those have a real parent).
+# Doctor surfaces what it caught so a non-technical operator SEES the system cleaning up. docs/RESILIENCE.md.
+_MCP_HYGIENE_STATE = os.path.join(STATE_DIR, "_mcp_hygiene.json")
+_MCP_HYGIENE_LOG = os.path.join(STATE_DIR, "_mcp_hygiene.log")
+_MCP_HYGIENE_LOCK = threading.Lock()
+# Confirmed leaky MCP servers (name + a stable command-line substring + who to nudge upstream). The GENERIC
+# orphan-reaping below already covers anything; this list only names known offenders for reporting. Extend via
+# cc.config "mcp_hygiene_known_leaky": [{"name","match","vendor"}].
+_MCP_KNOWN_LEAKY = [
+    {"name": "Sidekick for InDesign", "match": "indesign-sidekick/dist/index.js", "vendor": "sidekick@eastpole.nl"},
+]
+# STRONG signals that an orphaned process is an MCP/extension server at all (so we only ever reap THOSE). A live
+# ClaudeFather server / claude session / tmux never matches these AND is never ppid==1, so it's doubly safe.
+_MCP_PROC_HINTS = ["/Claude Extensions/", ".mcpb", "modelcontextprotocol", "@modelcontextprotocol", "mcp-server-"]
+_MCP_CPU_MIN = 5.0       # conservative: reap an orphan only if it's burning >=5% CPU ...
+_MCP_AGE_MIN = 120       # ... OR has been running >=120s (past any brief just-launched ppid-1 race)
+
+def _mcp_known_leaky():
+    out = list(_MCP_KNOWN_LEAKY)
+    try:
+        for e in (CC.get("mcp_hygiene_known_leaky") or []):
+            if isinstance(e, dict) and e.get("match"): out.append(e)
+    except Exception: pass
+    return out
+
+def _etime_secs(et):
+    """Parse ps ELAPSED (etime): [[DD-]HH:]MM:SS -> seconds."""
+    try:
+        et = et.strip(); days = 0
+        if "-" in et: d, et = et.split("-", 1); days = int(d)
+        parts = [int(x) for x in et.split(":")]
+        while len(parts) < 3: parts.insert(0, 0)
+        return days * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+    except Exception: return 0
+
+def _mcp_is_server(cmd, leaky):
+    for e in leaky:
+        if e.get("match") and e["match"] in cmd: return e.get("name") or "known-leaky MCP server"
+    for h in _MCP_PROC_HINTS:
+        if h in cmd: return "MCP/extension server"
+    return None
+
+def _mcp_scan(reap):
+    """Find ORPHANED (ppid==1) MCP/extension processes that are stuck. If reap=True, kill them. Returns the list of
+    {pid,name,cpu,age,cmd} it acted on (or would act on). SAFE: ppid==1 only -> a live session is never included."""
+    leaky = _mcp_known_leaky(); hits = []
+    try:
+        code, out, _ = sh(["ps", "-A", "-o", "pid=,ppid=,%cpu=,etime=,command="], timeout=8)
+        if code != 0: return hits
+    except Exception:
+        return hits
+    for ln in out.splitlines():
+        try:
+            parts = ln.split(None, 4)
+            if len(parts) < 5: continue
+            pid, ppid, cpu, et, cmd = parts
+            pid = int(pid); ppid = int(ppid); cpu = float(cpu); age = _etime_secs(et)
+            if ppid != 1: continue                                  # only ORPHANS (parent gone) -> never a live one
+            if pid == os.getpid(): continue
+            name = _mcp_is_server(cmd, leaky)
+            if not name: continue
+            if not (cpu >= _MCP_CPU_MIN or age >= _MCP_AGE_MIN): continue    # conservative: stuck a while OR busy
+            hits.append({"pid": pid, "name": name, "cpu": cpu, "age": age, "cmd": cmd[:160]})
+        except Exception:
+            continue
+    if reap:
+        for h in hits:
+            try: os.kill(h["pid"], 15)                          # SIGTERM
+            except Exception: pass
+        if hits:
+            time.sleep(2)
+            for h in hits:
+                try: os.kill(h["pid"], 9)                       # SIGKILL -- force any survivor (these busy-spin, ignore TERM)
+                except Exception: pass
+    return hits
+
+def _mcp_hygiene_state():
+    try: return json.loads(_read(_MCP_HYGIENE_STATE) or "{}") or {}
+    except Exception: return {}
+
+def _mcp_hygiene_record(hits):
+    """Persist a rolling 24h ledger of reaps (for Doctor + the operator) + a human log line."""
+    now = time.time()
+    with _MCP_HYGIENE_LOCK:
+        st = _mcp_hygiene_state()
+        recent = [r for r in (st.get("recent") or []) if now - r.get("ts", 0) < 86400]
+        for h in hits:
+            recent.append({"ts": now, "pid": h["pid"], "name": h["name"], "cpu": round(h["cpu"], 1)})
+        st["recent"] = recent[-500:]; st["last_sweep"] = now
+        st["total_reaped"] = int(st.get("total_reaped", 0)) + len(hits)
+        try:
+            _tmp = _MCP_HYGIENE_STATE + ".tmp"; open(_tmp, "w").write(json.dumps(st)); os.replace(_tmp, _MCP_HYGIENE_STATE)
+        except Exception: pass
+        if hits:
+            try:
+                with open(_MCP_HYGIENE_LOG, "a") as f:
+                    for h in hits:
+                        f.write("%s  reaped orphan pid=%s %s (cpu=%.0f%% age=%ss)\n" % (
+                            time.strftime("%Y-%m-%d %H:%M:%S"), h["pid"], h["name"], h["cpu"], h["age"]))
+            except Exception: pass
+
+def mcp_hygiene_status():
+    """For Doctor + /api/mcp-hygiene: what's leaking + what we've cleaned in the last 24h."""
+    st = _mcp_hygiene_state(); now = time.time()
+    recent = [r for r in (st.get("recent") or []) if now - r.get("ts", 0) < 86400]
+    by = {}
+    for r in recent: by[r["name"]] = by.get(r["name"], 0) + 1
+    return {"ok": True, "enabled": CC.get("mcp_hygiene", True) is not False,
+            "reaped_24h": len(recent), "by_name": by, "total_reaped": int(st.get("total_reaped", 0)),
+            "last_sweep": st.get("last_sweep"), "known_leaky": _mcp_known_leaky()}
+
+def _mcp_hygiene_once():
+    hits = _mcp_scan(reap=True)
+    _mcp_hygiene_record(hits)          # always stamp last_sweep (proves the reaper is live), append/log only on hits
+    return hits
+
+_MCP_HYG_ALERTED = {"sig": ""}
+def _mcp_hygiene_loop():
+    """CONSERVATIVE reaper: every ~2 min, kill orphaned+stuck MCP/extension servers. Alerts the operator ONCE per
+    episode when it has to clean up a real pile-up (so a chronic leaker gets noticed + reported/updated), stays
+    silent for routine 1-off churn. Opt out with cc.config mcp_hygiene=false."""
+    time.sleep(90)
+    while True:
+        try:
+            if CC.get("mcp_hygiene", True) is not False:
+                hits = _mcp_hygiene_once()
+                if len(hits) >= 3:                       # a real pile-up -> tell the operator once, until it clears
+                    names = ", ".join(sorted({h["name"] for h in hits}))
+                    sig = "%d:%s" % (len(hits) // 3, names)
+                    if sig != _MCP_HYG_ALERTED["sig"]:
+                        _MCP_HYG_ALERTED["sig"] = sig
+                        msg = "[%s] MCP hygiene: reaped %d orphaned/stuck server(s) -- %s. A leaky MCP extension keeps orphaning; update or report it (see Doctor)." % (INSTANCE_ID, len(hits), names)
+                        print(msg)
+                        try: notify_send(msg)
+                        except Exception: pass
+                elif not hits:
+                    _MCP_HYG_ALERTED["sig"] = ""          # clean sweep -> re-arm the alert for the next episode
+        except Exception: pass
+        time.sleep(120)
+
 def _metrics_sample_loop():
     """Record one sample/minute to the shared machine-level history, FOREVER (not just while a tab is open).
     Deduped across the co-located nodes by shared-file freshness: whichever node fires while the file is stale
@@ -27374,6 +27533,7 @@ if __name__ == "__main__":
     _daemon("substack", _substack_loop)                  # SUBSTACK: poll tracked publications' RSS into the read cache (no-op until publications are configured)
     _daemon("chief_watchdog", _chief_watchdog)           # CHIEF WATCHDOG: keep the always-on Chief of Staff (the mesh comms endpoint) alive -- respawn if its claude exits
     _daemon("vitals", _vitals_loop)                       # RESILIENCE: watch our OWN fds/threads/cpu/children -> WARN (alert) -> CRITICAL (self-heal) before a leak becomes a zombie or an fd wedge
+    _daemon("mcp_hygiene", _mcp_hygiene_loop)             # RESILIENCE: reap ORPHANED+stuck MCP/extension servers (e.g. a leaky Claude Desktop extension) before dozens pile up -> every install stays clean
     _daemon("fleet_watchdog", _fleet_watchdog_loop)       # RESILIENCE phase 2 (overseer only): external backstop -- kill+respawn a co-located node too wedged to self-heal, then verify it came back
     _daemon("metrics_sample", _metrics_sample_loop)       # SERVER metrics HISTORY: record one machine sample/min forever (shared, deduped) so the graph shows real history, not just while a tab is open
     _daemon("security_beat", _security_beat_loop)         # SECURITY BEAT (opt-in security_beat): weekly security-auditor posture sweep -> incident on high-severity drift

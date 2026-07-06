@@ -119,6 +119,12 @@ It MUST contain these sections, in this order:
 ## Categories -- how install wires each
 - `integration` (MCP / external service): install records it; the setup agent writes the MCP server entry into
   the deployment's `.mcp.json` (or connects a claude.ai connector) + stores secrets in the gitignored env.
+  - **HARD RULE for any stdio MCP server WE author: it MUST exit when its client disconnects** (stdin EOF). Add
+    `process.stdin.on('end',()=>process.exit(0)); process.stdin.on('close',()=>process.exit(0));` (Node) or the
+    equivalent, and never busy-loop. An MCP server that stays alive after the client dies orphans to launchd and
+    spins forever; dozens pile up and wedge the machine (a real third-party case cost a laptop load-200 + 5GB RAM).
+    Core ships an MCP-hygiene reaper that CONTAINS third-party offenders we can't fix, but OUR servers must never
+    need it. (Programmatic extensions -- one-shot JSON stdin->stdout then exit -- already satisfy this.)
 - `agent-tool`: payload is an `agents/<id>/` dir (charter + tools/run.py) -> appears in the Agents lens.
 - `skill`: payload is a `SKILL.md` -> copied into `<scope>/.claude/skills/` -> appears in the Skills lens.
 - `theme`: provides a `data-theme` palette + brand assets.

@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.173 -- 2026-07-06  (Resilience: MCP / extension process-hygiene reaper -- every install self-cleans)
+- **Self-healing reaper for leaked MCP servers.** Third-party Claude Desktop MCP extensions that don't exit on
+  disconnect orphan to launchd and busy-spin; dozens pile up and wedge the machine (real case: 41 leaked "Sidekick
+  for InDesign" servers = load 200 + ~5GB RAM on an idle laptop). Core now ships a CONSERVATIVE reaper (daemon
+  `mcp_hygiene`, ~2 min) that kills only ORPHANED (ppid 1) + recognizably-MCP + stuck (>=5% CPU or >=120s)
+  processes -- a live/attached session (real parent) is NEVER touched. Runs on every node that installs
+  ClaudeFather. Opt out: cc.config `mcp_hygiene=false`.
+- **Visibility:** Doctor + `/api/mcp-hygiene` show what was cleaned in 24h + anything leaking now, and name known
+  offenders (Sidekick -> sidekick@eastpole.nl). Alerts once per pile-up (>=3) then re-arms, so a chronic leaker
+  gets reported/updated instead of silently reaped forever. Trail: `_mcp_hygiene.log`.
+- **Prevention for our own code:** AUTHORING.md now makes exit-on-stdin-EOF a HARD RULE for any first-party MCP
+  server, so ours can never make this mistake. docs/RESILIENCE.md documents the whole thing.
+
 ## 0.99.172 -- 2026-07-06  (Video Studio: generate clips with AI -- Veo/Gemini, BYO-key)
 - **Generate a video clip from a text prompt** (or animate a still) with AI, using the deployment's own vaulted
   key (Google Gemini -> Veo 3.1). Two entry points, exactly as asked:
