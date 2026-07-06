@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.161 -- 2026-07-05  (Video Studio: multi-track / picture-in-picture -- the "didn't build" list, pt 2)
+- **PiP / overlay track:** tap a clip -> **+ PiP** drops it on a new overlay lane, composited on top of the base
+  video. Tap the PiP block to cycle **position** (TL/TR/BL/BR/center) + **size** (25/35/50/70%) or delete; drag it
+  to retime. Renders via `filter_complex overlay` (new `edl._pip_segment` + an overlay pass) and composites live
+  in the canvas preview too. This is the "insert stuff" / multi-track piece.
+- 3 of the 4 "deliberately didn't build" items now shipped: real-time preview (160), direct drag-trim (160),
+  multi-track/PiP (161). The 4th -- a CapCut-verified `draft_content.json` -- is gated on testing against a real
+  CapCut install (can't be done headlessly); the reliable clips + EDIT_PLAN export already covers the workflow.
+
 ## 0.99.160 -- 2026-07-05  (Video Studio: direct drag-manipulation + live preview -- the "didn't build" list, pt 1)
 - **Drag manipulation** (was inspector-steppers only): select a clip -> drag its edge **handles to trim** in/out
   live; **drag impact/zoom pins** and **title blocks** to reposition (beat-snapped, tap still opens the menu);

@@ -47,6 +47,16 @@ def _segment(src_path, in_t, out_t, speed, w, h, fps, dest, proxy=False):
     return ac._dur(dest)
 
 
+def _pip_segment(src_path, in_t, out_t, speed, tw, fps, dest):
+    """A picture-in-picture segment: trim + speed, scaled to `tw` wide (aspect kept) -- to overlay on the base."""
+    src_len = max(0.05, float(out_t) - float(in_t)); sp = float(speed) if speed else 1.0
+    vf = ("setpts=%.4f*PTS," % (1.0 / sp) if sp != 1.0 else "setpts=PTS,") + \
+         "scale=%d:-2:force_original_aspect_ratio=decrease,fps=%d" % (tw, fps)
+    ac._run([FFMPEG, "-y", "-ss", "%.3f" % max(0, float(in_t)), "-i", src_path, "-t", "%.3f" % src_len, "-an",
+             "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-r", str(fps), dest])
+    return ac._dur(dest)
+
+
 def _drawtext_chain(text_clips):
     """Build one drawtext filter chain: each text clip shown only during [start,end] (enable=between)."""
     parts = []
@@ -104,6 +114,27 @@ def render(project, out, progress_cb=None, proxy=False):
     ac._run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", body])
     vlen = ac._dur(body)
     if progress_cb: progress_cb(65, "assembling")
+
+    # PiP / overlay tracks -> composite onto the base with filter_complex overlay (each at its start, scaled+placed)
+    ovs = [o for o in _tracks(project, "overlay") if srcs.get(o.get("source"), {}).get("path")]
+    if ovs and not proxy:
+        inputs = ["-i", body]; fc = []; last = "0:v"; n = 0
+        for oc in ovs:
+            tr = oc.get("transform") or {}; scale = float(tr.get("scale", 0.4))
+            seg = os.path.join(work, "ov%03d.mp4" % n)
+            if _pip_segment(srcs[oc["source"]]["path"], oc.get("in", 0), oc.get("out", 1), oc.get("speed", 1),
+                            max(80, int(w * scale)), fps, seg) <= 0.04: continue
+            n += 1; inputs += ["-i", seg]
+            x = int(float(tr.get("x", 0.05)) * w); y = int(float(tr.get("y", 0.05)) * h)
+            st = float(oc.get("start", 0)); en = st + (oc.get("out", 1) - oc.get("in", 0)) / (oc.get("speed", 1) or 1)
+            fc.append("[%s][%d:v]overlay=%d:%d:enable='between(t,%.3f,%.3f)'[v%d]" % (last, n, x, y, st, en, n))
+            last = "v%d" % n
+        if n:
+            ovd = os.path.join(work, "ov.mp4")
+            ac._run([FFMPEG, "-y"] + inputs + ["-filter_complex", ",".join(fc), "-map", "[%s]" % last,
+                     "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", ovd])
+            if ac._dur(ovd) > 0.04: body = ovd
+    if progress_cb: progress_cb(72, "overlays")
 
     # text overlays
     tclips = _tracks(project, "text")
