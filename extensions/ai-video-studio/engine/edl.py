@@ -129,5 +129,7 @@ def render(project, out, progress_cb=None, proxy=False):
 
 if __name__ == "__main__":
     import sys, json
-    if len(sys.argv) < 3: print("usage: edl.py <project.json> <out.mp4>"); sys.exit(1)
-    print(json.dumps(render(json.load(open(sys.argv[1])), sys.argv[2]), indent=2))
+    a = [x for x in sys.argv[1:] if x != "--proxy"]
+    proxy = "--proxy" in sys.argv
+    if len(a) < 2: print("usage: edl.py <project.json> <out.mp4> [--proxy]"); sys.exit(1)
+    print(json.dumps(render(json.load(open(a[0])), a[1], proxy=proxy), indent=2))

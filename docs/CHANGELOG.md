@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.156 -- 2026-07-05  (Video Studio P2: the manual timeline editor)
+- Auto-build now produces a SAVED, editable **project** (not just an MP4) and drops you into a real timeline
+  editor. Fine-tune, then Preview (fast 480p proxy) or Export (full MP4 to Files).
+- **Timeline UI** (mobile + desktop, in the /studio page): a time ruler with the song's **beat grid**, a video
+  track of clip blocks with **filmstrip thumbnails**, an **impacts lane** (tap to add a beat-snapped flash; tap a
+  pin to toggle big / delete), and a **waveform** music track. Tap a clip -> an inspector to trim in/out, set
+  speed (0.4x/0.5x/1x/2x slow-mo), reorder, add a flash, or delete. Zoom in/out; Save; reopen recent projects.
+- The editor edits the SAME project/EDL JSON the renderer consumes -- edits reflow the cut and re-render exactly.
+- Engine: NEW `project.py` (`emit` = build + save project + per-source **filmstrip sprites** + a music
+  **waveform**; self-contained -- copies the resolved music into the project cache). `edl.py` gains `--proxy`.
+- Server: `/api/studio/{build-project,render-project,project,project-save,projects}`; the Range media route now
+  also serves the project cache (thumbnails/waveform/music). Projects + cache live on the SSD (`_studio/`).
+- Next: effects/text lanes polish (P3), CapCut-draft export (P4), packaging incl. per-node media binaries (P5).
+
 ## 0.99.155 -- 2026-07-05  (Video Studio P1: auto-build a beat-synced video from clips + a song)
 - NEW **Video Studio** -- a built-in video editor (Phase 1: one-tap Auto-build). Drop in clips, add music (upload
   a track or paste a YouTube link + optional section), pick a pace, and it beat-detects the song, motion-detects

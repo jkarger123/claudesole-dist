@@ -14297,10 +14297,16 @@ if(r.ok){location.reload();}else{document.getElementById('e').textContent='Inval
 # renders run in a background thread (never block the request) and land in the Files lens. See the plan at
 # ~/.claude/plans/linear-hatching-fox.md.
 STUDIO_ENGINE = os.path.join(CC_HOME, "extensions", "ai-video-studio", "engine")
+STUDIO_ROOT = os.path.join(DELIV_LOCAL_ROOT or CC_HOME, "_studio")          # projects + media cache (SSD)
 STUDIO_MEDIA = os.path.join(DELIV_LOCAL_ROOT or CC_HOME, "_studio_media")   # uploaded clips
+STUDIO_PROJECTS = os.path.join(STUDIO_ROOT, "projects")                     # <id>.json (editable EDLs)
+STUDIO_CACHE = os.path.join(STUDIO_ROOT, "cache")                          # <id>/ filmstrips, music, proxies
 STUDIO_OUT_DIR = os.path.join(BASE, "deliverables")                        # renders -> show in Files lens
 _STUDIO_JOBS = {}
 _STUDIO_LOCK = threading.Lock()
+
+def _studio_pid():
+    return "p" + secrets.token_hex(5)
 
 def _studio_set(jid, **kw):
     with _STUDIO_LOCK:
@@ -14377,6 +14383,124 @@ def _studio_render_worker(jid, body):
 def studio_job(jid):
     with _STUDIO_LOCK: return dict(_STUDIO_JOBS.get(jid) or {"state": "unknown"})
 
+def _studio_engine_json(args, timeout=900):
+    """Run an engine CLI (project.py / edl.py) and parse its (possibly multi-line pretty) JSON stdout robustly."""
+    r = subprocess.run(args, capture_output=True, text=True, cwd=STUDIO_ENGINE, timeout=timeout)
+    out_txt = (r.stdout or "").strip()
+    try: return json.loads(out_txt)
+    except Exception:
+        m = re.search(r"\{.*\}", out_txt, re.S)
+        if m:
+            try: return json.loads(m.group(0))
+            except Exception: pass
+    return {"ok": False, "error": ((r.stderr or out_txt) or "engine failed")[-300:]}
+
+def _studio_pid_valid(pid):
+    return bool(re.match(r"^p[0-9a-f]{10}$", pid or ""))
+
+def studio_project_path(pid):
+    return os.path.join(STUDIO_PROJECTS, "%s.json" % pid) if _studio_pid_valid(pid) else None
+
+def studio_project_load(pid):
+    p = studio_project_path(pid)
+    if not p or not os.path.isfile(p): return {"ok": False, "error": "not found"}
+    try: return {"ok": True, "project": json.load(open(p)), "id": pid}
+    except Exception as e: return {"ok": False, "error": str(e)[:120]}
+
+def studio_project_save(body):
+    pid = body.get("id") or _studio_pid()
+    if not _studio_pid_valid(pid): return {"ok": False, "error": "bad id"}
+    proj = body.get("project")
+    if not isinstance(proj, dict) or not proj.get("tracks"): return {"ok": False, "error": "no project"}
+    try:
+        os.makedirs(STUDIO_PROJECTS, exist_ok=True)
+        proj["id"] = pid; proj["name"] = (body.get("name") or proj.get("name") or "Untitled")[:80]
+        with open(studio_project_path(pid), "w") as f: json.dump(proj, f, indent=2)
+        return {"ok": True, "id": pid}
+    except Exception as e: return {"ok": False, "error": str(e)[:120]}
+
+def studio_projects_list():
+    out = []
+    try:
+        for fn in sorted(os.listdir(STUDIO_PROJECTS), reverse=True):
+            if not fn.endswith(".json"): continue
+            try:
+                p = json.load(open(os.path.join(STUDIO_PROJECTS, fn)))
+                out.append({"id": p.get("id") or fn[:-5], "name": p.get("name") or "Untitled",
+                            "duration": p.get("duration"), "clips": len((p.get("tracks") or [{}])[0].get("clips", [])),
+                            "mtime": os.path.getmtime(os.path.join(STUDIO_PROJECTS, fn))})
+            except Exception: pass
+    except FileNotFoundError: pass
+    return sorted(out, key=lambda x: -(x.get("mtime") or 0))[:100]
+
+def studio_build_project_start(body):
+    jid = secrets.token_hex(6)
+    _studio_set(jid, state="queued", pct=0, msg="queued")
+    threading.Thread(target=_studio_build_worker, args=(jid, body), daemon=True).start()
+    return {"ok": True, "job_id": jid}
+
+def _studio_build_worker(jid, body):
+    """AUTO-BUILD -> a SAVED, editable project (+ filmstrips + waveform). The timeline then loads & edits it."""
+    try:
+        _studio_set(jid, state="running", pct=10, msg="resolving music")
+        clips = [c for c in (body.get("clips") or []) if c and os.path.exists(c)]
+        music = (body.get("music") or "").strip()
+        if not clips: return _studio_set(jid, state="error", pct=100, error="no clips uploaded")
+        if not music: return _studio_set(jid, state="error", pct=100, error="no music (upload a track or paste a YouTube URL)")
+        pid = _studio_pid()
+        os.makedirs(STUDIO_PROJECTS, exist_ok=True)
+        cache = os.path.join(STUDIO_CACHE, pid); os.makedirs(cache, exist_ok=True)
+        out_json = studio_project_path(pid)
+        args = ["python3", os.path.join(STUDIO_ENGINE, "project.py"), "emit", out_json, cache, music,
+                "--pace", (body.get("pace") or "punchy")]
+        if body.get("section"): args += ["--section", str(body["section"])]
+        args += clips
+        _studio_set(jid, pct=35, msg="beat-detecting + laying the timeline")
+        res = _studio_engine_json(args)
+        if res.get("ok") and os.path.isfile(out_json):
+            proj = res["project"]; proj["id"] = pid; proj["name"] = (body.get("name") or "Auto-build")[:80]
+            with open(out_json, "w") as f: json.dump(proj, f, indent=2)
+            _studio_set(jid, state="done", pct=100, msg="ready to edit", project_id=pid)
+        else:
+            _studio_set(jid, state="error", pct=100, error=str(res.get("error", "build failed"))[:300])
+    except Exception as e:
+        _studio_set(jid, state="error", pct=100, error=str(e)[:200])
+
+def studio_render_project_start(body):
+    jid = secrets.token_hex(6)
+    _studio_set(jid, state="queued", pct=0, msg="queued")
+    threading.Thread(target=_studio_render_project_worker, args=(jid, body), daemon=True).start()
+    return {"ok": True, "job_id": jid}
+
+def _studio_render_project_worker(jid, body):
+    """Render an edited project (posted inline, or by id) -> MP4 via edl.py. proxy=1 -> a fast 480p preview."""
+    try:
+        proj = body.get("project")
+        if not proj and body.get("id"):
+            r = studio_project_load(body["id"]); proj = r.get("project") if r.get("ok") else None
+        if not isinstance(proj, dict) or not proj.get("tracks"):
+            return _studio_set(jid, state="error", pct=100, error="no project to render")
+        proxy = bool(body.get("proxy"))
+        _studio_set(jid, state="running", pct=15, msg="proxy preview" if proxy else "rendering")
+        os.makedirs(STUDIO_OUT_DIR, exist_ok=True)
+        tmp_json = os.path.join(STUDIO_CACHE, "_render_%s.json" % jid)
+        os.makedirs(STUDIO_CACHE, exist_ok=True)
+        with open(tmp_json, "w") as f: json.dump(proj, f)
+        out = os.path.join(STUDIO_OUT_DIR, "studio_%s.mp4" % jid)
+        args = ["python3", os.path.join(STUDIO_ENGINE, "edl.py"), tmp_json, out]
+        if proxy: args.append("--proxy")
+        _studio_set(jid, pct=40, msg="proxy preview" if proxy else "cutting + rendering")
+        res = _studio_engine_json(args)
+        try: os.remove(tmp_json)
+        except Exception: pass
+        if res.get("ok") and os.path.exists(out):
+            _studio_set(jid, state="done", pct=100, msg="done", duration=res.get("duration"), path=out, proxy=proxy,
+                        rel="command-center/deliverables/studio_%s.mp4" % jid)
+        else:
+            _studio_set(jid, state="error", pct=100, error=str(res.get("error", "render failed"))[:300])
+    except Exception as e:
+        _studio_set(jid, state="error", pct=100, error=str(e)[:200])
+
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -14445,7 +14569,7 @@ class H(BaseHTTPRequestHandler):
         try: ab = raw if os.path.isabs(raw) else projpath(raw)
         except Exception: return self._s(400, "bad path")
         real = os.path.realpath(ab)
-        roots = [os.path.realpath(p) for p in [STUDIO_OUT_DIR, STUDIO_MEDIA, (DELIV_LOCAL_ROOT or CC_HOME)] if p]
+        roots = [os.path.realpath(p) for p in [STUDIO_OUT_DIR, STUDIO_MEDIA, STUDIO_ROOT, (DELIV_LOCAL_ROOT or CC_HOME)] if p]
         if _path_has_secret(real) or not any(real == r or real.startswith(r + os.sep) for r in roots):
             return self._s(403, "forbidden")
         if not os.path.isfile(real): return self._s(404, "not found")
@@ -14955,6 +15079,10 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"brief": brief_summary(ab), "files": list_files(ab)}))
         if u.path == "/api/studio/job":
             return self._s(200, json.dumps(studio_job(q.get("id", [""])[0])))
+        if u.path == "/api/studio/project":
+            return self._s(200, json.dumps(studio_project_load(q.get("id", [""])[0])))
+        if u.path == "/api/studio/projects":
+            return self._s(200, json.dumps({"ok": True, "projects": studio_projects_list()}))
         if u.path == "/api/studio/media":     # Range/206-capable media serve for <video> (file-get is whole-file-in-memory)
             return self._studio_media(q)
         return self._s(404, "{}")
@@ -14994,6 +15122,12 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(launch(body.get("target", "studio"), body.get("name", "session"), body.get("component"), body.get("rel") or None)))
         if u.path == "/api/studio/render":
             return self._s(200, json.dumps(studio_render_start(body)))
+        if u.path == "/api/studio/build-project":
+            return self._s(200, json.dumps(studio_build_project_start(body)))
+        if u.path == "/api/studio/render-project":
+            return self._s(200, json.dumps(studio_render_project_start(body)))
+        if u.path == "/api/studio/project-save":
+            return self._s(200, json.dumps(studio_project_save(body)))
         if u.path == "/api/close-session":
             return self._s(200, json.dumps(close_session(body["name"], body.get("force", False))))
         if u.path == "/api/claude-account/snapshot":
@@ -15881,164 +16015,313 @@ function tUpload(f){if(!f)return;
     .catch(function(e){tToast('Upload failed: '+(e&&e.message||'network'),5000);});}
 </script></body></html>"""
 
-STUDIO_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Video Studio</title>
+STUDIO_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>Video Studio</title>
 <style>
-:root{--bg:#0b0d12;--card:#141821;--card2:#1b2130;--line:#28303f;--txt:#e7ecf3;--dim:#8b95a7;--accent:#5b8cff;--go:#2fb56b;--warn:#e5a13a}
+:root{--bg:#0b0d12;--card:#141821;--card2:#1b2130;--line:#28303f;--txt:#e7ecf3;--dim:#8b95a7;--accent:#5b8cff;--go:#2fb56b;--warn:#e5a13a;--fx:#e5a13a;--fxbig:#ff5d5d}
 *{box-sizing:border-box}
 html,body{overflow-x:hidden;max-width:100%}
 body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-.wrap{width:100%;max-width:760px;margin:0 auto;padding:18px 16px 60px}
+.wrap{width:100%;max-width:820px;margin:0 auto;padding:16px 14px 80px}
+h1{font-size:19px;margin:4px 0 2px;display:flex;align-items:center;gap:9px}
 .sub,.drop,.muted{overflow-wrap:anywhere}
-h1{font-size:20px;margin:6px 0 2px;display:flex;align-items:center;gap:10px}
-.sub{color:var(--dim);font-size:13px;margin:0 0 16px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:0 0 14px}
-.card h2{font-size:13px;letter-spacing:.04em;text-transform:uppercase;color:var(--dim);margin:0 0 12px}
+.sub{color:var(--dim);font-size:13px;margin:0 0 14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:15px;margin:0 0 13px}
+.card h2{font-size:12px;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin:0 0 11px}
 label{display:block;font-size:12px;color:var(--dim);margin:0 0 5px}
 input[type=text],select{width:100%;background:var(--card2);color:var(--txt);border:1px solid var(--line);border-radius:10px;padding:11px 12px;font-size:15px;outline:none}
 input[type=text]:focus,select:focus{border-color:var(--accent)}
-.row{display:flex;gap:10px;flex-wrap:wrap}
-.row>div{flex:1;min-width:130px}
-.btn{appearance:none;border:1px solid var(--line);background:var(--card2);color:var(--txt);border-radius:10px;padding:11px 16px;font-size:15px;font-weight:600;cursor:pointer}
-.btn:active{transform:translateY(1px)}
+.btn{appearance:none;border:1px solid var(--line);background:var(--card2);color:var(--txt);border-radius:10px;padding:10px 15px;font-size:15px;font-weight:600;cursor:pointer}
+.btn:active{transform:translateY(1px)} .btn:disabled{opacity:.5;cursor:default}
 .btn.go{background:var(--accent);border-color:var(--accent);color:#fff;width:100%;padding:15px;font-size:16px;margin-top:4px}
-.btn.go:disabled{opacity:.5;cursor:default}
-.btn.ghost{background:transparent}
-.drop{border:1.5px dashed var(--line);border-radius:12px;padding:22px 14px;text-align:center;color:var(--dim);cursor:pointer}
+.btn.grn{background:var(--go);border-color:var(--go);color:#fff}
+.btn.sm{padding:8px 12px;font-size:14px}
+.drop{border:1.5px dashed var(--line);border-radius:12px;padding:20px 14px;text-align:center;color:var(--dim);cursor:pointer}
 .drop.on{border-color:var(--accent);color:var(--txt);background:rgba(91,140,255,.06)}
 .clip{display:flex;align-items:center;gap:10px;background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-top:8px;font-size:13px}
-.clip .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.clip .x{color:var(--dim);cursor:pointer;font-size:18px;line-height:1;padding:0 4px}
-.clip .sz{color:var(--dim);font-size:12px}
+.clip .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} .clip .sz{color:var(--dim);font-size:12px} .clip .x{color:var(--dim);cursor:pointer;font-size:18px;padding:0 4px}
 .muted{color:var(--dim);font-size:12px;margin-top:8px}
 .bar{height:8px;background:var(--card2);border-radius:6px;overflow:hidden;margin:12px 0 6px}
-.bar>i{display:block;height:100%;width:0;background:var(--go);transition:width .4s}
-video{width:100%;border-radius:12px;background:#000;margin-top:6px}
-.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:#000;color:#fff;padding:11px 16px;border-radius:10px;font-size:14px;max-width:90%;opacity:0;transition:opacity .25s;pointer-events:none;z-index:9}
-.toast.show{opacity:.95}
+.bar>i{display:block;height:100%;width:0;background:var(--go);transition:width .35s}
+video{width:100%;border-radius:12px;background:#000;max-height:52vh}
 a.dl{color:var(--accent);text-decoration:none;font-weight:600}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
-.seg button{background:var(--card2);color:var(--dim);border:0;padding:10px 14px;font-size:14px;cursor:pointer}
+.seg button{background:var(--card2);color:var(--dim);border:0;padding:9px 13px;font-size:14px;cursor:pointer}
 .seg button.on{background:var(--accent);color:#fff}
+.row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+.projitem{display:flex;justify-content:space-between;align-items:center;background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:8px;cursor:pointer}
+.projitem:hover{border-color:var(--accent)} .projitem .pd{color:var(--dim);font-size:12px}
+/* ---- editor ---- */
+#editor{display:none}
+.tbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.tbar .grow{flex:1}
+.tlwrap{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}
+.tl{position:relative}
+.ruler{position:relative;height:26px;cursor:pointer}
+.ruler canvas{display:block}
+.trk{position:relative;margin-top:6px;border-radius:8px;background:var(--card2)}
+.trk.video{height:56px} .trk.fx{height:22px;background:transparent} .trk.music{height:34px}
+.trklab{position:absolute;left:4px;top:2px;font-size:9px;letter-spacing:.05em;color:var(--dim);z-index:3;text-transform:uppercase;pointer-events:none}
+.cblock{position:absolute;top:0;height:100%;border:1.5px solid var(--line);border-radius:6px;overflow:hidden;cursor:pointer;background-color:#000;background-repeat:no-repeat}
+.cblock.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.cblock .cl{position:absolute;left:3px;bottom:2px;font-size:9px;color:#fff;text-shadow:0 1px 2px #000;background:rgba(0,0,0,.35);border-radius:3px;padding:0 3px}
+.cblock .he{position:absolute;left:3px;top:2px;font-size:9px;background:var(--accent);color:#fff;border-radius:3px;padding:0 3px}
+.fxpin{position:absolute;top:0;width:12px;height:100%;margin-left:-6px;cursor:pointer}
+.fxpin i{display:block;width:2px;height:100%;margin:0 auto;background:var(--fx)}
+.fxpin.big i{width:3px;background:var(--fxbig)}
+.fxpin b{position:absolute;top:-1px;left:50%;transform:translateX(-50%);width:8px;height:8px;border-radius:50%;background:var(--fx)}
+.fxpin.big b{background:var(--fxbig)}
+.playhead{position:absolute;top:0;width:2px;background:#fff;margin-left:-1px;z-index:5;pointer-events:none}
+.insp{margin-top:12px}
+.insp .ir{display:flex;align-items:center;gap:8px;margin-top:9px;flex-wrap:wrap}
+.insp .k{font-size:12px;color:var(--dim);min-width:56px}
+.stepper{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.stepper button{background:var(--card2);color:var(--txt);border:0;width:38px;height:36px;font-size:18px;cursor:pointer}
+.stepper span{min-width:60px;text-align:center;font-size:13px;padding:0 6px}
+.chip{display:inline-block;background:var(--card2);border:1px solid var(--line);border-radius:20px;padding:4px 11px;font-size:12px;color:var(--dim)}
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:#000;color:#fff;padding:11px 16px;border-radius:10px;font-size:14px;max-width:90%;opacity:0;transition:opacity .25s;pointer-events:none;z-index:9}
+.toast.show{opacity:.95}
+.actbar{position:sticky;bottom:0;background:linear-gradient(180deg,transparent,var(--bg) 40%);padding:12px 0 6px;display:flex;gap:9px;margin-top:12px}
+.actbar .btn{flex:1}
 </style></head><body>
 <div class="wrap">
 <h1>&#127916; Video Studio</h1>
-<p class="sub">Drop in clips, bring the music, and let it build a beat-synced hype cut. (Auto-build &mdash; the full timeline editor is coming next.)</p>
 
+<!-- ============ BUILDER ============ -->
+<div id="builder">
+<p class="sub">Drop in clips, bring the music, and Auto-build a beat-synced cut &mdash; then fine-tune it on the timeline.</p>
 <div class="card">
   <h2>1 &middot; Clips</h2>
   <div id="drop" class="drop">Tap to add video clips &mdash; or drag them here</div>
   <input id="file" type="file" accept="video/*" multiple style="display:none">
   <div id="clips"></div>
 </div>
-
 <div class="card">
   <h2>2 &middot; Music</h2>
   <label>YouTube link (or paste a track URL)</label>
   <input id="yt" type="text" placeholder="https://www.youtube.com/watch?v=...">
-  <div class="row" style="margin-top:10px">
-    <div>
-      <label>Section (optional, mm:ss-mm:ss)</label>
-      <input id="section" type="text" placeholder="3:11-3:25">
-    </div>
-  </div>
+  <div class="row" style="margin-top:10px"><div style="flex:1;min-width:150px">
+    <label>Section (optional, mm:ss-mm:ss)</label>
+    <input id="section" type="text" placeholder="3:11-3:25">
+  </div></div>
   <div class="muted">&hellip;or <a href="#" id="musicUpBtn" class="dl">upload an audio file</a> <span id="musicName"></span></div>
   <input id="musicFile" type="file" accept="audio/*" style="display:none">
 </div>
-
 <div class="card">
   <h2>3 &middot; Pace</h2>
   <div class="seg" id="pace">
-    <button data-v="frantic">Frantic</button>
-    <button data-v="punchy" class="on">Punchy</button>
-    <button data-v="cinematic">Cinematic</button>
+    <button data-v="frantic">Frantic</button><button data-v="punchy" class="on">Punchy</button><button data-v="cinematic">Cinematic</button>
   </div>
-  <div class="muted">How many beats between cuts &mdash; frantic = a cut every beat, cinematic = every 4th.</div>
+  <div class="muted">Beats between cuts. You can retime every clip afterward on the timeline.</div>
 </div>
-
-<button id="build" class="btn go">&#9889; Auto-build the video</button>
-
-<div class="card" id="result" style="display:none;margin-top:14px">
+<button id="build" class="btn go">&#9889; Auto-build &rarr; edit</button>
+<div class="card" id="result" style="display:none;margin-top:13px">
   <h2 id="rTitle">Building&hellip;</h2>
   <div class="bar"><i id="rBar"></i></div>
   <div class="muted" id="rMsg">starting</div>
-  <div id="rOut"></div>
+</div>
+<div class="card" id="recent" style="display:none">
+  <h2>Recent projects</h2><div id="projlist"></div>
+</div>
+</div>
+
+<!-- ============ EDITOR ============ -->
+<div id="editor">
+  <div class="tbar">
+    <button class="btn sm" id="eBack">&larr; Build</button>
+    <input id="eName" type="text" style="flex:1;min-width:120px" placeholder="Project name">
+    <button class="btn sm" id="eZoomOut">&minus;</button><button class="btn sm" id="eZoomIn">+</button>
+  </div>
+  <video id="eVideo" controls playsinline preload="metadata"></video>
+  <div class="muted" id="eStatus" style="min-height:16px"></div>
+  <div class="tlwrap" id="tlwrap"><div class="tl" id="tl">
+    <div class="ruler" id="ruler"><canvas id="rcanvas" height="26"></canvas></div>
+    <div class="trk video" id="trkV"><span class="trklab">video</span></div>
+    <div class="trk fx" id="trkFx"><span class="trklab" style="top:-1px">impacts &mdash; tap lane to add</span></div>
+    <div class="trk music" id="trkM"><span class="trklab">music</span><canvas id="wcanvas" height="34" style="position:absolute;left:0;top:0"></canvas></div>
+    <div class="playhead" id="ph" style="height:100%"></div>
+  </div></div>
+
+  <div class="card insp" id="insp" style="display:none">
+    <h2 id="iTitle">Clip</h2>
+    <div class="ir"><span class="k">Trim in</span>
+      <span class="stepper"><button data-a="in-">&minus;</button><span id="iIn">0.0s</span><button data-a="in+">+</button></span>
+      <span class="k">out</span>
+      <span class="stepper"><button data-a="out-">&minus;</button><span id="iOut">0.0s</span><button data-a="out+">+</button></span>
+    </div>
+    <div class="ir"><span class="k">Speed</span>
+      <span class="seg" id="iSpeed"><button data-s="0.4">0.4x</button><button data-s="0.5">&frac12;x</button><button data-s="1">1x</button><button data-s="2">2x</button></span>
+      <span class="chip" id="iLen">len 0.0s</span>
+    </div>
+    <div class="ir">
+      <button class="btn sm" data-a="left">&larr; move</button>
+      <button class="btn sm" data-a="right">move &rarr;</button>
+      <button class="btn sm" data-a="flash">&#9889; flash here</button>
+      <button class="btn sm" data-a="del" style="color:var(--fxbig)">Delete clip</button>
+    </div>
+  </div>
+
+  <div class="actbar">
+    <button class="btn" id="ePreview">&#9654; Preview</button>
+    <button class="btn" id="eSave">Save</button>
+    <button class="btn grn" id="eExport">Export MP4</button>
+  </div>
 </div>
 </div>
 <div id="toast" class="toast"></div>
 <script>
-var CC=window.CC||{}; var MAXMB=CC.maxUploadMb||500;
-var clips=[]; var musicPath=""; var pace="punchy"; var poll=null;
+var CC=window.CC||{}, MAXMB=CC.maxUploadMb||500;
+var clips=[], musicPath="", pace="punchy", poll=null;
+var proj=null, pid=null, zoom=48, sel=-1, dirty=false;
 function $(i){return document.getElementById(i);}
-function toast(m,ms){var t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(function(){t.classList.remove('show');},ms||3000);}
+function toast(m,ms){var t=$('toast');t.innerHTML=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(function(){t.classList.remove('show');},ms||3000);}
 function fmt(b){return b>1048576?(b/1048576).toFixed(1)+'MB':(b/1024).toFixed(0)+'KB';}
+function media(p){return '/api/studio/media?path='+encodeURIComponent(p||'');}
+function upload(file,qs){return fetch('/api/studio/upload?'+qs,{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file}).then(function(r){return r.json();});}
 
+/* ---------- builder ---------- */
 function renderClips(){var c=$('clips');c.innerHTML='';clips.forEach(function(cl,i){
   var d=document.createElement('div');d.className='clip';
   d.innerHTML='<span class="nm"></span><span class="sz"></span><span class="x">&times;</span>';
-  d.querySelector('.nm').textContent=cl.name; d.querySelector('.sz').textContent=fmt(cl.bytes);
-  d.querySelector('.x').onclick=function(){clips.splice(i,1);renderClips();};
-  c.appendChild(d);});}
-
-function upload(file, qs){return fetch('/api/studio/upload?'+qs,{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file}).then(function(r){return r.json();});}
-
-function addClips(files){
-  Array.prototype.forEach.call(files,function(f){
-    if(f.size>MAXMB*1048576){toast(f.name+' is over the '+MAXMB+'MB limit',5000);return;}
-    var tmp={name:f.name+' (uploading&hellip;)',bytes:f.size}; clips.push(tmp); renderClips();
-    upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'video/mp4')).then(function(r){
-      var i=clips.indexOf(tmp);
-      if(r&&r.ok){clips[i]={name:f.name,bytes:r.bytes,path:r.path};}
-      else{clips.splice(i,1);toast('Upload failed: '+((r||{}).error||'?'),5000);}
-      renderClips();
-    }).catch(function(e){var i=clips.indexOf(tmp);if(i>=0)clips.splice(i,1);renderClips();toast('Upload error',5000);});
-  });}
-
+  d.querySelector('.nm').textContent=cl.name;d.querySelector('.sz').textContent=fmt(cl.bytes);
+  d.querySelector('.x').onclick=function(){clips.splice(i,1);renderClips();};c.appendChild(d);});}
+function addClips(files){Array.prototype.forEach.call(files,function(f){
+  if(f.size>MAXMB*1048576){toast(f.name+' is over the '+MAXMB+'MB limit',5000);return;}
+  var tmp={name:f.name+' (uploading...)',bytes:f.size};clips.push(tmp);renderClips();
+  upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'video/mp4')).then(function(r){
+    var i=clips.indexOf(tmp);if(r&&r.ok){clips[i]={name:f.name,bytes:r.bytes,path:r.path};}else{clips.splice(i,1);toast('Upload failed: '+((r||{}).error||'?'),5000);}renderClips();
+  }).catch(function(){var i=clips.indexOf(tmp);if(i>=0)clips.splice(i,1);renderClips();toast('Upload error',5000);});});}
 $('drop').onclick=function(){$('file').click();};
 $('file').onchange=function(){addClips(this.files);this.value='';};
 ['dragover','dragenter'].forEach(function(ev){$('drop').addEventListener(ev,function(e){e.preventDefault();$('drop').classList.add('on');});});
 ['dragleave','drop'].forEach(function(ev){$('drop').addEventListener(ev,function(e){e.preventDefault();$('drop').classList.remove('on');});});
 $('drop').addEventListener('drop',function(e){if(e.dataTransfer&&e.dataTransfer.files)addClips(e.dataTransfer.files);});
-
 $('musicUpBtn').onclick=function(e){e.preventDefault();$('musicFile').click();};
-$('musicFile').onchange=function(){var f=this.files[0];if(!f)return;
-  if(f.size>MAXMB*1048576){toast('Track is over the '+MAXMB+'MB limit',5000);return;}
-  $('musicName').textContent='('+f.name+' &mdash; uploading&hellip;)';
+$('musicFile').onchange=function(){var f=this.files[0];if(!f)return;if(f.size>MAXMB*1048576){toast('Track too large',5000);return;}
+  $('musicName').textContent='('+f.name+' - uploading...)';
   upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'audio/mpeg')).then(function(r){
-    if(r&&r.ok){musicPath=r.path;$('musicName').innerHTML='&#10003; '+f.name;$('yt').value='';}
-    else{$('musicName').textContent='';toast('Track upload failed',5000);}});};
-
-Array.prototype.forEach.call($('pace').children,function(b){b.onclick=function(){
-  Array.prototype.forEach.call($('pace').children,function(x){x.classList.remove('on');});
-  b.classList.add('on');pace=b.getAttribute('data-v');};});
-
+    if(r&&r.ok){musicPath=r.path;$('musicName').innerHTML='&#10003; '+f.name;$('yt').value='';}else{$('musicName').textContent='';toast('Track upload failed',5000);}});};
+Array.prototype.forEach.call($('pace').children,function(b){b.onclick=function(){Array.prototype.forEach.call($('pace').children,function(x){x.classList.remove('on');});b.classList.add('on');pace=b.getAttribute('data-v');};});
 function stopPoll(){if(poll){clearInterval(poll);poll=null;}}
+
 $('build').onclick=function(){
   var ready=clips.filter(function(c){return c.path;});
   if(!ready.length){toast('Add at least one clip first',3500);return;}
   var music=musicPath||$('yt').value.trim();
-  if(!music){toast('Add music &mdash; a YouTube link or an uploaded track',4000);return;}
-  $('build').disabled=true; $('result').style.display='block'; $('rTitle').textContent='Building…';
-  $('rBar').style.width='0'; $('rOut').innerHTML=''; $('rMsg').textContent='starting';
+  if(!music){toast('Add music - a YouTube link or an uploaded track',4000);return;}
+  $('build').disabled=true;$('result').style.display='block';$('rTitle').textContent='Building...';$('rBar').style.width='0';$('rMsg').textContent='starting';
   var body={clips:ready.map(function(c){return c.path;}),music:music,section:$('section').value.trim(),pace:pace};
-  fetch('/api/studio/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
-   .then(function(r){return r.json();}).then(function(r){
-     if(!r||!r.job_id){$('build').disabled=false;toast('Could not start render',4000);return;}
-     stopPoll(); poll=setInterval(function(){checkJob(r.job_id);},1500);
-   }).catch(function(){$('build').disabled=false;toast('Network error',4000);});
+  fetch('/api/studio/build-project',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(r){
+    if(!r||!r.job_id){$('build').disabled=false;toast('Could not start',4000);return;}
+    stopPoll();poll=setInterval(function(){checkBuild(r.job_id);},1500);
+  }).catch(function(){$('build').disabled=false;toast('Network error',4000);});
 };
+function checkBuild(id){fetch('/api/studio/job?id='+id).then(function(r){return r.json();}).then(function(j){
+  $('rBar').style.width=(j.pct||0)+'%';if(j.msg)$('rMsg').textContent=j.msg;
+  if(j.state==='done'){stopPoll();$('build').disabled=false;$('result').style.display='none';openProject(j.project_id);}
+  else if(j.state==='error'){stopPoll();$('build').disabled=false;$('rTitle').textContent='Build failed';$('rMsg').textContent=j.error||'error';}
+}).catch(function(){});}
 
-function checkJob(id){
-  fetch('/api/studio/job?id='+id).then(function(r){return r.json();}).then(function(j){
-    var pct=j.pct||0; $('rBar').style.width=pct+'%'; if(j.msg)$('rMsg').textContent=j.msg;
-    if(j.state==='done'){stopPoll();$('build').disabled=false;$('rTitle').textContent='✅ Done'+(j.duration?' · '+j.duration+'s':'');
-      var src='/api/studio/media?path='+encodeURIComponent(j.path||'');
-      $('rOut').innerHTML='<video controls playsinline preload="metadata"></video><div style="margin-top:8px"><a class="dl" download href="'+src+'">&#11015; Download MP4</a></div>';
-      $('rOut').querySelector('video').src=src; $('rMsg').textContent='saved to Files';
-    } else if(j.state==='error'){stopPoll();$('build').disabled=false;$('rTitle').textContent='⚠️ Render failed';
-      $('rMsg').textContent=j.error||'unknown error';
-    }
-  }).catch(function(){});
+function loadRecent(){fetch('/api/studio/projects').then(function(r){return r.json();}).then(function(d){
+  var ps=(d&&d.projects)||[];if(!ps.length)return;$('recent').style.display='block';var el=$('projlist');el.innerHTML='';
+  ps.slice(0,8).forEach(function(p){var d2=document.createElement('div');d2.className='projitem';
+    d2.innerHTML='<span></span><span class="pd">'+(p.clips||0)+' clips - '+(p.duration||0)+'s</span>';
+    d2.firstChild.textContent=p.name||'Untitled';d2.onclick=function(){openProject(p.id);};el.appendChild(d2);});});}
+
+/* ---------- editor ---------- */
+function openProject(id){fetch('/api/studio/project?id='+id).then(function(r){return r.json();}).then(function(d){
+  if(!d||!d.ok){toast('Could not load project',4000);return;}
+  proj=d.project;pid=id;sel=-1;dirty=false;$('eName').value=proj.name||'Untitled';
+  $('builder').style.display='none';$('editor').style.display='block';window.scrollTo(0,0);
+  $('eVideo').removeAttribute('src');$('eVideo').load();$('eStatus').textContent='Fine-tune, then Preview or Export.';
+  drawWave();renderTL();});}
+$('eBack').onclick=function(){if(dirty&&!confirm('Leave without saving?'))return;$('editor').style.display='none';$('builder').style.display='block';loadRecent();};
+$('eZoomIn').onclick=function(){zoom=Math.min(220,zoom*1.4);renderTL();};
+$('eZoomOut').onclick=function(){zoom=Math.max(14,zoom/1.4);renderTL();};
+
+function vtrack(){return proj.tracks.find(function(t){return t.kind==='video';});}
+function fxtrack(){return proj.tracks.find(function(t){return t.kind==='effects';});}
+function atrack(){return proj.tracks.find(function(t){return t.kind==='audio';});}
+function clen(c){return Math.max(0.05,(c.out-c['in'])/(c.speed||1));}
+function reflow(){var t=vtrack(),p=0;t.clips.forEach(function(c){c.start=Math.round(p*1000)/1000;p+=clen(c);});proj.duration=Math.round(p*100)/100;var a=atrack();if(a&&a.clips[0]){a.clips[0].out=proj.duration;}dirty=true;}
+function beats(){return (proj.music&&proj.music.beats)||[];}
+function snapBeat(t){var bs=beats();if(!bs.length)return t;var best=bs[0];bs.forEach(function(b){if(Math.abs(b-t)<Math.abs(best-t))best=b;});return Math.abs(best-t)<0.28?best:Math.round(t*100)/100;}
+
+function renderTL(){
+  if(!proj)return;var dur=proj.duration||1,W=Math.max(320,dur*zoom);
+  $('tl').style.width=W+'px';
+  // ruler + beats
+  var rc=$('rcanvas'),dpr=window.devicePixelRatio||1;rc.width=W*dpr;rc.height=26*dpr;rc.style.width=W+'px';rc.style.height='26px';
+  var g=rc.getContext('2d');g.scale(dpr,dpr);g.clearRect(0,0,W,26);g.fillStyle='#8b95a7';g.font='9px sans-serif';
+  for(var s=0;s<=dur;s++){var x=s*zoom;g.fillStyle='#28303f';g.fillRect(x,14,1,12);if(zoom>26||s%2===0){g.fillStyle='#8b95a7';g.fillText(s+'s',x+2,10);}}
+  g.fillStyle='rgba(91,140,255,.5)';beats().forEach(function(b){if(b<=dur){g.fillRect(b*zoom,20,1,6);}});
+  // video blocks
+  var tv=$('trkV');tv.querySelectorAll('.cblock').forEach(function(e){e.remove();});
+  vtrack().clips.forEach(function(c,i){
+    var b=document.createElement('div');b.className='cblock'+(i===sel?' sel':'');
+    var w=clen(c)*zoom;b.style.left=(c.start*zoom)+'px';b.style.width=Math.max(6,w)+'px';
+    var src=proj.sources[c.source]||{},st=src.strip;
+    if(st){var H=56,tw=st.tile_w*(H/st.tile_h),tot=st.n*tw,sdur=src.dur||st.dur||1;
+      b.style.backgroundImage='url('+media(st.path)+')';b.style.backgroundSize=tot+'px '+H+'px';
+      b.style.backgroundPositionX=(-(c['in']/sdur)*tot)+'px';}
+    b.innerHTML=(c.hero?'<span class="he">HERO</span>':'')+'<span class="cl">'+clen(c).toFixed(1)+'s'+((c.speed||1)!=1?' '+c.speed+'x':'')+'</span>';
+    b.onclick=function(ev){ev.stopPropagation();selectClip(i);};tv.appendChild(b);});
+  // fx pins
+  var tf=$('trkFx');tf.querySelectorAll('.fxpin').forEach(function(e){e.remove();});
+  fxtrack().clips.forEach(function(f,i){var p=document.createElement('div');p.className='fxpin'+(f.big?' big':'');
+    p.style.left=(f.at*zoom)+'px';p.innerHTML='<b></b><i></i>';
+    p.onclick=function(ev){ev.stopPropagation();fxMenu(i);};tf.appendChild(p);});
+  $('ph').style.left=((window._phT||0)*zoom)+'px';
+  drawWave(W);
 }
+$('trkFx').onclick=function(ev){var r=$('trkFx').getBoundingClientRect();var t=snapBeat((ev.clientX-r.left)/zoom);addFx(t,false);};
+$('ruler').onclick=function(ev){var r=$('rcanvas').getBoundingClientRect();window._phT=Math.max(0,(ev.clientX-r.left)/zoom);$('ph').style.left=(window._phT*zoom)+'px';};
+
+function drawWave(W){var src=proj&&atrack()&&proj.sources[atrack().clips[0].source];var wave=src&&src.wave||[];
+  var dur=proj.duration||1;W=W||Math.max(320,dur*zoom);var wc=$('wcanvas'),dpr=window.devicePixelRatio||1;
+  wc.width=W*dpr;wc.height=34*dpr;wc.style.width=W+'px';wc.style.height='34px';var g=wc.getContext('2d');g.scale(dpr,dpr);g.clearRect(0,0,W,34);
+  if(!wave.length)return;g.fillStyle='rgba(91,140,255,.4)';var n=wave.length;
+  for(var x=0;x<W;x++){var idx=Math.floor(x/W*n),v=wave[idx]||0,h=v*30;g.fillRect(x,17-h/2,1,h);}}
+
+function selectClip(i){sel=i;renderTL();renderInsp();}
+function renderInsp(){var c=vtrack().clips[sel];if(!c){$('insp').style.display='none';return;}
+  $('insp').style.display='block';$('iTitle').textContent='Clip '+(sel+1)+' / '+vtrack().clips.length;
+  $('iIn').textContent=c['in'].toFixed(2)+'s';$('iOut').textContent=c.out.toFixed(2)+'s';$('iLen').textContent='len '+clen(c).toFixed(2)+'s';
+  Array.prototype.forEach.call($('iSpeed').children,function(b){b.classList.toggle('on',parseFloat(b.getAttribute('data-s'))==(c.speed||1));});}
+
+$('insp').addEventListener('click',function(ev){var a=ev.target.getAttribute&&ev.target.getAttribute('data-a');var sp=ev.target.getAttribute&&ev.target.getAttribute('data-s');
+  var c=vtrack().clips[sel];if(!c)return;
+  if(sp){c.speed=parseFloat(sp);reflow();renderTL();renderInsp();return;}
+  if(!a)return;var src=proj.sources[c.source]||{},sdur=src.dur||99;
+  if(a==='in-')c['in']=Math.max(0,+(c['in']-0.1).toFixed(2));
+  else if(a==='in+')c['in']=Math.min(c.out-0.1,+(c['in']+0.1).toFixed(2));
+  else if(a==='out-')c.out=Math.max(c['in']+0.1,+(c.out-0.1).toFixed(2));
+  else if(a==='out+')c.out=Math.min(sdur,+(c.out+0.1).toFixed(2));
+  else if(a==='left'&&sel>0){var t=vtrack().clips;t.splice(sel-1,0,t.splice(sel,1)[0]);sel--;}
+  else if(a==='right'&&sel<vtrack().clips.length-1){var t2=vtrack().clips;t2.splice(sel+1,0,t2.splice(sel,1)[0]);sel++;}
+  else if(a==='flash'){addFx(snapBeat(c.start+0.05),c.hero);}
+  else if(a==='del'){vtrack().clips.splice(sel,1);sel=-1;$('insp').style.display='none';}
+  reflow();renderTL();renderInsp();});
+
+function addFx(t,big){fxtrack().clips.push({at:Math.round(t*100)/100,type:'impact',big:!!big});dirty=true;renderTL();toast('Flash added',1200);}
+function fxMenu(i){var f=fxtrack().clips[i];if(confirm('Flash at '+f.at+'s'+(f.big?' (big)':'')+' - OK = toggle big, Cancel = delete?')){f.big=!f.big;}else{fxtrack().clips.splice(i,1);}dirty=true;renderTL();}
+
+$('eName').onchange=function(){if(proj){proj.name=this.value;dirty=true;}};
+$('eSave').onclick=function(){if(!proj)return;fetch('/api/studio/project-save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:pid,name:proj.name,project:proj})}).then(function(r){return r.json();}).then(function(r){if(r&&r.ok){dirty=false;toast('Saved &#10003;',1500);}else toast('Save failed',3000);});};
+$('ePreview').onclick=function(){doRender(true);};
+$('eExport').onclick=function(){doRender(false);};
+function doRender(proxy){if(!proj)return;$('ePreview').disabled=true;$('eExport').disabled=true;$('eStatus').textContent=proxy?'Rendering fast preview...':'Rendering final MP4...';
+  fetch('/api/studio/render-project',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:proj,proxy:proxy})}).then(function(r){return r.json();}).then(function(r){
+    if(!r||!r.job_id){$('ePreview').disabled=false;$('eExport').disabled=false;$('eStatus').textContent='Could not start render';return;}
+    stopPoll();poll=setInterval(function(){checkRender(r.job_id,proxy);},1500);
+  }).catch(function(){$('ePreview').disabled=false;$('eExport').disabled=false;$('eStatus').textContent='Network error';});}
+function checkRender(id,proxy){fetch('/api/studio/job?id='+id).then(function(r){return r.json();}).then(function(j){
+  $('eStatus').textContent=(proxy?'Preview ':'Render ')+(j.msg||'')+' '+(j.pct||0)+'%';
+  if(j.state==='done'){stopPoll();$('ePreview').disabled=false;$('eExport').disabled=false;
+    var v=$('eVideo');v.src=media(j.path)+'&t='+Date.now();v.load();
+    $('eStatus').innerHTML=proxy?'Preview ready - play above.':'Exported '+(j.duration||'')+'s &#10003; saved to Files. <a class="dl" download href="'+media(j.path)+'">Download</a>';
+  }else if(j.state==='error'){stopPoll();$('ePreview').disabled=false;$('eExport').disabled=false;$('eStatus').textContent='Failed: '+(j.error||'?');}
+}).catch(function(){});}
+loadRecent();
 </script></body></html>"""
 
 RALPH_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ralph loop</title>
