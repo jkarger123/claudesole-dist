@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""cc-advise -- cross-vendor advisor (the core partner-call helper).
+
+An independent GPT (Codex on the ChatGPT subscription) reviews a Claude agent's
+FINISHED work against its goal and returns a structured second opinion:
+verdict + blocking/non-blocking issues + guidance to steer the NEXT task.
+
+Report-only (Codex runs a read-only sandbox), fail-open (if Codex is
+unavailable/rate-limited it returns verdict:"skipped" and exit 0, never blocking
+the Claude work), budget-guarded (a daily call cap so it stays inside Plus), and
+secret-clean (auth lives in ~/.codex/auth.json; tokens are never echoed).
+
+Two ways to feed it context:
+  1. FILE mode (standalone / Ralph):   --goal <f> --deliverable <f> [--summary <f>]
+  2. PAYLOAD mode (Command Center v1):  --payload <file|->    (a pre-assembled
+     context blob; use "-" to read it from stdin). The server assembles a
+     session's recent messages + latest deliverables and pipes it in here.
+
+Graduated from conceptsandideas/OmniAgent/working/ per CROSS_VENDOR_ADVISOR_SPEC
+.md (7b). The Command Center endpoints (/api/advise, /api/advise-inject) shell
+out to this file.
+
+Usage:
+  cc-advise --payload -  --repo <dir> [--verify] [--json]
+  cc-advise --goal <f> --deliverable <f> [--summary <f>] [--repo <dir>] [--json]
+"""
+import argparse, json, os, subprocess, sys, tempfile, datetime, textwrap
+
+CODEX = os.path.expanduser("~/.npm-global/bin/codex")
+MAX_INLINE = 60000  # chars of a deliverable/payload to inline before truncating
+
+SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "verdict": {"type": "string", "enum": ["ship", "revise", "block"]},
+        "blocking": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {"issue": {"type": "string"},
+                           "location": {"type": "string"},
+                           "why": {"type": "string"}},
+            "required": ["issue", "location", "why"]}},
+        "nonblocking": {"type": "array", "items": {"type": "string"}},
+        "next_task_guidance": {"type": "string"},
+    },
+    "required": ["verdict", "blocking", "nonblocking", "next_task_guidance"],
+}
+
+REVIEWER = textwrap.dedent("""\
+    You are an independent senior engineer from a DIFFERENT AI vendor than the
+    agent that produced the work below. A Claude agent just finished a task and
+    summarized it. Review the FINISHED work against the stated goal --
+    skeptically. Assume the author's own model rubber-stamped its own work; your
+    value is catching what it missed, not agreeing.
+
+    You may READ the provided material (and files under the repo root if one is
+    given). You must NOT edit anything, write code, or open a PR -- report only.
+
+    Judge it against the GOAL, not against your own idea of a different task.
+    Be concrete: cite the specific claim, section, or file:line. Do not pad, do
+    not invent problems -- if it is genuinely good, say so with empty blocking.
+
+    Return ONLY the JSON object required by the output schema:
+      verdict            "ship" | "revise" | "block"
+      blocking           [{issue, location, why}]  -- defects that must be fixed
+      nonblocking        [{suggestion string}]     -- improvements, not blockers
+      next_task_guidance one short paragraph directing the NEXT task -- what to
+                         prioritize, watch for, or do differently ({mode_note}).
+    """)
+
+
+VERIFY_CLAUSE = textwrap.dedent("""\
+
+    VERIFICATION MANDATE (do not skip). This deliverable may assert "FACT" claims
+    that are actually inferences. Do NOT trust the report's prose. For every
+    load-bearing claim, OPEN the actual deliverable files under the repo root and
+    independently re-check it: recompute any derived count, re-read the referenced
+    JSON/evidence records, and confirm the report's numbers match the files. In
+    your reasoning, state what you verified against a file vs what you could only
+    take on the report's word. Any load-bearing FACT you cannot substantiate from
+    the provided files is a BLOCKING issue (mislabeled inference / unverifiable).
+    A clean "ship" is warranted ONLY if you actually opened the files and they
+    corroborate the report.
+    """)
+
+
+def _load(val):
+    """A --goal/--summary/--deliverable value: a readable file path, else literal."""
+    if val and os.path.isfile(val):
+        return open(val, encoding="utf-8", errors="replace").read()
+    return val or ""
+
+
+def _budget_ok(path, cap):
+    today = datetime.date.today().isoformat()
+    st = {"date": today, "count": 0}
+    if os.path.isfile(path):
+        try:
+            st = json.load(open(path))
+        except Exception:
+            pass
+    if st.get("date") != today:
+        st = {"date": today, "count": 0}
+    if st["count"] >= cap:
+        return False, st["count"]
+    st["count"] += 1
+    try:
+        json.dump(st, open(path, "w"))
+    except Exception:
+        pass
+    return True, st["count"]
+
+
+def _skip(reason, as_json):
+    out = {"verdict": "skipped", "reason": reason}
+    print(json.dumps(out) if as_json else "[cc-advise] SKIPPED: %s" % reason)
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--goal", default="", help="task goal/contract (file or string)")
+    ap.add_argument("--deliverable", default="", help="finished work (file or string)")
+    ap.add_argument("--summary", default="", help="agent's final summary (file or string)")
+    ap.add_argument("--payload", default="", help="pre-assembled context blob (file, or '-' for stdin)")
+    ap.add_argument("--repo", default="", help="repo root the reviewer may read")
+    ap.add_argument("--model", default="gpt-5.5")
+    ap.add_argument("--effort", default="medium",
+                    choices=["none", "minimal", "low", "medium", "high", "xhigh"])
+    ap.add_argument("--mode", default="review_and_steer",
+                    choices=["review_and_steer", "review_only"])
+    ap.add_argument("--max-calls-per-day", type=int, default=40)
+    ap.add_argument("--budget-file",
+                    default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                         ".cc-advise-budget.json"))
+    ap.add_argument("--verify", action="store_true",
+                    help="rigor mode: force independent verification of load-bearing FACT claims")
+    ap.add_argument("--json", action="store_true", help="print raw JSON verdict")
+    args = ap.parse_args()
+
+    # PAYLOAD mode (Command Center) vs FILE mode (standalone/Ralph) -- one is required.
+    if args.payload:
+        payload_text = sys.stdin.read() if args.payload == "-" else _load(args.payload)
+    elif args.goal and args.deliverable:
+        payload_text = None
+    else:
+        ap.error("provide --payload, or both --goal and --deliverable")
+
+    ok, n = _budget_ok(args.budget_file, args.max_calls_per_day)
+    if not ok:
+        return _skip("daily advisor cap reached (%d)" % n, args.json)
+
+    if payload_text is not None:
+        if len(payload_text) > MAX_INLINE:
+            payload_text = payload_text[:MAX_INLINE] + "\n\n[...truncated for review...]"
+        stdin_payload = payload_text
+    else:
+        goal, deliverable, summary = _load(args.goal), _load(args.deliverable), _load(args.summary)
+        if len(deliverable) > MAX_INLINE:
+            deliverable = deliverable[:MAX_INLINE] + "\n\n[...truncated for review...]"
+        stdin_payload = (
+            "=== GOAL / ACCEPTANCE CONTRACT ===\n%s\n\n"
+            "=== AGENT'S FINAL SUMMARY ===\n%s\n\n"
+            "=== FINISHED DELIVERABLE ===\n%s\n" % (goal, summary or "(none provided)", deliverable)
+        )
+    if args.repo:
+        stdin_payload = ("(You may also read files under repo root: %s)\n\n" % args.repo) + stdin_payload
+
+    mode_note = ("give concrete next-task guidance" if args.mode == "review_and_steer"
+                 else "leave next_task_guidance empty; this is review-only")
+    prompt = REVIEWER.replace("{mode_note}", mode_note)
+    if args.verify:
+        prompt += VERIFY_CLAUSE
+
+    if not os.path.isfile(CODEX):
+        return _skip("codex CLI not found at %s" % CODEX, args.json)
+
+    with tempfile.TemporaryDirectory() as td:
+        schema_f = os.path.join(td, "schema.json")
+        last_f = os.path.join(td, "last.json")
+        json.dump(SCHEMA, open(schema_f, "w"))
+        cmd = [CODEX, "exec", "--ephemeral", "--skip-git-repo-check",
+               "-s", "read-only", "-m", args.model,
+               "-c", 'model_reasoning_effort="%s"' % args.effort,
+               "--output-schema", schema_f, "-o", last_f, prompt]
+        if args.repo:
+            cmd[3:3] = ["-C", args.repo]  # insert working root
+        try:
+            r = subprocess.run(cmd, input=stdin_payload, text=True,
+                               capture_output=True, timeout=300)
+        except Exception as e:  # fail-open: never block the Claude work
+            return _skip("codex call failed: %s" % e, args.json)
+        try:
+            verdict = json.load(open(last_f))
+        except Exception:
+            # Secret-clean (spec 6): NEVER surface raw codex stderr -- it can carry local paths, auth
+            # diagnostics, or command args. Log a redacted tail to our OWN stderr for operator debugging;
+            # the machine-readable output stays a generic fail-open skip.
+            sys.stderr.write("[cc-advise] no structured output; codex stderr tail (not surfaced): %s\n"
+                             % (r.stderr or "")[-400:])
+            return _skip("no structured output from the reviewer", args.json)
+
+    if args.json:
+        print(json.dumps(verdict, indent=2))
+        return 0
+    _pretty(verdict)
+    return 0
+
+
+def _pretty(v):
+    icon = {"ship": "SHIP", "revise": "REVISE", "block": "BLOCK"}.get(v.get("verdict"), v.get("verdict", "?"))
+    print("\nGPT ADVISOR (external, gpt-5.5) -- VERDICT: %s\n" % icon)
+    bl = v.get("blocking") or []
+    print("BLOCKING (%d):" % len(bl))
+    for b in bl:
+        print("  - %s" % b.get("issue", ""))
+        if b.get("location"): print("      @ %s" % b["location"])
+        if b.get("why"): print("      why: %s" % b["why"])
+    if not bl: print("  (none)")
+    nb = v.get("nonblocking") or []
+    print("\nNON-BLOCKING (%d):" % len(nb))
+    for s in nb: print("  - %s" % s)
+    if not nb: print("  (none)")
+    g = v.get("next_task_guidance") or ""
+    if g.strip():
+        print("\nGUIDANCE FOR NEXT TASK (weigh it -- Claude holds the pen):")
+        print(textwrap.fill(g, 88, initial_indent="  ", subsequent_indent="  "))
+    print()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

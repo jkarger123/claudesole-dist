@@ -41,6 +41,23 @@ def _plat(host, val):
 
 # ---- browser-attach ---------------------------------------------------------------------------
 
+# The agent browser's profile is PERSISTENT so logins are REMEMBERED across sessions: log into Facebook (etc.)
+# once and every future session returns already logged in. It lives in a DURABLE home dir -- NOT ~/.cache, which
+# macOS periodically purges (that would silently drop the user's logins). `$HOME/.edge-mcp/profiles/<name>`.
+DURABLE_PROFILE = "$HOME/.edge-mcp/profiles/%s"
+LEGACY_PROFILE = "$HOME/.cache/edge-mcp/chrome-%s"   # old (evictable) location -> auto-migrated on next cold start
+
+
+def browser_profile(server):
+    """Durable, persistent profile path for a browser-attach server (where the remembered logins live).
+    Explicit config.user_data_dir wins; else config.profile_name; else a per-port default."""
+    c = server.get("config") or {}
+    if c.get("user_data_dir"):
+        return c["user_data_dir"]
+    name = c.get("profile_name") or ("chrome-%s" % c.get("debug_port", 9222))
+    return DURABLE_PROFILE % name
+
+
 @recipe("browser-attach")
 class BrowserAttach:
     mode_default = "warm"
@@ -48,8 +65,8 @@ class BrowserAttach:
         "mcp": "chrome-devtools",           # chrome-devtools | playwright
         "debug_port": 9222,
         "headless": False,                  # True only for a headless test box (no display)
-        "user_data_dir": None,              # None -> dedicated debug profile (reliable). Set to the user's real
-                                            #   profile to drive their logged-in sessions (see setup note re Chrome).
+        "user_data_dir": None,              # None -> durable per-port profile (browser_profile()); set to pin a path
+        "profile_name": None,               # None -> "chrome-<port>"; set to share/separate remembered-login sets
         "chrome_bin": {"macos": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
                        "windows": "C:/Program Files/Google/Chrome/Application/chrome.exe"},
         "npx_bin": {"macos": "/opt/homebrew/bin/npx", "windows": "npx.cmd"},
@@ -58,34 +75,46 @@ class BrowserAttach:
 
     @staticmethod
     def resolve_launch(server, host):
+        import os as _os
         c = _cfg(server, BrowserAttach.default_config)
         port = c["debug_port"]
         url = "http://127.0.0.1:%s" % port
         npx = _plat(host, c["npx_bin"])
+        # Run the MCP server over ssh with an EXPLICIT absolute PATH (env PATH=...), not the host's login-shell
+        # PATH. npx's `#!/usr/bin/env node` shebang otherwise fails with "env: node: No such file or directory"
+        # on a non-interactive ssh where Homebrew's shellenv was never sourced. Fixed superset, no $PATH needed.
+        nodedir = _os.path.dirname(npx) or "/opt/homebrew/bin"
+        pathv = "%s:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" % nodedir
+        pfx = ["env", "PATH=" + pathv]
         if c["mcp"] == "playwright":
-            return [npx, "-y", "@playwright/mcp@latest", "--cdp-endpoint", url]
+            return pfx + [npx, "-y", "@playwright/mcp@latest", "--cdp-endpoint", url]
         # default: Chrome DevTools MCP (official)
-        return [npx, "-y", "chrome-devtools-mcp@latest", "--browserUrl", url]
+        return pfx + [npx, "-y", "chrome-devtools-mcp@latest", "--browserUrl", url]
 
     @staticmethod
     def pre_launch(reg, host, server):
-        """Ensure Chrome is running on the host with the remote-debugging port. Idempotent: if the port already
-        answers we do nothing; else we launch Chrome (dedicated debug profile by default) and wait for it."""
+        """Ensure Chrome is up on the host with the remote-debugging port, using the DURABLE profile so logins
+        persist. Idempotent: if the port already answers we don't touch it (never migrate a live profile); else
+        we migrate any legacy ~/.cache profile to the durable home once, then launch."""
         c = _cfg(server, BrowserAttach.default_config)
         port = int(c["debug_port"])
         chrome = _plat(host, c["chrome_bin"])
-        profile = c.get("user_data_dir") or "$HOME/.cache/edge-mcp/chrome-%s" % port
+        profile = browser_profile(server)
+        legacy = LEGACY_PROFILE % port
         headless = " --headless=new" if c.get("headless") else ""
         cmd = (
             'PORT=%d\n'
             'if curl -s "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1; then echo ALREADY_UP; exit 0; fi\n'
-            'PROF="%s"; mkdir -p "$PROF"\n'
+            'PROF="%s"; OLD="%s"\n'
+            '# one-time migration: preserve logins saved under the old evictable ~/.cache location\n'
+            'if [ ! -d "$PROF" ] && [ -d "$OLD" ]; then mkdir -p "$(dirname "$PROF")"; mv "$OLD" "$PROF" 2>/dev/null; fi\n'
+            'mkdir -p "$PROF"\n'
             'nohup "%s" --remote-debugging-port=$PORT --user-data-dir="$PROF" '
             '--no-first-run --no-default-browser-check%s >/dev/null 2>&1 &\n'
             'for i in $(seq 1 30); do curl -s "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1 '
             '&& { echo STARTED; exit 0; }; sleep 0.5; done\n'
             'echo FAILED; exit 1\n'
-        ) % (port, profile, chrome, headless)
+        ) % (port, profile, legacy, chrome, headless)
         rc, out, err = R.host_run(reg, host, cmd, timeout=45)
         state = (out or "").strip().splitlines()[-1] if out.strip() else "FAILED"
         return {"ok": rc == 0 and state in ("ALREADY_UP", "STARTED"), "state": state,

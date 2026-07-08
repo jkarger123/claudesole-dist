@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# cc-route "<topic>"  -- the front-door triage: ask which HOME a topic belongs to before going deep, so work lands
+# in its proper scope with its own clean memory. Prints the best-matching module/agent (or that a new home is
+# needed). Read-only -- it recommends; it doesn't move anything. Follow up by launching/continuing the right scoped
+# agent there (or propose a warm transfer with `cc-handoff propose --to <scope|new>`). For agents AND humans.
+set -uo pipefail
+Q="$*"
+[ -z "${Q// }" ] && { echo "usage: cc-route \"the topic to place\""; exit 1; }
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
+[ -f "$CFG" ] || CFG="$HOME/hptuners-control/cc.config.json"
+PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
+QENC="$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$Q")"
+RESP="$(curl -s "http://127.0.0.1:${PORT}/api/route?q=${QENC}" 2>/dev/null)"
+if [ -z "$RESP" ]; then echo "could not reach the dashboard on port ${PORT}"; exit 1; fi
+python3 - "$RESP" <<'PY'
+import json,sys
+try: d=json.loads(sys.argv[1])
+except Exception: print("unexpected response:",sys.argv[1][:200]); sys.exit(1)
+if d.get("needs_new_home"):
+    print("→ No home yet. Would create one under: %s" % (d.get("suggested_parent") or "(root)"))
+    print("  Propose it:  cc-handoff propose --to new")
+    sys.exit(0)
+dd=d.get("destination") or {}
+print("→ %s  (%d%% match)" % (dd.get("rel") or "?", round((dd.get("confidence") or 0)*100)))
+alts=[a.get("rel") for a in (d.get("alternatives") or [])[1:4] if a.get("rel")]
+if alts: print("  also: %s" % ", ".join(alts))
+print("  Launch/continue the scoped agent there, or:  cc-handoff propose --to <scope>")
+PY

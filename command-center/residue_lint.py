@@ -46,7 +46,11 @@ def _framework_files():
                 if m.endswith(TEXT_EXT): files.add(os.path.relpath(m, HOME))
             elif os.path.isdir(m):
                 for root, _dirs, fs in os.walk(m):
-                    if "secrets" in root.split(os.sep) or "/.git" in root: continue
+                    _parts = root.split(os.sep)
+                    # skip per-node TRANSIENT state that lives under a framework dir but never ships as core:
+                    # secrets, git, session handoffs, deliverables. (Handoffs narrate tenant work by nature.)
+                    if ("secrets" in _parts or "_handoffs" in _parts or "deliverables" in _parts
+                            or "/.git" in root): continue
                     for f in fs:
                         if f.endswith(TEXT_EXT): files.add(os.path.relpath(os.path.join(root, f), HOME))
     return sorted(files)

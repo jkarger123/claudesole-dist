@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# cc-opnote <peer> "<message>"  -- leave a HUMAN-to-human note for another node's OPERATOR (the person, not the
+# agent mesh). Use when you're relaying something one human wants to tell another node's human (e.g. your operator
+# -> their operator). It lands in that node's Messages/Notes lens with a can't-miss alert. Peer ids: run
+# `curl -s http://127.0.0.1:$PORT/api/peers`. (To reach an agent/Mission Control instead, use cc-escalate.)
+# For agents AND humans.
+set -uo pipefail
+PEER="${1:-}"; shift || true
+TEXT="$*"
+{ [ -z "${PEER// }" ] || [ -z "${TEXT// }" ]; } && { echo "usage: cc-opnote <peer-id> \"the note for their operator\""; exit 1; }
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
+[ -f "$CFG" ] || CFG="$HOME/hptuners-control/cc.config.json"
+PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
+TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
+BODY="$(python3 -c "import json,sys;print(json.dumps({'peer':sys.argv[1],'text':sys.argv[2]}))" "$PEER" "$TEXT")"
+if curl -s -X POST "http://127.0.0.1:${PORT}/api/opnote-send" -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODY" >/dev/null 2>&1; then
+  echo "✓ note sent to ${PEER}'s operator (durable): $TEXT"
+else
+  echo "could not reach the dashboard on port ${PORT}"
+fi

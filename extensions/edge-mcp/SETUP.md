@@ -27,7 +27,16 @@ the MCP server <-> the user's app. If the host is also a ClaudeFather node, the 
   plugin for the InDesign server; Node if the server is Node-based).
 - You know which account on that machine the server should run under (host- and account-agnostic).
 
-## Setup steps
+## Fast path -- drive a user's real logged-in browser (the common case)
+One click or one command does the WHOLE thing (host + SSH key + Node + Chrome + server), no hand-assembly:
+- **Dashboard:** Edge MCP lens -> **Connect a browser** -> enter a name + `user@tailnet-address` -> Set up.
+- **CLI / agent:** `edge-mcp setup-browser <host-id> <user@tailnet-addr>` (e.g. `work-laptop user@100.x.y.z`).
+It reuses an already-authorized SSH key if one exists (else prints a one-line snippet the user pastes), installs
+Node if missing, checks Chrome, and registers the browser server. Then `edge-mcp start <server>` opens Chrome
+(isolated debug profile) on the user's machine; the user logs in once and that becomes the session. Revoke any
+time from the lens or `edge-mcp revoke <server>`. Only read on for the manual / non-browser (plugin-app) path.
+
+## Setup steps (manual / advanced -- plugin-app servers, custom launches)
 On CLAUDEFATHER (one command does mint-key + vault-store + host-register + prints the user's snippet):
 1. Enable SSH on the user's machine ONE time:
    - macOS: System Settings > General > Sharing > Remote Login = On (or `sudo systemsetup -setremotelogin on`).

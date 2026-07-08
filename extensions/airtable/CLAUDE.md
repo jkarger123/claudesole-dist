@@ -1,5 +1,9 @@
 # Airtable extension -- headless Airtable bases via a PAT-authed self-hosted MCP
 
+<!-- LATEST-HANDOFF -->
+**>> Resume here:** read `_handoffs/20260708-1825__airtable.md` first -- it is the latest handoff.
+<!-- /LATEST-HANDOFF -->
+
 A ClaudeFather **integration extension** (`extension.json` id `airtable`) that lets an agent read + EDIT Airtable
 bases in place (list bases/tables, read schema, query records, create/update/upsert rows). Path B / headless:
 `domdomegg/airtable-mcp-server` (`npx -y airtable-mcp-server`, stdio) authed with ONE Airtable Personal Access

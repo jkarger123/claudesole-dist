@@ -163,6 +163,7 @@ def _status(sid, sess, state):
           "host": host.get("id"), "transport": "node-local" if R.is_local_host(host) else "ssh",
           "uptime_s": round(time.time() - sess.started_at, 1) if (sess and sess.started_at) else None,
           "calls": sess.calls if sess else 0, "logfile": os.path.join(LOGDIR, sid + ".jsonl"),
+          "profile": profile_dir(srv) if srv.get("recipe") == "browser-attach" else None,
           "pid": os.getpid()}
     _, statusfile, _ = _paths(sid)
     try: json.dump(st, open(statusfile, "w"))
@@ -283,20 +284,33 @@ def _start(sid):
 
 
 def probe_once(sid):
-    """One-shot: initialize + tools/list, no warm daemon. Proves reachability + lists the server's tools."""
+    """One-shot: initialize + tools/list, no warm daemon. Proves reachability + lists the server's tools.
+    Returns a STRUCTURED result on every failure path (missing key, host asleep, node missing) -- never a
+    raw traceback, so an agent shows the user a clean diagnosis + fix instead of a stack dump."""
     reg = _reg(); server = R.get_server(reg, sid)
-    if not server: return {"ok": False, "error": "unknown server %r" % sid}
+    if not server: return {"ok": False, "error": "unknown server %r (run edge-mcp setup-browser or add-server)" % sid}
+    host = R.get_host(reg, server.get("host_id")) or {}
+    if not R.host_reachable(host):
+        return {"ok": False, "error": "host %r unreachable (laptop asleep / Remote Login off?)" % host.get("id"),
+                "fix": "wake the machine, then re-probe"}
     sess = EdgeSession(reg, server)
     try:
         _run_pre_launch(reg, server)
         sess._spawn()
         init = sess._rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
                          "clientInfo": {"name": "edge-probe", "version": "0.1"}}, timeout=120)
-        if not init: return {"ok": False, "error": "no initialize response"}
+        if not init:
+            return {"ok": False, "error": "MCP server didn't answer initialize",
+                    "fix": "run `edge-mcp preflight %s` -- usually Node.js missing on the host or the app not open" % sid}
         sess._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         tl = sess._rpc("tools/list", {}, timeout=30)
         tools = [t.get("name") for t in (tl or {}).get("result", {}).get("tools", [])]
         return {"ok": True, "serverInfo": init.get("result", {}).get("serverInfo"), "tools": tools}
+    except Exception as e:
+        msg = str(e)
+        fix = ("run `edge-mcp setup-browser %s <user@addr>` to (re)provision the host's key" % host.get("id")
+               if "not provisioned" in msg else "run `edge-mcp preflight %s`" % sid)
+        return {"ok": False, "error": msg, "fix": fix}
     finally:
         sess.stop()
 
@@ -340,6 +354,103 @@ def _scp(reg, host_id, local, remote, direction):
         return {"ok": False, "error": str(e)}
 
 
+def profile_dir(server):
+    """The browser-attach DURABLE profile path on the host (where remembered logins live). Delegates to the
+    recipe so the daemon, revoke, and launch all agree on one path."""
+    try:
+        import edge_recipes
+        return edge_recipes.browser_profile(server)
+    except Exception:
+        c = server.get("config") or {}
+        return c.get("user_data_dir") or ("$HOME/.edge-mcp/profiles/chrome-%s" % c.get("debug_port", 9222))
+
+
+def remembered_sites(reg, server):
+    """Best-effort list of domains the profile has PERSISTENT cookies for = the sites this browser stays logged
+    into across sessions. Reads the Cookies sqlite immutably (no lock fight) at the known Chrome paths."""
+    host = R.get_host(reg, server.get("host_id")) or {}
+    pd = profile_dir(server)
+    # Copy the Cookies DB *and its -wal* to a temp dir before reading: a live Chrome keeps recent cookies in the
+    # write-ahead log, so an immutable read of the main DB alone reports nothing. sqlite replays the copied WAL.
+    sh = (
+        'P="%s"\n'
+        'for db in "$P/Default/Network/Cookies" "$P/Default/Cookies"; do\n'
+        '  [ -f "$db" ] || continue\n'
+        '  T="$(mktemp -d)"; cp -f "$db" "$T/Cookies" 2>/dev/null; [ -f "$db-wal" ] && cp -f "$db-wal" "$T/Cookies-wal" 2>/dev/null\n'
+        '  sqlite3 "$T/Cookies" "SELECT DISTINCT host_key FROM cookies WHERE is_persistent=1;" 2>/dev/null\n'
+        '  rm -rf "$T"; break\n'
+        'done\n'
+    ) % pd
+    rc, out, err = R.host_run(reg, host, sh, timeout=20)
+    doms = set()
+    for ln in (out or "").splitlines():
+        d = ln.strip().lstrip(".")
+        if d and "." in d:
+            doms.add(d)
+    return sorted(doms)
+
+
+def _doctor():
+    """Report WHICH node this CLI is operating on -- the #1 source of 'why did it hit the wrong vault'
+    confusion on co-located nodes. Shows the resolved config, whether that node's server is live, and the
+    registry file in use."""
+    t = R.cc_target(); reg = _reg()
+    return {"ok": True, "node": {"cc_home": t["cc_home"], "config": t["cfg"], "port": t["port"],
+                                 "server_live": t["live"]},
+            "registry": REG_PATH, "hosts": len(reg.get("hosts", [])), "servers": len(reg.get("servers", [])),
+            "note": "this is the node this edge-mcp is operating on. Wrong one? set CC_CONFIG=<node>/cc.config.json "
+                    "or run from that node's console."}
+
+
+def _preflight(sid):
+    reg = _reg(); server = R.get_server(reg, sid)
+    if not server: return {"ok": False, "error": "unknown server %r" % sid}
+    host = R.get_host(reg, server.get("host_id")) or {}
+    import edge_setup
+    return edge_setup.preflight_browser_host(reg, host, remediate=False)
+
+
+def _revoke(sid, wipe=True):
+    """Cut off standing access: stop the warm session and (default) WIPE the host debug profile so every
+    logged-in cookie is gone."""
+    reg = _reg(); server = R.get_server(reg, sid)
+    if not server: return {"ok": False, "error": "unknown server %r" % sid}
+    host = R.get_host(reg, server.get("host_id")) or {}
+    stopped = False
+    if _running(sid):
+        try: _client(sid, {"op": "stop"}); stopped = True
+        except Exception: pass
+    wiped = False
+    if wipe:
+        pd = profile_dir(server)
+        rc, out, err = R.host_run(reg, host,
+                                  'pkill -f %s 2>/dev/null; rm -rf "%s" && echo WIPED' % (
+                                      __import__("shlex").quote("user-data-dir=" + pd), pd), timeout=30)
+        wiped = (rc == 0 and "WIPED" in (out or ""))
+    return {"ok": True, "server": sid, "daemon_stopped": stopped, "profile_wiped": wiped,
+            "note": "logged-in sessions cleared" if wiped else "daemon stopped; debug profile left intact"}
+
+
+def _accounts(sid):
+    """Best-effort view of what this browser session can currently reach: the debug profile path + the
+    domains of any open tabs (a hint at which sites are logged in). Pairs with `revoke` for the trust panel."""
+    import re
+    reg = _reg(); server = R.get_server(reg, sid)
+    if not server: return {"ok": False, "error": "unknown server %r" % sid}
+    info = {"ok": True, "server": sid, "profile": profile_dir(server), "open_domains": [], "remembered": []}
+    try:
+        info["remembered"] = remembered_sites(reg, server)   # persistent-cookie domains = stays-logged-in sites
+    except Exception: pass
+    if _running(sid):
+        try:
+            r = _client(sid, {"op": "call", "tool": "list_pages", "args": {}}, timeout=30)
+            txt = r.get("text", "") if isinstance(r, dict) else ""
+            info["open_domains"] = sorted(set(re.findall(r"https?://([^/\s)]+)", txt)))
+        except Exception: pass
+    info["note"] = "remembered = sites this browser stays logged into; forget all with: edge-mcp revoke %s" % sid
+    return info
+
+
 def main():
     ap = argparse.ArgumentParser(prog="edge-mcp")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -348,6 +459,10 @@ def main():
         sub.add_parser(c).add_argument("server")
     pc = sub.add_parser("call"); pc.add_argument("server"); pc.add_argument("tool"); pc.add_argument("args", nargs="?", default="{}")
     sub.add_parser("host-key").add_argument("host")
+    sub.add_parser("doctor")
+    sub.add_parser("preflight").add_argument("server")
+    sub.add_parser("accounts").add_argument("server")
+    rv = sub.add_parser("revoke"); rv.add_argument("server"); rv.add_argument("--keep-profile", action="store_true")
     hs = sub.add_parser("sh"); hs.add_argument("host"); hs.add_argument("command")
     pl = sub.add_parser("pull"); pl.add_argument("host"); pl.add_argument("remote"); pl.add_argument("local")
     ph = sub.add_parser("push"); ph.add_argument("host"); ph.add_argument("local"); ph.add_argument("remote")
@@ -374,6 +489,14 @@ def main():
         print(json.dumps(probe_once(a.server), indent=2)); return
     if a.cmd == "host-key":
         print(json.dumps(_host_key(_reg(), a.host), indent=2)); return
+    if a.cmd == "doctor":
+        print(json.dumps(_doctor(), indent=2)); return
+    if a.cmd == "preflight":
+        print(json.dumps(_preflight(a.server), indent=2)); return
+    if a.cmd == "accounts":
+        print(json.dumps(_accounts(a.server), indent=2)); return
+    if a.cmd == "revoke":
+        print(json.dumps(_revoke(a.server, wipe=not a.keep_profile), indent=2)); return
     if a.cmd == "sh":
         print(json.dumps(_host_sh(_reg(), a.host, a.command), indent=2)); return
     if a.cmd == "pull":

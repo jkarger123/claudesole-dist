@@ -8,30 +8,37 @@ User side (one copy-paste): an OS-specific snippet that enables SSH + authorizes
 Secrets rule: the private key lives ONLY in the vault (`vault_put` -> /api/vault-set); it is read back at
 use-time via `cc-secure get` and materialized to a 0600 temp file (see edge_registry.resolve_key). Never printed.
 """
-import os, sys, json, subprocess, tempfile, urllib.request
+import os, sys, json, subprocess, tempfile, urllib.request, urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CC = os.environ.get("CC_HOME") or os.path.abspath(os.path.join(HERE, "..", "..", ".."))  # install root (extensions/edge-mcp/runtime -> CC_HOME)
-CFG = os.environ.get("CC_CONFIG") or os.path.join(CC, "cc.config.json")
-
-
-def _port_token():
-    try:
-        c = json.load(open(CFG))
-        return c.get("port") or 8799, c.get("auth_token") or ""
-    except Exception:
-        return 8799, ""
+import edge_registry as R
 
 
 def vault_put(key, value, label=None, scope="*"):
-    """Store a secret into THIS install's vault via the operator API. Returns the API result (no value echoed)."""
-    port, tok = _port_token()
+    """Store a secret into THIS node's vault via the operator API. Targets the node resolved by
+    edge_registry.cc_target() (env -> CWD -> runtime install). Returns a STRUCTURED result on failure
+    (never raises a bare HTTPError/traceback) so the caller can show the user exactly what to fix."""
+    t = R.cc_target()
+    if not t["live"]:
+        return {"ok": False, "error": "no ClaudeFather server answering on 127.0.0.1:%s (config %s). "
+                "This CLI resolved to that node -- run it from the node's console, or set "
+                "CC_CONFIG=<node>/cc.config.json." % (t["port"], t["cfg"]), "target": t["cfg"]}
     body = json.dumps({"id": key, "value": value, "label": label or ("Edge MCP: " + key),
                        "scope": scope}).encode()
-    req = urllib.request.Request("http://127.0.0.1:%s/api/vault-set" % port, data=body,
-                                 headers={"Content-Type": "application/json", "X-CC-Token": tok})
-    with urllib.request.urlopen(req, timeout=10) as r:
-        return json.loads(r.read().decode())
+    req = urllib.request.Request("http://127.0.0.1:%s/api/vault-set" % t["port"], data=body,
+                                 headers={"Content-Type": "application/json", "X-CC-Token": t["token"]})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        hint = ("this session isn't scoped to this node -- re-run from the node's own console (it exports "
+                "CC_CONFIG), or pass CC_CONFIG=<node>/cc.config.json" if e.code in (401, 403)
+                else "the vault server rejected the write")
+        return {"ok": False, "http": e.code, "target": t["cfg"],
+                "error": "vault-set failed (HTTP %s) on node %s (port %s): %s" % (e.code, t["cfg"], t["port"], hint)}
+    except Exception as e:
+        return {"ok": False, "target": t["cfg"],
+                "error": "vault-set unreachable at 127.0.0.1:%s (%s)" % (t["port"], e)}
 
 
 def import_key_to_vault(key_name, private_key_path):
@@ -226,6 +233,188 @@ def add_server(reg_path, server_id, host_id, launch=None, mode="per-session", la
             "verified_live": verified}
 
 
+# ---- host preflight + one-command browser setup -----------------------------------------------
+
+def _key_authenticates(ssh_target, key_path):
+    """True if `key_path` already logs into ssh_target non-interactively (BatchMode, no prompt)."""
+    if "@" not in ssh_target:
+        return False
+    try:
+        r = subprocess.run(["ssh", "-i", os.path.expanduser(key_path), "-o", "BatchMode=yes",
+                            "-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new",
+                            ssh_target, "true"], capture_output=True, timeout=15)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def find_working_key(ssh_target):
+    """Return the path to an already-authorized private key for this host, if one exists -- so setup can
+    IMPORT it (zero copy-paste for the user) instead of minting a fresh key they'd have to authorize."""
+    cands = ["~/.ssh/afp_mesh_ed25519", "~/.ssh/id_ed25519", "~/.ssh/id_rsa", "~/.ssh/imac_access"]
+    for p in cands:
+        ep = os.path.expanduser(p)
+        if os.path.isfile(ep) and _key_authenticates(ssh_target, ep):
+            return ep
+    return None
+
+
+_PREFLIGHT_SH = r'''
+NODE=""
+for p in /opt/homebrew/bin/node /usr/local/bin/node "$HOME"/.nvm/versions/node/*/bin/node; do [ -x "$p" ] && NODE="$p" && break; done
+[ -z "$NODE" ] && NODE="$(command -v node 2>/dev/null)"
+echo "NODE=$NODE"
+NPX=""
+for p in /opt/homebrew/bin/npx /usr/local/bin/npx; do [ -x "$p" ] && NPX="$p" && break; done
+[ -z "$NPX" ] && NPX="$(command -v npx 2>/dev/null)"
+echo "NPX=$NPX"
+CH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+[ -x "$CH" ] && echo "CHROME=yes" || echo "CHROME=no"
+echo "BREW=$(command -v brew 2>/dev/null || (ls /opt/homebrew/bin/brew 2>/dev/null))"
+'''
+
+
+def _probe_host(reg, host):
+    out = _host_run(reg, host, _PREFLIGHT_SH, timeout=25) or ""
+    kv = {}
+    for ln in out.splitlines():
+        if "=" in ln:
+            k, v = ln.split("=", 1); kv[k.strip()] = v.strip()
+    return kv
+
+
+def preflight_browser_host(reg, host, remediate=True):
+    """Check (and, if remediate, auto-fix) everything the browser-attach recipe needs on the host:
+    SSH reachable, Node.js present (chrome-devtools-mcp needs it), Chrome present. Returns a checklist +
+    the resolved absolute npx path (so the recipe never depends on the host's login-shell PATH)."""
+    import edge_registry as _R
+    checks = []
+    if not _R.host_reachable(host):
+        checks.append({"check": "ssh", "ok": False,
+                       "detail": "host unreachable on :22 (asleep / Remote Login off?)",
+                       "fix": "wake the machine; enable System Settings > General > Sharing > Remote Login"})
+        return {"ok": False, "checks": checks, "npx": None}
+    checks.append({"check": "ssh", "ok": True, "detail": "reachable, key authorized"})
+
+    kv = _probe_host(reg, host)
+    node, npx, chrome, brew = kv.get("NODE"), kv.get("NPX"), kv.get("CHROME") == "yes", kv.get("BREW")
+
+    if not node and remediate and brew:
+        # install Node via Homebrew (no sudo). Long op -- allow several minutes.
+        _host_run(reg, host, "%s install node >/dev/null 2>&1; true" % brew, timeout=420)
+        kv = _probe_host(reg, host)
+        node, npx = kv.get("NODE"), kv.get("NPX")
+        checks.append({"check": "node", "ok": bool(node),
+                       "detail": ("installed Node via Homebrew: " + node) if node else "brew install node failed",
+                       "fixed": bool(node)})
+    elif node:
+        checks.append({"check": "node", "ok": True, "detail": node})
+    else:
+        checks.append({"check": "node", "ok": False,
+                       "detail": "Node.js not found (chrome-devtools-mcp needs it)",
+                       "fix": "install Node on the host: brew install node" if brew
+                              else "install Homebrew + Node on the host"})
+
+    checks.append({"check": "chrome", "ok": bool(chrome),
+                   "detail": "Google Chrome installed" if chrome else "Google Chrome not found",
+                   "fix": None if chrome else "install Google Chrome on the host"})
+
+    ok = all(c["ok"] for c in checks)
+    return {"ok": ok, "checks": checks, "npx": npx or "/opt/homebrew/bin/npx"}
+
+
+def setup_browser(reg_path, host_id, ssh_target, import_from=None, platform="macos", power="laptop",
+                  remediate=True, debug_port=9222, server_id=None):
+    """ONE command to stand up 'drive the user's real Chrome' end-to-end: register the host (auto-importing an
+    already-authorized key when one exists, else minting + printing an authorize snippet), preflight + auto-fix
+    the host (Node/Chrome), register the browser-attach server, and report a single clean checklist ending in
+    the ONE human step (log in). Idempotent; safe to re-run."""
+    import edge_registry as _R
+    server_id = server_id or ("chrome-" + host_id)
+    result = {"ok": False, "host": host_id, "server": server_id, "steps": []}
+
+    # 1) host + key -----------------------------------------------------------------------------
+    if not import_from and "@" in ssh_target:
+        import_from = find_working_key(ssh_target)   # reuse an already-authorized key -> no user paste
+    hr = add_host(reg_path, host_id, ssh_target, platform=platform, power=power, import_from=import_from)
+    if not hr.get("ok"):
+        result["error"] = "host registration failed: %s" % hr.get("error")
+        result["steps"].append({"check": "host", "ok": False, "detail": result["error"]})
+        return result
+    result["steps"].append({"check": "host", "ok": True,
+                            "detail": ("imported existing authorized key" if import_from
+                                       else "minted a dedicated key -- user must authorize it (see 'authorize')")})
+    if hr.get("authorize"):
+        result["authorize"] = hr["authorize"]        # user still needs to paste this (no working key found)
+
+    reg = _R.load_registry(reg_path)
+    host = _R.get_host(reg, host_id)
+
+    # 2) preflight + remediate the host ---------------------------------------------------------
+    pf = preflight_browser_host(reg, host, remediate=remediate)
+    result["steps"].extend(pf["checks"])
+
+    # 3) register the browser-attach server (absolute npx so it never depends on login-shell PATH) --
+    cfg = {"debug_port": int(debug_port), "npx_bin": {platform: pf["npx"]}}
+    sr = add_server(reg_path, server_id, host_id, recipe="browser-attach", config=cfg,
+                    label="Chrome on %s" % host_id)
+    result["steps"].append({"check": "server", "ok": sr.get("ok", False),
+                            "detail": "registered %s (browser-attach, port %s)" % (server_id, debug_port)})
+    result["config"] = cfg
+
+    # 4) verdict + the one human step -----------------------------------------------------------
+    blocking = [c for c in result["steps"] if not c.get("ok") and c["check"] in ("host", "node", "server")]
+    result["ok"] = not blocking and not result.get("authorize")
+    if result.get("authorize"):
+        result["next"] = "Send the authorize block to the user to paste on the host, then run: edge-mcp start %s" % server_id
+    elif result["ok"]:
+        result["next"] = ("Run `edge-mcp start %s`, then have the user LOG IN once in the Chrome window that opens "
+                          "on their machine (isolated debug profile). That login becomes the scraping session."
+                          % server_id)
+    else:
+        result["next"] = "Resolve the failing checks above, then re-run setup-browser (it's idempotent)."
+    result["consent_note"] = ("Cookies from that login persist in the host's debug profile and stay reachable by "
+                              "future sessions on THIS node until revoked (edge-mcp revoke %s)." % server_id)
+    return result
+
+
+def import_logins(reg_path, server_id, source_profile="Default"):
+    """BEST-EFFORT seed: copy the user's EXISTING Chrome logins into the agent's durable profile, so it starts
+    already logged into what they use (Facebook, etc.) without logging in even once. Requires the user's Chrome
+    QUIT (cookie DB is locked while it runs) and same OS user (cookies are keychain-encrypted with an app-level
+    key we copy from 'Local State'). Not guaranteed per-site/platform -- if a site still asks to log in, the user
+    logs in once and it's remembered thereafter (that path is bulletproof)."""
+    import edge_registry as _R, edge_recipes
+    reg = _R.load_registry(reg_path); server = _R.get_server(reg, server_id)
+    if not server: return {"ok": False, "error": "unknown server %r" % server_id}
+    host = _R.get_host(reg, server.get("host_id"))
+    dest = edge_recipes.browser_profile(server)
+    sh = (
+        'PROF="%s"; SRC="$HOME/Library/Application Support/Google/Chrome"; SP="%s"\n'
+        'pkill -f "user-data-dir=$PROF" 2>/dev/null; sleep 1\n'   # stop OUR debug Chrome so the dest profile is writable
+        'if pgrep -f "Google Chrome.app/Contents/MacOS/Google Chrome" >/dev/null 2>&1; then echo CHROME_RUNNING; exit 3; fi\n'
+        'if [ ! -d "$SRC/$SP" ]; then echo NO_SOURCE_PROFILE; exit 4; fi\n'
+        'mkdir -p "$PROF/Default/Network"\n'
+        'cp -f "$SRC/Local State" "$PROF/Local State" 2>/dev/null\n'   # app-level cookie key -> copied cookies decrypt
+        'for f in "Network/Cookies" "Cookies" "Login Data" "Web Data"; do\n'
+        '  [ -f "$SRC/$SP/$f" ] && { mkdir -p "$PROF/Default/$(dirname "$f")"; cp -f "$SRC/$SP/$f" "$PROF/Default/$f" 2>/dev/null; }\n'
+        'done\n'
+        'echo IMPORTED\n'
+    ) % (dest, source_profile)
+    rc, out, err = _R.host_run(reg, host, sh, timeout=60)
+    state = (out or "").strip().splitlines()[-1] if (out or "").strip() else "FAILED"
+    if state == "CHROME_RUNNING":
+        return {"ok": False, "need": "quit_chrome",
+                "error": "Chrome is running on the host. Fully QUIT Chrome (Cmd-Q) on that machine, then import "
+                         "again -- the login files are locked while it's open."}
+    if state == "NO_SOURCE_PROFILE":
+        return {"ok": False, "error": "no Chrome profile %r found on the host (try a different --profile)" % source_profile}
+    ok = (state == "IMPORTED")
+    return {"ok": ok, "server": server_id, "source_profile": source_profile,
+            "note": ("Seeded existing logins (best-effort). Click Start and check the sites; any that still ask "
+                     "to log in, log in once and it's remembered.") if ok else "import failed: %s" % state}
+
+
 def _parse_flags(a, names):
     """Pull --flag value pairs out of arg list a; returns (kw, positionals-before-'--', launch-after-'--')."""
     kw, pos, launch = {}, [], None
@@ -282,6 +471,29 @@ if __name__ == "__main__":
             print("\nNOTE: host was not reachable to verify the launch live (asleep?). Registered the known "
                   "default path; run `edge-mcp probe %s` once the host is awake to confirm." % pos[0])
 
+    elif cmd == "setup-browser":
+        kw, pos, _ = _parse_flags(a[1:], {"platform", "power", "import", "port", "server", "no-remediate"})
+        if len(pos) < 2:
+            print("usage: edge-mcp setup-browser <host-id> <user@addr> "
+                  "[--import <privkey>] [--platform macos|windows] [--power laptop|always-on] "
+                  "[--port 9222] [--server <server-id>]")
+            sys.exit(1)
+        r = setup_browser(REGP, pos[0], pos[1], import_from=kw.get("import"),
+                          platform=kw.get("platform", "macos"), power=kw.get("power", "laptop"),
+                          remediate=("no-remediate" not in kw), debug_port=kw.get("port", 9222),
+                          server_id=kw.get("server"))
+        auth = r.pop("authorize", None)
+        print(json.dumps(r, indent=2))
+        if auth:
+            print("\n===== SEND THIS TO THE USER (run on their machine) =====\n")
+            print(auth)
+
+    elif cmd == "import-logins":
+        kw, pos, _ = _parse_flags(a[1:], {"profile"})
+        if len(pos) < 1:
+            print("usage: edge-mcp import-logins <server-id> [--profile Default]"); sys.exit(1)
+        print(json.dumps(import_logins(REGP, pos[0], source_profile=kw.get("profile", "Default")), indent=2))
+
     else:
-        print("usage: edge_setup {add-host | add-server} ...")
+        print("usage: edge_setup {add-host | add-server | setup-browser | import-logins} ...")
         sys.exit(1)

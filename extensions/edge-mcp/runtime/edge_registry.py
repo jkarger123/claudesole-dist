@@ -16,12 +16,59 @@ import os, sys, json, shlex, socket, tempfile, subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROXY = os.path.join(HERE, "mcp_proxy_log.py")
+
+
+def _find_cc_home():
+    """WHICH ClaudeFather node does this CLI invocation belong to? Resolution order:
+      1) CC_HOME env  (the framework exports this into every launched session -- the normal path)
+      2) dir of CC_CONFIG env
+      3) nearest cc.config.json walking up from CWD (a hand-run CLI inside a node's project tree)
+      4) the install this runtime physically lives under (the /opt/homebrew/bin/edge-mcp symlink target)
+    The single global symlink means a bare `edge-mcp` on a co-located node would otherwise silently hit the
+    PRIMARY install's vault/registry (401s + split registries); this makes it scope to the right node, and
+    `cc_target()` reports exactly which node it picked so nothing is silent."""
+    if os.environ.get("CC_HOME"):
+        return os.environ["CC_HOME"]
+    if os.environ.get("CC_CONFIG"):
+        return os.path.dirname(os.environ["CC_CONFIG"])
+    d = os.getcwd()
+    for _ in range(10):
+        if os.path.isfile(os.path.join(d, "cc.config.json")):
+            return d
+        nd = os.path.dirname(d)
+        if nd == d:
+            break
+        d = nd
+    return os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+
+
 # Per-install runtime state lives OUTSIDE the (framework/signed) extension dir -- in the deployment's gitignored
 # data/ area -- so registry/keys/activity never ship with the core and stay tenant-neutral.
-CC_HOME = (os.environ.get("CC_HOME")
-           or (os.path.dirname(os.environ["CC_CONFIG"]) if os.environ.get("CC_CONFIG") else "")
-           or os.path.abspath(os.path.join(HERE, "..", "..", "..")))   # auto-scope to the instance whose session
-# set CC_CONFIG (multi-instance: one `edge-mcp` command targets each instance's own registry + vault).
+CC_HOME = _find_cc_home()
+
+
+def cc_target(cc_home=None):
+    """Resolve the node's vault/API endpoint for THIS invocation: {cc_home, cfg, port, token, live}.
+    `live` = whether that node's server actually answers on 127.0.0.1:<port> (so callers can give a precise
+    'this session isn't scoped to this node' error instead of a raw 401/traceback)."""
+    home = cc_home or CC_HOME
+    cfg = (os.environ["CC_CONFIG"] if (not cc_home and os.environ.get("CC_CONFIG"))
+           else os.path.join(home, "cc.config.json"))
+    port, token = 8799, ""
+    try:
+        c = json.load(open(cfg))
+        port = c.get("port") or 8799
+        token = c.get("auth_token") or ""
+    except Exception:
+        pass
+    live = False
+    try:
+        s = socket.create_connection(("127.0.0.1", int(port)), timeout=2); s.close(); live = True
+    except Exception:
+        pass
+    return {"cc_home": home, "cfg": cfg, "port": port, "token": token, "live": live}
+
+
 STATE_DIR = os.environ.get("EDGE_MCP_STATE") or os.path.join(CC_HOME, "data", "edge-mcp")
 REGISTRY = os.path.join(STATE_DIR, "registry.json")
 ACTIVITY_DIR = os.path.join(STATE_DIR, "_mcp_activity")

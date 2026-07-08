@@ -187,8 +187,9 @@ def _account_activate(label):
         fd = os.open(ACTIVE_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, tok.encode()); os.close(fd)
         w = _wallet_load(); w["default"] = label; _wallet_save(w); return True
     except Exception: return False
-# spliced into every claude launch prefix. The account WALLET now switches the GLOBAL keychain login (live,
-# all sessions) instead of per-session env tokens, so this injects nothing -- launches use the keychain login.
+# spliced into every claude launch prefix. The account WALLET now switches the GLOBAL keychain login (live, all
+# sessions) instead of per-session env tokens. NOTE: REASSIGNED near _CC_PATH (~line 1990) to export this
+# instance's CC_CONFIG into every session -- see the LINCHPIN comment there. This "" is just the pre-_shlex default.
 _CC_ENVP = ""
 
 def render_page():
@@ -1983,6 +1984,14 @@ import shlex as _shlex
 # command-center dir) holds them. Previously only the main launch() put BASE on PATH, so agents hit
 # "command not found: cc-secure" and had to hand-locate it. Use _CC_PATH everywhere instead of an inline export.
 _CC_PATH = 'export PATH=' + _shlex.quote(BASE) + ':"$HOME/.local/bin:/opt/homebrew/bin:$PATH"; '
+# LINCHPIN: every launched session must carry ITS OWN instance config, so the cc-* CLIs (cc-stage/cc-deliver/
+# cc-task/cc-note/cc-escalate/...) resolve THIS deployment's port + admin session -- not the shared root fallback
+# (`$BASE/../cc.config.json` = the root/default node), which would silently mis-target the node from an overseer or
+# any co-located tenant instance. Co-located instances SHARE this command-center dir, so without an
+# explicit CC_CONFIG in the session env, every verb defaults to the same wrong node. `_CC_CONFIG` (line ~58) is
+# already this instance's own config path. Reassigned here (not at its "" default up top) because `_shlex` imports
+# just above; only ever read at request time inside the launch fns, so the later value wins.
+_CC_ENVP = 'export CC_CONFIG=' + _shlex.quote(_CC_CONFIG) + '; '
 _AGENT_TITLES_FILE = os.path.join(STATE_DIR, "_session_titles.json")
 def _load_agent_titles():
     try: return json.load(open(_AGENT_TITLES_FILE))
@@ -4354,7 +4363,14 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
             seed_s = " " + _shlex.quote(seed)
         elif rel and os.path.isdir(wd) and not os.path.isfile(os.path.join(wd, "CLAUDE.md")):
             seed_s = " " + _shlex.quote(_NEW_FOLDER_BRIEF)
-        cl2 = "export CC_SESSION=" + _shlex.quote(name) + "; " + cl2   # so the agent can self-identify (cc-hold / cc-handoff)
+        # Scope the session to THIS node: export CC_SESSION (self-identify) AND CC_HOME/CC_CONFIG so every
+        # node-scoped CLI the agent runs (edge-mcp, cc-secure, vault, cc-*) targets THIS deployment's config +
+        # vault + registry -- NOT whichever install a shared /opt/homebrew/bin symlink happens to point at. The
+        # shared tmux server does NOT carry the launching process's env, so co-located nodes (AFP, atem, ...)
+        # would otherwise silently operate on the primary install's vault (401s, split registries). One export
+        # fixes the whole class. (See edge-mcp streamline audit.)
+        cl2 = ("export CC_SESSION=%s CC_HOME=%s CC_CONFIG=%s; "
+               % (_shlex.quote(name), _shlex.quote(CC_HOME), _shlex.quote(_CC_CONFIG))) + cl2
         sh([TMUX, "new-session", "-d", "-s", name, "-c", wd, cl2 + seed_s])
         try: _smeta_set(name, subject=(subj or None), active_ts=time.time(), model=(model or None))   # topic tag + the model it launched on
         except Exception: pass
@@ -4435,10 +4451,10 @@ def chief_open():
     prompt = ("You are my Chief of Staff, operating from the top level. %s, "
               "give me a one-line status of the operation, and stand by. "
               "For any command needing sudo or interactive input you cannot run it yourself (no TTY) -- "
-              "stage it into this project's Admin shell via POST /api/admin-stage {\"text\":\"<cmd>\"} (it resolves "
-              "the canonical admin session, drops tmux copy-mode, and CONFIRMS the line landed -- do NOT hand-roll "
-              "`tmux send-keys` against a guessed session name), then ask me to run it in the Sessions tab; "
-              "protocol: see docs/SESSIONS_AND_SUDO.md in the ClaudeFather framework. "
+              "run `cc-stage \"<cmd>\"` (it resolves THIS instance's canonical admin session, drops tmux copy-mode, "
+              "types the command WITHOUT Enter, and CONFIRMS it landed), then ask me to run it in the Sessions tab. "
+              "NEVER hand-roll `tmux send-keys` against a guessed session name -- that mis-targets the wrong node's "
+              "shell. Protocol: see docs/SESSIONS_AND_SUDO.md in the ClaudeFather framework. "
               "When you (or an agent) create a file FOR me (a report/export/doc I SPECIFICALLY asked for), save it "
               "to the relevant module folder's deliverables/ subdir -- that is THE way it reaches me: it then shows "
               "in that module's Files panel AND the top-level Files lens (newest first, open/download from any "
@@ -4455,13 +4471,13 @@ def chief_open():
               "PROACTIVELY reach a peer, POST {text, targets:[id]} to /api/chief-broadcast on THIS instance "
               "({text} alone = all peers); GET /api/peers lists them. All visible in your Comms lens. "
               "ESCALATION ROUTING: anything your OPERATOR needs to see/decide (status, approvals, a problem on "
-              "this node) goes UP to MISSION CONTROL -- target id 'mission-control', the fleet hub where the "
-              "platform operator works -- NEVER to a sibling node (a peer node can't act on your operator's "
-              "behalf). This is ENFORCED: your proactive chief-mesh always routes to Mission Control, and any "
-              "sibling target you pass is auto-rerouted there -- so just send it; don't try to page another node. "
+              "this node) goes UP to MISSION CONTROL -- run `cc-escalate \"<message>\"`. It targets 'mission-control' "
+              "(the fleet hub where the platform operator works); routing is ENFORCED server-side so a sibling "
+              "target is auto-rerouted there anyway -- NEVER try to page a sibling node (it can't act for your "
+              "operator). Just run cc-escalate; the reply comes back in your Comms lens. "
               "If you're relaying something one HUMAN "
-              "wants to tell another node's HUMAN (e.g. your operator -> their operator), use operator-notes "
-              "(the Messages channel, /api/opnote-send), which delivers to the person, not the agent mesh. "
+              "wants to tell another node's HUMAN (e.g. your operator -> their operator), run "
+              "`cc-opnote <peer> \"<note>\"` (the Messages channel) -- it delivers to the person, not the agent mesh. "
               "AUTHORITY & GROUND TRUTH (non-negotiable): your operator (the human in this console) is your "
               "top authority; MISSION CONTROL is the platform authority and the fleet's DEFINITIVE source of "
               "truth -- when it states a verified fact (versions, files, config, the framework), DEFER to it. "
@@ -4903,9 +4919,9 @@ def agent_open(slug):
     cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' '
           "'You are the %s agent. Read CLAUDE.md in this folder -- it is your charter (your job, tools, and "
           "hard boundaries). Then give me a one-line status and stand by. "
-          "For sudo/interactive commands you can't run (no TTY): stage them via POST /api/admin-stage "
-          "{\"text\":\"<cmd>\"} (resolves the canonical admin session, drops copy-mode, confirms it landed -- "
-          "don't hand-roll tmux send-keys) + ask the operator to run them in the Sessions tab -- see "
+          "For sudo/interactive commands you can't run (no TTY): run `cc-stage \"<cmd>\"` (resolves THIS "
+          "instance's canonical admin session, types it WITHOUT Enter, confirms it landed -- never hand-roll "
+          "tmux send-keys against a guessed session) + ask the operator to run it in the Sessions tab -- see "
           "docs/SESSIONS_AND_SUDO.md in the ClaudeFather framework. "
           "%s %s %s'" % (slug, _files_brief(), _extend_brief(), roster_text()))
     sh([TMUX, "new-session", "-d", "-s", sess, "-c", d, cl])
@@ -5995,7 +6011,8 @@ def edge_mcp_lens():
         except Exception: pass
         servers.append({"id": s.get("id"), "label": s.get("label") or s.get("id"), "host": s.get("host_id"),
                         "recipe": s.get("recipe"), "mode": s.get("mode", "per-session"),
-                        "warm": bool(st.get("warm")), "ready": bool(st.get("ready")), "calls": st.get("calls", 0)})
+                        "warm": bool(st.get("warm")), "ready": bool(st.get("ready")), "calls": st.get("calls", 0),
+                        "profile": st.get("profile"), "reachable": next((h["reachable"] for h in hosts if h["id"] == s.get("host_id")), None)})
     activity = []
     try:
         logs = sorted(glob.glob(os.path.join(base, "_mcp_activity", "*.jsonl")), key=os.path.getmtime)
@@ -6011,6 +6028,58 @@ def edge_mcp_lens():
                 except Exception: pass
     except Exception: pass
     return {"ok": True, "hosts": hosts, "servers": servers, "activity": activity[-30:]}
+
+
+def _edge_cli(args, timeout=60):
+    """Drive the edge-mcp CLI as THIS node (CC_HOME/CC_CONFIG forced) and return its JSON. The dashboard is the
+    front end for edge-mcp: setup/start/revoke are one click here, backed by the same CLI an agent uses."""
+    exe = os.path.join(CC_HOME, "extensions", "edge-mcp", "runtime", "edge-mcp")
+    if not os.path.exists(exe): exe = "edge-mcp"
+    env = dict(os.environ); env["CC_HOME"] = CC_HOME; env["CC_CONFIG"] = _CC_CONFIG
+    try:
+        r = subprocess.run([exe] + [str(a) for a in args], capture_output=True, text=True, timeout=timeout, env=env)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    out = (r.stdout or "").strip()
+    body = out.split("\n=====", 1)[0].strip() if "\n=====" in out else out   # drop any authorize block after JSON
+    try:
+        data = json.loads(body)
+    except Exception:
+        return {"ok": r.returncode == 0, "raw": out[:2000], "stderr": (r.stderr or "")[:500]}
+    if "\n=====" in out:                                   # surface the user-side authorize snippet to the UI
+        data["authorize"] = out.split("\n=====", 1)[1].split("=====", 1)[-1].strip()
+    return data
+
+
+def edge_mcp_setup(host_id, ssh_target, import_from=None):
+    """One-click 'Connect a browser': register host + key, preflight/auto-fix the host (Node/Chrome), register
+    the browser-attach server. Long op (may brew-install Node) -- generous timeout."""
+    host_id = (host_id or "").strip(); ssh_target = (ssh_target or "").strip()
+    if not host_id or not ssh_target or "@" not in ssh_target:
+        return {"ok": False, "error": "need a host id and a user@address"}
+    args = ["setup-browser", host_id, ssh_target]
+    if import_from: args += ["--import", import_from]
+    return _edge_cli(args, timeout=470)
+
+
+def edge_mcp_action(action, server, keep_profile=False):
+    if action not in ("start", "stop", "probe", "revoke"):
+        return {"ok": False, "error": "unknown action %r" % action}
+    args = [action, server] + (["--keep-profile"] if (action == "revoke" and keep_profile) else [])
+    return _edge_cli(args, timeout=180)
+
+
+def edge_mcp_accounts(server):
+    return _edge_cli(["accounts", server], timeout=45)
+
+
+def edge_mcp_import(server, source_profile="Default"):
+    """Seed the agent browser with the user's existing Chrome logins (best-effort). Stops the browser first so
+    its profile is writable, then imports; the user starts it again after."""
+    if not server: return {"ok": False, "error": "server required"}
+    _edge_cli(["stop", server], timeout=30)
+    return _edge_cli(["import-logins", server, "--profile", source_profile or "Default"], timeout=90)
+
 
 def _gitignore_add(line):
     """Append a line to the deployment .gitignore if absent (so per-deployment install output never lands in
@@ -9628,20 +9697,21 @@ def _files_brief():
     """How an agent should place files: by RELEVANCE (the module the work belongs to), not merely where it was
     launched -- and leave a well-laid-out, self-describing structure for the next agent. Shared by chief +
     agent-tools so placement is consistent everywhere."""
-    return ("FILES + STRUCTURE: deliver every file you create FOR the user into a `deliverables/` subdir -- it "
-            "then shows in that module's Files panel + the top-level Files lens (and auto-syncs on iCloud "
-            "deployments). Place it under the module the work BELONGS to, found via the Module map in the root "
-            "CLAUDE.md -- NOT merely where you were launched; if you were started in the wrong place, save by "
-            "relevance. "
-            "WHAT COUNTS AS A DELIVERABLE: ONLY a file the user SPECIFICALLY asked you to produce. Every file you "
-            "drop in `deliverables/` pops a 'new file ready' card for them, so do NOT put working notes, scratch, "
-            "intermediate drafts, or things you made on your own initiative there -- keep those in a scratch/ or "
-            "working dir. Never auto-email or 'hand over' a file the user did not ask for. "
-            "DELIVERABLE FORMAT: produce user-facing deliverables in a SHAREABLE format the recipient can open -- a "
-            "Google Doc/Sheet (via the Google Workspace tools), Word (.docx), PDF, a spreadsheet (.xlsx), or plain "
-            ".txt. Markdown (.md) is for internal/working notes ONLY -- never hand a raw `.md` to the user as the "
-            "finished deliverable unless they explicitly ask for Markdown. If the right format is ambiguous, ASK "
-            "(Word / PDF / plain text) before producing it. "
+    return ("DELIVERING A FILE TO THE USER: run `cc-deliver <file>` -- it is the ONE reliable way, and it is on "
+            "your PATH. It places the file where the dashboard Files lens actually looks AND verifies it truly "
+            "surfaced (exit 0 = confirmed visible + the 'new file ready' card will pop; non-zero = it tells you "
+            "exactly why it failed). NEVER hand-place a file in a `deliverables/` folder yourself: the store has a "
+            "managed layout and a wrong drop is SILENTLY invisible -- no card, no error, and you CANNOT check "
+            "/api/files without the operator token. `cc-deliver` removes that trap. Flags: `--to <email>` also emails "
+            "it (a guaranteed second channel); `--module <name>` files it under a specific module; `cc-deliver --list` "
+            "shows what the operator currently sees. "
+            "WHAT COUNTS AS A DELIVERABLE: ONLY a file the user SPECIFICALLY asked you to produce -- each one pops a "
+            "card, so keep working notes, scratch, and self-initiated drafts in a scratch/ or working dir, and never "
+            "auto-email or 'hand over' a file the user did not ask for. "
+            "FORMAT: produce it in the format that fits what the user asked for. If they named a format -- or the "
+            "content is naturally a .md, .txt, .csv, Google Doc/Sheet, .docx, .pdf, or .xlsx -- use THAT. A plain "
+            ".md is perfectly fine when that suits the file; do NOT burn time converting to a 'nicer' format the user "
+            "didn't ask for. Only when the right format is genuinely ambiguous, ASK. "
             "When you build something new (a tool, an area), give its folder a CLAUDE.md (an H1 title "
             "+ ONE plain sentence describing it) so the platform + future agents recognize + can navigate it, and "
             "file any durable learning into that module's CC:NOTES. Keep each CLAUDE.md an INDEX (point to "
@@ -9804,7 +9874,7 @@ def _system_brief():
         try:
             if CC.get("handoff", True) is not False:
                 base += ("\n\nYOU ARE THE FRONT DOOR (triage / warm-transfer desk): when the operator raises a topic, "
-                         "route it to the right HOME before going deep -- GET /api/route?q=<topic> returns the best "
+                         "route it to the right HOME before going deep -- run `cc-route \"<topic>\"` to get the best "
                          "scope (or that a new home is needed). Prefer launching/continuing the right scoped agent "
                          "THERE (or propose a warm transfer: cc-handoff propose --to <scope|new>) over handling "
                          "everything in this general session; if a topic has no home, propose creating one. The point "
@@ -10254,6 +10324,148 @@ def _session_scope(sess):
             r = os.path.relpath(cwd, PROJECT); return "" if r == "." else r
     except Exception: pass
     return None
+
+# ---- Cross-vendor advisor ("Third-party review") -----------------------------
+# An independent external GPT (Codex on the ChatGPT subscription) reviews a
+# session's recent work and returns a second opinion. Engine = command-center/
+# cc-advise (report-only, fail-open, budget-guarded). Spec: conceptsandideas/
+# OmniAgent/deliverables/CROSS_VENDOR_ADVISOR_SPEC.md (7b). v1 = on-demand button
+# in any session header -> auto-assemble context -> opinion -> manual Inject +
+# auto-inject toggle. Auto-inject uses the SAME guarded injector as the mesh
+# (_mesh_deliver: defers to the compact lock + waits for the pane to be free).
+CC_ADVISE = os.path.join(BASE, "cc-advise")
+ADVISE_STATE = os.path.join(STATE_DIR, "_advise.json")               # per-session prefs + last result
+ADVISE_BUDGET = os.path.join(STATE_DIR, "_advise_budget.json")       # daily call cap (Plus-safe)
+ADVISE_MAX_PER_DAY = int((CC.get("advisor") or {}).get("max_calls_per_day", 40))
+_ADVISE_LOCK = threading.Lock()
+
+def _advise_load(): return load(ADVISE_STATE, {"sessions": {}})
+def _advise_save(d): save(ADVISE_STATE, d)
+def _advise_prefs(name):
+    return (_advise_load().get("sessions", {}).get(name) or {})
+
+def advise_set_pref(session_id, key, value):
+    name = re.sub(r"[^A-Za-z0-9_-]", "", session_id or "")[:64]
+    if not name: return {"ok": False, "error": "no session"}
+    if key not in ("autoinject", "verify"): return {"ok": False, "error": "bad key"}
+    with _ADVISE_LOCK:
+        d = _advise_load(); s = d.setdefault("sessions", {}).setdefault(name, {})
+        s[key] = bool(value); _advise_save(d)
+    return {"ok": True, key: bool(value)}
+
+def advise_state(session_id):
+    name = re.sub(r"[^A-Za-z0-9_-]", "", session_id or "")[:64]
+    p = _advise_prefs(name)
+    return {"ok": True, "autoinject": bool(p.get("autoinject")),
+            "verify": bool(p.get("verify")), "last": p.get("last")}
+
+def _advise_recent_files(cwd, limit=8, cap=4000):
+    """Recently-modified files under a session's cwd -- the 'latest deliverables' hint. Names+relpath only,
+    bounded so a huge repo never stalls the request. Skips VCS/vendor/state noise."""
+    out = []
+    if not cwd or not os.path.isdir(cwd): return out
+    skip = {".git", "node_modules", "__pycache__", ".venv", "venv", "data",
+            "handoffs", "_handoffs", ".pipeline", "dist", "build"}
+    seen = 0
+    try:
+        for root, dirs, files in os.walk(cwd):
+            dirs[:] = [x for x in dirs if x not in skip and not x.startswith(".")]
+            if root[len(cwd):].count(os.sep) > 3: dirs[:] = []
+            for fn in files:
+                if fn.startswith(".") or fn.endswith((".pyc", ".jsonl", ".log")): continue
+                seen += 1
+                if seen > cap: dirs[:] = []; break
+                p = os.path.join(root, fn)
+                try: out.append((os.path.getmtime(p), os.path.relpath(p, cwd)))
+                except Exception: pass
+    except Exception: pass
+    out.sort(reverse=True)
+    return [rel for _, rel in out[:limit]]
+
+def _advise_render(v):
+    """A structured verdict dict -> the plain-text review shown in the panel and injected into Claude."""
+    if not isinstance(v, dict): return ""
+    vd = v.get("verdict")
+    if vd == "skipped":
+        return "Advisor skipped: %s" % (v.get("reason") or "the external reviewer was unavailable")
+    lines = ["VERDICT: %s" % str(vd or "?").upper()]
+    bl = v.get("blocking") or []
+    lines.append("\nBlocking (%d):" % len(bl))
+    for b in bl:
+        if isinstance(b, dict):
+            lines.append("  - %s" % b.get("issue", ""))
+            if b.get("location"): lines.append("      @ %s" % b["location"])
+            if b.get("why"): lines.append("      why: %s" % b["why"])
+        else:
+            lines.append("  - %s" % b)
+    if not bl: lines.append("  (none)")
+    nb = v.get("nonblocking") or []
+    lines.append("\nNon-blocking (%d):" % len(nb))
+    for s in nb: lines.append("  - %s" % (s if isinstance(s, str) else json.dumps(s)))
+    if not nb: lines.append("  (none)")
+    g = (v.get("next_task_guidance") or "").strip()
+    if g: lines.append("\nGuidance for the next task:\n  %s" % g)
+    return "\n".join(lines)
+
+_ADVISE_MARK = "\U0001f535 GPT ADVISOR (external"
+def _advise_inject_block(opinion):
+    """Wrap the opinion with the provenance stamp (spec 6) so Claude reads it as labeled external advice."""
+    opinion = (opinion or "").strip()
+    if opinion.startswith(_ADVISE_MARK): return opinion    # already stamped -> don't double-wrap
+    return (_ADVISE_MARK + ", independent review of this session's recent work -- "
+            "weigh it, you hold the pen):\n\n" + opinion)
+
+def advise_run(session_id, verify=False):
+    """Assemble a session's recent context and get an external GPT second opinion. Fail-open."""
+    name = re.sub(r"[^A-Za-z0-9_-]", "", session_id or "")[:64]
+    if not name or sh([TMUX, "has-session", "-t", name])[0] != 0:
+        return {"ok": False, "error": "no such session"}
+    if not os.path.isfile(CC_ADVISE):
+        return {"ok": False, "error": "advisor engine missing (%s)" % CC_ADVISE}
+    cwd = _pane_cwd(name) or PROJECT
+    tpath = _session_transcript_path(name)
+    tail = _transcript_tail(tpath, maxchars=16000) if tpath else ""
+    recent = _advise_recent_files(cwd)
+    advise_set_pref(name, "verify", bool(verify))   # remember the rigor choice for this session
+    payload = (
+        "=== SESSION UNDER REVIEW ===\n"
+        "A Claude agent has been working in this session. Below is the RECENT CONVERSATION "
+        "(what it was asked, what it did, and how it summarized the finished work), followed by "
+        "the files most recently touched in the working directory. Review the finished work "
+        "against what was asked -- skeptically.\n\n"
+        "Working directory (repo root you may read): %s\n\n"
+        "=== RECENTLY MODIFIED FILES ===\n%s\n\n"
+        "=== RECENT CONVERSATION (human + assistant) ===\n%s\n"
+        % (cwd, "\n".join(recent) or "(none found)", tail or "(transcript unavailable)")
+    )
+    cmd = ["python3", CC_ADVISE, "--payload", "-", "--repo", cwd, "--json",
+           "--budget-file", ADVISE_BUDGET, "--max-calls-per-day", str(ADVISE_MAX_PER_DAY)]
+    if verify: cmd.append("--verify")
+    try:
+        r = subprocess.run(cmd, input=payload, text=True, capture_output=True, timeout=340)
+        v = json.loads(r.stdout or "{}")
+    except Exception as e:   # fail-open: the Claude work is never blocked by advisor trouble
+        return {"ok": True, "verdict": "skipped",
+                "reason": "advisor call failed: %s" % str(e)[:200], "opinion": ""}
+    opinion = _advise_render(v)
+    with _ADVISE_LOCK:
+        d = _advise_load(); s = d.setdefault("sessions", {}).setdefault(name, {})
+        s["last"] = {"verdict": v.get("verdict"), "ts": int(time.time()), "opinion": opinion}
+        autoinject = bool(s.get("autoinject")); _advise_save(d)
+    injected = False
+    if autoinject and v.get("verdict") not in (None, "skipped") and opinion.strip():
+        _mesh_deliver(name, _advise_inject_block(opinion)); injected = True
+    return {"ok": True, "verdict": v.get("verdict"), "opinion": opinion, "raw": v,
+            "autoinject": autoinject, "injected": injected}
+
+def advise_inject(session_id, text):
+    """Manually inject a review into a session (the operator's 'Inject into Claude' button)."""
+    name = re.sub(r"[^A-Za-z0-9_-]", "", session_id or "")[:64]
+    if not name or sh([TMUX, "has-session", "-t", name])[0] != 0:
+        return {"ok": False, "error": "no such session"}
+    if not (text or "").strip(): return {"ok": False, "error": "nothing to inject"}
+    _mesh_deliver(name, _advise_inject_block(text))
+    return {"ok": True}
 
 def _scope_candidates(limit=500):
     """The HOMES a conversation can be routed to: every meaningful module (folder with a hand-authored CLAUDE.md,
@@ -15043,6 +15255,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"text": term_snapshot((q.get("name") or [""])[0], (q.get("lines") or ["60"])[0])}))
         if u.path == "/api/compact-state":
             return self._s(200, json.dumps(_COMPACT_STATE.get((q.get("name") or [""])[0], {})))
+        if u.path == "/api/advise-state":
+            return self._s(200, json.dumps(advise_state((q.get("name") or q.get("session_id") or [""])[0])))
         if u.path == "/api/autocompact":
             return self._s(200, json.dumps({"on": _autocompact_on(), "pct": _autocompact_pct()}))
         if u.path == "/api/ideas": return self._s(200, json.dumps(ideas_list()))
@@ -15153,6 +15367,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/routines":      return self._s(200, json.dumps(routines_list()))
         if u.path == "/api/ext-data":      return self._s(200, json.dumps(ext_data((q.get("ext") or [""])[0], (q.get("resource") or [""])[0], q)))
         if u.path == "/api/edge-mcp/lens": return self._s(200, json.dumps(edge_mcp_lens()))
+        if u.path == "/api/edge-mcp/accounts": return self._s(200, json.dumps(edge_mcp_accounts(q.get("server", [""])[0])))
         if u.path == "/api/version-check": return self._s(200, json.dumps(version_check()))
         if u.path == "/api/agent-report":  return self._s(200, json.dumps(agent_report(q.get("slug", [""])[0])))
         if u.path == "/api/skills":        return self._s(200, json.dumps(skills_list()))
@@ -15522,6 +15737,12 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(ext_run(body.get("ext", ""), body.get("fn"), body.get("inputs") or {}, body.get("session"))))
         if u.path == "/api/compact-session":  # handoff -> /compact -> re-read handoff (preserve agent memory)
             return self._s(200, json.dumps(compact_session(body.get("name", ""))))
+        if u.path == "/api/advise":           # cross-vendor "Third-party review": external GPT second opinion
+            return self._s(200, json.dumps(advise_run(body.get("session_id") or body.get("name") or "", bool(body.get("verify")))))
+        if u.path == "/api/advise-inject":    # manual gate: inject the review into the session (guarded injector)
+            return self._s(200, json.dumps(advise_inject(body.get("session_id") or body.get("name") or "", body.get("text") or "")))
+        if u.path == "/api/advise-toggle":    # persist per-session prefs (autoinject / verify)
+            return self._s(200, json.dumps(advise_set_pref(body.get("session_id") or body.get("name") or "", body.get("key") or "", body.get("value"))))
         if u.path == "/api/autocompact":      # turn graceful auto-compact on/off + set the % threshold (persists to cc.config, live)
             try:
                 if "on" in body: CC["autocompact"] = bool(body.get("on"))
@@ -15804,6 +16025,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/routine-set":         return self._s(200, json.dumps(routine_set(body.get("name", ""), body.get("enabled"))))
         if u.path == "/api/routine-delete":      return self._s(200, json.dumps(routine_delete(body.get("name", ""))))
         if u.path == "/api/ext-action":          return self._s(200, json.dumps(ext_action(body.get("ext", ""), body.get("action", ""), body.get("payload") or {})))
+        if u.path == "/api/edge-mcp/setup":      return self._s(200, json.dumps(edge_mcp_setup(body.get("host_id", ""), body.get("ssh_target", ""), body.get("import") or None)))
+        if u.path == "/api/edge-mcp/action":     return self._s(200, json.dumps(edge_mcp_action(body.get("action", ""), body.get("server", ""), bool(body.get("keep_profile")))))
+        if u.path == "/api/edge-mcp/import":      return self._s(200, json.dumps(edge_mcp_import(body.get("server", ""), body.get("profile") or "Default")))
         if u.path == "/api/extension-install":   return self._s(200, json.dumps(extension_install(body.get("id", ""))))
         if u.path == "/api/entitlement-grant":   return self._s(200, json.dumps(entitlement_grant(body.get("node", INSTANCE_ID), body.get("ext", ""), int(body.get("days", 0) or 0))))
         if u.path == "/api/entitlement-revoke":  return self._s(200, json.dumps(entitlement_revoke(body.get("node", INSTANCE_ID), body.get("ext", ""))))
@@ -17474,6 +17698,8 @@ textarea{width:100%;min-height:240px;font-family:ui-monospace,Menlo,Monaco,monos
 #ccDlg{position:fixed;inset:0;z-index:10050;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(8,8,12,.74);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)}
 #ccDlg .modal{width:min(440px,94vw)}
 #ccDlg .mbody{font-size:13.5px;line-height:1.6;color:var(--ink);white-space:normal;margin:2px 0 2px;max-height:60vh;overflow:auto;overflow-wrap:anywhere}
+#advDlg{position:fixed;inset:0;z-index:10060;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(8,8,12,.74);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)}
+#advDlg .modal{width:min(640px,94vw)}
 .btn.danger{background:rgba(248,81,73,.14);color:#f85149;border-color:rgba(248,81,73,.4)}.mini.danger{color:#f85149}
 .modal::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;border-radius:18px 18px 0 0;background:var(--grad);opacity:.9}
 .modal h2{margin:0 0 16px;font-size:19px;font-weight:700;letter-spacing:-.01em;color:var(--ink);display:flex;align-items:center;gap:9px}
@@ -23024,6 +23250,7 @@ async function loadNotes(){
 var NB={notes:[],hasVoice:false,rec:null,chunks:[],q:""};
 async function nbSearch(){var i=document.getElementById("nbSearch");NB.q=i?i.value:"";var f=i&&document.activeElement===i;var p=i?i.selectionStart:0;await loadNotebook();var i2=document.getElementById("nbSearch");if(i2&&f){i2.focus();try{i2.setSelectionRange(p,p);}catch(e){}}}
 // ---- Email Archive lens (email-archive extension): ASK (bounded AI) + faceted full-text search + threads -------
+let EDGE={setupOpen:false, busy:false, result:null};
 async function loadEdgeMcp(){
   var g=document.getElementById('grid');
   var d; try{ d=await(await fetch('/api/edge-mcp/lens')).json(); }catch(e){ d={ok:false,error:'not reachable'}; }
@@ -23033,18 +23260,47 @@ async function loadEdgeMcp(){
   var reach=hosts.filter(function(h){return h.reachable;}).length;
   var h='<div class="modstack">';
   h+='<div class="cc-head"><span class="cc-h-t">Edge MCP Host</span><span class="cc-h-sub">'+hosts.length+' host'+(hosts.length==1?'':'s')+' ('+reach+' reachable) · '+servers.length+' server'+(servers.length==1?'':'s')+' ('+warm+' warm)</span></div>';
+
+  // ---- Connect a browser (the front-end setup wizard) ----
+  h+='<div class="cc-panel"><div class="cc-p-h"><b>Connect a browser</b> <span class="cc-p-note">drive a user\'s real Chrome on their own machine — logins are remembered: sign into a site once, the agent returns to it logged in</span></div>';
+  if(!EDGE.setupOpen && !EDGE.busy && !EDGE.result){
+    h+='<div style="margin-top:9px"><button class="btn go" onclick="edgeToggleSetup(1)">+ Connect a browser</button></div>';
+  }
+  if(EDGE.setupOpen){
+    h+='<div style="margin-top:9px;display:flex;gap:7px;flex-wrap:wrap;align-items:center">'
+      +'<input id="edgeHostId" class="cc-in" placeholder="name (e.g. work-laptop)" style="width:170px">'
+      +'<input id="edgeTarget" class="cc-in" placeholder="user@tailnet-address (e.g. jo@100.x.y.z)" style="flex:1;min-width:260px">'
+      +'<button class="btn go" onclick="edgeSetup()">Set up</button> <button class="btn" onclick="edgeToggleSetup(0)">Cancel</button></div>'
+      +'<div class="cc-p-note" style="margin-top:7px">The machine must have Remote Login (SSH) on. If no already-authorized key is found, you\'ll get a one-line snippet to paste on that machine. Node/Chrome get checked and installed if missing.</div>';
+  }
+  if(EDGE.busy) h+='<div class="cc-p-note" style="margin-top:9px">Setting up the host — checking SSH, Node.js and Chrome (may install Node, up to a couple of minutes)…</div>';
+  if(EDGE.result) h+=edgeResultView(EDGE.result);
+  h+='</div>';
+
+  // ---- Servers (with actions) ----
+  h+='<div class="cc-list"><div class="cc-sec">Browsers &amp; servers</div>';
+  if(!servers.length) h+=empty('None yet. Click “Connect a browser” above.');
+  servers.forEach(function(s){
+    var wb = s.warm ? (s.ready?'<span class="badge bdg-green">ready</span>':'<span class="badge bdg-amber">starting</span>') : (s.reachable===false?'<span class="badge bdg-amber">host asleep</span>':'<span class="badge bdg-gray">cold</span>');
+    var isBrowser = s.recipe=='browser-attach';
+    h+='<div class="cc-item"><div class="cc-main"><div class="cc-ti">'+esc(s.label)+' '+wb+'</div><div class="cc-mt">'+(s.recipe?esc(s.recipe)+' · ':'')+esc(s.mode||'')+' · host '+esc(s.host||'?')+' · '+(s.calls||0)+' calls</div>';
+    if(isBrowser && s.warm && s.ready) h+='<div class="cc-mt" style="color:var(--accent,#e8c547)">↳ ready to drive. Sign into a site once in the Chrome window on their machine — it\'s remembered next time.</div>';
+    h+='</div><div class="cc-side" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">';
+    if(!s.warm) h+='<button class="btn" onclick="edgeAction(\''+esc(s.id)+'\',\'start\')">Start</button>';
+    if(isBrowser){ h+='<button class="btn" onclick="edgeAccounts(\''+esc(s.id)+'\')">Logins</button>';
+      h+='<button class="btn" onclick="edgeImport(\''+esc(s.id)+'\')" title="Copy the user\'s existing Chrome logins in (best-effort; Chrome must be quit)">Import existing</button>';
+      h+='<button class="btn" style="color:var(--err)" onclick="edgeRevoke(\''+esc(s.id)+'\')">Forget logins</button>'; }
+    h+='</div></div>';
+    h+='<div id="edgeAcc_'+esc(s.id)+'"></div>';
+  });
+  h+='</div>';
+
+  // ---- Hosts ----
   h+='<div class="cc-list"><div class="cc-sec">Hosts</div>';
-  if(!hosts.length) h+=empty('No hosts registered. Use edge-mcp add-host.');
+  if(!hosts.length) h+=empty('No hosts registered.');
   hosts.forEach(function(x){
     var b = x.reachable ? '<span class="badge bdg-green">reachable</span>' : (x.power=='laptop'?'<span class="badge bdg-amber">asleep?</span>':'<span class="badge bdg-red">unreachable</span>');
     h+='<div class="cc-item"><div class="cc-main"><div class="cc-ti">'+esc(x.label)+' '+b+'</div><div class="cc-mt">'+esc(x.mode||'')+(x.user?(' · '+esc(x.user)+'@'+esc(x.addr||'')):'')+(x.platform?(' · '+esc(x.platform)):'')+(x.power?(' · '+esc(x.power)):'')+'</div></div></div>';
-  });
-  h+='</div>';
-  h+='<div class="cc-list"><div class="cc-sec">Servers</div>';
-  if(!servers.length) h+=empty('No servers registered. Use edge-mcp add-server.');
-  servers.forEach(function(s){
-    var wb = s.warm ? (s.ready?'<span class="badge bdg-green">warm</span>':'<span class="badge bdg-amber">starting</span>') : '<span class="badge bdg-gray">cold</span>';
-    h+='<div class="cc-item"><div class="cc-main"><div class="cc-ti">'+esc(s.label)+' '+wb+'</div><div class="cc-mt">'+(s.recipe?esc(s.recipe)+' · ':'')+esc(s.mode||'')+' · host '+esc(s.host||'?')+' · '+(s.calls||0)+' calls</div></div></div>';
   });
   h+='</div>';
   h+='<div class="cc-panel"><div class="cc-p-h"><b>Recent activity</b> <span class="cc-p-note">every MCP tool call, captured by the transparency proxy</span></div>';
@@ -23061,6 +23317,65 @@ async function loadEdgeMcp(){
   }
   h+='</div></div>';
   g.innerHTML=h;
+}
+function edgeToggleSetup(on){ EDGE.setupOpen=!!on; if(!on){EDGE.result=null;} loadEdgeMcp(); }
+function edgeChecklist(steps){
+  if(!steps||!steps.length) return '';
+  var h='<div style="margin-top:9px">';
+  steps.forEach(function(c){
+    var ic = c.ok? '<span style="color:var(--ok,#5cba7d)">✓</span>' : '<span style="color:var(--err)">✗</span>';
+    var fx = (!c.ok && c.fix)? ' <span style="color:var(--dim)">— '+esc(c.fix)+'</span>' : '';
+    h+='<div style="font:13px/1.6 ui-monospace,monospace">'+ic+' <b>'+esc(c.check||'')+'</b> '+esc(c.detail||'')+(c.fixed?' <span class="badge bdg-green">auto-fixed</span>':'')+fx+'</div>';
+  });
+  return h+'</div>';
+}
+function edgeResultView(r){
+  var h='<div style="margin-top:11px;border-top:1px solid var(--line,#2a2f3a);padding-top:10px">';
+  var badge = r.ok? '<span class="badge bdg-green">ready</span>' : (r.authorize?'<span class="badge bdg-amber">needs authorize</span>':'<span class="badge bdg-red">action needed</span>');
+  h+='<div class="cc-ti">'+esc(r.server||'browser')+' '+badge+'</div>';
+  h+=edgeChecklist(r.steps);
+  if(r.authorize) h+='<div class="cc-p-note" style="margin-top:9px">Send this to the user to run on their machine:</div><pre style="white-space:pre-wrap;font:12px/1.5 ui-monospace,monospace;background:var(--panel2,#151922);padding:9px;border-radius:8px;overflow-x:auto">'+esc(r.authorize)+'</pre>';
+  if(r.next) h+='<div style="margin-top:9px"><b>Next:</b> '+esc(r.next)+'</div>';
+  if(r.consent_note) h+='<div class="cc-p-note" style="margin-top:7px;color:var(--amber,#d6a94a)">⚠ '+esc(r.consent_note)+'</div>';
+  if(r.error) h+='<div style="margin-top:9px;color:var(--err)">'+esc(r.error)+'</div>';
+  h+='<div style="margin-top:10px"><button class="btn go" onclick="edgeToggleSetup(0)">Done</button></div></div>';
+  return h;
+}
+async function edgeSetup(){
+  var hid=(document.getElementById('edgeHostId')||{}).value||'';
+  var tgt=(document.getElementById('edgeTarget')||{}).value||'';
+  if(!hid.trim()||tgt.indexOf('@')<0){ toast('Enter a name and user@address',2600); return; }
+  EDGE.busy=true; EDGE.setupOpen=false; EDGE.result=null; loadEdgeMcp();
+  var r; try{ r=await(await fetch('/api/edge-mcp/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({host_id:hid.trim(),ssh_target:tgt.trim()})})).json(); }catch(e){ r={ok:false,error:'setup request failed (timeout?)'}; }
+  EDGE.busy=false; EDGE.result=r; loadEdgeMcp();
+}
+async function edgeAction(server,action){
+  toast(action+'…',1600);
+  var r; try{ r=await(await fetch('/api/edge-mcp/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:server,action:action})})).json(); }catch(e){ r={ok:false,error:'failed'}; }
+  toast(r.ok?(action+' ok'):(r.error||'failed'), r.ok?2200:4000); loadEdgeMcp();
+}
+async function edgeRevoke(server){
+  if(!await confirmM('Forget all logins for '+server+'?\n\nThis stops the browser and WIPES its saved profile — every remembered login is cleared and the user would sign in again next time.')) return;
+  var r; try{ r=await(await fetch('/api/edge-mcp/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:server,action:'revoke'})})).json(); }catch(e){ r={ok:false,error:'failed'}; }
+  toast(r.ok?(r.profile_wiped?'Logins forgotten — profile wiped':'Stopped'):(r.error||'failed'), 3200); loadEdgeMcp();
+}
+async function edgeImport(server){
+  if(!await confirmM('Import existing logins into '+server+'?\n\nBest-effort: copies the user\'s current Chrome logins (cookies) into the agent browser so it starts already signed in. Chrome must be FULLY QUIT on that machine, and it only works on the same computer/account. Anything it can\'t copy, the user just signs into once.')) return;
+  toast('importing…',2000);
+  var r; try{ r=await(await fetch('/api/edge-mcp/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:server})})).json(); }catch(e){ r={ok:false,error:'failed'}; }
+  toast(r.ok?'Imported — click Start and check the sites':(r.error||'import failed'), r.ok?3200:5000); loadEdgeMcp();
+}
+async function edgeAccounts(server){
+  var box=document.getElementById('edgeAcc_'+server); if(box) box.innerHTML='<div class="cc-p-note" style="padding:4px 0 8px">reading logins…</div>';
+  var r; try{ r=await(await fetch('/api/edge-mcp/accounts?server='+encodeURIComponent(server))).json(); }catch(e){ r={ok:false,error:'failed'}; }
+  if(!box) return;
+  if(!r.ok){ box.innerHTML='<div class="cc-p-note" style="color:var(--err);padding:4px 0 8px">'+esc(r.error||'failed')+'</div>'; return; }
+  var rem=(r.remembered||[]), open=(r.open_domains||[]);
+  var h='<div style="padding:4px 0 9px;font:12px/1.6 ui-monospace,monospace">';
+  h+='<div><b>Remembered (stays signed in):</b> '+(rem.length?rem.map(esc).join(', '):'<span style="color:var(--dim)">none saved yet — sign into a site once to remember it</span>')+'</div>';
+  h+='<div class="cc-p-note" style="margin-top:3px">open now: '+(open.length?open.map(esc).join(', '):'no tabs open')+'</div>';
+  h+='<div class="cc-p-note" style="margin-top:3px">profile: '+esc(r.profile||'')+'</div>';
+  box.innerHTML=h+'</div>';
 }
 let EMAILA={q:'',res:null,facets:null,contact:null,year:null,ask:null,asking:false}, _emT=null;
 async function loadEmailArchive(){
@@ -24397,6 +24712,7 @@ function paneHead(x){return '<div class="sthead"><span class="stdot">'+(x.attach
   +'<span class="stbtns">'
   +'<button class="mini panedown" title="push this session back down to the taskbar" onclick="paneDown(\''+esc(x.name)+'\')">&#11015;</button>'
   +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
+  +'<button class="mini" title="Third-party review — an independent external GPT (a different AI vendor) reviews this session\'s recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." onclick="adviseOpen(\''+esc(x.name)+'\')">🔵</button>'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
   +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
   +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
@@ -24732,6 +25048,47 @@ function confirmM(msg,opt){ opt=opt||{}; return new Promise(function(res){ var d
 function promptM(label,def,opt){ opt=opt||{}; return new Promise(function(res){ var d=_ccdlg((opt.title?'<h2>'+esc(opt.title)+'</h2>':'')+'<div class="row">'+(label?'<label>'+_dlgmsg(label)+'</label>':'')+'<input id="_dIn" value="'+esc(def==null?'':String(def))+'" autocomplete="off"></div><div class="btns"><button class="btn" id="_dCancel">Cancel</button><button class="btn go" id="_dOk">'+esc(opt.ok||'OK')+'</button></div>'); var inp=document.getElementById('_dIn'); var fin=function(v){ _ccdlgClose(); res(v); }; d._esc=function(){fin(null);}; document.getElementById('_dOk').onclick=function(){fin(inp?inp.value:'');}; document.getElementById('_dCancel').onclick=function(){fin(null);}; if(inp){ inp.onkeydown=function(e){ if(e.key==='Enter'){e.preventDefault();fin(inp.value);} else if(e.key==='Escape'){e.preventDefault();fin(null);} }; setTimeout(function(){inp.focus();inp.select();},40); } }); }
 function alertM(msg,opt){ opt=opt||{}; return new Promise(function(res){ var d=_ccdlg((opt.title?'<h2>'+esc(opt.title)+'</h2>':'')+'<div class="mbody">'+_dlgmsg(msg)+'</div><div class="btns"><button class="btn go" id="_dOk">'+esc(opt.ok||'OK')+'</button></div>'); var fin=function(){ _ccdlgClose(); res(); }; d._esc=fin; document.getElementById('_dOk').onclick=fin; setTimeout(function(){var b=document.getElementById('_dOk');if(b)b.focus();},40); }); }
 function toast(t,ms){const e=document.getElementById("toast");e.innerHTML=t;e.style.display="block";clearTimeout(e._t);e._t=setTimeout(()=>e.style.display="none",ms||2800);}
+// ---- Cross-vendor advisor ("Third-party review"): an external GPT second opinion on a session ----
+var _adviseSess=null, _adviseLast=null;
+function _advDlg(inner){ var d=document.getElementById('advDlg'); if(!d){ d=document.createElement('div'); d.id='advDlg'; d.tabIndex=-1; document.body.appendChild(d); d.addEventListener('mousedown',function(e){ if(e.target===d&&d._esc) d._esc(); }); d.addEventListener('keydown',function(e){ if(e.key==='Escape'&&d._esc){ e.preventDefault(); d._esc(); } }); } d.innerHTML='<div class="modal" role="dialog" aria-modal="true">'+inner+'</div>'; d.style.display='flex'; return d; }
+function _advClose(){ var d=document.getElementById('advDlg'); if(d){ d.style.display='none'; d._esc=null; } }
+function _adviseBadge(vd){ var m={ship:['bdg-ok','SHIP'],revise:['bdg-amber','REVISE'],block:['bdg-red','BLOCK'],skipped:['bdg-gray','SKIPPED']}; var b=m[vd]||['bdg-gray',String(vd||'?').toUpperCase()]; return '<span class="badge '+b[0]+'">'+b[1]+'</span>'; }
+async function adviseOpen(name){
+  _adviseSess=name; _adviseLast=null;
+  var st={}; try{ st=await (await fetch('/api/advise-state?name='+encodeURIComponent(name))).json()||{}; }catch(e){}
+  _advDlg('<h2>Third-party review</h2>'
+    +'<div class="cc-p-sub" style="margin:-10px 0 12px">An independent external GPT (a different AI vendor) reviews <b>'+esc(name)+'</b>&#39;s recent work &mdash; a skeptical second opinion. It reads only; Claude holds the pen.</div>'
+    +'<div id="advBody"><div style="padding:22px 4px;color:var(--dim)">Assembling this session&#39;s context and asking the external reviewer&hellip; this can take a minute or two.</div></div>'
+    +'<div class="btns" id="advBtns"><button class="btn" onclick="_advClose()">Close</button></div>');
+  document.getElementById('advDlg')._esc=function(){_advClose();};
+  var res=null;
+  try{ res=await (await fetch('/api/advise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:name,verify:!!st.verify})})).json(); }
+  catch(e){ res={ok:false,error:'request failed'}; }
+  if(_adviseSess!==name) return;                                   // operator moved on
+  var dd=document.getElementById('advDlg'); if(!dd||dd.style.display==='none') return;   // closed mid-run
+  _adviseLast=res; _adviseRenderResult(res, st);
+}
+function _adviseRenderResult(res, st){
+  var body=document.getElementById('advBody'), btns=document.getElementById('advBtns'); if(!body) return; st=st||{};
+  if(!res||!res.ok){ body.innerHTML='<div style="padding:14px 4px;color:var(--fxbig)">Review failed: '+esc((res&&res.error)||'unknown')+'</div>'; return; }
+  var vd=res.verdict;
+  if(vd==='skipped'){ body.innerHTML='<div class="cc-p-note">Advisor skipped: '+esc(res.reason||'the external reviewer was unavailable or the daily cap was reached')+'. Your Claude work is untouched.</div>';
+    if(btns) btns.innerHTML='<button class="btn" onclick="adviseRerun()">Re-run</button><button class="btn" onclick="_advClose()">Close</button>'; return; }
+  var toggles='<div style="display:flex;gap:18px;flex-wrap:wrap;margin:2px 0 12px;font-size:12.5px">'
+    +'<label style="display:flex;align-items:center;gap:7px;cursor:pointer"><input type="checkbox" id="advAuto" style="width:auto" '+(st.autoinject?'checked':'')+' onchange="adviseToggle(\'autoinject\',this.checked)"> <span title="When on, every review is injected straight into Claude without asking.">Auto-inject reviews into Claude</span></label>'
+    +'<label style="display:flex;align-items:center;gap:7px;cursor:pointer"><input type="checkbox" id="advVerify" style="width:auto" '+(st.verify?'checked':'')+' onchange="adviseToggle(\'verify\',this.checked)"> <span title="Slower and uses more tokens: forces the reviewer to open files and verify claims. Off by default to protect quota. Takes effect on the next run.">Verify mode (rigorous)</span></label>'
+    +'</div>';
+  var note = res.injected ? '<div class="cc-p-sub" style="color:var(--go);margin-bottom:8px">Auto-injected into '+esc(_adviseSess)+'.</div>' : '';
+  body.innerHTML='<div style="display:flex;align-items:center;gap:9px;margin-bottom:10px">'+_adviseBadge(vd)+'<b style="font-size:14px">External reviewer&#39;s verdict</b></div>'
+    +toggles+note
+    +'<pre style="white-space:pre-wrap;word-break:break-word;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px;max-height:46vh;overflow:auto;font-size:12.5px;line-height:1.5;margin:0">'+esc(res.opinion||'')+'</pre>';
+  if(btns) btns.innerHTML='<button class="btn" onclick="adviseRerun()">Re-run</button>'
+    +(res.injected?'':'<button class="btn go" onclick="adviseInject()">Inject into Claude</button>')
+    +'<button class="btn" onclick="_advClose()">Close</button>';
+}
+async function adviseToggle(key,val){ if(!_adviseSess) return; try{ await fetch('/api/advise-toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:_adviseSess,key:key,value:!!val})}); }catch(e){} if(key==='autoinject'&&val) toast('Future reviews will auto-inject into '+esc(_adviseSess)+'.'); }
+async function adviseInject(){ if(!_adviseSess||!_adviseLast) return; var t=(_adviseLast.opinion||''); if(!t.trim()) return; var r=null; try{ r=await (await fetch('/api/advise-inject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:_adviseSess,text:t})})).json(); }catch(e){} if(r&&r.ok){ toast('Injected the review into '+esc(_adviseSess)+'.'); _advClose(); } else toast('Inject failed: '+((r&&r.error)||'?'),5000); }
+function adviseRerun(){ var n=_adviseSess; _advClose(); adviseOpen(n); }
 // Reusable busy overlay -- show a spinner + message during any slow op so it never looks frozen.
 function busyOn(msg,sub){ var o=document.getElementById('cfbusy'); if(!o){ o=document.createElement('div'); o.id='cfbusy'; o.className='cfbusy'; document.body.appendChild(o);} o.innerHTML='<div class="cfbusy-card"><div class="spin big"></div><div class="cfbusy-msg">'+(msg||'Working…')+'</div>'+(sub?('<div class="cfbusy-sub">'+sub+'</div>'):'')+'</div>'; o.style.display='flex'; }
 function busyOff(){ var o=document.getElementById('cfbusy'); if(o) o.style.display='none'; }

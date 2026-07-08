@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# cc-escalate "<message>"  -- send a durable message UP the mesh to Mission Control (the fleet hub where the
+# platform operator works). Use for anything YOUR operator needs to see/decide: status, an approval, a problem on
+# this node. Routing is enforced server-side -- proactive chief-mesh always goes to Mission Control and any sibling
+# target is auto-rerouted there -- so you never page a sibling node by mistake. Your reply arrives back in the
+# Comms lens. (To message a PEER'S HUMAN operator instead of the agent mesh, use cc-opnote.) For agents AND humans.
+set -uo pipefail
+TEXT="$*"
+[ -z "${TEXT// }" ] && { echo "usage: cc-escalate \"what Mission Control needs to know/decide\""; exit 1; }
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
+[ -f "$CFG" ] || CFG="$HOME/hptuners-control/cc.config.json"
+PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
+TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
+BODY="$(python3 -c "import json,sys;print(json.dumps({'text':sys.argv[1],'targets':['mission-control']}))" "$TEXT")"
+if curl -s -X POST "http://127.0.0.1:${PORT}/api/chief-broadcast" -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODY" >/dev/null 2>&1; then
+  echo "✓ escalated to Mission Control (durable queue -- delivers + retries): $TEXT"
+else
+  echo "could not reach the dashboard on port ${PORT}"
+fi

@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""cc-deliver -- the ONE reliable way to hand a file to the operator.
+
+Places a file where the dashboard **Files lens** actually looks (so it surfaces
+and pops the "new file ready" card), then **VERIFIES it really appears** by
+querying the deliverables API with the operator token -- something an agent's
+shell CANNOT do itself (/api/files returns 401 without the cookie). Optionally
+emails the file too, as a guaranteed second channel.
+
+  cc-deliver <file> [--module <name>] [--to <email>] [--note "..."] [--as <name>]
+  cc-deliver --list                    # what the operator currently sees
+  cc-deliver --help
+
+WHY THIS EXISTS (the trap it removes): the deliverables store has a MANAGED
+layout -- the Files lens walks `<PROJECT>/<module>/deliverables/` symlinks into
+the store; the store ROOT and arbitrary folders are NOT walked. So dropping a
+file "in deliverables" the naive way is SILENTLY INVISIBLE: no card, no error,
+no way for the agent to notice. Two agents burned huge time+tokens rediscovering
+this. Never hand-place a deliverable again -- call this.
+
+Exit 0 only when the file is CONFIRMED visible in the lens (or emailed). Any
+other outcome exits non-zero with the reason, so a loop/agent knows it failed.
+"""
+import json, os, sys, time, shutil, urllib.request
+
+BASE = os.path.dirname(os.path.realpath(__file__))   # realpath: resolve the /opt/homebrew/bin symlink to the real dir
+HOME = os.path.dirname(BASE)
+
+def _cfg():
+    p = os.environ.get("CC_CONFIG") or os.path.join(os.environ.get("CC_HOME") or HOME, "cc.config.json")
+    try: return json.load(open(p))
+    except Exception: return {}
+
+def _api(path, body=None, method="GET"):
+    c = _cfg(); port = c.get("port") or int(os.environ.get("HPCC_PORT") or 8799); tok = c.get("auth_token") or ""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request("http://127.0.0.1:%s%s" % (port, path), data=data,
+        headers={"Content-Type": "application/json", "Cookie": "cc_auth=%s" % tok}, method=method)
+    return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
+
+def _project():
+    c = _cfg()
+    return c.get("project_root") or os.environ.get("CC_PROJECT") or HOME
+
+def _err(msg, code=1):
+    print("cc-deliver: " + msg, file=sys.stderr); sys.exit(code)
+
+def _list():
+    try: r = _api("/api/files")
+    except Exception as e: _err("could not query the deliverables API (%s). Is the dashboard up?" % (str(e)[:80]))
+    files = r.get("files") if isinstance(r, dict) else []
+    if not files: print("(no deliverables visible to the operator yet)"); return 0
+    print("%-42s %-14s %s" % ("NAME", "MODULE", "REL"))
+    for f in files[:60]:
+        print("%-42s %-14s %s" % (f.get("name","?")[:42], (f.get("module") or "_root")[:14], f.get("rel","")))
+    return 0
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("--help", "-h"): print(__doc__); return 0
+    if a[0] == "--list": return _list()
+
+    src = None; module = ""; to = ""; note = ""; asname = ""
+    i = 0
+    while i < len(a):
+        if a[i] == "--module": module = a[i+1]; i += 2
+        elif a[i] == "--to": to = a[i+1]; i += 2
+        elif a[i] == "--note": note = a[i+1]; i += 2
+        elif a[i] == "--as": asname = a[i+1]; i += 2
+        elif a[i].startswith("--"): _err("unknown flag %s (see --help)" % a[i])
+        else: src = a[i]; i += 1
+    if not src: _err("no file given.  usage: cc-deliver <file> [--to <email>] [--module <name>]")
+    src = os.path.abspath(os.path.expanduser(src))
+    if not os.path.isfile(src): _err("file not found: %s" % src)
+
+    project = _project()
+    if not os.path.isdir(project): _err("project_root not found (%s) -- check cc.config.json" % project)
+    # Correct, Files-lens-visible location: <PROJECT>/[<module>/]deliverables/
+    ddir = os.path.join(project, module, "deliverables") if module else os.path.join(project, "deliverables")
+    try: os.makedirs(ddir, exist_ok=True)
+    except Exception as e: _err("could not create deliverables dir %s (%s)" % (ddir, str(e)[:60]))
+
+    name = asname or os.path.basename(src)
+    dst = os.path.join(ddir, name)
+    try: shutil.copy2(src, dst)
+    except Exception as e: _err("could not copy into deliverables (%s)" % str(e)[:80])
+
+    # VERIFY it actually surfaces in the Files lens (the step agents can't do).
+    rel = None; visible = False
+    for _ in range(3):
+        try:
+            r = _api("/api/files")
+            for f in (r.get("files") or []):
+                if os.path.realpath(os.path.join(project, f.get("rel",""))) == os.path.realpath(dst):
+                    rel = f.get("rel"); visible = True; break
+        except Exception: pass
+        if visible: break
+        time.sleep(1)
+
+    emailed = ""
+    if to:
+        # rel must be project-relative for the API; derive it if the verify didn't catch it
+        er = rel or os.path.relpath(dst, project)
+        try:
+            resp = _api("/api/deliverable-email", {"rel": er, "to": to}, "POST")
+            emailed = (" | emailed to %s" % to) if resp.get("ok") else (" | EMAIL FAILED: %s" % resp.get("error"))
+        except Exception as e:
+            emailed = " | EMAIL FAILED: %s" % str(e)[:60]
+
+    if visible:
+        print("delivered: %s" % name)
+        print("  visible in the Files lens now (rel: %s) -- the 'new file ready' card will pop on the next poll.%s" % (rel, emailed))
+        if note: print("  note: %s" % note)
+        return 0
+    # placed but not confirmed visible -> loud, not silent
+    print("delivered the file to %s" % dst, file=sys.stderr)
+    print("  WARNING: could not CONFIRM it in the Files lens (API returned it? no).%s" % (emailed or " No email fallback was requested (add --to <email>)."), file=sys.stderr)
+    print("  Check: cc-deliver --list", file=sys.stderr)
+    return 2
+
+if __name__ == "__main__":
+    sys.exit(main())

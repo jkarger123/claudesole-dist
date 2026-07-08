@@ -4,8 +4,19 @@ Drive MCP servers that run on a user's OWN computer -- GUI apps (Adobe InDesign/
 their real logged-in browser, local files/devices -- over the mesh, with every call logged transparently.
 Use the `edge-mcp` CLI (on PATH). Registered hosts+servers live in a registry; credentials in the vault.
 
+WANT TO DRIVE A USER'S REAL LOGGED-IN CHROME (scraping, portal pulls)? ONE command does the whole setup --
+do NOT hand-build it (register host, provision key, install Node, register server are all automatic):
+    edge-mcp setup-browser <host-id> <user@tailnet-addr>   # e.g. work-laptop  jo@100.x.y.z
+It registers the host (reusing an already-authorized SSH key if one exists, else prints a one-line snippet the
+user pastes), preflights + auto-installs Node/checks Chrome on the host, and registers the browser server. Then:
+    edge-mcp start <server>            # opens Chrome (isolated debug profile) on the user's machine
+    -> the user LOGS IN once in that window; that becomes the session. Then drive it:
+    edge-mcp call <server> navigate_page '{"url":"..."}'   # + take_snapshot, list_pages, click, fill_form
+    edge-mcp accounts <server>         # which sites it can reach   |   edge-mcp revoke <server>  # cut access + wipe profile
+If anything looks wrong, `edge-mcp doctor` shows WHICH node this CLI targets (wrong node = the #1 gotcha).
+
     edge-mcp hosts | servers            # what's registered (reachable? warm?)
-    edge-mcp status <server>            # {warm, ready, reachable, recipe, calls}
+    edge-mcp status <server>            # {warm, ready, reachable, recipe, calls, profile}
     edge-mcp call <server> <tool> '<json-args>'    # invoke a tool, JSON back
     edge-mcp run  <server> <file.js> [desc]        # run a JS file on the server (big scripts)
     edge-mcp sh   <host> '<cmd>'                    # shell ON the host (ssh, or local) -- you HAVE real shell
@@ -72,6 +83,20 @@ LAYOUT DOCTRINE (building a multi-page book/magazine/devotional -- read this BEF
 
 BROWSER (recipe browser-attach) -- attaches to the user's real Chrome (chrome-devtools-mcp): navigate_page,
 take_screenshot, take_snapshot, click, fill_form, list_pages, etc. Gives the user's real logged-in sessions.
+- **Set it up with `edge-mcp setup-browser <host> <user@addr>` (above)** -- it does host+key+Node+Chrome+server in
+  one shot. The operator can also click **Connect a browser** in the Edge MCP lens (same primitive, one button).
+- LOGINS ARE REMEMBERED: the browser uses a DURABLE profile ($HOME/.edge-mcp/profiles/<name>, NOT ~/.cache). The
+  user signs into a site ONCE and every future session returns already logged in. Chrome 136+ blocks remote-debug
+  on the user's DEFAULT profile, so this is a SEPARATE profile -- their existing tabs/logins aren't in it at first.
+  Reliability: "remember-me"/persistent-cookie logins (Facebook, most sites) persist across full restarts; session-
+  only logins last while the warm browser stays up. To start already logged into their existing sites, run
+  `edge-mcp import-logins <server>` (best-effort copy of their real Chrome logins; Chrome must be QUIT, same user).
+  `edge-mcp accounts <server>` shows remembered sites; `edge-mcp revoke <server>` forgets them (wipes the profile).
+- `env: node: No such file or directory` at start = Node missing/not on the host PATH -> `edge-mcp preflight <server>`
+  (setup-browser already fixes this: it installs Node and the recipe launches with an absolute PATH).
+- WRONG-NODE gotcha: a bare `edge-mcp` on a co-located node can target the primary install's vault (401 on key
+  provisioning, split registry). Fixed -- launched sessions export CC_HOME/CC_CONFIG -- but if you ever see a 401
+  or a "not provisioned" key, run `edge-mcp doctor` to confirm the node, or set CC_CONFIG=<node>/cc.config.json.
 
-To register a new one: `edge-mcp add-host <id> <user@addr>` (mints a vault SSH key + prints the user's
-one-command authorize snippet), then `edge-mcp add-server <id> <host> --recipe <plugin-app|browser-attach>`.
+To register a DIFFERENT kind of server by hand: `edge-mcp add-host <id> <user@addr>` then
+`edge-mcp add-server <id> <host> --recipe <plugin-app|browser-attach>`.

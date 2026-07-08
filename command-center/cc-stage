@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# cc-stage "<command>"  -- stage a command into THIS instance's canonical Admin shell for the operator to run
+# (the reliable way for an agent to hand off a sudo/interactive command it can't run itself -- no TTY). It types
+# the command into the admin pane WITHOUT pressing Enter; the operator opens the 🔑 Admin shell in the Sessions
+# tab, reviews, and runs it. NEVER hand-roll `tmux send-keys -t admin-<guessed-name>`: this resolves the CANONICAL
+# admin session for THIS node (from CC_CONFIG -> the instance you belong to), drops copy-mode, and CONFIRMS the
+# line actually landed on the pane. Because the port comes from the session's config, you cannot stage into the
+# wrong node's shell. For agents AND humans.
+set -uo pipefail
+TEXT="$*"
+[ -z "${TEXT// }" ] && { echo "usage: cc-stage \"the command for the operator to run\""; exit 1; }
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
+[ -f "$CFG" ] || CFG="$HOME/hptuners-control/cc.config.json"
+PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
+TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
+BODY="$(python3 -c "import json,sys;print(json.dumps({'text':sys.argv[1]}))" "$TEXT")"
+RESP="$(curl -s -X POST "http://127.0.0.1:${PORT}/api/admin-stage" -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODY" 2>/dev/null)"
+if [ -z "$RESP" ]; then echo "could not reach the dashboard on port ${PORT}"; exit 1; fi
+python3 - "$RESP" "$TEXT" <<'PY'
+import json,sys
+try: d=json.loads(sys.argv[1])
+except Exception: print("unexpected response:",sys.argv[1][:200]); sys.exit(1)
+sess=d.get("session") or "?"; text=sys.argv[2]
+if d.get("staged"):
+    print("✓ staged in the Admin shell (%s) -- NOT run." % sess)
+    print("  %s" % text)
+    print("→ Tell the operator: open 🔑 Admin shell in the Sessions tab, review, and press Enter.")
+    sys.exit(0)
+print("⚠ staged into %s but could NOT confirm it landed on the pane -- %s" % (sess, d.get("hint") or "the pane may be busy/mid-command; check the Sessions tab."))
+sys.exit(2)
+PY

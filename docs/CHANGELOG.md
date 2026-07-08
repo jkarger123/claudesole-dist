@@ -3,6 +3,24 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.179 -- 2026-07-08  (Cross-vendor "Third-party review": an external GPT second opinion in any session)
+- New on-demand **Third-party review** button (🔵) in every session pane header: an independent external GPT
+  (Codex on the ChatGPT subscription -- a different AI vendor) reviews the session's recent work and returns a
+  skeptical structured second opinion (verdict + blocking/non-blocking + next-task guidance). Report-only; Claude
+  holds the pen.
+- One-click auto-context: the server assembles the session's recent conversation + most-recently-touched files
+  (token-bounded) and pipes it to the reviewer -- no operator curation step.
+- Results panel surfaces the opinion with a manual **Inject into Claude** gate, an **auto-inject** toggle (uses
+  the compact-lock-guarded session injector), and a **verify mode** toggle (rigorous, off by default to protect
+  the Plus quota). Prefs persist per session.
+- Engine `command-center/cc-advise` graduated from the OmniAgent working spike: fail-open (reviewer down/rate-
+  limited -> `skipped`, the Claude work is never blocked), budget-guarded (daily cap, config
+  `advisor.max_calls_per_day`, default 40), secret-clean (auth in `~/.codex/auth.json`; raw reviewer stderr is
+  redacted from operator-facing output).
+- Endpoints: `POST /api/advise` / `/api/advise-inject` / `/api/advise-toggle`, `GET /api/advise-state`.
+  Spec: `conceptsandideas/OmniAgent/deliverables/CROSS_VENDOR_ADVISOR_SPEC.md` (§7b). Ralph loop-finish +
+  per-iteration hooks reuse this same engine next.
+
 ## 0.99.178 -- 2026-07-06  (Ralph: live tab comes up WITH the runner, every launch path)
 - The runner now spawns its own `ralph-<name>-live` tab at startup, so BOTH windows appear together the instant a
   loop starts -- no matter how it was launched (dashboard, cc-ralph, or an agent starting the runner directly).
