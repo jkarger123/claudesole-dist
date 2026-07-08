@@ -10359,28 +10359,65 @@ def advise_state(session_id):
     return {"ok": True, "autoinject": bool(p.get("autoinject")),
             "verify": bool(p.get("verify")), "last": p.get("last")}
 
-def _advise_recent_files(cwd, limit=8, cap=4000):
-    """Recently-modified files under a session's cwd -- the 'latest deliverables' hint. Names+relpath only,
-    bounded so a huge repo never stalls the request. Skips VCS/vendor/state noise."""
-    out = []
-    if not cwd or not os.path.isdir(cwd): return out
-    skip = {".git", "node_modules", "__pycache__", ".venv", "venv", "data",
-            "handoffs", "_handoffs", ".pipeline", "dist", "build"}
-    seen = 0
+def _advise_noise(p):
+    """A path that is runtime STATE/noise, not a deliverable -- so it never drowns out the real changed files
+    in the reviewer's context. Leading-underscore _*.json files are per-node state (STATE_DIR churns them on
+    every request); logs/transcripts/caches are noise too."""
+    b = os.path.basename(p)
+    if b.startswith("_") or b.startswith("."): return True
+    if p.endswith((".pyc", ".jsonl", ".log", ".lock")): return True
+    if any(seg in p.split("/") for seg in ("__pycache__", "node_modules", ".git", "data",
+                                           "handoffs", "_handoffs", ".pipeline", "caches")): return True
+    return False
+
+def _advise_repo_root(cwd):
+    """The git toplevel for a session's cwd (so the reviewer can open any changed file by its repo-relative
+    path), else the cwd itself. This is what we pass to codex as --repo."""
+    if not cwd or not os.path.isdir(cwd): return cwd
+    code, top, _ = sh(["git", "-C", cwd, "rev-parse", "--show-toplevel"])
+    return top.strip() if (code == 0 and top.strip()) else cwd
+
+def _advise_changed_files(cwd, root, limit=30):
+    """The files that actually represent the work under review, repo-relative to `root`. GIT-AWARE: raw mtime
+    in a live server's dir surfaces churning _*.json state (which made a real review verdict BLOCK 'can't find
+    the claimed changes'), so prefer git's changed + recently-committed files, and only fall back to an
+    mtime walk (state-filtered) for a non-git working dir."""
+    if not cwd or not os.path.isdir(cwd): return []
+    code, _t, _ = sh(["git", "-C", cwd, "rev-parse", "--show-toplevel"])
+    if code == 0:
+        out = []
+        _c, st, _ = sh(["git", "-C", cwd, "status", "--porcelain", "-uall"])
+        for ln in (st or "").splitlines():
+            p = ln[3:].strip().strip('"')
+            if " -> " in p: p = p.split(" -> ", 1)[1]      # rename
+            if p and not _advise_noise(p) and p not in out: out.append(p)
+        _c, lg, _ = sh(["git", "-C", cwd, "log", "--name-only", "--pretty=format:", "-3"])
+        for p in (lg or "").splitlines():
+            p = p.strip()
+            if p and not _advise_noise(p) and p not in out: out.append(p)
+        if out: return out[:limit]
+    # fallback: mtime walk (non-git dir), state-filtered
+    out = []; seen = 0
     try:
-        for root, dirs, files in os.walk(cwd):
-            dirs[:] = [x for x in dirs if x not in skip and not x.startswith(".")]
-            if root[len(cwd):].count(os.sep) > 3: dirs[:] = []
+        for r, dirs, files in os.walk(cwd):
+            dirs[:] = [x for x in dirs if not x.startswith(".") and x not in
+                       ("node_modules", "__pycache__", "data", "handoffs", "_handoffs", "dist", "build")]
+            if r[len(cwd):].count(os.sep) > 3: dirs[:] = []
             for fn in files:
-                if fn.startswith(".") or fn.endswith((".pyc", ".jsonl", ".log")): continue
+                rel = os.path.relpath(os.path.join(r, fn), cwd)
+                if _advise_noise(rel): continue
                 seen += 1
-                if seen > cap: dirs[:] = []; break
-                p = os.path.join(root, fn)
-                try: out.append((os.path.getmtime(p), os.path.relpath(p, cwd)))
+                if seen > 4000: dirs[:] = []; break
+                try: out.append((os.path.getmtime(os.path.join(r, fn)), rel))
                 except Exception: pass
     except Exception: pass
     out.sort(reverse=True)
-    return [rel for _, rel in out[:limit]]
+    return [rel for _, rel in out[:10]]
+
+def _advise_recent_commits(cwd, n=5):
+    """Recent commit subjects -- direct corroboration of what the session shipped (e.g. the version-bump commit)."""
+    code, out, _ = sh(["git", "-C", cwd, "log", "--oneline", "-%d" % n])
+    return out.strip() if code == 0 else ""
 
 def _advise_render(v):
     """A structured verdict dict -> the plain-text review shown in the panel and injected into Claude."""
@@ -10423,22 +10460,26 @@ def advise_run(session_id, verify=False):
     if not os.path.isfile(CC_ADVISE):
         return {"ok": False, "error": "advisor engine missing (%s)" % CC_ADVISE}
     cwd = _pane_cwd(name) or PROJECT
+    root = _advise_repo_root(cwd)                    # git toplevel (reviewer's read root) or cwd
     tpath = _session_transcript_path(name)
     tail = _transcript_tail(tpath, maxchars=16000) if tpath else ""
-    recent = _advise_recent_files(cwd)
+    changed = _advise_changed_files(cwd, root)       # git-aware: the ACTUAL work, not churning state files
+    commits = _advise_recent_commits(cwd)
     advise_set_pref(name, "verify", bool(verify))   # remember the rigor choice for this session
     payload = (
         "=== SESSION UNDER REVIEW ===\n"
         "A Claude agent has been working in this session. Below is the RECENT CONVERSATION "
-        "(what it was asked, what it did, and how it summarized the finished work), followed by "
-        "the files most recently touched in the working directory. Review the finished work "
-        "against what was asked -- skeptically.\n\n"
-        "Working directory (repo root you may read): %s\n\n"
-        "=== RECENTLY MODIFIED FILES ===\n%s\n\n"
+        "(what it was asked, what it did, and how it summarized the finished work), the files it "
+        "CHANGED (from git), and its recent commits. OPEN the changed files under the repo root to "
+        "verify the work against what was asked -- skeptically.\n\n"
+        "Repo root you may read: %s\n\n"
+        "=== CHANGED FILES (git: uncommitted + recently committed) ===\n%s\n\n"
+        "=== RECENT COMMITS ===\n%s\n\n"
         "=== RECENT CONVERSATION (human + assistant) ===\n%s\n"
-        % (cwd, "\n".join(recent) or "(none found)", tail or "(transcript unavailable)")
+        % (root, "\n".join(changed) or "(none found)", commits or "(none)",
+           tail or "(transcript unavailable)")
     )
-    cmd = ["python3", CC_ADVISE, "--payload", "-", "--repo", cwd, "--json",
+    cmd = ["python3", CC_ADVISE, "--payload", "-", "--repo", root, "--json",
            "--budget-file", ADVISE_BUDGET, "--max-calls-per-day", str(ADVISE_MAX_PER_DAY)]
     if verify: cmd.append("--verify")
     try:
@@ -10456,6 +10497,7 @@ def advise_run(session_id, verify=False):
     if autoinject and v.get("verdict") not in (None, "skipped") and opinion.strip():
         _mesh_deliver(name, _advise_inject_block(opinion)); injected = True
     return {"ok": True, "verdict": v.get("verdict"), "opinion": opinion, "raw": v,
+            "reason": v.get("reason"),   # propagate a skip reason (e.g. "codex CLI not found") for the UI
             "autoinject": autoinject, "injected": injected}
 
 def advise_inject(session_id, text):
@@ -24689,6 +24731,7 @@ function ccWireDropzones(){
 function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)
   +'<span class="stbtns">'
   +'<button class="mini" title="give Claude a file (upload + hand the path to this session)" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
+  +'<button class="mini" title="Third-party review — an independent external GPT (a different AI vendor) reviews this session\'s recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." onclick="adviseOpen(\''+esc(x.name)+'\')">🔵</button>'
   +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
   +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
   +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
@@ -24824,6 +24867,7 @@ function sessTile(x,i){const big=(SESSBIG==x.name);
     +'<span class="stbtns" onclick="event.stopPropagation()">'
     +'<button class="mini" title="'+(big?'minimize':'maximize')+'" onclick="tileClick(\''+esc(x.name)+'\')">'+(big?'▒':'⤢')+'</button>'
     +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
+    +'<button class="mini" title="Third-party review — an independent external GPT (a different AI vendor) reviews this session\'s recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." onclick="adviseOpen(\''+esc(x.name)+'\')">🔵</button>'
     +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
     +'<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
     +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'

@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.180 -- 2026-07-08  (Third-party review: fixes surfaced by the feature reviewing itself)
+- **Context assembly is now git-aware.** The reviewer was being fed the working dir's most-recently-*modified*
+  files, which in a live node surfaces churning `_*.json` STATE files and hides the actual code changes -- a real
+  review correctly returned BLOCK ("can't find the claimed changes"). Now it lists the files git says CHANGED
+  (uncommitted + last few commits) plus recent commit subjects, and passes the git repo root so the reviewer can
+  open them. State/log/cache files are filtered out.
+- **Button now in EVERY session view.** It was only in the workspace-pane header (`paneHead`); added to the focus
+  view (`bigHead`) and the grid/list tiles (`sessTile`) so "any session header" actually means any.
+- **`cc-advise` hardening:** the daily budget is no longer spent when Codex is absent (availability check moved
+  before the cap increment, so a mis-configured node can't burn its cap on skips); raw reviewer stderr is never
+  emitted anywhere (only a boolean "stderr present"); a skip reason (e.g. "codex CLI not found") now propagates
+  to the UI instead of a generic message.
+
 ## 0.99.179 -- 2026-07-08  (Cross-vendor "Third-party review": an external GPT second opinion in any session)
 - New on-demand **Third-party review** button (🔵) in every session pane header: an independent external GPT
   (Codex on the ChatGPT subscription -- a different AI vendor) reviews the session's recent work and returns a

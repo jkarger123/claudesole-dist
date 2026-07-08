@@ -145,6 +145,11 @@ def main():
     else:
         ap.error("provide --payload, or both --goal and --deliverable")
 
+    # Check the reviewer is even available BEFORE spending budget -- else a mis-configured node (no Codex)
+    # burns its whole daily cap on skipped attempts (only real invocations should count).
+    if not os.path.isfile(CODEX):
+        return _skip("codex CLI not found at %s" % CODEX, args.json)
+
     ok, n = _budget_ok(args.budget_file, args.max_calls_per_day)
     if not ok:
         return _skip("daily advisor cap reached (%d)" % n, args.json)
@@ -171,9 +176,6 @@ def main():
     if args.verify:
         prompt += VERIFY_CLAUSE
 
-    if not os.path.isfile(CODEX):
-        return _skip("codex CLI not found at %s" % CODEX, args.json)
-
     with tempfile.TemporaryDirectory() as td:
         schema_f = os.path.join(td, "schema.json")
         last_f = os.path.join(td, "last.json")
@@ -192,11 +194,10 @@ def main():
         try:
             verdict = json.load(open(last_f))
         except Exception:
-            # Secret-clean (spec 6): NEVER surface raw codex stderr -- it can carry local paths, auth
-            # diagnostics, or command args. Log a redacted tail to our OWN stderr for operator debugging;
-            # the machine-readable output stays a generic fail-open skip.
-            sys.stderr.write("[cc-advise] no structured output; codex stderr tail (not surfaced): %s\n"
-                             % (r.stderr or "")[-400:])
+            # Secret-clean (spec 6): NEVER emit raw codex stderr anywhere -- it can carry local paths, auth
+            # diagnostics, or command args. We log only whether stderr was present, never its contents.
+            sys.stderr.write("[cc-advise] no structured output from the reviewer (stderr present: %s)\n"
+                             % bool((r.stderr or "").strip()))
             return _skip("no structured output from the reviewer", args.json)
 
     if args.json:
