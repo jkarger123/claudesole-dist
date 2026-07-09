@@ -24,9 +24,9 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "33df6ce60af9013a5ae6bce1ce0190e4da800d8f694639afb19cafe89c650760",
+      "claudesole.manifest.json": "12d4c9b070725576f46447c5494fc92085d0b62a32590a98253a77660c70be68",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
-      "command-center/cc-advise": "3e73560e6408af3447802a161664390a703afa543c54f7828342c95d4633603f",
+      "command-center/cc-advise": "ae1eca57012c608fdca291b111b83dee074f2635d242f1b0c4bd485043f4d7f9",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
       "command-center/cc-deliver": "e1f1c2d09fbae615fe1a0f264cea40430cbda715418994b892c0ac8761b27446",
       "command-center/cc-email": "4895c4eb4ca8e1c6f3b26dd260f9ee3b776c42f24ec656b8581d1cef0c4155ed",
@@ -58,7 +58,7 @@
       "command-center/ralph_runner.py": "516905583666730da9a9022e2213c7bb01afe2d9faa99d4e31093a2d6ad099e5",
       "command-center/residue_lint.py": "0b1c757909a27470095d5ea8b48641a9e9e0248ec1729f3598596f2129fd1d6f",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "9d9a76334ea98035855ca032ffd29c0012dc7fa9cce72983cee7171fec5315b8",
+      "command-center/server.py": "dbbabdf5cdb0e6e040226d2f0bb7b81e6346a93d479d48ae12c55ca172b2f475",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/ui_lint.py": "0cabb923f1edd1a5f9808e4e04329c46334483b3da38fcf4adba2e3e9b476132",
@@ -151,9 +151,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783546343,
+    "generated": 1783570468,
     "v": 1,
-    "version": "0.99.180"
+    "version": "0.99.181"
   },
-  "sig": "KVhRluwI9DZxx+MQMfdRM3WM3Z6uVQ+E05zCnsWsgXoixxAPRFZNW668TWn3ZliiWObhF11/Ta8+BDslkwenBA=="
+  "sig": "+4fvebLUNjrMT8xadnwNvKYAC+qA7UM39NjQ8C3Xtoi2KczMiZ9gFhNcuTIRlFDSIo8cDvR5ezpYRnA8oQxbCw=="
 }

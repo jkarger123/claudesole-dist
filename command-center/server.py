@@ -10452,20 +10452,22 @@ def _advise_inject_block(opinion):
     return (_ADVISE_MARK + ", independent review of this session's recent work -- "
             "weigh it, you hold the pen):\n\n" + opinion)
 
-def advise_run(session_id, verify=False):
-    """Assemble a session's recent context and get an external GPT second opinion. Fail-open."""
-    name = re.sub(r"[^A-Za-z0-9_-]", "", session_id or "")[:64]
-    if not name or sh([TMUX, "has-session", "-t", name])[0] != 0:
-        return {"ok": False, "error": "no such session"}
-    if not os.path.isfile(CC_ADVISE):
-        return {"ok": False, "error": "advisor engine missing (%s)" % CC_ADVISE}
+def _advise_tab(name):
+    return ("advise-" + re.sub(r"[^A-Za-z0-9_-]", "", name or ""))[:48]
+def _advise_payload_path(name):
+    return os.path.join(STATE_DIR, "_advise_payload_%s.txt" % re.sub(r"[^A-Za-z0-9_-]", "", name or ""))
+def _advise_result_path(name):
+    return os.path.join(STATE_DIR, "_advise_result_%s.json" % re.sub(r"[^A-Za-z0-9_-]", "", name or ""))
+
+def _advise_assemble(name):
+    """Build the reviewer's context payload for a session (git-aware changed files + recent commits + the
+    recent conversation). Returns (repo_root, payload)."""
     cwd = _pane_cwd(name) or PROJECT
     root = _advise_repo_root(cwd)                    # git toplevel (reviewer's read root) or cwd
     tpath = _session_transcript_path(name)
     tail = _transcript_tail(tpath, maxchars=16000) if tpath else ""
     changed = _advise_changed_files(cwd, root)       # git-aware: the ACTUAL work, not churning state files
     commits = _advise_recent_commits(cwd)
-    advise_set_pref(name, "verify", bool(verify))   # remember the rigor choice for this session
     payload = (
         "=== SESSION UNDER REVIEW ===\n"
         "A Claude agent has been working in this session. Below is the RECENT CONVERSATION "
@@ -10479,6 +10481,107 @@ def advise_run(session_id, verify=False):
         % (root, "\n".join(changed) or "(none found)", commits or "(none)",
            tail or "(transcript unavailable)")
     )
+    return root, payload
+
+def advise_start(session_id, verify=False):
+    """Launch the external reviewer in a WATCHABLE tmux tab (streams codex's real output live), non-blocking.
+    The Command Center panel embeds this tab so the operator SEES the review happen, and polls advise_result
+    for the structured verdict. A background thread handles auto-inject so it fires even if the panel is closed."""
+    name = re.sub(r"[^A-Za-z0-9_-]", "", session_id or "")[:64]
+    if not name or sh([TMUX, "has-session", "-t", name])[0] != 0:
+        return {"ok": False, "error": "no such session"}
+    if not os.path.isfile(CC_ADVISE):
+        return {"ok": False, "error": "advisor engine missing (%s)" % CC_ADVISE}
+    root, payload = _advise_assemble(name)
+    advise_set_pref(name, "verify", bool(verify))   # remember the rigor choice for this session
+    pf, rf, tab = _advise_payload_path(name), _advise_result_path(name), _advise_tab(name)
+    try:
+        open(pf, "w", encoding="utf-8").write(payload)
+    except Exception as e:
+        return {"ok": False, "error": "could not stage context: %s" % str(e)[:120]}
+    try: os.remove(rf)
+    except Exception: pass
+    sh([TMUX, "kill-session", "-t", tab])           # clear any prior run's tab
+    vflag = " --verify" if verify else ""
+    inner = ("python3 %s --payload %s --repo %s --stream --result-file %s "
+             "--budget-file %s --max-calls-per-day %d%s; "
+             "echo; echo '=== review complete -- the verdict is in the panel. (this tab closes shortly) ==='; "
+             "sleep 25") % (_shlex.quote(CC_ADVISE), _shlex.quote(pf), _shlex.quote(root),
+                            _shlex.quote(rf), _shlex.quote(ADVISE_BUDGET), ADVISE_MAX_PER_DAY, vflag)
+    rc, _o, err = sh([TMUX, "new-session", "-d", "-s", tab, "-c", root, inner])
+    if rc != 0:
+        return {"ok": False, "error": "could not start reviewer: %s" % (err or "").strip()[:160]}
+    threading.Thread(target=_advise_await_and_inject, args=(name, rf, tab), daemon=True).start()
+    return {"ok": True, "running": True, "tab": tab}
+
+def _advise_ingest(name, rf):
+    """Load a finished result file, render it, persist it as this session's last review. PURE persistence --
+    it does NOT decide injection (so a UI poll reading the result can never consume the auto-inject freshness;
+    that decision belongs solely to _advise_await_and_inject, keyed on injected_ts). Returns (v, opinion, autoinject)."""
+    v = json.load(open(rf))
+    opinion = _advise_render(v)
+    with _ADVISE_LOCK:
+        d = _advise_load(); s = d.setdefault("sessions", {}).setdefault(name, {})
+        s["last"] = {"verdict": v.get("verdict"), "ts": int(time.time()), "opinion": opinion,
+                     "rf_ts": int(os.path.getmtime(rf))}
+        autoinject = bool(s.get("autoinject")); _advise_save(d)
+    return v, opinion, autoinject
+
+def _advise_await_and_inject(name, rf, tab):
+    """Background: wait for the reviewer to finish, then auto-inject if the session opted in -- independent of
+    whether the operator kept the panel open, and independent of the UI poll. Delivery is claimed ATOMICALLY
+    via injected_ts so it fires exactly once per result, with no race against advise_result()."""
+    deadline = time.time() + 600            # ~10 min upper bound regardless of tab/poll timing
+    while time.time() < deadline and not os.path.isfile(rf):
+        time.sleep(2)
+    if not os.path.isfile(rf):
+        return
+    try:
+        v, opinion, autoinject = _advise_ingest(name, rf)     # persist (idempotent)
+        rf_ts = int(os.path.getmtime(rf))
+    except Exception:
+        return
+    if not autoinject or v.get("verdict") in (None, "skipped") or not opinion.strip():
+        return
+    with _ADVISE_LOCK:                       # claim one-time delivery for THIS result
+        d = _advise_load(); s = d.setdefault("sessions", {}).setdefault(name, {})
+        if s.get("injected_ts") == rf_ts:    # already delivered this result -> no double-inject
+            return
+        s["injected_ts"] = rf_ts; _advise_save(d)
+    _mesh_deliver(name, _advise_inject_block(opinion))
+
+def advise_result(session_id):
+    """Poll target: has the reviewer finished? Returns the structured verdict when the result file exists.
+    NEVER injects -- injection is the background thread's job alone (see _advise_await_and_inject)."""
+    name = re.sub(r"[^A-Za-z0-9_-]", "", session_id or "")[:64]
+    if not name: return {"ok": False, "error": "no session"}
+    rf, tab = _advise_result_path(name), _advise_tab(name)
+    running = sh([TMUX, "has-session", "-t", tab])[0] == 0
+    if not os.path.isfile(rf):
+        return {"ok": True, "ready": False, "running": running, "tab": tab}
+    try:
+        v, opinion, autoinject = _advise_ingest(name, rf)
+    except Exception:
+        return {"ok": True, "ready": False, "running": running, "tab": tab}
+    # `injected` = whether THIS result was ACTUALLY delivered (injected_ts claimed), not merely the pref.
+    # The UI drives its "delivered" note + Inject-button off this, so manual Inject stays available whenever
+    # auto-inject did not actually deliver (e.g. the toggle changed near completion).
+    try: injected = ((_advise_prefs(name).get("injected_ts")) == int(os.path.getmtime(rf)))
+    except Exception: injected = False
+    return {"ok": True, "ready": True, "running": running, "tab": tab,
+            "verdict": v.get("verdict"), "opinion": opinion, "reason": v.get("reason"),
+            "raw": v, "autoinject": autoinject, "injected": injected}
+
+def advise_run(session_id, verify=False):
+    """SYNCHRONOUS review (used by API/Ralph callers that want to block for the verdict). The interactive
+    Command Center flow uses advise_start + advise_result instead so the reviewer is watchable live."""
+    name = re.sub(r"[^A-Za-z0-9_-]", "", session_id or "")[:64]
+    if not name or sh([TMUX, "has-session", "-t", name])[0] != 0:
+        return {"ok": False, "error": "no such session"}
+    if not os.path.isfile(CC_ADVISE):
+        return {"ok": False, "error": "advisor engine missing (%s)" % CC_ADVISE}
+    root, payload = _advise_assemble(name)
+    advise_set_pref(name, "verify", bool(verify))
     cmd = ["python3", CC_ADVISE, "--payload", "-", "--repo", root, "--json",
            "--budget-file", ADVISE_BUDGET, "--max-calls-per-day", str(ADVISE_MAX_PER_DAY)]
     if verify: cmd.append("--verify")
@@ -10497,8 +10600,7 @@ def advise_run(session_id, verify=False):
     if autoinject and v.get("verdict") not in (None, "skipped") and opinion.strip():
         _mesh_deliver(name, _advise_inject_block(opinion)); injected = True
     return {"ok": True, "verdict": v.get("verdict"), "opinion": opinion, "raw": v,
-            "reason": v.get("reason"),   # propagate a skip reason (e.g. "codex CLI not found") for the UI
-            "autoinject": autoinject, "injected": injected}
+            "reason": v.get("reason"), "autoinject": autoinject, "injected": injected}
 
 def advise_inject(session_id, text):
     """Manually inject a review into a session (the operator's 'Inject into Claude' button)."""
@@ -15299,6 +15401,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(_COMPACT_STATE.get((q.get("name") or [""])[0], {})))
         if u.path == "/api/advise-state":
             return self._s(200, json.dumps(advise_state((q.get("name") or q.get("session_id") or [""])[0])))
+        if u.path == "/api/advise-result":
+            return self._s(200, json.dumps(advise_result((q.get("name") or q.get("session_id") or [""])[0])))
         if u.path == "/api/autocompact":
             return self._s(200, json.dumps({"on": _autocompact_on(), "pct": _autocompact_pct()}))
         if u.path == "/api/ideas": return self._s(200, json.dumps(ideas_list()))
@@ -15779,7 +15883,9 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(ext_run(body.get("ext", ""), body.get("fn"), body.get("inputs") or {}, body.get("session"))))
         if u.path == "/api/compact-session":  # handoff -> /compact -> re-read handoff (preserve agent memory)
             return self._s(200, json.dumps(compact_session(body.get("name", ""))))
-        if u.path == "/api/advise":           # cross-vendor "Third-party review": external GPT second opinion
+        if u.path == "/api/advise-start":      # launch the reviewer in a WATCHABLE tmux tab (transparent), non-blocking
+            return self._s(200, json.dumps(advise_start(body.get("session_id") or body.get("name") or "", bool(body.get("verify")))))
+        if u.path == "/api/advise":           # cross-vendor "Third-party review": external GPT second opinion (blocking)
             return self._s(200, json.dumps(advise_run(body.get("session_id") or body.get("name") or "", bool(body.get("verify")))))
         if u.path == "/api/advise-inject":    # manual gate: inject the review into the session (guarded injector)
             return self._s(200, json.dumps(advise_inject(body.get("session_id") or body.get("name") or "", body.get("text") or "")))
@@ -16261,7 +16367,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid #2a2a3a;background:#22222e;color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px;font-family:inherit}
 #tdlg .tdlg-b.go{background:linear-gradient(135deg,#d6b23c,#c9a227);color:#15120a;border:none;font-weight:700}
 </style></head><body>
-<div id="bar"><span id="st">connecting...</span><button id="mdlbtn" onclick="mdlPickTerm(event)" title="the model this session runs -- click to change">Model</button><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button id="actog" onclick="toggleAutoCopy()" title="Auto-copy: when ON, whatever you have selected is copied to your clipboard the moment you release the mouse (no Ctrl+C needed). Needs a secure origin (https/localhost); on plain http a one-tap Copy chip is used instead.">&#9113; auto-copy</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button id="anbtn" onclick="toggleAn()" title="Auto-nudge: auto-send your keep-going message to this session every time it stops at a turn-end, until you turn it off (you are the brake)" style="color:#8a8a99">Auto-nudge</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
+<div id="bar"><span id="st">connecting...</span><button id="mdlbtn" onclick="mdlPickTerm(event)" title="the model this session runs -- click to change">Model</button><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button onclick="termAdvise()" title="Third-party review: an independent external GPT (a different AI vendor) reviews this session's recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." style="color:#58a6ff">&#128309; review</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button id="actog" onclick="toggleAutoCopy()" title="Auto-copy: when ON, whatever you have selected is copied to your clipboard the moment you release the mouse (no Ctrl+C needed). Needs a secure origin (https/localhost); on plain http a one-tap Copy chip is used instead.">&#9113; auto-copy</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button id="anbtn" onclick="toggleAn()" title="Auto-nudge: auto-send your keep-going message to this session every time it stops at a turn-end, until you turn it off (you are the brake)" style="color:#8a8a99">Auto-nudge</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
 <button id="live" onclick="toLive()">&#8595; jump to live</button><button id="selcopy" onclick="doSelCopy()">&#10697; Copy selection</button><div id="cliptoast"></div>
 <div id="copyov"><div id="copybar"><b>Selectable text</b><span id="copyst" style="color:#8a8a99">long-press to select, or</span><button onclick="copyAll()">&#10697; copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" style="border-color:#e8c547">&#10005; close</button></div><pre id="copybody"></pre></div>
 <div id="wrap">
@@ -16358,6 +16464,59 @@ async function compactSess(){if(!await confirmM('Compact this session?\n\nThe ag
   st.textContent=name+' - compact: starting…';
   fetch('/api/compact-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(r=>{if(!r||!r.ok){st.textContent='compact failed: '+((r||{}).error||'?');return;}compactPoll();}).catch(()=>{st.textContent='compact request failed';});}
 function compactPoll(){fetch('/api/compact-state?name='+encodeURIComponent(name)).then(r=>r.json()).then(s=>{if(!s||!s.step)return;st.textContent=name+' - compact: '+(s.msg||s.step);if(['done','aborted','error'].indexOf(s.step)<0)setTimeout(compactPoll,3000);}).catch(()=>{});}
+// ---- Third-party review (external GPT second opinion) -- self-contained for this standalone /term page ----
+var _aPolling=false,_aLast=null;
+var _aBtnS='background:#22222e;color:#e6e6f0;border:1px solid #3a3a4a;border-radius:9px;padding:9px 15px;cursor:pointer;font:13px -apple-system,sans-serif';
+var _aBtnG='background:#2a3a2a;color:#e6e6f0;border:1px solid #3a5a3a;border-radius:9px;padding:9px 15px;cursor:pointer;font:13px -apple-system,sans-serif;font-weight:600';
+function _aEsc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function _aBadge(vd){var m={ship:['#2ea043','SHIP'],revise:['#d29922','REVISE'],block:['#f85149','BLOCK'],skipped:['#6a6a7a','SKIPPED']};var b=m[vd]||['#6a6a7a',String(vd||'?').toUpperCase()];return '<span style="background:'+b[0]+';color:#08080c;font-weight:700;font-size:11px;padding:2px 8px;border-radius:6px">'+b[1]+'</span>';}
+function _aOv(){var o=document.getElementById('advOv');if(!o){o=document.createElement('div');o.id='advOv';o.style.cssText='position:fixed;inset:0;background:rgba(6,6,10,.72);z-index:100000;display:flex;align-items:center;justify-content:center;padding:16px';document.body.appendChild(o);o.addEventListener('mousedown',function(e){if(e.target===o)_aClose();});}return o;}
+function _aClose(){var o=document.getElementById('advOv');if(o)o.style.display='none';_aPolling=false;}
+async function termAdvise(){
+  var st={};try{st=await(await fetch('/api/advise-state?name='+encodeURIComponent(name))).json()||{};}catch(e){}
+  var o=_aOv();o.style.display='flex';
+  o.innerHTML='<div style="background:#14141c;border:1px solid #2a2a3a;border-radius:14px;padding:20px;width:min(640px,94vw);max-height:88vh;overflow:auto;color:#e6e6f0">'
+    +'<div style="font-size:18px;font-weight:700;margin-bottom:6px">Third-party review</div>'
+    +'<div style="color:#8a8a99;font-size:12.5px;margin-bottom:12px">An independent external GPT (a different AI vendor) reviews <b>'+_aEsc(name)+'</b>&#39;s recent work &mdash; a skeptical second opinion you watch live. It reads only; Claude holds the pen.</div>'
+    +'<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;font-size:12.5px">'
+      +'<label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" id="aAuto" '+(st.autoinject?'checked':'')+' onchange="_aToggle(\'autoinject\',this.checked)"> Auto-inject into Claude</label>'
+      +'<label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" id="aVerify" '+(st.verify?'checked':'')+' onchange="_aToggle(\'verify\',this.checked)"> Verify mode (rigorous)</label>'
+    +'</div>'
+    +'<div id="aTermWrap" style="display:none;margin-bottom:10px"><div style="color:#8a8a99;font-size:11px;margin-bottom:4px">Live reviewer terminal (external GPT / codex):</div><div style="height:240px;border:1px solid #2a2a3a;border-radius:10px;overflow:hidden;background:#0a0a0f"><iframe id="aTerm" style="width:100%;height:100%;border:0" src="about:blank"></iframe></div></div>'
+    +'<div id="aBody" style="color:#a8a8b8;font-size:13px;line-height:1.5">Choose your options above (verify is off by default to protect quota), then start the review. You&#39;ll watch the reviewer work live and decide whether to inject its opinion into Claude.</div>'
+    +'<div id="aBtns" style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px"><button onclick="_aClose()" style="'+_aBtnS+'">Close</button><button id="aStart" onclick="_aLaunch()" style="'+_aBtnG+'">Start review</button></div>'
+  +'</div>';
+  setTimeout(function(){var b=document.getElementById('aStart');if(b)b.focus();},40);
+}
+async function _aToggle(k,v){try{await fetch('/api/advise-toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:name,key:k,value:!!v})});}catch(e){}}
+async function _aLaunch(){
+  var vck=document.getElementById('aVerify');var verify=!!(vck&&vck.checked);
+  _aPolling=true;_aLast=null;
+  var sb=document.getElementById('aStart');if(sb){sb.disabled=true;sb.textContent='Starting…';}
+  var body=document.getElementById('aBody');if(body)body.textContent='Starting the reviewer…';
+  var res=null;try{res=await(await fetch('/api/advise-start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:name,verify:verify})})).json();}catch(e){res={ok:false,error:'could not start'};}
+  if(!res||!res.ok){if(body)body.innerHTML='<span style="color:#f85149">Couldn&#39;t start the review: '+_aEsc((res&&res.error)||'unknown')+'</span>';if(sb){sb.disabled=false;sb.textContent='Start review';}return;}
+  var tw=document.getElementById('aTermWrap'),tf=document.getElementById('aTerm');if(tw&&tf){tw.style.display='block';tf.src='/term?name='+encodeURIComponent(res.tab);}
+  if(body)body.textContent='Reviewer is working… the verdict appears here when it finishes (watch it live above).';
+  var btns=document.getElementById('aBtns');if(btns)btns.innerHTML='<button onclick="_aClose()" style="'+_aBtnS+'">Close</button>';
+  _aPoll();
+}
+function _aPoll(){
+  if(!_aPolling)return;var o=document.getElementById('advOv');if(!o||o.style.display==='none')return;
+  fetch('/api/advise-result?name='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(res){
+    if(res&&res.ready){_aPolling=false;_aLast=res;_aRender(res);}else setTimeout(_aPoll,2500);
+  }).catch(function(){setTimeout(_aPoll,3000);});
+}
+function _aRender(res){
+  var body=document.getElementById('aBody'),btns=document.getElementById('aBtns');if(!body)return;
+  if(!res||!res.ok){body.innerHTML='<span style="color:#f85149">Review failed.</span>';return;}
+  if(res.verdict==='skipped'){body.innerHTML='Advisor skipped: '+_aEsc(res.reason||'the reviewer was unavailable or the daily cap was reached')+'. Your Claude work is untouched.';if(btns)btns.innerHTML='<button onclick="_aLaunch()" style="'+_aBtnS+'">Re-run</button><button onclick="_aClose()" style="'+_aBtnS+'">Close</button>';return;}
+  var note=res.injected?'<div style="color:#2ea043;font-size:12px;margin-bottom:6px">Delivered to Claude.</div>':(res.autoinject?'<div style="color:#8a8a99;font-size:12px;margin-bottom:6px">Auto-inject is on &mdash; delivering to Claude&hellip;</div>':'');
+  body.innerHTML='<div style="display:flex;gap:9px;align-items:center;margin-bottom:8px">'+_aBadge(res.verdict)+'<b>External reviewer&#39;s verdict</b></div>'+note
+    +'<pre style="white-space:pre-wrap;word-break:break-word;background:#0a0a0f;border:1px solid #2a2a3a;border-radius:9px;padding:11px;max-height:40vh;overflow:auto;font:12px/1.5 ui-monospace,monospace;margin:0">'+_aEsc(res.opinion||'')+'</pre>';
+  if(btns)btns.innerHTML='<button onclick="_aLaunch()" style="'+_aBtnS+'">Re-run</button>'+(res.injected?'':'<button onclick="_aInject()" style="'+_aBtnG+'">Inject into Claude</button>')+'<button onclick="_aClose()" style="'+_aBtnS+'">Close</button>';
+}
+async function _aInject(){if(!_aLast)return;var t=(_aLast.opinion||'');if(!t.trim())return;var r=null;try{r=await(await fetch('/api/advise-inject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:name,text:t})})).json();}catch(e){}if(r&&r.ok){clipToast('review injected into Claude');_aClose();}}
 function tgPaint(s){var b=document.getElementById('tgbtn');if(!b)return;if(!s||!s.installed){b.style.display='none';return;}b.style.display='';var n=(s.on&&s.num)?(' #'+s.num):'';b.innerHTML='&#128241; Telegram'+n+': '+(s.on?'on':'off');b.style.color=s.on?'#26a5e4':'#8a8a99';b.title=s.configured?('Telegram '+(s.on?('ON'+(s.num?(' as #'+s.num):'')+' -- pinged on your phone when this finishes/blocks; reply to interact. '+(s.count>1?(s.count+' sessions on -- reply with the number'):'')):'off')+' for this session'):'Telegram bot not set up -- install + Set up telegram-notify in the Marketplace';}
 function tgState(){fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(tgPaint).catch(()=>{});}
 function toggleTg(){fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(r=>r.json()).then(function(cur){if(!cur.configured){st.textContent='Telegram not set up -- install + Set up telegram-notify (Marketplace), then toggle';return;}fetch('/api/telegram-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,on:!cur.on})}).then(r=>r.json()).then(function(s){tgPaint(s);st.textContent=name+' - Telegram '+(s.on?'ON (phone alerts + reply-to-interact)':'off');});});}
@@ -25093,24 +25252,58 @@ function promptM(label,def,opt){ opt=opt||{}; return new Promise(function(res){ 
 function alertM(msg,opt){ opt=opt||{}; return new Promise(function(res){ var d=_ccdlg((opt.title?'<h2>'+esc(opt.title)+'</h2>':'')+'<div class="mbody">'+_dlgmsg(msg)+'</div><div class="btns"><button class="btn go" id="_dOk">'+esc(opt.ok||'OK')+'</button></div>'); var fin=function(){ _ccdlgClose(); res(); }; d._esc=fin; document.getElementById('_dOk').onclick=fin; setTimeout(function(){var b=document.getElementById('_dOk');if(b)b.focus();},40); }); }
 function toast(t,ms){const e=document.getElementById("toast");e.innerHTML=t;e.style.display="block";clearTimeout(e._t);e._t=setTimeout(()=>e.style.display="none",ms||2800);}
 // ---- Cross-vendor advisor ("Third-party review"): an external GPT second opinion on a session ----
-var _adviseSess=null, _adviseLast=null;
+// TRANSPARENT: the reviewer runs in a live tmux tab we embed here, so the operator WATCHES codex work in
+// real time; we poll advise-result for the structured verdict when it finishes.
+var _adviseSess=null, _adviseLast=null, _adviseTab=null, _advisePolling=false;
 function _advDlg(inner){ var d=document.getElementById('advDlg'); if(!d){ d=document.createElement('div'); d.id='advDlg'; d.tabIndex=-1; document.body.appendChild(d); d.addEventListener('mousedown',function(e){ if(e.target===d&&d._esc) d._esc(); }); d.addEventListener('keydown',function(e){ if(e.key==='Escape'&&d._esc){ e.preventDefault(); d._esc(); } }); } d.innerHTML='<div class="modal" role="dialog" aria-modal="true">'+inner+'</div>'; d.style.display='flex'; return d; }
-function _advClose(){ var d=document.getElementById('advDlg'); if(d){ d.style.display='none'; d._esc=null; } }
+function _advClose(){ var d=document.getElementById('advDlg'); if(d){ d.style.display='none'; d._esc=null; } _adviseSess=null; _advisePolling=false; }
 function _adviseBadge(vd){ var m={ship:['bdg-ok','SHIP'],revise:['bdg-amber','REVISE'],block:['bdg-red','BLOCK'],skipped:['bdg-gray','SKIPPED']}; var b=m[vd]||['bdg-gray',String(vd||'?').toUpperCase()]; return '<span class="badge '+b[0]+'">'+b[1]+'</span>'; }
 async function adviseOpen(name){
-  _adviseSess=name; _adviseLast=null;
+  _adviseSess=name; _adviseLast=null; _adviseTab=null; _advisePolling=false;
   var st={}; try{ st=await (await fetch('/api/advise-state?name='+encodeURIComponent(name))).json()||{}; }catch(e){}
   _advDlg('<h2>Third-party review</h2>'
-    +'<div class="cc-p-sub" style="margin:-10px 0 12px">An independent external GPT (a different AI vendor) reviews <b>'+esc(name)+'</b>&#39;s recent work &mdash; a skeptical second opinion. It reads only; Claude holds the pen.</div>'
-    +'<div id="advBody"><div style="padding:22px 4px;color:var(--dim)">Assembling this session&#39;s context and asking the external reviewer&hellip; this can take a minute or two.</div></div>'
-    +'<div class="btns" id="advBtns"><button class="btn" onclick="_advClose()">Close</button></div>');
+    +'<div class="cc-p-sub" style="margin:-10px 0 10px">An independent external GPT (a different AI vendor) reviews <b>'+esc(name)+'</b>&#39;s recent work &mdash; a skeptical second opinion you watch live. It reads only; Claude holds the pen.</div>'
+    +_adviseTogglesHTML(st)
+    +'<div id="advTermWrap" style="display:none;margin-bottom:10px"><div class="cc-p-sub" style="margin-bottom:4px;font-size:11.5px">Live reviewer terminal (external GPT / codex):</div>'
+      +'<div style="height:250px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--bg)"><iframe id="advTerm" style="width:100%;height:100%;border:0" src="about:blank"></iframe></div></div>'
+    +'<div id="advBody"><div class="cc-p-note">Choose your options above (verify mode is off by default to protect quota), then start the review. You&#39;ll watch the reviewer work live and decide whether to inject its opinion into Claude.</div></div>'
+    +'<div class="btns" id="advBtns"><button class="btn" onclick="_advClose()">Close</button><button class="btn go" id="advStartBtn" onclick="adviseLaunch()">Start review</button></div>');
   document.getElementById('advDlg')._esc=function(){_advClose();};
+  setTimeout(function(){ var b=document.getElementById('advStartBtn'); if(b) b.focus(); },40);
+}
+async function adviseLaunch(){
+  var name=_adviseSess; if(!name) return;
+  var vck=document.getElementById('advVerifyCk'); var verify=!!(vck&&vck.checked);   // read the CURRENT toggle (settable before this run)
+  var ack=document.getElementById('advAutoCk'); var st={autoinject:!!(ack&&ack.checked), verify:verify};
+  _advisePolling=true; _adviseLast=null;
+  var sb=document.getElementById('advStartBtn'); if(sb){ sb.disabled=true; sb.textContent='Starting…'; }
+  var body=document.getElementById('advBody'); if(body) body.innerHTML='<div style="padding:16px 4px;color:var(--dim)">Starting the reviewer&hellip;</div>';
   var res=null;
-  try{ res=await (await fetch('/api/advise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:name,verify:!!st.verify})})).json(); }
-  catch(e){ res={ok:false,error:'request failed'}; }
-  if(_adviseSess!==name) return;                                   // operator moved on
-  var dd=document.getElementById('advDlg'); if(!dd||dd.style.display==='none') return;   // closed mid-run
-  _adviseLast=res; _adviseRenderResult(res, st);
+  try{ res=await (await fetch('/api/advise-start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:name,verify:verify})})).json(); }
+  catch(e){ res={ok:false,error:'could not start'}; }
+  if(_adviseSess!==name) return;
+  if(!res||!res.ok){ if(body) body.innerHTML='<div style="padding:12px 4px;color:var(--fxbig)">Couldn&#39;t start the review: '+esc((res&&res.error)||'unknown')+'</div>'; if(sb){ sb.disabled=false; sb.textContent='Start review'; } return; }
+  _adviseTab=res.tab;
+  var tw=document.getElementById('advTermWrap'), tf=document.getElementById('advTerm');
+  if(tw&&tf){ tw.style.display='block'; tf.src='/term?name='+encodeURIComponent(res.tab); }   // embed the live terminal
+  if(body) body.innerHTML='<div style="padding:12px 4px;color:var(--dim)">Reviewer is working&hellip; the verdict appears here when it finishes (watch it live above).</div>';
+  var btns=document.getElementById('advBtns'); if(btns) btns.innerHTML='<button class="btn" onclick="_advClose()">Close</button>';
+  advisePoll(name, st);
+}
+function advisePoll(name, st){
+  if(_adviseSess!==name || !_advisePolling) return;
+  var dd=document.getElementById('advDlg'); if(!dd||dd.style.display==='none') return;
+  fetch('/api/advise-result?name='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(res){
+    if(_adviseSess!==name) return;
+    if(res&&res.ready){ _advisePolling=false; _adviseLast=res; _adviseRenderResult(res, st); }
+    else setTimeout(function(){advisePoll(name, st);}, 2500);
+  }).catch(function(){ setTimeout(function(){advisePoll(name, st);}, 3000); });
+}
+function _adviseTogglesHTML(st){ st=st||{};
+  return '<div style="display:flex;gap:18px;flex-wrap:wrap;margin:2px 0 12px;font-size:12.5px">'
+    +'<label style="display:flex;align-items:center;gap:7px;cursor:pointer"><input type="checkbox" id="advAutoCk" style="width:auto" '+(st.autoinject?'checked':'')+' onchange="adviseToggle(\'autoinject\',this.checked)"> <span title="When on, every review is injected straight into Claude without asking.">Auto-inject reviews into Claude</span></label>'
+    +'<label style="display:flex;align-items:center;gap:7px;cursor:pointer"><input type="checkbox" id="advVerifyCk" style="width:auto" '+(st.verify?'checked':'')+' onchange="adviseToggle(\'verify\',this.checked)"> <span title="Slower and uses more tokens: forces the reviewer to open files and verify claims. Off by default to protect quota. Applies to the next Start / Re-run.">Verify mode (rigorous)</span></label>'
+    +'</div>';
 }
 function _adviseRenderResult(res, st){
   var body=document.getElementById('advBody'), btns=document.getElementById('advBtns'); if(!body) return; st=st||{};
@@ -25118,21 +25311,19 @@ function _adviseRenderResult(res, st){
   var vd=res.verdict;
   if(vd==='skipped'){ body.innerHTML='<div class="cc-p-note">Advisor skipped: '+esc(res.reason||'the external reviewer was unavailable or the daily cap was reached')+'. Your Claude work is untouched.</div>';
     if(btns) btns.innerHTML='<button class="btn" onclick="adviseRerun()">Re-run</button><button class="btn" onclick="_advClose()">Close</button>'; return; }
-  var toggles='<div style="display:flex;gap:18px;flex-wrap:wrap;margin:2px 0 12px;font-size:12.5px">'
-    +'<label style="display:flex;align-items:center;gap:7px;cursor:pointer"><input type="checkbox" id="advAuto" style="width:auto" '+(st.autoinject?'checked':'')+' onchange="adviseToggle(\'autoinject\',this.checked)"> <span title="When on, every review is injected straight into Claude without asking.">Auto-inject reviews into Claude</span></label>'
-    +'<label style="display:flex;align-items:center;gap:7px;cursor:pointer"><input type="checkbox" id="advVerify" style="width:auto" '+(st.verify?'checked':'')+' onchange="adviseToggle(\'verify\',this.checked)"> <span title="Slower and uses more tokens: forces the reviewer to open files and verify claims. Off by default to protect quota. Takes effect on the next run.">Verify mode (rigorous)</span></label>'
-    +'</div>';
-  var note = res.injected ? '<div class="cc-p-sub" style="color:var(--go);margin-bottom:8px">Auto-injected into '+esc(_adviseSess)+'.</div>' : '';
+  var note = res.injected ? '<div class="cc-p-sub" style="color:var(--go);margin-bottom:8px">Delivered to Claude.</div>'
+    : (res.autoinject ? '<div class="cc-p-sub" style="color:var(--dim);margin-bottom:8px">Auto-inject is on &mdash; delivering to Claude&hellip;</div>' : '');
   body.innerHTML='<div style="display:flex;align-items:center;gap:9px;margin-bottom:10px">'+_adviseBadge(vd)+'<b style="font-size:14px">External reviewer&#39;s verdict</b></div>'
-    +toggles+note
-    +'<pre style="white-space:pre-wrap;word-break:break-word;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px;max-height:46vh;overflow:auto;font-size:12.5px;line-height:1.5;margin:0">'+esc(res.opinion||'')+'</pre>';
+    +note
+    +'<pre style="white-space:pre-wrap;word-break:break-word;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px;max-height:40vh;overflow:auto;font-size:12.5px;line-height:1.5;margin:0">'+esc(res.opinion||'')+'</pre>';
+  // manual Inject stays available UNLESS this result was actually delivered (fallback if auto-inject didn't fire)
   if(btns) btns.innerHTML='<button class="btn" onclick="adviseRerun()">Re-run</button>'
     +(res.injected?'':'<button class="btn go" onclick="adviseInject()">Inject into Claude</button>')
     +'<button class="btn" onclick="_advClose()">Close</button>';
 }
 async function adviseToggle(key,val){ if(!_adviseSess) return; try{ await fetch('/api/advise-toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:_adviseSess,key:key,value:!!val})}); }catch(e){} if(key==='autoinject'&&val) toast('Future reviews will auto-inject into '+esc(_adviseSess)+'.'); }
 async function adviseInject(){ if(!_adviseSess||!_adviseLast) return; var t=(_adviseLast.opinion||''); if(!t.trim()) return; var r=null; try{ r=await (await fetch('/api/advise-inject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:_adviseSess,text:t})})).json(); }catch(e){} if(r&&r.ok){ toast('Injected the review into '+esc(_adviseSess)+'.'); _advClose(); } else toast('Inject failed: '+((r&&r.error)||'?'),5000); }
-function adviseRerun(){ var n=_adviseSess; _advClose(); adviseOpen(n); }
+function adviseRerun(){ if(_adviseSess) adviseLaunch(); }   // re-launch with the CURRENT toggle state (verify settable here)
 // Reusable busy overlay -- show a spinner + message during any slow op so it never looks frozen.
 function busyOn(msg,sub){ var o=document.getElementById('cfbusy'); if(!o){ o=document.createElement('div'); o.id='cfbusy'; o.className='cfbusy'; document.body.appendChild(o);} o.innerHTML='<div class="cfbusy-card"><div class="spin big"></div><div class="cfbusy-msg">'+(msg||'Working…')+'</div>'+(sub?('<div class="cfbusy-sub">'+sub+'</div>'):'')+'</div>'; o.style.display='flex'; }
 function busyOff(){ var o=document.getElementById('cfbusy'); if(o) o.style.display='none'; }

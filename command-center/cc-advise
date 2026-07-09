@@ -110,8 +110,22 @@ def _budget_ok(path, cap):
     return True, st["count"]
 
 
-def _skip(reason, as_json):
+def _emit_result(d, result_file):
+    """Persist the final verdict to --result-file (atomic) so a caller polling the file always sees a result,
+    even on a skip/failure -- this is what keeps the Command Center panel from hanging forever."""
+    if not result_file:
+        return
+    try:
+        tmp = result_file + ".tmp"
+        json.dump(d, open(tmp, "w"))
+        os.replace(tmp, result_file)
+    except Exception:
+        pass
+
+
+def _skip(reason, as_json, result_file=None):
     out = {"verdict": "skipped", "reason": reason}
+    _emit_result(out, result_file)
     print(json.dumps(out) if as_json else "[cc-advise] SKIPPED: %s" % reason)
     return 0
 
@@ -135,6 +149,11 @@ def main():
     ap.add_argument("--verify", action="store_true",
                     help="rigor mode: force independent verification of load-bearing FACT claims")
     ap.add_argument("--json", action="store_true", help="print raw JSON verdict")
+    ap.add_argument("--stream", action="store_true",
+                    help="TRANSPARENT mode: let codex stream its work to this terminal live (do not capture); "
+                         "for running inside a watchable tmux tab. Writes the verdict to --result-file.")
+    ap.add_argument("--result-file", default="",
+                    help="write the final structured verdict JSON here (atomic) -- for a caller polling for it")
     args = ap.parse_args()
 
     # PAYLOAD mode (Command Center) vs FILE mode (standalone/Ralph) -- one is required.
@@ -145,14 +164,15 @@ def main():
     else:
         ap.error("provide --payload, or both --goal and --deliverable")
 
+    rf = args.result_file
     # Check the reviewer is even available BEFORE spending budget -- else a mis-configured node (no Codex)
     # burns its whole daily cap on skipped attempts (only real invocations should count).
     if not os.path.isfile(CODEX):
-        return _skip("codex CLI not found at %s" % CODEX, args.json)
+        return _skip("codex CLI not found at %s" % CODEX, args.json, rf)
 
     ok, n = _budget_ok(args.budget_file, args.max_calls_per_day)
     if not ok:
-        return _skip("daily advisor cap reached (%d)" % n, args.json)
+        return _skip("daily advisor cap reached (%d)" % n, args.json, rf)
 
     if payload_text is not None:
         if len(payload_text) > MAX_INLINE:
@@ -176,6 +196,12 @@ def main():
     if args.verify:
         prompt += VERIFY_CLAUSE
 
+    if args.stream:   # TRANSPARENT: show the operator what the reviewer is doing before it starts
+        print("=== Third-party review (external GPT: %s%s) ===" % (
+            args.model, ", VERIFY mode" if args.verify else ""))
+        print("Reviewing the session's recent work against its goal. Live reviewer output follows.\n"
+              "(read-only sandbox -- the reviewer can read the repo but cannot change anything)\n", flush=True)
+
     with tempfile.TemporaryDirectory() as td:
         schema_f = os.path.join(td, "schema.json")
         last_f = os.path.join(td, "last.json")
@@ -187,19 +213,22 @@ def main():
         if args.repo:
             cmd[3:3] = ["-C", args.repo]  # insert working root
         try:
+            # stream mode: inherit stdout/stderr so codex's work is VISIBLE live in the tmux tab.
+            # non-stream: capture (r.stderr used only to note presence on a parse failure).
             r = subprocess.run(cmd, input=stdin_payload, text=True,
-                               capture_output=True, timeout=300)
+                               capture_output=(not args.stream), timeout=300)
         except Exception as e:  # fail-open: never block the Claude work
-            return _skip("codex call failed: %s" % e, args.json)
+            return _skip("codex call failed: %s" % e, args.json, rf)
         try:
             verdict = json.load(open(last_f))
         except Exception:
             # Secret-clean (spec 6): NEVER emit raw codex stderr anywhere -- it can carry local paths, auth
             # diagnostics, or command args. We log only whether stderr was present, never its contents.
             sys.stderr.write("[cc-advise] no structured output from the reviewer (stderr present: %s)\n"
-                             % bool((r.stderr or "").strip()))
-            return _skip("no structured output from the reviewer", args.json)
+                             % bool(((getattr(r, "stderr", "") or "")).strip()))
+            return _skip("no structured output from the reviewer", args.json, rf)
 
+    _emit_result(verdict, rf)
     if args.json:
         print(json.dumps(verdict, indent=2))
         return 0

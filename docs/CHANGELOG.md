@@ -3,6 +3,23 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.181 -- 2026-07-08  (Third-party review: transparent live reviewer + every-surface button)
+- **The reviewer now runs in a WATCHABLE live terminal.** The old flow ran Codex synchronously with its output
+  captured and hidden -- a black box that showed only "Assembling context…" and, on a slow call, looked dead.
+  Now the review runs in its own `advise-<session>` tmux tab (streaming Codex's real output), which the panel
+  EMBEDS so the operator watches the reviewer read the repo, reason, and produce its verdict in real time. The
+  server polls a result file for the structured verdict; a background thread handles auto-inject so it fires even
+  if the panel is closed. (`cc-advise` gained `--stream` + `--result-file`.)
+- **Explicit Start button.** The panel opens with the verify + auto-inject toggles and a Start button (auto-
+  focused), reading the CURRENT verify choice at launch -- so verify is settable BEFORE the first run (the old
+  auto-fire-on-open used the persisted pref only).
+- **Button on EVERY session surface.** Added to the standalone full-screen `/term` view (self-contained modal)
+  in addition to the dashboard's pane / focus / grid headers.
+- **Auto-inject race fixed.** Result persistence and one-time delivery are now separate: the UI poll never
+  injects, and the background injector claims delivery atomically via an `injected_ts` marker, so a poll can't
+  consume the freshness. The panel's "delivered" note + Inject button now reflect ACTUAL delivery, and manual
+  Inject stays available whenever auto-inject didn't deliver.
+
 ## 0.99.180 -- 2026-07-08  (Third-party review: fixes surfaced by the feature reviewing itself)
 - **Context assembly is now git-aware.** The reviewer was being fed the working dir's most-recently-*modified*
   files, which in a live node surfaces churning `_*.json` STATE files and hides the actual code changes -- a real
