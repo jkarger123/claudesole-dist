@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.184 -- 2026-07-09  (Front Desk: the concierge completes the hot-swap in-chat)
+- **The Front Desk concierge can now COMPLETE a placement itself -- no "go click Transfers" dead-end.** New
+  `cc-handoff go` (`/api/handoff-go` -> `handoff_go()` = propose + accept in one, `by:"frontdesk"`): the concierge
+  runs it the instant it knows your scope, and it opens (or resumes) that department ALREADY BRIEFED with your goal
+  + context + pointers -- the "enforce-at-intent" thesis is now reachable end to end. `cc-handoff propose` stays as
+  the cautious path (still lands in Transfers for a confirm). The concierge brief now uses `go`.
+- **The operator's screen follows the swap.** `handoff_go` stamps the origin session's `_smeta.handoff_to` (+
+  scope); the front-desk lens arms `fdFollow()` after opening a concierge and polls `GET /api/session-follow`,
+  auto-`openInSessions(destination)` the moment the concierge hands you off (bounded 10-min window, fires once,
+  survives lens changes). So you type a goal -> watch the concierge think -> land in the right department, warm,
+  with zero clicks.
+- **The Chief of Staff got `cc-handoff go` too** -- its brief now says "delegate department work, don't do it
+  here" and routes a specific piece of department work to that scope (taking you there) instead of doing it at the
+  top level. Reinforces the Front-Desk/Chief boundary.
+- Guard: `handoff_go` rejects an empty goal (was silently creating a phantom "topic" home).
+
 ## 0.99.183 -- 2026-07-09  (Deep-audit: Phase 0 safety floor + Phase 1 -- policy engine + Front Desk + reproducibility)
 - **Remote Desktop: `/wsvnc` auth hardened + shows on Mission Control.** The noVNC bridge is now exempt from
   dashboard cookie-auth (iOS browsers don't attach `cc_auth` to a WebSocket upgrade); the macOS VNC/screen-sharing

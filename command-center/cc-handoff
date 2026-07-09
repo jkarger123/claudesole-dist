@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # cc-handoff propose --goal "<what they now need>" --summary "<where we are>" [--to <scope|new>] [--next "<next step>"]
-# Prepare a WARM TRANSFER: when this conversation has drifted out of your scope, don't muscle through -- route it
-# to the right home and let the operator confirm. Lands in the Transfers tab for one-click approval (Assisted).
+# cc-handoff go      --goal "..." --summary "..." [--to <scope|new>] ...   <- COMPLETE the transfer NOW (no click)
+#
+# WARM TRANSFER: when a conversation has drifted out of your scope, don't muscle through -- route it to the right
+# home carrying the goal + context so the destination opens ALREADY BRIEFED.
+#   propose = leave it in the operator's Transfers tab for one-click confirm (Assisted; cautious/Chief default).
+#   go      = propose AND accept in one -- YOU finish the swap (the operator's UI follows). This is the Front Desk
+#             concierge default: the operator already consented by talking to you, so actually take them there.
 # For agents AND humans. Resolves this node's port + token from its cc.config.json.
 set -uo pipefail
 SUB="${1:-}"; shift || true
-[ "$SUB" = "propose" ] || { echo "usage: cc-handoff propose --goal \"...\" --summary \"...\" [--to <scope|new>] [--next \"...\"] [--from-session NAME]"; exit 1; }
+case "$SUB" in
+  propose|go) : ;;
+  *) echo "usage: cc-handoff {propose|go} --goal \"...\" --summary \"...\" [--to <scope|new>] [--next \"...\"] [--from-session NAME]"; exit 1;;
+esac
 GOAL=""; SUMMARY=""; TO=""; NEXT=""; SUBJECT=""; FROMS="${CC_SESSION:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -23,16 +31,24 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
 PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
 TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
-BODY="$(python3 -c "import json,sys;print(json.dumps({'goal':sys.argv[1],'summary':sys.argv[2],'to':(sys.argv[3] or None),'next':sys.argv[4],'subject':(sys.argv[5] or None),'from_session':(sys.argv[6] or None),'by':'agent'}))" "$GOAL" "$SUMMARY" "$TO" "$NEXT" "$SUBJECT" "$FROMS")"
-RES="$(curl -s -X POST "http://127.0.0.1:${PORT}/api/handoff-propose" -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODY" 2>/dev/null)"
+# go = the completer (by:frontdesk, hits /api/handoff-go); propose = the suggester (by:agent, /api/handoff-propose)
+if [ "$SUB" = "go" ]; then EP="handoff-go"; BY="frontdesk"; else EP="handoff-propose"; BY="agent"; fi
+BODY="$(python3 -c "import json,sys;print(json.dumps({'goal':sys.argv[1],'summary':sys.argv[2],'to':(sys.argv[3] or None),'next':sys.argv[4],'subject':(sys.argv[5] or None),'from_session':(sys.argv[6] or None),'by':sys.argv[7]}))" "$GOAL" "$SUMMARY" "$TO" "$NEXT" "$SUBJECT" "$FROMS" "$BY")"
+RES="$(curl -s -X POST "http://127.0.0.1:${PORT}/api/${EP}" -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODY" 2>/dev/null)"
 if [ -n "$RES" ]; then
-  python3 -c "
-import json,sys
-d=json.loads(sys.argv[1])
-h=d.get('handoff') or {}
-if not d.get('ok'): print('cc-handoff:', d.get('error','could not propose')); sys.exit(0)
-dest = ('NEW home (\"%s\")' % h.get('to_subject')) if h.get('needs_new_home') else h.get('to_scope')
-print('* warm transfer proposed -> %s. The operator will confirm it in the Transfers tab.' % dest)
+  SUB="$SUB" python3 -c "
+import json,os,sys
+d=json.loads(sys.argv[1]); sub=os.environ.get('SUB')
+if not d.get('ok'): print('cc-handoff:', d.get('error','could not '+sub)); sys.exit(0)
+if sub=='go':
+    if d.get('flagged'): print('* not auto-completed (%s) -- left in the Transfers tab for the operator.' % (d.get('note') or 'flagged')); sys.exit(0)
+    where=d.get('placed') or d.get('to_scope') or 'the right scope'
+    verb='resumed' if d.get('resumed') else ('opened a NEW home' if d.get('created_home') else 'opened')
+    print('* done -- %s %s and took the operator there (session %s). The UI follows automatically.' % (verb, where, d.get('session')))
+else:
+    h=d.get('handoff') or {}
+    dest=('NEW home (\"%s\")' % h.get('to_subject')) if h.get('needs_new_home') else h.get('to_scope')
+    print('* warm transfer proposed -> %s. The operator will confirm it in the Transfers tab.' % dest)
 " "$RES"
 else
   echo "could not reach the dashboard on port ${PORT}"

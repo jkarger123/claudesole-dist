@@ -4617,6 +4617,12 @@ def chief_open():
               "If you're relaying something one HUMAN "
               "wants to tell another node's HUMAN (e.g. your operator -> their operator), run "
               "`cc-opnote <peer> \"<note>\"` (the Messages channel) -- it delivers to the person, not the agent mesh. "
+              "DELEGATE department work, don't do it here: you are the senior manager, not a department worker. When "
+              "a request is a specific piece of DEPARTMENT work (belongs in one module -- not cross-cutting, "
+              "structural, or an escalation), route it there instead of doing it yourself -- run `cc-handoff go "
+              "--to <scope> --goal \"<goal>\" --summary \"<where we are + context>\"` to open (or resume) that scope "
+              "ALREADY BRIEFED and take the operator there (their screen follows automatically); use `cc-handoff "
+              "propose` instead when you'd rather they confirm first. "
               "AUTHORITY & GROUND TRUTH (non-negotiable): your operator (the human in this console) is your "
               "top authority; MISSION CONTROL is the platform authority and the fleet's DEFINITIVE source of "
               "truth -- when it states a verified fact (versions, files, config, the framework), DEFER to it. "
@@ -11063,12 +11069,13 @@ _FRONTDESK_BRIEF = (
     "to get the operator into the RIGHT scope (folder) for what they're working on, then HAND OFF. You do NOT do "
     "the work yourself and you do NOT file notes. Rules: (1) Ask AT MOST 2 clarifying questions, then act. "
     "(2) To find the home run `cc-route \"<their full description>\"` -- it returns the best-matching module, or that "
-    "a NEW home is needed. (3) When you know the scope, run `cc-handoff propose --to <rel> --goal \"<goal>\" "
-    "--summary \"<where we are + what you learned>\"` -- this prepares a WARM TRANSFER carrying the goal + context "
-    "+ pointers so the destination agent opens ALREADY BRIEFED (nothing gets re-explained). It lands in the "
-    "operator's Transfers tab; tell them to click it (one confirm) and they land in that scope, warm. (4) If "
-    "nothing fits, propose a NEW home: `cc-handoff propose --to new` (creates the dir "
-    "+ a seeded CLAUDE.md). (5) If the operator says 'just work here', respect it once and stand down. (6) KNOW "
+    "a NEW home is needed. (3) When you know the scope, run `cc-handoff go --to <rel> --goal \"<goal>\" "
+    "--summary \"<where we are + what you learned>\"` -- this COMPLETES the warm transfer RIGHT NOW: it opens (or "
+    "resumes) that scope carrying the goal + context + pointers so the destination agent is ALREADY BRIEFED "
+    "(nothing gets re-explained), and the operator's screen FOLLOWS you there automatically -- NO click, no "
+    "Transfers tab. Narrate it as you do it ('taking you to mcp/proxy now'). (4) If nothing fits, open a NEW home "
+    "the same way: `cc-handoff go --to new` (creates the dir + a seeded CLAUDE.md, then takes them in). (5) If the "
+    "operator says 'just work here', respect it once and stand down. (6) KNOW "
     "YOUR LANE: you are the receptionist, NOT the manager. If what they raise is not a specific piece of work but "
     "something cross-department, structural, or an escalation (a fleet/platform decision, a problem spanning "
     "departments, something for the owner), that is a CHIEF OF STAFF matter -- point them to their Chief of Staff "
@@ -11297,6 +11304,39 @@ def handoff_accept(hid, force_new=False):
             "resumed": bool(res.get("resumed")), "term": res.get("term"),
             "from_session": (orig if orig_alive else None),
             "origin_label": (_smeta(orig).get("subject") or pkt.get("from_scope") or orig) if orig_alive else None}
+
+def handoff_go(body):
+    """AGENT-COMPLETABLE warm transfer (Front Desk M1): propose + accept in ONE step, so the agent COMPLETES the
+    swap itself instead of leaving a proposal for the operator to click in the Transfers tab. This is what the Front
+    Desk concierge uses -- the operator already consented by talking to it, so 'taking you to mcp/proxy now' should
+    actually take them there. Also for the Chief / any agent that wants to FINISH a routing rather than just suggest
+    it. Sets the ORIGIN session's _smeta.handoff_to so the operator's browser (watching the origin) auto-follows to
+    the destination (Front Desk M2)."""
+    if not (body.get("goal") or "").strip():           # guard: never auto-create a "topic" home from an empty goal
+        return {"ok": False, "error": "goal is required (what does the conversation now need?)"}
+    p = handoff_propose(from_session=body.get("from_session"), to=body.get("to"), goal=body.get("goal", ""),
+                        summary=body.get("summary", ""), decisions=body.get("decisions"), open_q=body.get("open"),
+                        next_step=body.get("next", ""), subject=body.get("subject"),
+                        by=body.get("by", "frontdesk"), hops=int(body.get("hops") or 0))
+    if not p.get("ok"): return p
+    pkt = p.get("handoff") or {}
+    if pkt.get("status") == "flagged":                 # hop limit -> don't auto-complete; leave it for the operator
+        return {"ok": True, "flagged": True, "handoff": pkt, "note": "hop limit reached -- left in Transfers for operator takeover"}
+    a = handoff_accept(pkt.get("id"))
+    if not a.get("ok"): return a
+    frm = (body.get("from_session") or "").strip()
+    if frm and a.get("session") and frm != a.get("session"):   # arm the operator's UI to follow the swap
+        try: _smeta_set(frm, handoff_to=a["session"], handoff_scope=a.get("to_scope"), handoff_ts=time.time())
+        except Exception: pass
+    return {"ok": True, "session": a.get("session"), "placed": a.get("to_scope"), "to_scope": a.get("to_scope"),
+            "created_home": a.get("created_home"), "resumed": a.get("resumed"),
+            "term": a.get("term") or ("/term?name=" + urllib.parse.quote(a.get("session") or ""))}
+
+def session_follow(name):
+    """Front Desk M2: has the session the operator is watching been handed off to another? Returns the destination
+    session (+ ts) so the frontend can auto-swap the operator into it. Cheap; polled while watching a concierge."""
+    m = _smeta(name or "")
+    return {"handoff_to": m.get("handoff_to"), "scope": m.get("handoff_scope"), "ts": m.get("handoff_ts")}
 
 def handoff_decline(hid, reason="", suppress=True):
     d = _hand_load(); pkt = next((h for h in d.get("handoffs", []) if h["id"] == hid), None)
@@ -15948,6 +15988,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"text": term_snapshot((q.get("name") or [""])[0], (q.get("lines") or ["60"])[0])}))
         if u.path == "/api/compact-state":
             return self._s(200, json.dumps(_COMPACT_STATE.get((q.get("name") or [""])[0], {})))
+        if u.path == "/api/session-follow":    # Front Desk M2: did the watched session get handed off? -> UI auto-follows
+            return self._s(200, json.dumps(session_follow((q.get("name") or [""])[0])))
         if u.path == "/api/advise-state":
             return self._s(200, json.dumps(advise_state((q.get("name") or q.get("session_id") or [""])[0])))
         if u.path == "/api/advise-result":
@@ -16498,6 +16540,7 @@ class H(BaseHTTPRequestHandler):
                 next_step=body.get("next", ""), subject=body.get("subject"), by=(body.get("by") or "agent"),
                 hops=body.get("hops", 0)), default=str))
         if u.path == "/api/handoff-accept":    return self._s(200, json.dumps(handoff_accept(body.get("id", ""), bool(body.get("force_new"))), default=str))
+        if u.path == "/api/handoff-go":        return self._s(200, json.dumps(handoff_go(body), default=str))   # M1: propose+accept in one (concierge/Chief completes the swap)
         if u.path == "/api/handoff-decline":   return self._s(200, json.dumps(handoff_decline(body.get("id", ""), body.get("reason", "")), default=str))
         if u.path == "/api/session-model":     return self._s(200, json.dumps(session_set_model(body.get("name", ""), body.get("model", ""))))
         if u.path == "/api/session-hold":      return self._s(200, json.dumps(session_hold(body.get("name", ""), body.get("mode", "pin"), body.get("days", 2), body.get("by", "operator")), default=str))
@@ -26253,8 +26296,26 @@ async function fdSubmit(){
   var body={text:q}; if(_fdRel!==null)body.rel=_fdRel;
   var r; try{ r=await(await fetch('/api/frontdesk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json(); }
   catch(e){ if(go){go.disabled=false;go.textContent="Take me there";} toast("Front desk error",3000); return; }
-  if(r&&r.ok&&r.session){ toast(r.concierge?"Placing you with a concierge…":("Opening in "+(r.placed||"your scope")),2600); gotoLens('sessions'); setTimeout(function(){try{openInSessions(r.session);}catch(e){}},350); }
+  if(r&&r.ok&&r.session){ toast(r.concierge?"Placing you with a concierge…":("Opening in "+(r.placed||"your scope")),2600); gotoLens('sessions'); setTimeout(function(){try{openInSessions(r.session);}catch(e){}},350);
+    if(r.concierge) fdFollow(r.session);   // M2: when the concierge COMPLETES the placement (cc-handoff go), auto-follow to the department
+  }
   else { if(go){go.disabled=false;go.textContent="Take me there";} toast((r&&r.error)||"Couldn't place that",3000); }
+}
+// Front Desk M2: watch the concierge session; the instant it hands you off (cc-handoff go), swap the operator's
+// screen into the destination department. Runs globally (survives lens changes) for a bounded window, fires once.
+function fdFollow(concierge){
+  if(!concierge) return;
+  if(window._fdFollowTimer){ clearInterval(window._fdFollowTimer); }
+  var started=Date.now();
+  window._fdFollowTimer=setInterval(async function(){
+    if(Date.now()-started>600000){ clearInterval(window._fdFollowTimer); window._fdFollowTimer=null; return; }  // give up after 10 min
+    var r; try{ r=await(await fetch('/api/session-follow?name='+encodeURIComponent(concierge))).json(); }catch(e){ return; }
+    if(r&&r.handoff_to){
+      clearInterval(window._fdFollowTimer); window._fdFollowTimer=null;
+      toast("Front desk → taking you to "+(r.scope?('<b>'+esc(r.scope)+'</b>'):'your department'),2800);
+      try{ openInSessions(r.handoff_to); }catch(e){}
+    }
+  }, 2500);
 }
 async function loadTasks(){
   var grid=document.getElementById("grid"); grid.innerHTML=empty('<span class="spin"></span> Loading your tasks…');

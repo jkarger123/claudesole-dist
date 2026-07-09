@@ -59,18 +59,27 @@ The design rule: the front desk must be **faster** than bypassing it.
 `POST /api/frontdesk {text:"fix the airtable sync duplicates", rel:"extensions/airtable"}` launched a session
 whose cwd is `extensions/airtable` with the goal seeded; a vague goal spun up the concierge. Both confirmed live.
 
-## Not yet built (the roadmap tail — Phase 1.3 M1–M6)
-- **The Start box UI** (M4) — replace `▶ New session` with `▶ Start` + a live route chip (`GET /api/route` as you
-  type) → Enter posts `/api/frontdesk {text, rel}`. Keep the old picker behind "Choose a place instead".
-- **M1 agent-completable accept** — `cc-handoff go` (gated by `pkt.by=="frontdesk"`) so the concierge's in-chat
-  "yes" completes the move without a second click in the Transfers tab.
-- **M2 UI-follows-the-swap** — the sessions poll jumps the browser to the destination when a frontdesk handoff
-  delivers; offer-archive the concierge tab.
+## Done — the full hot-swap (Phase 1.3 M1/M2/M4 + default landing)
+- **M4 Start box + live route chip** ✅ — the `frontdesk` lens: a `what-do-you-want-to-work-on` box, a debounced
+  route chip (`GET /api/route` as you type, with confidence %), Enter → `POST /api/frontdesk {text, rel}`, plus the
+  escape hatch. It is the **default landing** for a project node (`applyPreset`; overseer keeps Portfolio).
+- **M1 agent-completable accept** ✅ — `cc-handoff go` (`/api/handoff-go` → `handoff_go()` = `handoff_propose` +
+  `handoff_accept` in one, `by:"frontdesk"`). The concierge's in-chat "taking you there now" actually COMPLETES the
+  move — opens/resumes the destination warm — with no second click in Transfers. `cc-handoff propose` stays for the
+  cautious/Chief-confirm path. The concierge brief (rule 3/4) now uses `go`.
+- **M2 UI-follows-the-swap** ✅ — `handoff_go` stamps the origin session's `_smeta.handoff_to` (+ scope);
+  `GET /api/session-follow?name=<sess>` exposes it; the front-desk lens arms `fdFollow(concierge)` after opening a
+  concierge, which polls that endpoint and `openInSessions(destination)` the instant the swap lands (bounded 10-min
+  window, fires once, survives lens changes).
+- **The Chief got `cc-handoff go` too** ✅ — the Chief brief now says "delegate department work, don't do it here"
+  and to `cc-handoff go --to <scope> ...` so triage-via-Chief actually completes (reinforces the Chief-vs-department
+  boundary).
+
+## Not yet built (the roadmap tail)
 - **M6 greenfield fork** — if the intake reveals a whole new PROJECT (not a module), the concierge offers
   `cc-onboard scaffold` instead of `module_add`.
-- Default-entry rollout: make `▶ Start` the default + first-run landing (a `frontdesk` toggle in
-  `context_settings`), with the escape hatches above; give the Chief `cc-handoff go` too so triage-via-Chief
-  completes.
+- Generalize the follow-poll beyond the concierge case (any focused session that gets handed off auto-follows).
+- Per-session read_only ctx for the concierge (it's an ephemeral triage desk; it shouldn't need write tools).
 
 ## Files
 - `command-center/server.py` — `front_desk`, `front_desk_open`, `_FRONTDOOR_BRIEF`, `/api/frontdesk`.
