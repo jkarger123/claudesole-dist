@@ -1,0 +1,33 @@
+# ClaudeFather always-on unit (Linux / systemd) -- TEMPLATE.
+# Keeps ONE instance's dashboard supervised: systemd restarts it if it dies. On Linux there is no TCC/Full-Disk
+# gate, so we run server.py directly (no tmux brain server needed for drive access). If you WANT the dashboard's
+# Sessions/terminal lens to attach to a tmux server, run the supervisor instead (see the commented ExecStart).
+#
+# INSTALL:
+#   1. Replace the __PLACEHOLDERS__ below:
+#        __CC_HOME__    absolute path to this framework home (the unzipped claudefather/ dir)
+#        __CC_CONFIG__  absolute path to this instance's cc.config.json (usually __CC_HOME__/cc.config.json)
+#        __USER__       the OS account to run as
+#   2. Save as /etc/systemd/system/claudefather.service  (or ~/.config/systemd/user/claudefather.service for --user)
+#   3. sudo systemctl daemon-reload && sudo systemctl enable --now claudefather
+#   4. Verify: systemctl status claudefather   ->  active (running)
+#
+[Unit]
+Description=ClaudeFather control center
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__CC_HOME__
+Environment=CC_CONFIG=__CC_CONFIG__
+Environment=TMUX_TMPDIR=/tmp
+ExecStart=/usr/bin/env python3 __CC_HOME__/command-center/server.py
+# --- tmux-supervised alternative (enables the Sessions/terminal lens) ---
+# ExecStart=/bin/bash __CC_HOME__/command-center/cc-instance-supervise.sh __CC_CONFIG__ claudefather
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

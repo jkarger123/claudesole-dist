@@ -3,6 +3,131 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.183 -- 2026-07-09  (Deep-audit: Phase 0 safety floor + Phase 1 -- policy engine + Front Desk + reproducibility)
+- **Remote Desktop: `/wsvnc` auth hardened + shows on Mission Control.** The noVNC bridge is now exempt from
+  dashboard cookie-auth (iOS browsers don't attach `cc_auth` to a WebSocket upgrade); the macOS VNC/screen-sharing
+  PASSWORD remains the gate on the actual screen, and 5900 is reached only via this tailnet bridge. Added the
+  Remote Desktop lens to the overseer/Mission Control preset. A `/wsvnc` debug tracer (`STATE_DIR/_vnc_debug.log`,
+  `GET /api/vnc-debug`) was added. **KNOWN ISSUE:** browser-based VNC still fails on iOS — a WebKit WebSocket
+  limitation (the phone receives the RFB banner and won't reply), NOT the server; desktop browsers work, and on
+  mobile use a native VNC app -> `<tailnet-ip>:5900`. Tracked in ccr-1783612527444.
+- **Ship-safety floor (deep-audit 2026-07-09, Phase 0).** (0.1) `save()`/`load()`/`_vault_save` are now atomic +
+  loud on corruption -- closes a silent state-wipe on the restart that happens every ship. (0.2) preship now runs
+  the 189-test unit suite as a hard gate (was never in the ship path); 6 drift tests quarantined w/ un-skip TODOs.
+  (0.3) `fleet_converge` is now a serialized canary: each node is health-verified back onto the target version and
+  the first failure HALTS the fan-out, so a bad ship reaches at most one tenant (`fleet_canary` flag, default on).
+  (0.4) a manifest `never_ship` list is honored by all three copiers (+ a build-time secret gate) -- closes a hole
+  where a rebuilt install bundle would have shipped live OAuth secrets. (0.5) a manifest-completeness preship gate
+  (+ shipped the referenced-but-missing `ralph_live.py` and `cc-lifeline`). (0.6) per-instance `_backup_state` +
+  `CC_CONFIG`-aware `git-backup.sh` (co-located instances no longer stomp one file / back up the wrong repo).
+  (0.7) an SPA staleness banner (offers a one-click reload when the running version changes) + the phosphor icon
+  font is now vendored locally (zero external runtime dependencies; air-gapped-safe).
+- **Ralph loops release cleanly.** All ralph tmux targets use exact-match (`=name`) so a completed loop's lingering
+  `-live` tab can't make `has-session` prefix-match and report the loop still running (blocked archive; CCR).
+- **Per-action POLICY ENGINE (deep-audit graft G1) — the #1 next graft, landed in log-only mode.** `cc_policy.py`
+  (ALLOW/DENY/ASK, fail-closed, registry-allowlisted; 5 builtins: blast_radius / credential_guard / read_only_os /
+  ask_on_os_tools / spawn_bounds) + `policy_hook.py` (a fail-open Claude Code PreToolUse hook) + `/api/policy-evaluate`
+  + a `_policy_audit.log` (view: `GET /api/policy-audit`). Wired into the chief launch's hook settings. Rollout is
+  MESH_ENFORCE-style: `cc.config policy_enforce` defaults to **"log"** (evaluate + record the would-be verdict, but
+  ALWAYS allow — breaks nothing); flip to **"on"** to actually block force-push/`rm -rf`/credential edits/etc. as a
+  MECHANISM instead of a prose HARD RULE. Verified end-to-end: a real `claude -p` session runs tools normally with
+  the hook, and dangerous commands are correctly flagged in the audit log. Now also covers scoped agents +
+  Ralph loops (shared `--settings` helper) with per-session context (`CC_POLICY_CTX` -> read-only reviewers). Docs:
+  `docs/POLICIES.md`.
+- **THE FRONT DESK (deep-audit Phase 1.3) -- the "vibe coder -> context engineer" differentiator.** A reception you
+  land in: "what do you want to work on?" -> routes to the right department (scope) via the live router and opens a
+  session THERE with the goal seeded (and the destination agent briefed via the warm-transfer packet, so nothing is
+  re-explained); an unclear goal opens an ephemeral cheap-model concierge that places you (creating a new home if
+  none fits). Backend `front_desk`/`front_desk_open` + `/api/frontdesk` + `cc-front` CLI + a new Front Desk LENS
+  (welcome, live department chip, escape hatch). **Default landing for PROJECT nodes** (an overseer keeps Portfolio;
+  opt out with `cc.config frontdesk_landing:false`). The **Front Desk vs Chief of Staff** boundary (receptionist vs
+  senior manager) is explicit in the help text, the concierge + scoped-agent briefs, and `docs/FRONT_DESK.md`.
+- **Reproducibility (deep-audit P1-4): shipped CLIs no longer hardcode the dev path.** Removed the
+  `$HOME/<install-dir>` fallback from every `cc-*` CLI and made `cc-spawn`/`cc-promote` self-locate `CC_HOME`
+  (like `cc-init`) -- a fresh install elsewhere now resolves config from its own tree. Living tracker of the
+  remaining "download -> works" landmines: `docs/PACKAGING.md`.
+- **Reproducibility (deep-audit P0-2): a "Connect Claude" step now exists.** The `claude` CLI is the engine for
+  every chief/agent/Ralph loop/Front-Desk concierge, but nothing checked for it -- a fresh install booted green,
+  then every agent failed on first launch. `install.sh` now checks `command -v claude` + auth as a first-class
+  prereq, `AGENT_INSTALL.md` makes it step zero (verify with `claude -p 'reply OK'`), and Doctor flags it (red if
+  the CLI is missing, a warning if no auth).
+- **Reproducibility (deep-audit P1-5/P1-6): portable supervision + honest restart commands.** The shipping
+  supervisor (`cc-instance-supervise.sh`) now resolves tmux via `command -v tmux` (a hardcoded
+  `/opt/homebrew/bin/tmux` silently broke Intel Macs + Linux); every printed restart command (`cc-init`,
+  `cc-update`, `cc-spawn`) derives the tmux **session name** from cc.config `"session"` (default `claudefather`)
+  instead of the dev box's `hpcc`, and resolves tmux portably. Shipped fill-in-the-blanks always-on units:
+  `install/templates/com.claudefather.instance.plist.template` (launchd) + `claudefather.service.template`
+  (systemd). Landmine tracker now 8/14 closed.
+- **Secure-default (deep-audit P1-9 / roadmap 1.1): auth is now FAIL-SECURE, not open-by-default.** A fresh
+  install with no configured token used to boot with the dashboard + every `/api` wide open to anyone who could
+  reach the port. It now mints a random per-node token at boot (persisted to cc.config, dropped in
+  `STATE_DIR/_auth_token.txt`, and printed LOUDLY to stderr so the operator can log in). Running genuinely open
+  now requires an explicit `auth_open: true` (for a listener bound to 127.0.0.1 / a private tailnet -- Doctor
+  still warns). `CC_AUTH_TOKEN` / cc.config `auth_token` still take precedence, and an install that already has
+  a token is byte-for-byte unchanged (verified live: all 3 co-located instances restart with auth intact, no
+  spurious mint). Landmine tracker now 9/14 closed.
+- **Reproducibility (deep-audit P2-11): `platform_map.json` is portable + managed.** It shipped with 66
+  hardcoded absolute `/Users/<dev>/…` paths and wasn't in the manifest (so it never propagated + would point at
+  the dev box on every install). It now stores paths RELATIVE to CC_HOME; `/api/platform-map` absolutizes them
+  against THIS install's CC_HOME at serve time (frontend + file-get unchanged); the file is now a managed
+  framework path (ships via cc-update) and residue-clean. Landmine tracker now 10/14 closed.
+- **Reproducibility (deep-audit P2-14): the credential vault fails LOUD, not silent, when cryptography is
+  missing.** On PEP-668 python (recent Homebrew/Debian) `pip install --user cryptography` exits nonzero without
+  installing anything, so the vault (Fernet) was silently disabled and every secret save returned a quiet
+  `ok:false`. install.sh now VERIFIES by real `import cryptography` after each attempt and falls back to
+  `--break-system-packages`, failing LOUD with the exact remediation instead of a misleading "SKIP (no
+  network?)". Doctor gained a RED `vault` error (names the PEP-668 trap) when the vault can't encrypt. Landmine
+  tracker now 11/14 closed.
+- **Reproducibility (deep-audit P2-13): the Linux-support claim is now honest.** The docs said "macOS or Linux"
+  flatly. Reality: the control server is portable stdlib Python and boots + runs on Linux (supervise with the
+  shipped systemd template, `storage_mode: github`), and every macOS-only binary (`security`/Keychain,
+  `launchctl`, `pmset`, iCloud) is invoked ONLY on-demand through guarded `sh()` handlers -- confirmed nothing
+  macOS-specific runs at boot, so Linux degrades gracefully (account-switch / iCloud / power lenses no-op)
+  instead of crashing. Documented the exact cross-platform-vs-macOS-only split (`docs/PACKAGING.md` "Platform
+  support" + a precise AGENT_INSTALL prereq). Landmine tracker now 12/14 closed.
+- **Clean-core (deep-audit P2-12): tenant residue ratcheted 47 -> 6.** Genericized every tenant name/example that
+  lived in comments, docstrings, and test fixtures across `server.py`/`context.py`/`zoom.py` (operator names,
+  example session titles, node names) and re-baselined `.residue_baseline.json` so the floor can't regress past
+  6. The remaining 6 are FUNCTIONAL tenant-defaults (the `_FRIENDLY` service-label map, the `/hptuners/`
+  cwd-shortening regex, the `text2tune bridge` product chip) that need config-plumbing rather than a rename --
+  tracked to the clean-core carve-out. No behavior change (self-tests pass; all 3 instances restart green).
+
+- **Per-action policy engine is now OPT-IN, OFF BY DEFAULT.** It was defaulting to `"log"` mode, which wired a
+  PreToolUse hook into every session (chief/agents/Ralph) and fired a network call on every tool call to record a
+  would-be verdict -- overhead + interference even though it never blocked. Now `policy_enforce` defaults to
+  `"off"`, and when off the hook is NOT wired into ANY session at all: zero calls, zero overhead, unlimited
+  untouched tool use for power users and fleet nodes. It is a guardrail an operator turns ON only when they want
+  it (e.g. a non-technical end-user) via `policy_enforce: "log"` (watch) or `"on"` (enforce). The 5 rules still
+  target only genuinely dangerous actions, never normal tool use. (`docs/POLICIES.md`.)
+- **Reproducibility: `cc-init` now writes an EXPLICIT, secure update posture.** A scaffolded install used to
+  rely on invisible runtime defaults for how it updates. `cc-init` now writes `update_channel` (managed vs
+  standalone) + the signature-gated `update_verify` into `cc.config.json`, and PRINTS the posture + how to change
+  it (run isolated, point at your own upstream, or harden to `enforce`). `setdefault` preserves any choice the
+  operator already made. Ties the P1-8 update-safety work into the install path so a downloader makes an informed
+  choice instead of getting a silent default. (`docs/UPDATES.md`.)
+- **Clean-core (deep-audit P2-12 CLOSED): framework tenant residue is now 0 and ENFORCED at 0.** Ratcheted the
+  remaining functional tenant-defaults to zero by config-driving them rather than renaming: service session
+  labels now derive from cc.config `services` via `_service_labels()` (the framework carries no hardcoded service
+  names), the cwd-shortening regex is generic (keeps the last two path segments on any install), and the
+  product-bridge status chip label is generic. Re-baselined `.residue_baseline.json` to 0, so any framework file
+  that gains a tenant marker now FAILS the ship. Verified: config-derived labels resolve correctly (a
+  deployment's service sessions show its own configured labels), all 3 instances restart green. Reproducibility
+  landmine tracker is now 14/14 -- every one closed.
+- **Supply-chain safety (deep-audit P1-8): framework updates are signature-gated + the update posture is
+  explicit.** A fresh non-source install used to auto-pull framework code from a hardcoded public GitHub mirror
+  every ~30 min and self-restart, with `cc-update.sh` applying it verbatim -- no signature check. Now: (1)
+  `cc-update.sh` runs `verify_update.py` BEFORE overlaying, which checks the upstream's `core.sig.json` is signed
+  by THIS box's existing trust root (`superadmin.pub`/`recovery.pub`, never the incoming copy) AND that every
+  framework file it will install hash-matches that signed manifest -- so a swapped `server.py` or a swapped-in
+  trust root is caught before it lands. Policy `cc.config update_verify`: `warn` (default -- verify + loud warn,
+  still apply, matching the MESH_ENFORCE/POLICY_ENFORCE staged rollout), `enforce` (block), `off`. `--allow-unsigned`
+  proceeds past an UNSIGNED upstream but NEVER past active tampering. (2) Managed-vs-standalone is now explicit:
+  `update_channel:"standalone"` disables auto-pull, and Doctor surfaces when a node auto-installs from the built-in
+  public mirror so it is never silent. (3) Key rotation is supported via the primary + break-glass `recovery.pub`
+  trust pair. Verified end-to-end: the real signed dist VERIFIES (148/148), an unsigned upstream is UNVERIFIED,
+  a tampered file FAILS and is blocked even with `--allow-unsigned`. Full model: `docs/UPDATES.md`. Landmine
+  tracker now 13/14 -- every ship-blocking landmine closed.
+
 ## 0.99.182 -- 2026-07-08  (Third-party review: Ralph loop-finish review + next-task steer + full docs)
 - **Ralph loops can now be gated by the cross-vendor reviewer.** Opt-in per loop (a `loop.json` `advisor` block,
   or the `🔵 review: on/off` toggle on each loop card): when a loop COMPLETES, an independent external GPT

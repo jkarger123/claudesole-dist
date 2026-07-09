@@ -368,15 +368,15 @@ def _selftest():
         "WEBVTT\n\n"
         "1\n00:00:01.000 --> 00:00:04.000\n<v James>Hey, thanks for hopping on.\n\n"
         "2\n00:00:04.000 --> 00:00:07.500\n<v James>Wanted to talk about the 6.7 tune.\n\n"
-        "3\n00:00:08.000 --> 00:00:12.000\nSarah Karger: Sure, what are the EGT concerns?\n\n"
+        "3\n00:00:08.000 --> 00:00:12.000\nDana Lee: Sure, what are the EGT concerns?\n\n"
     )
     out = parse_vtt_text(sample)
-    assert "James:" in out["text"] and "Sarah Karger:" in out["text"], out
-    assert "James" in out["speakers"] and "Sarah Karger" in out["speakers"], out["speakers"]
+    assert "James:" in out["text"] and "Dana Lee:" in out["text"], out
+    assert "James" in out["speakers"] and "Dana Lee" in out["speakers"], out["speakers"]
     # consecutive same-speaker cues collapse onto one line
     assert out["text"].count("James:") == 1, out["text"]
-    txt = parse_txt_text("James: hello there\nSarah: hi back")
-    assert txt["speakers"] == ["James", "Sarah"], txt
+    txt = parse_txt_text("James: hello there\nDana: hi back")
+    assert txt["speakers"] == ["James", "Dana"], txt
     print("SELFTEST OK ->\n" + out["text"])
     print("speakers:", out["speakers"])
     return True

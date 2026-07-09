@@ -28,7 +28,9 @@ Multiple ClaudeFathers federate under a **ClaudeGrandfather** (Mission Control /
 
 ## 2. The Core Engine — `command-center/server.py`
 
-The Command Center is the platform's web control plane: a single **~12.8k-line stdlib-Python HTTP server** with an **embedded vanilla-JS single-page frontend** (the `PAGE` string inside request-handler class `H`). No build step, no external deps except the optional guarded `cryptography` import used for Ed25519 superadmin.
+The Command Center is the platform's web control plane: a single **~28.5k-line stdlib-Python HTTP server** (as of 2026-07-09; the embedded `PAGE` frontend alone is ~9.6k lines, ~286 `/api` endpoints) with an **embedded vanilla-JS single-page frontend** (the `PAGE` string inside request-handler class `H`). No build step, no external deps except the optional guarded `cryptography` import used for Ed25519 superadmin.
+
+> **Platform self-assessment (2026-07-09):** a full 5-agent deep audit of ClaudeFather — architecture, fleet/governance, packaging, the OmniAgent benchmark, and the product differentiator — plus the definitive platform profile and the ranked roadmap live in `conceptsandideas/OmniAgent/deliverables/deep-audit-20260709/` (`CLAUDEFATHER_PROFILE.md` + `THE_PATH_FORWARD.md`).
 
 - **Bind / portability.** Serves the dashboard on `0.0.0.0:8799` (override via `HPCC_PORT`/config). Self-locating and portable: `BASE` = this dir, `CC_HOME` = parent, all tenant settings come from `cc.config.json` via `$CC_CONFIG`, so nested instances reuse the same code with different config + `state_dir`.
 - **Supervision.** Runs inside the `hpcc` tmux session on the shared **brain tmux server** (`cc-supervise.sh` + a launchd `KeepAlive`) so it inherits TCC context for SSD access. **Edits to `server.py` do NOT take effect until that session is recreated** — use the `claudesole-restart` skill after any server/frontend edit.

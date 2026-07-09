@@ -110,6 +110,41 @@ the loop is finalized.
 - **Effect:** the external GPT becomes a **quality gate** on Ralph — a loop can't declare "done" until the
   cross-vendor reviewer is satisfied (or the round cap is hit, with the operator notified each round).
 
+### 3.4 Campaign flow — GPT as DIRECTOR of a chain of loops
+The reviewer promoted to a **director**: a perpetual **plan → build → run → review** cycle toward a north-star
+goal, run full-auto with an operator intercept window. Runner: `campaign_runner.py` in tmux `campaign-<name>`.
+
+```
+   north-star goal
+        │
+        ▼
+  ┌─▶ DIRECTOR (external GPT, cc-advise --mode direct_next, VISIBLE) ── decides: next loop  OR  campaign DONE
+  │        │ next_loop {goal, checklist, rationale}
+  │        ▼
+  │   INTERCEPT WINDOW (timer) ── operator MAY edit / launch-now / pause / halt;  no action → auto-launch
+  │        │
+  │        ▼
+  │   BUILD + RUN ── a Claude agent executes it (a real Ralph loop, its own live tab) → completion
+  │        │
+  └────────┘  (round++, until DONE / round-cap / halt)
+```
+
+- **Director** (`cc-advise --mode direct_next`): reads the north-star goal + prior-loop history + the finished
+  loop's output (opens the repo) and returns `{status: continue|done, assessment, next_loop:{goal,checklist,
+  rationale}, done_reason}`. It **plans**; it never edits (read-only sandbox).
+- **Intercept window**: the proposed next loop is written to `pending.json` with a deadline and surfaced in the
+  **Campaigns lens** with a live countdown. The operator can **edit** the goal, **launch now**, **pause**, or
+  **halt** — but if nobody acts before the deadline, it **auto-launches** (full-auto with a human escape hatch).
+- **Build + run**: the runner creates a real Ralph loop (`_camp-<name>-r<N>`, hidden from the Ralph lens by the
+  `_` prefix, watchable from Campaigns) from the directive's checklist and runs it to completion — a Claude agent
+  does the actual building, visible in its own live tab.
+- **Guardrails**: a hard **`max_rounds`** cap (always terminates), the director can declare **DONE**, and
+  **halt/pause anytime** (kill switch, mid-loop safe). **Fail-SAFE** (unlike the per-review advisor's fail-open):
+  if the director can't decide, the campaign **pauses for the operator** rather than barrelling on. No unattended
+  runaway — the round cap + Plus daily cap bound total spend.
+- **Provenance:** this is the fullest realization so far of Omnigent's Tier-1 *Executor/meta-harness* idea — two
+  different-vendor models pushing one goal forward together (GPT steering, Claude doing).
+
 ---
 
 ## 4. The reviewer instructions (why it's good, not sycophantic)
@@ -142,6 +177,12 @@ referenced records; any load-bearing FACT you can't substantiate from a file is 
 | `/api/advise` | POST `{session_id, verify?}` | **Synchronous** review (blocks for the verdict) — for API/Ralph callers. |
 | `/api/ralph-advisor` | POST `{name, on, mode?, verify?, max_rounds?}` | Turn the loop-finish review on/off for a loop. |
 | `/api/ralph-notify` (kind `advisor_review`) | POST | The runner surfaces a completed loop review to the operator. |
+| `/api/campaign-create` | POST `{name, goal, cwd?, max_rounds?, intercept_secs?}` | Create a GPT-directed campaign. |
+| `/api/campaign-launch` | POST `{name}` | Start the campaign runner (tmux `campaign-<name>`). |
+| `/api/campaigns` / `/api/campaign` | GET | List campaigns / one campaign's detail (config, pending, director log). |
+| `/api/campaign-control` | POST `{name, action}` | pause / resume / halt / delete. |
+| `/api/campaign-intercept` | POST `{name, action, directive?}` | Act on the pending next-loop directive: `go` (launch now, honoring an edit) / `skip` (pause to re-plan). |
+| `/api/campaign-notify` (kinds done/ended/attention) | POST | The runner pings the chief on human-relevant campaign events. |
 
 ### `loop.json` advisor block (Ralph)
 ```json
@@ -187,6 +228,11 @@ Set it via the Ralph lens toggle (`🔵 review: on/off` on each loop card), `POS
   `advisePoll`/`_adviseRenderResult`) in the `PAGE` string, the `/term` self-contained modal in `TERM_PAGE`,
   and the Ralph pieces (`ralph_advisor_set`, `ralph_notify` kind `advisor_review`, the Ralph-lens toggle).
 - **`command-center/ralph_runner.py`** — `_advisor_gate()` (the loop-finish hook) + its wiring at `is_complete()`.
+- **`command-center/campaign_runner.py`** — the GPT-directed campaign orchestrator (director → intercept →
+  build+run → repeat). Server side: `campaign_*` functions + `/api/campaign-*` routes + the **Campaigns lens**
+  (`loadCampaigns`/`campaignCard` + the intercept panel). Engine: `cc-advise --mode direct_next` (the director
+  prompt + `DIRECTOR_SCHEMA`). Campaign state: `data/campaigns/<name>/` (`campaign.json`, `pending.json`,
+  `director.md`, `run.log`); its loops: `data/ralph/_camp-<name>-r<N>/`.
 - **`~/.codex/auth.json`** — the Codex subscription login (per-node; *later:* migrate into the credential vault).
 - **This doc** — `docs/CROSS_VENDOR_ADVISOR.md`. Original spec: `conceptsandideas/OmniAgent/deliverables/
   CROSS_VENDOR_ADVISOR_SPEC.md`.
@@ -196,12 +242,14 @@ Set it via the Ralph lens toggle (`🔵 review: on/off` on each loop card), `POS
 ## 8. Roadmap / build order
 
 1. ✅ **v1 — interactive "Third-party review"** in any session (watchable, Inject + auto-inject + verify). SHIPPED.
-2. ✅ **Ralph loop-finish auto-review + next-task steer.** SHIPPED (this doc).
-3. **Ralph per-iteration review + pause/modify** — opt-in per loop, tighter budget gate (Plus-aware).
-4. **GPT-as-agent-team-member** — the reviewer as a first-class participant, not only a reviewer.
+2. ✅ **Ralph loop-finish auto-review + next-task steer.** SHIPPED.
+3. ✅ **Campaigns — GPT as DIRECTOR** of a chain of loops (plan → intercept → build → repeat). SHIPPED (§3.4).
+4. **Ralph per-iteration review + pause/modify** — opt-in per loop, tighter budget gate (Plus-aware).
 5. **Provider-agnostic partner abstraction** — Gemini / local behind the same seam (the real Omnigent *Executor*
    pillar); optional debate-to-converge and eyes-on-manager modes. Upgrade to Pro when volume warrants.
 6. **Vault migration** — move the Codex login into the per-install credential vault for fleet sharing/rotation.
+7. **Campaign polish** — richer intercept editing (full checklist edit), per-campaign budget cap, a campaign
+   history/timeline view, resume-after-restart of a running campaign.
 
 ---
 

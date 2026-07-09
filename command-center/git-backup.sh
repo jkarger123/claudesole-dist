@@ -9,10 +9,15 @@
 set -uo pipefail
 CC_HOME="${CC_HOME:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)}"   # this bundle's root (portable)
 CC="$CC_HOME/command-center"
-STATE="$CC/_backup_state.json"
+# Resolve WHICH instance we are from CC_CONFIG (else the root config) -- co-located instances share this script,
+# so keying off CC_HOME alone made every instance back up the ROOT repo and stomp ONE shared state file. Now both
+# REPO and STATE derive from the instance's own config (state_dir matches server.py's STATE_DIR). (deep-audit 0.6)
+CFG="${CC_CONFIG:-$CC_HOME/cc.config.json}"
+STATE_DIR="$(python3 -c "import json,os;c=json.load(open('$CFG'));print(os.path.expanduser(c.get('state_dir') or '$CC'))" 2>/dev/null || echo "$CC")"
+STATE="$STATE_DIR/_backup_state.json"
 LOG="$CC_HOME/data/backup.log"
-# Repo to back up = the tenant's project_root (cc.config); override with the REPO env var.
-REPO="${REPO:-$(python3 -c "import json;print(json.load(open('$CC_HOME/cc.config.json')).get('project_root',''))" 2>/dev/null)}"
+# Repo to back up = this instance's project_root (its cc.config); override with the REPO env var.
+REPO="${REPO:-$(python3 -c "import json;print(json.load(open('$CFG')).get('project_root',''))" 2>/dev/null)}"
 SCAN="$CC/git-backup-secretscan.py"
 MODE="${1:-auto}"
 export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"

@@ -48,9 +48,14 @@ d["project_name"]=name; d["project_root"]=root; d["brand"]=brand
 if storage: d["storage_mode"]=storage
 d.setdefault("storage_mode","github")
 d.setdefault("framework","command-center")
-# Enterprise auto-update: a provisioned node is a TENANT -> it self-converges from the dist (boot + timer).
-# Leave update_role UNSET (only authoring/source nodes set it). Override update_source for a private fleet.
+# Update posture -- made EXPLICIT so a fresh install's operator SEES it, not an invisible runtime default
+# (deep-audit P1-8). Defaults: MANAGED (self-converges from update_source; unset -> the built-in signed public
+# mirror) with signature verification in "warn" (verify + loud warn, still apply -- the staged fleet default;
+# flip to "enforce" to block unverified updates). To run isolated, set update_channel:"standalone" (no
+# auto-pull) or point update_source at your OWN trusted upstream. Leave update_role UNSET (authoring nodes set it).
 d.setdefault("auto_update",True)
+d.setdefault("update_channel","managed")
+d.setdefault("update_verify","warn")
 d.setdefault("agents",["security","backup","usage","ideas","routines"])
 d.setdefault("chief_brief","You are my Chief of Staff, operating from the top level. Read CLAUDE.md, give me a one-line status of the operation, and stand by.")
 # Per-node auth_token (NODE_SETUP_STREAMLINE.md #3/#4): mint one ONLY when none exists -- an existing
@@ -105,9 +110,19 @@ fi
 python3 "$SEC/scan.py" >/dev/null 2>&1 && echo "  security scan: done (see Security lens)" || echo "  security scan: SKIP"
 
 echo
+# Derive THIS install's tmux session name from config (default `claudefather`) + resolve tmux portably, so
+# the printed restart command is correct on ANY install -- not the dev box's `hpcc` / Homebrew path (P1-5/P1-6).
+SESS="$(python3 -c "import json,sys;print((json.load(open(sys.argv[1])).get('session') or 'claudefather'))" "$CFG" 2>/dev/null || echo claudefather)"
+TMUXBIN="$(command -v tmux || echo /opt/homebrew/bin/tmux)"
 echo "Done. Restart the dashboard to operate on the new project:"
-echo "  TMUX_TMPDIR=/tmp /opt/homebrew/bin/tmux kill-session -t hpcc"
+echo "  TMUX_TMPDIR=/tmp $TMUXBIN kill-session -t $SESS"
 echo "Control center now targets: $ROOT"
+UCHAN="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('update_channel','managed'))" "$CFG" 2>/dev/null || echo managed)"
+USRC="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('update_source') or 'the built-in signed public mirror')" "$CFG" 2>/dev/null || echo 'the built-in signed public mirror')"
+echo "Update posture: $UCHAN (updates from: $USRC; signature-verified, update_verify=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('update_verify','warn'))" "$CFG" 2>/dev/null || echo warn))."
+echo "  - MANAGED auto-converges framework updates. To run ISOLATED, set cc.config \"update_channel\":\"standalone\"."
+echo "  - To converge from YOUR OWN upstream, set cc.config \"update_source\" (a git URL, any host, or a dir)."
+echo "  - Harden updates to BLOCK anything unverified: set cc.config \"update_verify\":\"enforce\"  (see docs/UPDATES.md)."
 echo "Deliverables (files the system makes) land in: ${CC_HOME}/deliverables  (self-contained; the whole"
 echo "  install can be moved to a dedicated drive. To put just deliverables on another drive, set"
 echo "  cc.config \"deliverables_root\".)"

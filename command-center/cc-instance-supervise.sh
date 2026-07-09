@@ -5,7 +5,9 @@
 # Usage (via launchd): cc-instance-supervise.sh <CC_CONFIG path> <tmux session name>
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export TMUX_TMPDIR=/tmp
-TMUX=/opt/homebrew/bin/tmux
+# Resolve tmux portably (Homebrew Apple-Silicon path is just the fallback; Intel Macs use /usr/local, Linux
+# uses /usr/bin -- a hardcoded /opt/homebrew path silently breaks the supervisor there). Matches server.py.
+TMUX="$(command -v tmux || echo /opt/homebrew/bin/tmux)"
 # Derive THIS bundle's command-center from the script's own location so a standalone/relocated bundle
 # runs its OWN server.py (portable). Falls back to the canonical path if resolution fails.
 CCDIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# cc-front "<what you're working on>"  -- THE FRONT DESK: routes your goal to the RIGHT scope (folder) and opens a
+# session THERE with the goal already seeded, so you start in the right room with clean context instead of dumping
+# everything into one session. If the scope is confident it goes straight there; if it's unclear, it opens a quick
+# concierge that places you and hands off. This is the "context is king" entry point. For agents AND humans.
+# (Deep-audit Phase 1.3.)  See docs/FRONT_DOOR.md.
+set -uo pipefail
+Q="$*"
+[ -z "${Q// }" ] && { echo "usage: cc-front \"what you're working on\""; exit 1; }
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
+PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
+TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
+BODY="$(python3 -c "import json,sys;print(json.dumps({'text':sys.argv[1]}))" "$Q")"
+RESP="$(curl -s -X POST "http://127.0.0.1:${PORT}/api/frontdesk" -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODY" 2>/dev/null)"
+[ -z "$RESP" ] && { echo "could not reach the dashboard on port ${PORT}"; exit 1; }
+python3 - "$RESP" <<'PY'
+import json,sys
+try: d=json.loads(sys.argv[1])
+except Exception: print("unexpected response:",sys.argv[1][:200]); sys.exit(1)
+if not d.get("ok"): print("front desk:", d.get("error","failed")); sys.exit(1)
+if d.get("concierge"):
+    print("→ scope unclear — opened a concierge to place you (it routes + hands you off):")
+    print("   %s" % (d.get("term") or d.get("session")))
+else:
+    conf = (" · %d%% match" % round((d.get("confidence") or 0)*100)) if d.get("routed") else ""
+    print("→ opened in %s%s : %s" % (d.get("placed","(scope)"), conf, d.get("term") or d.get("session")))
+    print("   your goal is the opening turn there — jump in via the Sessions tab.")
+PY

@@ -99,16 +99,23 @@ PLAN
 
 if [ -n "$DRY" ]; then echo "(dry run -- nothing written)"; exit 0; fi
 
-# ---- 1) build the bundle: copy every framework_path (manifest-driven; preserve_paths excluded by construction)
+# ---- 1) build the bundle: copy every framework_path (manifest-driven; preserve_paths excluded by construction).
+#         rsync honors the manifest never_ship list so nested secrets/.env/_handoffs/node_modules inside a
+#         framework dir never propagate into a node bundle (bare cp -R would have shipped them). (deep-audit 0.4.)
 mkdir -p "$DEST"
+EXCL=(); while IFS= read -r pat; do [ -n "$pat" ] && EXCL+=( --exclude="$pat" ); done \
+  < <(python3 -c "import json;[print(p) for p in json.load(open('$SRC/claudesole.manifest.json')).get('never_ship',[])]")
 ( cd "$SRC" && python3 -c "import json;[print(p) for p in json.load(open('claudesole.manifest.json'))['framework_paths']]" ) | while read -r p; do
   for s in $SRC/$p; do
     [ -e "$s" ] || continue
     rel="${s#$SRC/}"
     mkdir -p "$DEST/$(dirname "$rel")"
-    cp -R "$s" "$DEST/$(dirname "$rel")/"
+    rsync -a "${EXCL[@]}" "$s" "$DEST/$(dirname "$rel")/"
   done
 done
+# HARD secret gate: never emit a node bundle carrying a secrets/ dir or .env (deep-audit 0.4)
+_leaks="$(cd "$DEST" && find . \( -name '.env' -o -name '.env.*' -o -type d -name secrets \) 2>/dev/null)"
+if [ -n "$_leaks" ]; then echo "NEWINSTANCE ABORT: secret-bearing paths staged despite excludes:"; echo "$_leaks"; exit 1; fi
 # the generic instance supervisor + install guides + version stamp
 cp "$SRC/command-center/cc-instance-supervise.sh" "$DEST/command-center/" 2>/dev/null || true
 chmod +x "$DEST/command-center/cc-instance-supervise.sh" 2>/dev/null || true

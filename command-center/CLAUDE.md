@@ -32,7 +32,7 @@
 <!-- /CC:CHILDREN -->
 
 The ClaudeFather platform's web control plane: a single **stdlib-Python HTTP server** (`server.py`,
-~12.8k lines) with an **embedded vanilla-JS frontend** (the `PAGE` string). No build step, no deps
+~28.5k lines as of 2026-07-09; the embedded `PAGE` frontend alone is ~9.6k) with an **embedded vanilla-JS frontend** (the `PAGE` string). No build step, no deps
 beyond the stdlib (one optional: `cryptography` for Ed25519 superadmin; falls back to HMAC). It serves
 the dashboard, runs tmux sessions in a browser terminal, drives agents/Ralph loops, talks to the rest
 of the fleet (mesh), and integrates Google Workspace + Tasks + deliverables.
@@ -83,7 +83,7 @@ of the fleet (mesh), and integrates Google Workspace + Tasks + deliverables.
 - **Google Workspace** (540–1175): server-side OAuth client (token file under the google-workspace extension
   secrets). Gmail (list/get/thread/send/draft/label/snooze/attachments), Calendar (events/create/update/rsvp/
   delete), Drive (list/get/content/thumb/modify/upload). `_g_api` + `_g_parallel`.
-- **Auth + manifest** (1184–1222): `AUTH_TOKEN` (off by default = open), cookie login, `AUTH_EXEMPT` /
+- **Auth + manifest** (1184–1222): `AUTH_TOKEN` (fail-secure: auto-minted if none configured; `auth_open:true` opts into open), cookie login, `AUTH_EXEMPT` /
   `AUTH_MESH_INGRESS` path allowlists, PWA web manifest.
 - **Shell/ssh/tmux + fleet** (1402–1440): `sh()`, `ssh_to()`, `machine_status()`, `all_status()`.
 - **Sessions** (1440–1548): tmux session listing, scoping to `PROJECT` (`SCOPE_SESSIONS`), protected names,
@@ -176,7 +176,9 @@ Brand assets in `static/brand/`; terminal via `static/xterm.js`; remote desktop 
 - **Secret files are chmod 0600 on boot** (`cc.config.json`, `peers.json`, mesh hook settings). Don't make
   them world-readable. Never change `auth_token`/`mesh_token` without confirming the exact value first
   (lockout risk; a credential-change watch logs any change to `~/.cc-credential-changes.log`).
-- **Auth is OFF by default** (open) so existing deployments keep working; `doctor()` warns while off.
+- **Auth is FAIL-SECURE by default** (deep-audit P1-9): a fresh install with no configured token auto-mints one
+  (persisted to cc.config, dropped in `STATE_DIR/_auth_token.txt`, printed to stderr). Run open ONLY with an
+  explicit `auth_open:true` (Doctor warns). env `CC_AUTH_TOKEN` / cc.config `auth_token` still win.
   Mesh enforcement (`MESH_ENFORCE`) is likewise carried-but-not-rejected until explicitly turned on.
 - **Run on the brain tmux server, not bare launchd** — the SSD (`<SSD>`) needs that TCC
   context; bare launchd EPERMs and silently breaks the Docs/doctor/deliverables lenses.

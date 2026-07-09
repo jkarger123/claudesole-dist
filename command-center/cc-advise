@@ -45,6 +45,46 @@ SCHEMA = {
     "required": ["verdict", "blocking", "nonblocking", "next_task_guidance"],
 }
 
+# DIRECTOR schema (mode=direct_next): the reviewer becomes a PLANNER that decides the campaign's next loop.
+DIRECTOR_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "status": {"type": "string", "enum": ["continue", "done"]},
+        "assessment": {"type": "string"},   # brief: what the finished loop produced vs the north-star goal
+        "next_loop": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "goal": {"type": "string"},
+                "checklist": {"type": "array", "items": {"type": "string"}},
+                "rationale": {"type": "string"},
+            },
+            "required": ["goal", "checklist", "rationale"],
+        },
+        "done_reason": {"type": "string"},   # if status==done, why the north-star goal is met
+    },
+    "required": ["status", "assessment", "next_loop", "done_reason"],
+}
+
+DIRECTOR = textwrap.dedent("""\
+    You are the DIRECTOR of an autonomous engineering campaign -- an independent
+    senior engineer from a DIFFERENT AI vendor than the agents doing the work. A
+    Claude agent just ran an autonomous loop to completion (its output is below);
+    you also have the campaign's NORTH-STAR GOAL and the history of prior loops.
+
+    Decide the campaign's next move, skeptically and decisively:
+      - If the north-star goal is genuinely ACHIEVED, set status="done" and explain
+        in done_reason (be honest -- don't declare done to stop early, and don't
+        churn make-work loops to avoid finishing).
+      - Otherwise set status="continue" and specify the NEXT loop: a concrete,
+        single-focus `goal` (one line) plus a `checklist` of 2-6 verifiable items a
+        Claude agent will execute, and a short `rationale` for why this is the right
+        next step given what just finished. Build on the finished work; do not
+        repeat it. Prefer the highest-leverage next step toward the north-star.
+
+    You may READ the repo. You must NOT edit anything -- you plan, Claude builds.
+    Return ONLY the JSON object required by the output schema.
+    """)
+
 REVIEWER = textwrap.dedent("""\
     You are an independent senior engineer from a DIFFERENT AI vendor than the
     agent that produced the work below. A Claude agent just finished a task and
@@ -141,7 +181,7 @@ def main():
     ap.add_argument("--effort", default="medium",
                     choices=["none", "minimal", "low", "medium", "high", "xhigh"])
     ap.add_argument("--mode", default="review_and_steer",
-                    choices=["review_and_steer", "review_only"])
+                    choices=["review_and_steer", "review_only", "direct_next"])
     ap.add_argument("--max-calls-per-day", type=int, default=40)
     ap.add_argument("--budget-file",
                     default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -190,22 +230,33 @@ def main():
     if args.repo:
         stdin_payload = ("(You may also read files under repo root: %s)\n\n" % args.repo) + stdin_payload
 
-    mode_note = ("give concrete next-task guidance" if args.mode == "review_and_steer"
-                 else "leave next_task_guidance empty; this is review-only")
-    prompt = REVIEWER.replace("{mode_note}", mode_note)
+    director = (args.mode == "direct_next")
+    if director:
+        prompt = DIRECTOR
+        active_schema = DIRECTOR_SCHEMA
+    else:
+        mode_note = ("give concrete next-task guidance" if args.mode == "review_and_steer"
+                     else "leave next_task_guidance empty; this is review-only")
+        prompt = REVIEWER.replace("{mode_note}", mode_note)
+        active_schema = SCHEMA
     if args.verify:
         prompt += VERIFY_CLAUSE
 
-    if args.stream:   # TRANSPARENT: show the operator what the reviewer is doing before it starts
-        print("=== Third-party review (external GPT: %s%s) ===" % (
-            args.model, ", VERIFY mode" if args.verify else ""))
-        print("Reviewing the session's recent work against its goal. Live reviewer output follows.\n"
-              "(read-only sandbox -- the reviewer can read the repo but cannot change anything)\n", flush=True)
+    if args.stream:   # TRANSPARENT: show the operator what the director/reviewer is doing before it starts
+        if director:
+            print("=== Campaign DIRECTOR (external GPT: %s) ===" % args.model)
+            print("Assessing the finished loop against the north-star goal and deciding the next loop.\n"
+                  "Live director output follows. (read-only sandbox.)\n", flush=True)
+        else:
+            print("=== Third-party review (external GPT: %s%s) ===" % (
+                args.model, ", VERIFY mode" if args.verify else ""))
+            print("Reviewing the session's recent work against its goal. Live reviewer output follows.\n"
+                  "(read-only sandbox -- the reviewer can read the repo but cannot change anything)\n", flush=True)
 
     with tempfile.TemporaryDirectory() as td:
         schema_f = os.path.join(td, "schema.json")
         last_f = os.path.join(td, "last.json")
-        json.dump(SCHEMA, open(schema_f, "w"))
+        json.dump(active_schema, open(schema_f, "w"))
         cmd = [CODEX, "exec", "--ephemeral", "--skip-git-repo-check",
                "-s", "read-only", "-m", args.model,
                "-c", 'model_reasoning_effort="%s"' % args.effort,
@@ -237,6 +288,17 @@ def main():
 
 
 def _pretty(v):
+    if "status" in v and "next_loop" in v:   # director result (mode=direct_next)
+        print("\nCAMPAIGN DIRECTOR (external, gpt-5.5) -- STATUS: %s\n" % str(v.get("status", "?")).upper())
+        if v.get("assessment"): print("Assessment: %s\n" % v["assessment"])
+        if v.get("status") == "done":
+            print("CAMPAIGN DONE: %s" % (v.get("done_reason") or "(goal met)")); print(); return
+        nl = v.get("next_loop") or {}
+        print("NEXT LOOP goal: %s" % nl.get("goal", ""))
+        print("Checklist:")
+        for it in (nl.get("checklist") or []): print("  - [ ] %s" % it)
+        if nl.get("rationale"): print("Rationale: %s" % nl["rationale"])
+        print(); return
     icon = {"ship": "SHIP", "revise": "REVISE", "block": "BLOCK"}.get(v.get("verdict"), v.get("verdict", "?"))
     print("\nGPT ADVISOR (external, gpt-5.5) -- VERDICT: %s\n" % icon)
     bl = v.get("blocking") or []

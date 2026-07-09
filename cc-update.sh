@@ -7,8 +7,15 @@
 set -uo pipefail
 CC_HOME="${CC_HOME:-$(cd "$(dirname "$0")" && pwd)}"   # self-locate: the script lives at CC_HOME root (robust to any deployment path / remote superadmin cc_update), not a hardcoded $HOME default
 MAN="$CC_HOME/claudesole.manifest.json"
-SRC="${1:-}"; DRY=""; [ "${2:-}" = "--dry-run" ] && DRY=1
-[ -z "$SRC" ] && { echo "usage: cc-update.sh <git-url|local-dir> [--dry-run]"; exit 1; }
+SRC=""; DRY=""; ALLOW_UNSIGNED=""
+for _a in "$@"; do
+  case "$_a" in
+    --dry-run) DRY=1 ;;
+    --allow-unsigned) ALLOW_UNSIGNED=1 ;;   # proceed past an UNSIGNED upstream (never past active tampering)
+    *) [ -z "$SRC" ] && SRC="$_a" ;;
+  esac
+done
+[ -z "$SRC" ] && { echo "usage: cc-update.sh <git-url|local-dir> [--dry-run] [--allow-unsigned]"; exit 1; }
 [ -f "$MAN" ] || { echo "no manifest at $MAN"; exit 1; }
 
 TMP=""
@@ -20,6 +27,37 @@ echo "local    version: $(python3 -c "import json;print(json.load(open('$MAN')).
 echo "upstream version: $(python3 -c "import json;print(json.load(open('$UP/claudesole.manifest.json')).get('version'))")"
 [ -n "$DRY" ] && echo "(dry run -- nothing written)"
 
+# SUPPLY-CHAIN GATE (deep-audit P1-8): before overlaying ANY framework code, verify the upstream is signed by
+# THIS box's existing trust root (superadmin.pub/recovery.pub) and that the files match the signed hashes -- so
+# a wrong/malicious upstream (or a swapped-in server.py / trust root) is caught BEFORE it lands + runs. Policy
+# from cc.config `update_verify`: "warn" (default -- verify + LOUD warn, still apply, matches the MESH_ENFORCE/
+# POLICY_ENFORCE staged-rollout convention), "enforce" (BLOCK on failure), "off" (skip). `--allow-unsigned` lets
+# one run proceed past an UNSIGNED upstream (exit 2) but NEVER past active tampering (exit 1). Dry-runs skip.
+VP="$CC_HOME/command-center/verify_update.py"
+if [ -z "$DRY" ] && [ -f "$VP" ]; then
+  VMODE="$(python3 -c "import json,os;cfg=os.environ.get('CC_CONFIG') or '$CC_HOME/cc.config.json';print((json.load(open(cfg)).get('update_verify') or 'warn').lower())" 2>/dev/null || echo warn)"
+  if [ "$VMODE" != "off" ]; then
+    python3 "$VP" "$UP" "$CC_HOME"; VRC=$?
+    if [ "$VRC" -eq 0 ]; then
+      :   # VERIFIED -- proceed
+    elif [ "$VRC" -eq 2 ] && [ -n "$ALLOW_UNSIGNED" ]; then
+      echo "  update-verify: proceeding past an UNSIGNED upstream (--allow-unsigned)."
+    elif [ "$VMODE" = "enforce" ]; then
+      echo "  update-verify: BLOCKED (update_verify=enforce) -- refusing to apply an unverified framework update."
+      [ -n "$TMP" ] && rm -rf "$TMP"; exit 3
+    else
+      echo "  update-verify: WARNING -- applying an unverified update anyway (update_verify=warn). Set update_verify:enforce to block, or investigate the upstream."
+    fi
+  fi
+fi
+
+# Build the rsync --exclude set from the UPSTREAM manifest's never_ship list (single source of truth, ships with
+# the framework so it stays in sync across cc-update / make-install-package / cc-newinstance). Fall back to the
+# historical hardcoded set if an older upstream lacks never_ship. (deep-audit 2026-07-09 finding 0.4.)
+EXCL=(); while IFS= read -r pat; do [ -n "$pat" ] && EXCL+=( --exclude="$pat" ); done \
+  < <(python3 -c "import json;[print(p) for p in json.load(open('$UP/claudesole.manifest.json')).get('never_ship',[])]" 2>/dev/null)
+[ ${#EXCL[@]} -eq 0 ] && EXCL=( --exclude='secrets/' --exclude='secrets' --exclude='*.local' --exclude='.env' --exclude='.env.*' )
+
 python3 -c "import json;[print(p) for p in json.load(open('$UP/claudesole.manifest.json'))['framework_paths']]" | while read -r p; do
   for s in $UP/$p; do
     [ -e "$s" ] || continue
@@ -29,7 +67,7 @@ python3 -c "import json;[print(p) for p in json.load(open('$UP/claudesole.manife
       # NEVER propagate per-deployment secrets that may live inside a framework dir (e.g.
       # extensions/*/secrets/ -- OAuth client JSON + refresh tokens). rsync ignores .gitignore, so without
       # these excludes one tenant's secret would replicate to every node on update. (CCR: rsync-secrets-exclude.)
-      mkdir -p "$dst"; rsync -a --exclude='secrets/' --exclude='secrets' --exclude='*.local' --exclude='.env' --exclude='.env.*' "$s/" "$dst/"; echo "  updated dir  $rel/"
+      mkdir -p "$dst"; rsync -a "${EXCL[@]}" "$s/" "$dst/"; echo "  updated dir  $rel/"
     else
       [ -n "$DRY" ] && { echo "  file $rel"; continue; }
       mkdir -p "$(dirname "$dst")"
@@ -90,4 +128,11 @@ if [ -z "$DRY" ] && [ -f "$CC_HOME/VERSION" ]; then
   echo "  stamped VERSION $(cat "$CC_HOME/VERSION")"
 fi
 
-[ -z "$DRY" ] && echo "Done. Restart to load updates: TMUX_TMPDIR=/tmp /opt/homebrew/bin/tmux kill-session -t hpcc"
+# Derive THIS install's session name from its own config (default `claudefather`) + resolve tmux portably, so
+# the printed restart command is correct on ANY install -- not the dev box's `hpcc` / Homebrew path (P1-5/P1-6).
+if [ -z "$DRY" ]; then
+  _CFG="${CC_CONFIG:-$CC_HOME/cc.config.json}"
+  SESS="$(python3 -c "import json,sys;print((json.load(open(sys.argv[1])).get('session') or 'claudefather'))" "$_CFG" 2>/dev/null || echo claudefather)"
+  TMUXBIN="$(command -v tmux || echo /opt/homebrew/bin/tmux)"
+  echo "Done. Restart to load updates: TMUX_TMPDIR=/tmp $TMUXBIN kill-session -t $SESS"
+fi

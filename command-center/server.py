@@ -28,6 +28,7 @@ slack   = _opt_import("slack")     # Slack -> context layer (read-only ingest, t
 zoom    = _opt_import("zoom")      # Zoom transcript intake -> the granola proposal pipeline
 clips   = _opt_import("clips")     # CAPTURE SPINE: Capture -> Triage -> Apply (review-first)
 substack = _opt_import("substack") # Substack -> READ (RSS track) + DRAFT (headless-claude co-writer); no publish API
+cc_policy = _opt_import("cc_policy")# per-action POLICY ENGINE (ALLOW/DENY/ASK) for the PreToolUse hook; deep-audit graft G1
 morning_brief = _opt_import("morning_brief")  # MORNING BRIEF: scheduled, voice-read daily brief from your sources
 notebook = _opt_import("notebook")            # NOTEBOOK: speak/write a note -> structured tasks + context event
 email_archive = _opt_import("email_archive")  # EMAIL ARCHIVE: full-text search over an exported (mbox) email history
@@ -66,7 +67,7 @@ PROJECT_NAME = CC.get("project_name") or os.path.basename(PROJECT.rstrip("/"))
 # per-model API value of the same usage, so you can see the subscription's leverage. Default: two Claude
 # Max 20x plans ($200 each). Override per deployment via cc.config "subscription_monthly".
 SUB_MONTHLY = float(CC.get("subscription_monthly") or 400.0)
-BRAND = CC.get("brand") or PROJECT_NAME or "Command Center"   # neutral default: a tenant's own project name, not "text2tune"
+BRAND = CC.get("brand") or PROJECT_NAME or "Command Center"   # neutral default: a tenant's own project name, not a hardcoded product name
 # Product identity (the framework) -- skinnable per deployment so a tenant can re-brand the engine.
 PRODUCT = CC.get("product_name") or "the ClaudeFather"      # full product name
 PRODUCT_TAG = CC.get("product_tag") or "COMMAND CENTER"     # small wordmark under the per-instance brand (neutral default)
@@ -119,7 +120,7 @@ def _agency_early():
 
 def _default_pillars():
     """Category roots for the Docs scope dropdown. An agency tenant's real top-level dirs (Clients/Partners/
-    Pipeline/Tools/...), else the text2tune product pillars. Override per-deployment with cc.config 'pillars'."""
+    Pipeline/Tools/...), else the deployment's configured product pillars. Override per-deployment with cc.config 'pillars'."""
     if _agency_early():
         try:
             return [e for e in sorted(os.listdir(PROJECT))
@@ -192,6 +193,22 @@ def _account_activate(label):
 # instance's CC_CONFIG into every session -- see the LINCHPIN comment there. This "" is just the pre-_shlex default.
 _CC_ENVP = ""
 
+_VNC_TICKETS = {}   # short-lived tickets so the noVNC WebSocket can auth WITHOUT the cookie (iOS Safari drops
+                    # cookies on WS upgrades). Ticket, not the real auth token -> nothing sensitive in a URL.
+def _vnc_ticket_new():
+    """Mint a ~1h ticket the authed dashboard embeds in the noVNC WS URL (?t=). Reusable within its window so
+    noVNC's auto-reconnect keeps working. No-op when auth is off (then /wsvnc is already open). (remote-desktop
+    mobile fix 2026-07-09.)"""
+    if not AUTH_TOKEN: return ""
+    now = time.time()
+    for _k, _e in list(_VNC_TICKETS.items()):
+        if _e < now: _VNC_TICKETS.pop(_k, None)
+    t = secrets.token_urlsafe(18); _VNC_TICKETS[t] = now + 3600
+    return t
+def _vnc_ticket_ok(t):
+    e = _VNC_TICKETS.get(t)
+    return bool(e and e >= time.time())
+
 def render_page():
     """Serve the dashboard with project/brand injected from cc.config.json (so the SAME framework UI
     operates on any project). Frontend reads window.CC.{project,projectName,brand}."""
@@ -199,13 +216,15 @@ def render_page():
     except Exception: _lenses = None
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
-        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "protectedSessions": CC.get("protected_sessions") or [], "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "models": CC_MODELS, "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(), "backupTiers": CC.get("backup_tiers") or [],
+        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "protectedSessions": CC.get("protected_sessions") or [], "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "frontdesk_landing": CC.get("frontdesk_landing", True), "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "models": CC_MODELS, "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(), "backupTiers": CC.get("backup_tiers") or [],
         "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md"]})   # tenant desk docs come from cc.config; neutral default
     return (PAGE
             .replace("<title>ClaudeFather ", "<title>%s " % BRAND)
             .replace(">ClaudeFather<small>", ">%s<small>" % BRAND)
             .replace(">COMMAND CENTER<", ">%s<" % PRODUCT_TAG)
             .replace('data-theme="godfather"', 'data-theme="%s"' % THEME)
+            # remote-desktop mobile fix: hand noVNC a WS auth ticket via the path (URL-encoded ?t=), or nothing when auth is off
+            .replace("__VNCT__", ("%3Ft%3D" + urllib.parse.quote(_vnc_ticket_new())) if AUTH_TOKEN else "")
             .replace("</head>", cc + "</head>"))
 MACHINES = os.path.join(STATE_DIR, "_machines.json")
 COMPS = os.path.join(STATE_DIR, "_components.json")
@@ -229,11 +248,35 @@ CC_SKIP = {".git", "node_modules", "__pycache__", ".venv", ".venv32", ".venv64",
 PILLARS = CC.get("pillars") or _default_pillars()                   # category roots (per-deployment, not hardcoded)
 
 def load(p, default=None):
+    # Return parsed JSON, or `default` (else {}) if the file is ABSENT. If the file EXISTS but fails to parse
+    # (e.g. a truncated write from a hard kill/restart), preserve it as `<p>.corrupt` and log LOUDLY instead of
+    # silently returning empty -- a silent default on a corrupt state file is undiagnosable data loss.
+    # (deep-audit 2026-07-09 finding 0.1; pairs with the atomic save() below.)
+    d = default if default is not None else {}
+    if not os.path.exists(p): return d
     try:
         with open(p) as f: return json.load(f)
-    except Exception: return default if default is not None else {}
+    except Exception as e:
+        try:
+            bad = p + ".corrupt"; os.replace(p, bad)
+            sys.stderr.write("[cc] CORRUPT STATE FILE %s (%s) -> preserved as %s; returning default\n" % (p, e, bad))
+        except Exception:
+            sys.stderr.write("[cc] CORRUPT STATE FILE %s (%s); returning default\n" % (p, e))
+        return d
 def save(p, d):
-    with open(p, "w") as f: json.dump(d, f, indent=2)
+    # ATOMIC write: serialize to a temp file in the same dir, fsync, then os.replace (atomic on APFS). A crash
+    # or kill mid-write leaves only the temp file -- never a truncated `p` -- so no state file is silently wiped
+    # on the restart that happens every ship. The pid-stamped temp name keeps two co-located instances that
+    # share one path (e.g. _backup_state) from colliding. (deep-audit 2026-07-09 finding 0.1.)
+    tmp = "%s.tmp.%d" % (p, os.getpid())
+    try:
+        with open(tmp, "w") as f:
+            json.dump(d, f, indent=2); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, p)
+    except Exception:
+        try: os.remove(tmp)
+        except Exception: pass
+        raise
 def slug(s): return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
 def projpath(rel):
     p = os.path.normpath(os.path.join(PROJECT, rel))
@@ -1163,7 +1206,7 @@ def _gmail_attachments(payload):
     # inline EMBEDDED images -- email-signature logos, tracking pixels, quoted-thread images -- which Gmail exposes
     # as parts with a filename + attachmentId but carry a `Content-ID` and/or `Content-Disposition: inline`. Those
     # must NEVER surface as attachments: otherwise the Gmail lens shows a sender's signature logo as "1 attachment"
-    # and a reply built from that list re-attaches the sender's own signature image (Sarah's report). A genuine
+    # and a reply built from that list re-attaches the sender's own signature image (an operator's report). A genuine
     # image attachment (a photo the sender chose to send) has no Content-ID and is marked `attachment`, so it stays.
     out = []
     def _hdr(p, name):
@@ -1635,7 +1678,7 @@ _GAPPS_DOCLIKE = ("application/vnd.google-apps.document", "application/vnd.googl
 def drive_open_comments(days=7, max_files=15):
     """UNRESOLVED comment threads on recently-modified Google Docs/Sheets/Slides, each with its FULL thread
     (opening comment + every reply) + creation times. Read-only. Powers the Morning Brief so it can mention a
-    genuinely-OPEN comment WITH context and never re-flag one that was already answered/resolved (Sarah: the
+    genuinely-OPEN comment WITH context and never re-flag one that was already answered/resolved (operator note: the
     brief read only the first comment, missed the resolving replies, and wrongly chastised her). Resolved
     threads are dropped entirely. Returns [] when Google isn't configured (source degrades, never crashes)."""
     if not google_configured(): return []
@@ -1665,14 +1708,55 @@ def drive_open_comments(days=7, max_files=15):
                                      "created": r.get("createdTime") or ""} for r in replies[:12]]})
     return out
 
-# ---- Dashboard/API authentication (CCR ccr-1782162511858). OFF by default (open) so existing deployments
-# keep working until an operator sets a token; /api/doctor warns loudly while it is off. Enable by setting
-# cc.config `auth_token` (or env CC_AUTH_TOKEN). When on, EVERY request needs a valid credential: a browser
-# session cookie (set via the /login page), an `Authorization: Bearer <token>` / `X-CC-Token` header for
-# programmatic/curl use, or a valid `X-Mesh-Token` for peer traffic. Constant-time compared. ----
+# ---- Dashboard/API authentication (CCR ccr-1782162511858). FAIL-SECURE by default (deep-audit P1-9): a fresh
+# install with NO configured token does NOT boot wide-open -- it mints a random per-node token (below). A token
+# can also come from cc.config `auth_token` or env CC_AUTH_TOKEN. When on, EVERY request needs a valid credential:
+# a browser session cookie (set via the /login page), an `Authorization: Bearer <token>` / `X-CC-Token` header
+# for programmatic/curl use, or a valid `X-Mesh-Token` for peer traffic. Constant-time compared. To run genuinely
+# OPEN (no login) on a trusted/private network, set cc.config `auth_open: true` (Doctor still warns). ----
 AUTH_TOKEN = os.environ.get("CC_AUTH_TOKEN") or CC.get("auth_token") or ""
+if not AUTH_TOKEN and not CC.get("auth_open"):
+    # FAIL-SECURE: nothing configured -> mint a random token, persist it to cc.config (so it is stable across
+    # reboots), also drop it in STATE_DIR/_auth_token.txt, and print it LOUDLY to stderr so the operator can log
+    # in. Never let a minting bug crash boot: on catastrophic failure fall back to the historical open behavior.
+    try:
+        AUTH_TOKEN = secrets.token_hex(16)
+        _mint_note = "for THIS process only (could not persist)"
+        try:
+            with open(_CC_CONFIG) as _af: _ad = json.load(_af)
+            _ad["auth_token"] = AUTH_TOKEN
+            _atmp = _CC_CONFIG + ".tmp"
+            with open(_atmp, "w") as _af: json.dump(_ad, _af, indent=2)
+            os.replace(_atmp, _CC_CONFIG)
+            try: os.chmod(_CC_CONFIG, 0o600)
+            except Exception: pass
+            _mint_note = "persisted to cc.config auth_token (stable across reboots)"
+        except Exception as _ae:
+            _mint_note = "NOT persisted (%s) -- set cc.config auth_token to make it stable" % _ae
+        try:
+            _atf = os.path.join(STATE_DIR, "_auth_token.txt")
+            with open(_atf, "w") as _af: _af.write(AUTH_TOKEN + "\n")
+            os.chmod(_atf, 0o600)
+        except Exception: pass
+        sys.stderr.write(
+            "\n" + "=" * 74 + "\n"
+            "[ClaudeFather] FAIL-SECURE: no auth_token was configured, so a random login token\n"
+            " was minted (%s):\n\n    %s\n\n"
+            " Log in with it (dashboard login field / cc_auth cookie / X-CC-Token header).\n"
+            " Choose your own with cc.config \"auth_token\"; run OPEN on a trusted network with\n"
+            " cc.config \"auth_open\": true.\n" % (_mint_note, AUTH_TOKEN) + "=" * 74 + "\n\n")
+        sys.stderr.flush()
+    except Exception:
+        AUTH_TOKEN = ""   # historical open fallback -- Doctor warns loudly
 AUTH_COOKIE = "cc_auth"
-AUTH_EXEMPT = ("/login", "/api/login", "/api/logout", "/api/health", "/favicon.ico", "/manifest.webmanifest", "/api/license-activate")
+AUTH_EXEMPT = ("/login", "/api/login", "/api/logout", "/api/health", "/favicon.ico", "/manifest.webmanifest", "/api/license-activate",
+               "/api/policy-evaluate",   # the local PreToolUse hook posts here; a policy decision is non-sensitive + the hook has no token
+
+               "/wsvnc")   # the noVNC bridge: mobile browsers won't attach the cc_auth cookie to a WebSocket upgrade
+                           # (and the ticket path is fragile across iOS/reload/cache), so gating /wsvnc on dashboard
+                           # auth made remote desktop unreliable on phones. The macOS VNC/Screen-Sharing PASSWORD is
+                           # the real gate on the actual screen (5900 stays localhost-only, reached only via this
+                           # tailnet bridge) -- same posture as normal Screen Sharing. (remote-desktop reliability 2026-07-09)
 
 def _web_manifest():
     """PWA manifest -> lets the operator 'Add to Dock' / Install this dashboard as a standalone, resizable
@@ -1742,7 +1826,7 @@ def mesh_send(text, target=None, targets=None, expect_reply=True):
     # HUB-AND-SPOKE, ENFORCED (not advised). If a Mission Control sits ABOVE this instance, EVERY proactive
     # chief-mesh from here routes UP to it -- a spoke node never pages a sibling node (the operator works at the
     # hub; a sibling can't act on their behalf, so a lateral page just strands + annoys). The chief brief has asked
-    # chiefs to do this for versions and they DON'T (AFP kept paging hptuners directly), so it is now enforced at
+    # chiefs to do this for versions and they DON'T (peers kept paging the master directly), so it is now enforced at
     # the routing layer where the model can't override it. The hub itself (Mission Control: its own id) keeps full
     # freedom to address/broadcast DOWN to any node. REPLIES are unaffected -- they go via /api/mesh-reply straight
     # back to whoever asked, never through here.
@@ -1859,6 +1943,53 @@ def _mesh_worker():
 
 HOOK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mesh_stop_hook.py")
 
+# ---- PER-ACTION POLICY ENGINE (deep-audit graft G1): the PreToolUse hook (policy_hook.py) POSTs each tool call
+# here; we evaluate it against cc_policy, LOG it, and return a Claude Code permission decision. Rollout is
+# OPT-IN, OFF BY DEFAULT. This is a guardrail an operator turns ON only when they want it (e.g. handing the
+# console to a non-technical end-user) -- a power user / fleet node gets UNLIMITED, untouched tool use. When
+# 'off' (the default) the PreToolUse hook is NOT wired into ANY session at all: zero calls, zero overhead, zero
+# interference. Opt in via cc.config `policy_enforce`: 'log' = evaluate + log the WOULD-BE verdict but ALWAYS
+# allow (watch the log, break nothing); 'on' = actually deny/ask. The hook is fail-open, so even a bug never
+# blocks. The 5 rules target only genuinely dangerous actions (rm -rf, force-push, credential edits, unbounded
+# spawns) -- never normal reads/edits/commands.
+POLICY_HOOK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policy_hook.py")
+POLICY_ENFORCE = (CC.get("policy_enforce") or "off").lower()      # "off" (default) | "log" | "on"
+POLICY_ON = POLICY_ENFORCE != "off"                               # wire the hook into sessions ONLY when opted in
+_POLICY_AUDIT = os.path.join(STATE_DIR, "_policy_audit.log")
+def _policy_log(rec):
+    try:
+        if os.path.exists(_POLICY_AUDIT) and os.path.getsize(_POLICY_AUDIT) > 2_000_000:
+            os.replace(_POLICY_AUDIT, _POLICY_AUDIT + ".1")
+        with open(_POLICY_AUDIT, "a") as f: f.write(json.dumps(rec) + "\n")
+    except Exception: pass
+def policy_evaluate(body):
+    tool = (body or {}).get("tool") or ""; inp = (body or {}).get("input") or {}; sess = (body or {}).get("session") or ""
+    if POLICY_ENFORCE == "off" or not cc_policy:
+        return {"permissionDecision": "allow"}
+    ctx = (body or {}).get("ctx") if isinstance((body or {}).get("ctx"), dict) else {}   # per-session: read_only / trust_os / spawn_count (from CC_POLICY_CTX)
+    try:
+        v = cc_policy.evaluate(tool, inp, ctx)
+    except Exception as e:
+        v = {"decision": "ask", "rule": "engine-error", "reason": "policy engine error (fail-closed): " + str(e)[:80]}
+    _policy_log({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "mode": POLICY_ENFORCE, "session": str(sess)[:40],
+                 "tool": tool, "cmd": str(inp.get("command") or inp.get("file_path") or "")[:160],
+                 "decision": v.get("decision"), "rule": v.get("rule"), "reason": v.get("reason")})
+    if POLICY_ENFORCE != "on":                       # log-only: evaluate + record, but NEVER block
+        return {"permissionDecision": "allow", "reason": "log-only (would be %s: %s)" % (v.get("decision"), v.get("reason"))}
+    return {"permissionDecision": v.get("decision", "allow"), "reason": v.get("reason") or ""}
+
+_POLICY_SETTINGS = os.path.join(STATE_DIR, "_policy_hook_settings.json")
+def _ensure_policy_settings():
+    """Write (idempotent) a PreToolUse-only hook settings file and return its path -- spliced via --settings into
+    NON-chief launches (scoped agents etc.) so the policy engine covers ALL sessions, not just the chief. The chief
+    keeps its own file (PreToolUse + the mesh Stop hook). (graft G1.)"""
+    try:
+        save(_POLICY_SETTINGS, {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": "python3 " + POLICY_HOOK_PATH, "timeout": 10}]}]}})
+    except Exception:
+        pass
+    return _POLICY_SETTINGS
+
 def mesh_reply(to, text):
     """Called by THIS instance's Stop hook the instant our chief finishes answering a peer's '[message from
     X]'. Logs our reply outbound (-> our Comms lens) and durably delivers it to peer X (kind='reply' ->
@@ -1970,13 +2101,13 @@ def _protected(name):
     if name and name == globals().get("CHIEF"): return True
     if name in (CC.get("protected_sessions") or []): return True   # tenant declares its infra sessions in cc.config
     return name.startswith("ralph-")
-_FRIENDLY = {"chief": "Chief of Staff", "hptuner-brain": "Orchestration Brain",
-             "t2tbridge": "Live bridge", "t2tcrons": "Bridge crons"}
+_FRIENDLY = {"chief": "Chief of Staff"}   # universal canonical name; per-deployment SERVICE session labels come
+                                          # from cc.config "services" ([[name,label,desc],...]) via _service_labels()
 _SESSLABEL = {}
 
 # Agent-declared session titles: an agent emits `[[CC_TITLE: short task name]]` once it understands its job;
-# the session-watch loop records it here so the dashboard shows "7th Ave -- bounce-list fix" instead of
-# "7th ave 2 / 7th ave 3". Persisted so it survives a CC restart. The instruction is appended to every
+# the session-watch loop records it here so the dashboard shows "Acme -- bounce-list fix" instead of
+# "acme 2 / acme 3". Persisted so it survives a CC restart. The instruction is appended to every
 # launched session's system prompt (CC_TITLE_FLAG) so EVERY session can self-name.
 import shlex as _shlex
 # ONE PATH prefix for EVERY launched session (chief, agents, teams, ralph, resume, …) so the cc-* CLIs
@@ -2007,7 +2138,7 @@ def _set_agent_title(name, title):
 TITLE_INSTRUCTION = (
     "SESSION NAMING: As soon as you understand what this session is working on (usually after the first "
     "message or two), output ON ITS OWN LINE exactly: [[CC_TITLE: <a 2-6 word task title>]] -- e.g. "
-    "[[CC_TITLE: 7th Ave bounce-list fix]]. This renames the session in the operator's dashboard so they can "
+    "[[CC_TITLE: Acme bounce-list fix]]. This renames the session in the operator's dashboard so they can "
     "tell multiple sessions apart. Emit it once; re-emit a new one only if the focus clearly changes.")
 CC_TITLE_FLAG = "--append-system-prompt " + _shlex.quote(TITLE_INSTRUCTION)
 
@@ -2015,6 +2146,8 @@ def _session_label(name):
     """A descriptive title instead of a code like hp-r-767755d1 -- agent-declared title wins, else derived
     from the conversation it was resumed/forked from (its opening message), or the launch name."""
     if name in _FRIENDLY: return _FRIENDLY[name]           # canonical system names (Chief of Staff, etc.) -- NEVER overridden
+    _svl = _service_labels()
+    if name in _svl: return _svl[name]                     # this deployment's configured service sessions (from cc.config)
     if name == globals().get("CHIEF"): return "Chief of Staff"
     if name in _AGENT_TITLES: return _AGENT_TITLES[name]   # the agent named this session itself
     if name in _SESSLABEL: return _SESSLABEL[name]
@@ -2055,7 +2188,7 @@ def _session_in_project(cwd):
 
 def _session_loc(cwd):
     """Short, human label of WHERE a session is launched -- relative to the project -- so the operator can
-    tell a '7th avenue' session from an 'Avenlur' one. Empty at the project root / unknown."""
+    tell an 'acme' session from a 'beta-co' one. Empty at the project root / unknown."""
     if not cwd: return ""
     c = cwd.rstrip("/"); base = PROJECT.rstrip("/")
     if c == base: return ""
@@ -2705,7 +2838,8 @@ def pipeline_payload():
             "steps": steps_out, "alarm": alarm}
 
 # ---- GitHub backup hub --------------------------------------------------------
-BACKUP_STATE = os.path.join(BASE, "_backup_state.json")
+BACKUP_STATE = os.path.join(STATE_DIR, "_backup_state.json")   # per-INSTANCE (was BASE=shared code dir): co-located
+                                                              # instances shared one file + stomped it. (deep-audit 0.6)
 BACKUP_SH = os.path.join(BASE, "git-backup.sh")
 BACKUP_LOG = os.path.join(CC_HOME, "data", "backup.log")
 _BK_CACHE = {"at": 0.0, "data": None}
@@ -3235,7 +3369,8 @@ def backup_run(mode="manual"):
         try:
             os.makedirs(os.path.dirname(BACKUP_LOG), exist_ok=True)
             lf = open(BACKUP_LOG, "a")
-            subprocess.Popen(["/bin/bash", BACKUP_SH, mode], stdout=lf, stderr=subprocess.STDOUT, cwd=PROJECT)
+            _bkenv = dict(os.environ, CC_CONFIG=_CC_CONFIG)   # tell git-backup.sh WHICH instance -> right repo + per-instance state (deep-audit 0.6)
+            subprocess.Popen(["/bin/bash", BACKUP_SH, mode], stdout=lf, stderr=subprocess.STDOUT, cwd=PROJECT, env=_bkenv)
             _BK_CACHE["at"] = 0.0                 # force fresh status on next poll
             out["github"] = {"started": True}
         except Exception as e:
@@ -4408,7 +4543,7 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
 
 # ---- the Chief of Staff: a persistent top-level session you can reach any time ----
 # Per-instance Chief session -- MUST be unique per ClaudeFather, else every instance's "Talk to Chief"
-# resumes the SAME tmux session (carsearch would open the hptuners chief). Named by project.
+# resumes the SAME tmux session (another project would open the wrong chief). Named by project.
 CHIEF = CC.get("chief_session") or ("chief-" + (re.sub(r"[^a-z0-9]+", "-", PROJECT_NAME.lower()).strip("-") or "main"))
 _FRIENDLY[CHIEF] = "Chief of Staff"
 _CHIEF_WD = {"respawns": 0, "last": 0}
@@ -4446,8 +4581,12 @@ def chief_open():
     brief = CC.get("chief_brief") or "Read CHIEF_OF_STAFF.md then CLAUDE.md"
     # Stop hook -> a settings FILE (no inline-JSON shell quoting); the hook forwards mesh replies instantly.
     settings_file = os.path.join(STATE_DIR, "_mesh_hook_settings.json")
-    save(settings_file, {"hooks": {"Stop": [{"hooks": [
-        {"type": "command", "command": "python3 " + HOOK_PATH, "async": True, "timeout": 20}]}]}})
+    _chief_hooks = {"Stop": [{"hooks": [
+        {"type": "command", "command": "python3 " + HOOK_PATH, "async": True, "timeout": 20}]}]}
+    if POLICY_ON:                                                          # policy engine (graft G1): OPT-IN only -- off = not wired at all
+        _chief_hooks["PreToolUse"] = [{"matcher": "*", "hooks": [
+            {"type": "command", "command": "python3 " + POLICY_HOOK_PATH, "timeout": 10}]}]
+    save(settings_file, {"hooks": _chief_hooks})
     prompt = ("You are my Chief of Staff, operating from the top level. %s, "
               "give me a one-line status of the operation, and stand by. "
               "For any command needing sudo or interactive input you cannot run it yourself (no TTY) -- "
@@ -4494,7 +4633,7 @@ def chief_open():
               % (brief, _system_brief(), roster_text()))
     # The prompt (instruction block + system brief + full roster) is LARGE and grows with the roster. Inlining
     # it as a tmux command argument overflows tmux's command buffer ("command too long") past ~16KB, which
-    # silently prevents the chief from starting -- the bug that left chief-hptuners dead. Write it to a file and
+    # silently prevents the chief from starting -- the bug that left a node's chief dead. Write it to a file and
     # reference it via "$(cat ...)" so the shell tmux spawns expands it INSIDE the pane: the tmux arg stays a few
     # hundred bytes no matter how big the roster gets.
     prompt_file = os.path.join(STATE_DIR, "_chief_prompt.txt")
@@ -4634,7 +4773,7 @@ def peer_remove(pid):
 
 # ======================================================================================================
 # OPERATOR NOTES -- a HUMAN-to-human chat between the people running the nodes (e.g. James at Mission Control
-# <-> Sarah at AFP), distinct from the chief(agent) mesh. Leave a note; it lands in the peer operator's
+# <-> an operator at a peer node), distinct from the chief(agent) mesh. Leave a note; it lands in the peer operator's
 # dashboard as a can't-miss corner alert + a Notes lens thread; they reply and it comes back here. Durable
 # (own retry worker), threaded per peer, history saved. Rides the SAME secure transport as the mesh
 # (X-Mesh-Token), but delivers to /api/opnote-recv -> the peer's HUMAN, never their agent.
@@ -4916,9 +5055,17 @@ def agent_open(slug):
     sess = "agt-" + slug
     if sh([TMUX, "has-session", "-t", sess])[0] == 0:
         return {"ok": True, "term": "/term?name=" + sess, "note": "resumed"}
-    cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' '
+    cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG
+          + ((' --settings ' + _shlex.quote(_ensure_policy_settings()) + ' ') if POLICY_ON else ' ')   # policy engine (graft G1): OPT-IN only
+          + ' '
           "'You are the %s agent. Read CLAUDE.md in this folder -- it is your charter (your job, tools, and "
           "hard boundaries). Then give me a one-line status and stand by. "
+          "KNOW THE STRUCTURE: you are a DEPARTMENT -- do YOUR department's work here. The Front Desk routes people "
+          "IN to the right department; your Chief of Staff is the senior manager for what spans the whole business. "
+          "So for anything cross-department, structural, or platform/framework-level (not your lane), do NOT muscle "
+          "through it: prepare a warm transfer (`cc-handoff propose`) to the right home, escalate to the Chief "
+          "(`cc-escalate` for a Mission Control matter), or file a Core Change Request -- handling it yourself "
+          "taints your scope and duplicates work. "
           "For sudo/interactive commands you can't run (no TTY): run `cc-stage \"<cmd>\"` (resolves THIS "
           "instance's canonical admin session, types it WITHOUT Enter, confirms it landed -- never hand-roll "
           "tmux send-keys against a guessed session) + ask the operator to run it in the Sessions tab -- see "
@@ -5172,10 +5319,21 @@ def _vault_load():
     try: return json.load(open(VAULT_FILE))
     except Exception: return {}
 def _vault_save(d):
+    # ATOMIC + fail-loud (deep-audit 2026-07-09 finding 0.1). The old version did an O_TRUNC in-place write and
+    # swallowed every error -- a crash mid-write, or any write failure, silently destroyed the WHOLE credential
+    # store with no backup and no signal. Now: write a 0600 pid-stamped temp, fsync, os.replace (atomic), and
+    # let a real failure propagate so an operator vault mutation can never report success without persisting.
     with _VAULT_LOCK:
+        tmp = "%s.tmp.%d" % (VAULT_FILE, os.getpid())
         try:
-            fd = os.open(VAULT_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, json.dumps(d, indent=2).encode()); os.close(fd)
-        except Exception: pass
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try: os.write(fd, json.dumps(d, indent=2).encode()); os.fsync(fd)
+            finally: os.close(fd)
+            os.chmod(tmp, 0o600); os.replace(tmp, VAULT_FILE)
+        except Exception:
+            try: os.remove(tmp)
+            except Exception: pass
+            raise
 def _vault_audit(action, sid, node, result):
     try:
         with open(VAULT_AUDIT, "a") as f:
@@ -6807,7 +6965,7 @@ def _ext_lenses():
 def _ext_agent_context():
     """Extension-scoped agent context: concatenate the agent-facing usage doc (AGENT.md) of every extension
     INSTALLED on THIS node, so a launched agent knows how to use exactly the tools this node has -- and NEVER
-    hears about an extension it doesn't (a CarSearch node without Skimlinks gets zero Skimlinks context). This
+    hears about an extension it doesn't (a node without a given extension gets zero context for it). This
     is injected into the launch brief (_system_brief). Per-node-clean by construction: it reads this node's
     install state, which is per-deployment. Capped so it can't bloat the window."""
     inst = _ext_installed()
@@ -7883,8 +8041,8 @@ def portfolio():
 
 # Protected system services (tmux sessions the chief watches but never lists as "work"). Per-deployment:
 # set "services" in cc.config.json as [[name,label,desc],...]. Falls back to this deployment's fleet.
-# Per-instance services. Only the master (hptuners, no CC_CONFIG) gets the default fleet; any instance
-# that sets "services" in its cc.config.json owns its list -- "services": [] means none (no hptuners leak).
+# Per-instance services. Only the master (no CC_CONFIG) gets the default fleet; any instance
+# that sets "services" in its cc.config.json owns its list -- "services": [] means none (no cross-tenant leak).
 _DEFAULT_SERVICES = []   # neutral: a fresh node has no tenant services. The master lists its own in cc.config "services".
 _SERVICES_CONFIG = [tuple(s) for s in CC["services"]] if "services" in CC else None
 
@@ -7892,9 +8050,20 @@ def _services_list():
     """Resolve services at REQUEST time (not import) so is_agency() reflects current on-disk state -- an
     agency tenant's Clients/Tools dirs may live in iCloud and not be materialized at server boot, which made
     an import-time agency check read False. Explicit cc.config 'services' wins; else agency tenants get NONE
-    (no hptuner-fleet leak, no opt-in needed); else the master fleet."""
+    (no cross-tenant fleet leak, no opt-in needed); else the master fleet."""
     if _SERVICES_CONFIG is not None: return _SERVICES_CONFIG
     return [] if is_agency() else _DEFAULT_SERVICES
+
+def _service_labels():
+    """{session_name: friendly label} for THIS deployment's configured services (cc.config "services" =
+    [[name,label,desc],...]). Keeps per-tenant service session names OUT of the framework (clean-core): the
+    dashboard labels a service session (e.g. a product bridge) from the operator's own config, not a hardcode."""
+    out = {}
+    for s in (_services_list() or []):
+        try:
+            if len(s) >= 2 and s[0] and s[1]: out[str(s[0])] = str(s[1])
+        except Exception: pass
+    return out
 
 def chief_overview():
     """Everything the chief oversees, at a glance. Work sessions vs protected system services."""
@@ -8544,7 +8713,7 @@ def _ralph_live_spawn(n):
     live. Idempotent: no-op if it's already running. Best-effort (a loop must never fail to start over this)."""
     live = "ralph-" + n + "-live"
     try:
-        if sh([TMUX, "has-session", "-t", live])[0] == 0: return live
+        if sh([TMUX, "has-session", "-t", "=" + live])[0] == 0: return live
         sh([TMUX, "new-session", "-d", "-s", live, "-c", BASE,
             "CC_HOME=%s python3 %s %s" % (CC_HOME, RALPH_LIVE, n)])
     except Exception: pass
@@ -8570,7 +8739,11 @@ def _rread(path, n=0):
             return f.read() if not n else "".join(f.readlines()[-n:])
     except Exception: return ""
 def _ralive(name):
-    code, _, _ = sh([TMUX, "has-session", "-t", "ralph-" + _rname(name)]); return code == 0
+    # EXACT match (leading '='): without it, tmux target-resolution PREFIX-matches, so `ralph-<name>` reports
+    # ALIVE whenever the loop's still-present `ralph-<name>-live` tab exists. That made a COMPLETED loop look
+    # running -> archive blocked ("still running -- halt it first") + it lingered in the loop bar, AND the
+    # orphan-live reaper below never fired (alive was falsely True) so the live tab never got reaped. (CCR ccr-1783564170371)
+    code, _, _ = sh([TMUX, "has-session", "-t", "=ralph-" + _rname(name)]); return code == 0
 
 def ralph_list():
     out = []
@@ -8583,9 +8756,9 @@ def ralph_list():
             state = st.get("state", "idle")
             if not alive and state in ("running", "paused"): state = "stopped"   # session died
             try:                                                                 # keep the live tab in lockstep with the runner (self-healing, not just launch-time)
-                _live_up = sh([TMUX, "has-session", "-t", "ralph-" + name + "-live"])[0] == 0
+                _live_up = sh([TMUX, "has-session", "-t", "=ralph-" + name + "-live"])[0] == 0   # exact: don't prefix-match
                 if alive and not _live_up:      _ralph_live_spawn(name)           # loop running but live tab missing -> (re)spawn it
-                elif (not alive) and _live_up:  sh([TMUX, "kill-session", "-t", "ralph-" + name + "-live"])   # runner gone -> reap orphan live tab
+                elif (not alive) and _live_up:  sh([TMUX, "kill-session", "-t", "=ralph-" + name + "-live"])   # runner gone -> reap orphan live tab
             except Exception: pass
             adv = cfg.get("advisor") if isinstance(cfg.get("advisor"), dict) else None
             out.append({"name": name, "state": state, "alive": alive, "iteration": st.get("iteration", 0),
@@ -8626,7 +8799,7 @@ def ralph_detail(name):
     return {"name": _rname(name), "config": _rjson(os.path.join(d, "loop.json")),
             "status": _rjson(os.path.join(d, "status.json")), "alive": _ralive(name),
             "session": "ralph-" + _rname(name),
-            "live_session": _lv, "live_alive": sh([TMUX, "has-session", "-t", _lv])[0] == 0,
+            "live_session": _lv, "live_alive": sh([TMUX, "has-session", "-t", "=" + _lv])[0] == 0,
             "progress": _rread(os.path.join(d, "progress.md")), "notes": _rread(os.path.join(d, "notes.md")),
             "rules": _rread(os.path.join(d, "rules.md")), "prompt": _rread(os.path.join(d, "prompt.txt")),
             "log": _rread(os.path.join(d, "run.log"), 300)}
@@ -8656,8 +8829,10 @@ def ralph_launch(name):
         except Exception: pass
     # pass this server's URL + config path so the runner can ping /api/ralph-notify (authenticated) on completion
     _cfgpath = os.environ.get("CC_CONFIG") or os.path.join(CC_HOME, "cc.config.json")
+    _pol_env = ("CC_POLICY_SETTINGS=%s " % _shlex.quote(_ensure_policy_settings())) if POLICY_ON else ""   # policy engine (graft G1): OPT-IN only
     sh([TMUX, "new-session", "-d", "-s", sess, "-c", BASE,
-        "CC_NOTIFY=http://127.0.0.1:%d CC_CONFIG=%s python3 %s %s" % (PORT, _cfgpath, RUNNER, n)])
+        "CC_NOTIFY=http://127.0.0.1:%d CC_CONFIG=%s %spython3 %s %s"
+        % (PORT, _cfgpath, _pol_env, RUNNER, n)])
     _lv = _ralph_live_spawn(n)                    # second tab: watch the current iteration live
     return {"ok": True, "session": sess, "term": "/term?name=" + sess, "live": _lv, "live_term": "/term?name=" + _lv}
 
@@ -8735,8 +8910,8 @@ def ralph_control(name, action):
     elif action == "halt":  open(os.path.join(d, "halt"), "w").close()        # graceful: stops after iteration
     elif action == "kill":                                                    # immediate
         open(os.path.join(d, "halt"), "w").close()
-        sh([TMUX, "kill-session", "-t", "ralph-" + n])
-        sh([TMUX, "kill-session", "-t", "ralph-" + n + "-live"])              # tear down the live tab too
+        sh([TMUX, "kill-session", "-t", "=ralph-" + n])                       # exact: never prefix-kill a sibling loop
+        sh([TMUX, "kill-session", "-t", "=ralph-" + n + "-live"])            # tear down the live tab too
     elif action == "archive":                                                 # move to Previous loops
         if _ralive(name): return {"ok": False, "error": "still running -- halt it first"}
         src = os.path.join(RALPHDIR, n)
@@ -8793,6 +8968,144 @@ def ralph_create(body):
     open(os.path.join(d, "progress.md"), "w").write(body.get("progress", "# %s -- progress\n\n## Phase 1\n- [ ] first item\n" % n))
     open(os.path.join(d, "notes.md"), "w").write("")
     return {"ok": True, "name": n}
+
+# ---- GPT-directed CAMPAIGNS (a chain of Ralph loops steered by an external GPT director) --------------
+# See docs/CROSS_VENDOR_ADVISOR.md. Runner: campaign_runner.py in tmux `campaign-<name>`. Cycle: director
+# plans the next loop (cc-advise --mode direct_next) -> operator intercept window -> Claude builds+runs it
+# (a real Ralph loop) -> repeat until DONE / round-cap / halt. Full-auto with an intercept timer; fail-safe.
+CAMPDIR = os.path.join(CC_HOME, "data", "campaigns")
+CAMP_RUNNER = os.path.join(BASE, "campaign_runner.py")
+
+def _cname(name): return re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:48]
+def _cdir(name):
+    n = _cname(name); d = os.path.join(CAMPDIR, n)
+    return d if os.path.isdir(d) else None
+def _cjson(path):
+    try: return json.loads(open(path).read() or "{}") or {}
+    except Exception: return {}
+def _calive(name): return sh([TMUX, "has-session", "-t", "campaign-" + _cname(name)])[0] == 0
+
+def campaign_create(body):
+    n = _cname(body.get("name", ""))
+    if not n: return {"ok": False, "error": "bad name"}
+    d = os.path.join(CAMPDIR, n)
+    if os.path.isdir(d): return {"ok": False, "error": "campaign already exists"}
+    if not (body.get("goal") or "").strip(): return {"ok": False, "error": "a north-star goal is required"}
+    os.makedirs(d, exist_ok=True)
+    cfg = {"name": n, "goal": body.get("goal", "").strip(), "cwd": body.get("cwd", "") or PROJECT,
+           "state": "idle", "round": 0, "history": [],
+           "max_rounds": int(body.get("max_rounds", 10) or 10),
+           "intercept_secs": int(body.get("intercept_secs", 120) or 120),
+           "model": body.get("model", ""), "max_turns": int(body.get("max_turns", 200) or 200),
+           "loop_timeout_sec": int(body.get("loop_timeout_sec", 2700) or 2700)}
+    with open(os.path.join(d, "campaign.json"), "w") as f: json.dump(cfg, f, indent=2)
+    if (body.get("brief") or "").strip():   # rich seeded context the director reads every round
+        try: open(os.path.join(d, "brief.md"), "w", encoding="utf-8").write(body["brief"])
+        except Exception: pass
+    return {"ok": True, "name": n}
+
+def campaign_launch(name):
+    d = _cdir(name)
+    if not d: return {"ok": False, "error": "no such campaign"}
+    n = _cname(name); sess = "campaign-" + n
+    if _calive(name): return {"ok": True, "session": sess, "term": "/term?name=" + sess, "note": "already running"}
+    st = _cjson(os.path.join(d, "campaign.json")).get("state")
+    if st in ("done", "capped"): return {"ok": False, "error": "campaign is %s -- create a new one" % st}
+    for ctl in ("halt", "pause"):
+        try: os.remove(os.path.join(d, ctl))
+        except Exception: pass
+    _cfgpath = os.environ.get("CC_CONFIG") or os.path.join(CC_HOME, "cc.config.json")
+    sh([TMUX, "new-session", "-d", "-s", sess, "-c", BASE,
+        "CC_NOTIFY=http://127.0.0.1:%d CC_CONFIG=%s python3 %s %s" % (PORT, _cfgpath, CAMP_RUNNER, n)])
+    return {"ok": True, "session": sess, "term": "/term?name=" + sess}
+
+def campaign_list():
+    out = []
+    if os.path.isdir(CAMPDIR):
+        for name in sorted(os.listdir(CAMPDIR)):
+            d = os.path.join(CAMPDIR, name)
+            if not os.path.isdir(d) or name.startswith((".", "_")): continue
+            cfg = _cjson(os.path.join(d, "campaign.json"))
+            alive = _calive(name); state = cfg.get("state", "idle")
+            if not alive and state in ("running", "paused"): state = "stopped"
+            pend = _cjson(os.path.join(d, "pending.json")) if os.path.isfile(os.path.join(d, "pending.json")) else None
+            out.append({"name": name, "goal": cfg.get("goal", ""), "state": state, "alive": alive,
+                        "round": cfg.get("round", 0), "max_rounds": cfg.get("max_rounds", 10),
+                        "cwd": cfg.get("cwd", ""), "rounds_run": len(cfg.get("history", [])),
+                        "pending": pend, "updated": cfg.get("updated", 0)})
+    return out
+
+def campaign_detail(name):
+    d = _cdir(name)
+    if not d: return {"ok": False, "error": "no such campaign"}
+    n = _cname(name); cfg = _cjson(os.path.join(d, "campaign.json"))
+    pend = _cjson(os.path.join(d, "pending.json")) if os.path.isfile(os.path.join(d, "pending.json")) else None
+    return {"ok": True, "name": n, "config": cfg, "alive": _calive(name),
+            "pending": pend, "director": _rread(os.path.join(d, "director.md")),
+            "log": _rread(os.path.join(d, "run.log"))[-8000:],
+            "session": "campaign-" + n, "term": "/term?name=campaign-" + n}
+
+def campaign_control(name, action):
+    d = _cdir(name)
+    if not d: return {"ok": False, "error": "no such campaign"}
+    n = _cname(name)
+    if action == "pause": open(os.path.join(d, "pause"), "w").close()
+    elif action == "resume":
+        try: os.remove(os.path.join(d, "pause"))
+        except Exception: pass
+    elif action == "halt":
+        open(os.path.join(d, "halt"), "w").close()
+        sh([TMUX, "kill-session", "-t", "campaign-" + n])
+    elif action == "delete":
+        if _calive(name): return {"ok": False, "error": "still running -- halt it first"}
+        tr = os.path.join(CAMPDIR, "_trash"); os.makedirs(tr, exist_ok=True)
+        try: os.rename(os.path.join(CAMPDIR, n), os.path.join(tr, n + "_" + str(int(time.time()))))
+        except Exception as e: return {"ok": False, "error": str(e)}
+    else: return {"ok": False, "error": "bad action"}
+    return {"ok": True, "action": action}
+
+def campaign_intercept(name, action, directive=None):
+    """Operator action on the pending next-loop directive: 'go' (launch now, honoring any edit), 'edit'
+    (update the directive, keep the window open), 'skip' (pause for a re-plan)."""
+    d = _cdir(name)
+    if not d: return {"ok": False, "error": "no such campaign"}
+    pf = os.path.join(d, "pending.json")
+    p = _cjson(pf)
+    if not p: return {"ok": False, "error": "no pending directive right now"}
+    if isinstance(directive, dict):
+        cur = p.get("directive") or {}
+        for k in ("goal", "checklist", "rationale"):
+            if k in directive: cur[k] = directive[k]
+        p["directive"] = cur
+    if action == "go": p["status"] = "go"
+    elif action == "skip":
+        open(os.path.join(d, "pause"), "w").close(); p["status"] = "awaiting"
+    try:
+        with open(pf, "w") as f: json.dump(p, f)
+    except Exception as e: return {"ok": False, "error": str(e)}
+    return {"ok": True, "status": p.get("status"), "directive": p.get("directive")}
+
+def campaign_notify(body):
+    """The runner reports campaign events. The frequent, low-stakes ones (intercept window opening, each
+    loop finishing) live in the dashboard Campaigns lens ONLY -- they'd spam a working chief agent, and the
+    operator opted into full-auto (the intercept is an opportunity, not a required interrupt). Only the events
+    that genuinely want a human -- the campaign needs attention, or it finished -- ping the chief."""
+    if not isinstance(body, dict): return {"ok": False}
+    n = _cname(body.get("name", "")); kind = (body.get("kind") or "").strip()
+    if kind in ("intercept", "loop_done"):
+        return {"ok": True, "note": "dashboard-only (Campaigns lens)"}   # deliberately NOT delivered to the chief
+    ns = CHIEF if sh([TMUX, "has-session", "-t", CHIEF])[0] == 0 else ""
+    if not ns: return {"ok": True, "note": "no notify target"}
+    if kind == "done":
+        msg = "[Campaign '%s' is COMPLETE -- the GPT director judged the north-star goal met: %s]" % (n, body.get("reason", ""))
+    elif kind == "ended":
+        msg = "[Campaign '%s' ended: %s.]" % (n, body.get("reason", ""))
+    elif kind == "attention":
+        msg = "[Campaign '%s' PAUSED and needs you: %s. Open the Campaigns lens.]" % (n, body.get("reason", ""))
+    else:
+        return {"ok": True, "note": "unknown kind"}
+    _mesh_deliver(ns, msg)
+    return {"ok": True, "notified": ns, "kind": kind}
 
 def ralph_previous():
     """Previous loops: archived new loops (precise duration) + the legacy .ps1 loop records at the
@@ -9025,10 +9338,31 @@ def _stray_at_imports(txt, base_dir):
         except Exception: pass
     return out
 
+def _claude_connected():
+    """Is Claude Code usable on this node? (deep-audit P0-2 'Connect Claude'.) Cheap heuristic -- NO live
+    token-costing call: the `claude` CLI must be on PATH AND some auth must be present (a live keychain/OAuth
+    login via _kc_read, an ANTHROPIC_API_KEY, or a CLAUDE_CODE_OAUTH_TOKEN). Without this, every chief / agent /
+    Ralph loop fails on first launch -- it is the ONE required piece besides python3 + tmux."""
+    import shutil as _sh
+    cli = bool(_sh.which("claude"))
+    how = None
+    if os.environ.get("ANTHROPIC_API_KEY"): how = "ANTHROPIC_API_KEY"
+    elif os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"): how = "CLAUDE_CODE_OAUTH_TOKEN"
+    else:
+        try:
+            if _kc_read(): how = "keychain login"
+        except Exception: pass
+    return {"cli": cli, "authed": bool(how), "how": how, "ok": cli and bool(how)}
+
 def doctor():
     """Self-maintenance check: flags over-budget docs, sub-tool duplication, managed-block drift, and
        registered components missing a CLAUDE.md -- so the multi-level doc system stays clean as it grows."""
     issues = []
+    _cx = _claude_connected()   # deep-audit P0-2: a fresh install boots green but agents fail if Claude isn't connected
+    if not _cx["cli"]:
+        issues.append({"sev": "err", "path": "claude", "msg": "the `claude` CLI (Claude Code) is NOT installed -- every chief, agent, and Ralph loop fails on first launch. Install Claude Code, then restart. It is the one required piece besides python3 + tmux."})
+    elif not _cx["authed"]:
+        issues.append({"sev": "warn", "path": "claude", "msg": "Claude Code is installed but NO authentication was detected (no keychain login, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN) -- if agents fail on launch, run `claude login`, or set ANTHROPIC_API_KEY (it can live in the vault). Verify with: claude -p 'ok'."})
     if _semver(BOOT_VERSION) < _semver(_manifest_version()):   # files updated by a converge but this process never re-exec'd
         issues.append({"sev": "warn", "path": "runtime", "msg": "running STALE code: this process booted on v%s but the framework on disk is v%s -- restart to load the update (the converge's restart didn't land)" % (BOOT_VERSION, _manifest_version())})
     try:                                                       # RESILIENCE: surface resource pressure BEFORE it wedges the node (the immune system's dashboard face)
@@ -9090,7 +9424,7 @@ def doctor():
         if p and os.path.isdir(os.path.join(PROJECT, p)) and not os.path.isfile(os.path.join(PROJECT, p, "CLAUDE.md")):
             issues.append({"sev": "err", "path": p, "msg": "registered component has no CLAUDE.md"})
     if not AUTH_TOKEN:
-        issues.append({"sev": "warn", "path": "auth", "msg": "Command Center has NO authentication -- dashboard + every /api is open to anyone who can reach the port (perimeter is network-only). Set cc.config auth_token / CC_AUTH_TOKEN to require a login."})
+        issues.append({"sev": "warn", "path": "auth", "msg": "Command Center is running OPEN (auth_open:true) -- dashboard + every /api is reachable by anyone who can hit the port (perimeter is network-only). This is only safe bound to 127.0.0.1 / a private tailnet. Remove `auth_open` to fail-secure (a token is auto-minted + logged), or set cc.config auth_token / CC_AUTH_TOKEN."})
     try:                                                       # daemon health: a crashed background loop must be LOUD, not a buried print (catalog D4)
         for _d in daemons_status()["daemons"]:
             if _d.get("last_error"):
@@ -9102,6 +9436,24 @@ def doctor():
     except Exception: pass
     if os.path.isfile(SA_PUBKEY_PATH) and not _HAS_CRYPTO:
         issues.append({"sev": "warn", "path": "superadmin", "msg": "superadmin.pub is present but the `cryptography` library is NOT installed for this CC's python -- Ed25519 superadmin grants cannot be verified here (the node is NOT under the owner's superadmin until fixed). Install: pip install --user cryptography, then restart the CC."})
+    # VAULT usability (deep-audit P2-11-adjacent finding P2-14): the credential vault needs Fernet (cryptography).
+    # If it can't encrypt, EVERY secret store silently fails (vault_set returns ok:false, easy to miss) -- make it
+    # a RED error, not a soft warning, and name the PEP-668 trap that silently no-ops `pip install --user`.
+    try:
+        if not vault_available():
+            if not _HAS_CRYPTO:
+                issues.append({"sev": "err", "path": "vault", "msg": "The credential VAULT is DISABLED: the `cryptography` package (Fernet) is not installed for this CC's python, so NO secret can be stored or leased -- every save fails. On PEP-668 python (recent Homebrew/Debian) `pip install --user` silently no-ops; run: python3 -m pip install --user --break-system-packages cryptography (or install into a venv the CC runs under), then restart the CC. Verify: python3 -c 'import cryptography'."})
+            else:
+                issues.append({"sev": "err", "path": "vault", "msg": "The credential VAULT cannot initialize its Fernet key -- secrets cannot be stored or leased. Ensure the vault dir + key file are writable and 0600 (%s). Then restart the CC." % VAULT_KEY_FILE})
+    except Exception: pass
+    # AUTO-UPDATE transparency (deep-audit P1-8): a non-source node that auto-installs framework code from the
+    # BUILT-IN public mirror (update_source not overridden) is NOT silent about it -- surface the posture + the
+    # choice so a standalone operator isn't unknowingly running a third party's auto-shipped code.
+    try:
+        if (not _is_update_source() and CC.get("auto_update", True) is not False
+                and not CC.get("update_source") and str(CC.get("update_channel", "")).lower() != "standalone"):
+            issues.append({"sev": "warn", "path": "update", "msg": "This node AUTO-INSTALLS framework code from the built-in ClaudeFather public mirror (%s) every ~%d min and self-restarts. Fine for a MANAGED fleet node; a STANDALONE install should either point cc.config `update_source` at its own trusted upstream, or set `update_channel:\"standalone\"` (or `auto_update:false`) to stop auto-pulling a third party's code. Updates are signature-gated (update_verify=%s -- set \"enforce\" to block unverified updates)." % (OFFICIAL_DIST_GIT, int(CC.get("auto_update_check_min", 30)), (CC.get("update_verify") or "warn"))})
+    except Exception: pass
     # Turnkey hardening (docs/HARDENING.md): a locked appliance should carry a signed core manifest + verify clean.
     if not _authoring():
         if not os.path.isfile(CORE_SIG_FILE):
@@ -10154,7 +10506,7 @@ def _toklen(s):
     return max(0, len(s or "")) // 4
 
 # --- Co-located instance ownership: many ClaudeFather instances share ONE tmux server on this Mac (the source
-# trio hptuners/overseer/carsearch + the co-located tenant installs atem/homeassistant/shopos). The unscoped
+# the master + overseer + co-located tenant installs sharing one host). The unscoped
 # overseer SEES every one of their sessions, but a session's payload (enabled tools especially) is a property of
 # the NODE that launched it -- so computing it against the VIEWER gave a different answer per dashboard. Each
 # instance publishes a tiny descriptor (project_root + local port); a viewer resolves a session's OWNING instance
@@ -10706,6 +11058,62 @@ def route(text, exclude=None):
             "alternatives": [{"rel": c["rel"], "name": c["name"], "confidence": s} for s, c in top],
             "needs_new_home": needs_new, "suggested_parent": parent}
 
+_FRONTDESK_BRIEF = (
+    "You are the FRONT DESK / concierge for this ClaudeFather node -- an EPHEMERAL triage desk. Your ONLY job is "
+    "to get the operator into the RIGHT scope (folder) for what they're working on, then HAND OFF. You do NOT do "
+    "the work yourself and you do NOT file notes. Rules: (1) Ask AT MOST 2 clarifying questions, then act. "
+    "(2) To find the home run `cc-route \"<their full description>\"` -- it returns the best-matching module, or that "
+    "a NEW home is needed. (3) When you know the scope, run `cc-handoff propose --to <rel> --goal \"<goal>\" "
+    "--summary \"<where we are + what you learned>\"` -- this prepares a WARM TRANSFER carrying the goal + context "
+    "+ pointers so the destination agent opens ALREADY BRIEFED (nothing gets re-explained). It lands in the "
+    "operator's Transfers tab; tell them to click it (one confirm) and they land in that scope, warm. (4) If "
+    "nothing fits, propose a NEW home: `cc-handoff propose --to new` (creates the dir "
+    "+ a seeded CLAUDE.md). (5) If the operator says 'just work here', respect it once and stand down. (6) KNOW "
+    "YOUR LANE: you are the receptionist, NOT the manager. If what they raise is not a specific piece of work but "
+    "something cross-department, structural, or an escalation (a fleet/platform decision, a problem spanning "
+    "departments, something for the owner), that is a CHIEF OF STAFF matter -- point them to their Chief of Staff "
+    "(the Chief session, or `cc-escalate` for a Mission Control matter), don't force it into a department. Be warm, "
+    "fast, and invisible: narrate what you're doing ('taking you to mcp/proxy now') so they always know.")
+
+def front_desk_open(text):
+    """FRONT DESK speed 2 (deep-audit Phase 1.3): spawn the EPHEMERAL cheap-model concierge to converse + place the
+    work. Greets with the router's best guesses already filled in, so it opens as an answer, not a blank prompt."""
+    rt = route(text)
+    dest = rt.get("destination") or {}
+    guesses = (["%s -- %s" % (dest["rel"], dest.get("name", ""))] if dest.get("rel") else [])
+    for a in (rt.get("alternatives") or [])[:2]:
+        if a.get("rel") and a["rel"] != dest.get("rel"): guesses.append(a["rel"])
+    greet = ("Hey -- let's get you to the right place. You're working on: %s. My best guess%s: %s%s. Which is it, "
+             "or tell me more?" % (text, "es" if len(guesses) != 1 else "", "; ".join(guesses) or "(nothing obvious yet)",
+             " -- or somewhere NEW" if rt.get("needs_new_home") else ""))
+    r = launch("studio", "concierge " + text[:24], rel=None,
+               model=(CC.get("frontdesk_model") or "claude-haiku-4-5-20251001"),
+               extra_sys=_FRONTDESK_BRIEF, seed=greet)
+    try:
+        if r.get("session"): _smeta_set(r["session"], kind="frontdesk", subject=text[:80])
+    except Exception: pass
+    if r.get("ok"): r["concierge"] = True
+    return r
+
+def front_desk(body):
+    """THE FRONT DESK: 'what are you working on?' -> land in the RIGHT scope with the goal SEEDED. {text, rel} = the
+    operator accepted a routed scope -> launch there with the goal as the opening turn (rel=\"\" = project root).
+    {text} alone -> hand it to the concierge to place. The Start box's Enter action. (deep-audit Phase 1.3)."""
+    text = (body.get("text") or "").strip()
+    if not text: return {"ok": False, "error": "tell me what you're working on"}
+    if "rel" in body:                                   # operator accepted a routed scope chip
+        rel = (body.get("rel") or "").strip() or None
+        r = launch("studio", text[:40], rel=rel, seed=text)
+        if r.get("ok"): r["placed"] = rel or "(project root)"
+        return r
+    rt = route(text)                                    # no explicit chip: route it -- confident -> go straight there
+    dest = rt.get("destination") or {}
+    if dest.get("rel") and (dest.get("confidence") or 0) >= 0.6:
+        r = launch("studio", text[:40], rel=dest["rel"], seed=text)
+        if r.get("ok"): r.update({"placed": dest["rel"], "routed": True, "confidence": dest["confidence"]})
+        return r
+    return front_desk_open(text)                        # unsure / new home -> the concierge places you
+
 def _llm_route(text, cands):
     """Ask the subscription model to pick the single best home folder (or NONE). Used only on ambiguous routes."""
     lines = "\n".join("- %s: %s" % (c["rel"], (c["summary"] or "")[:90]) for c in cands)
@@ -11100,7 +11508,7 @@ def pending_archives():
         try:
             m = _smeta(s); pa = float(m.get("archive_pending_at") or 0)
             if pa > now and _session_scope(s) is not None:
-                out.append({"name": s, "scope": _session_scope(s), "subject": m.get("subject") or _FRIENDLY.get(s) or s,
+                out.append({"name": s, "scope": _session_scope(s), "subject": m.get("subject") or _FRIENDLY.get(s) or _service_labels().get(s) or s,
                             "at": int(pa), "idle": int(_session_idle_sec(s))})
         except Exception: pass
     out.sort(key=lambda x: x["at"])
@@ -11128,7 +11536,7 @@ def hygiene():
         rk = _norm_toks(m.get("recent_kw") or "")                          # DRIFT (fix 3): is this conversation
         stok = _norm_toks(os.path.basename(rel) + " " + (cand_sum.get(rel) or ""))   # working OFF its scope now?
         drifted = bool(rk) and bool(stok) and len(rk & stok) == 0
-        by.setdefault(rel, []).append({"name": s, "subject": m.get("subject") or _FRIENDLY.get(s) or s,
+        by.setdefault(rel, []).append({"name": s, "subject": m.get("subject") or _FRIENDLY.get(s) or _service_labels().get(s) or s,
             "idle": int(_session_idle_sec(s)), "pin": bool(m.get("pin")), "hold_until": int(m.get("hold_until") or 0),
             "agent_hold": bool(m.get("agent_hold")), "eligible": _archive_eligible(s), "drifted": drifted})
     folders = sorted(([{"scope": k, "count": len(v), "sessions": v} for k, v in by.items()]),
@@ -11649,7 +12057,7 @@ def _clips_eod_loop():
 def _pretty_name(folder, title=None):
     """Canonical display name for a slugged folder. Prefer the folder's CLAUDE.md H1 title (the real,
     human-written name -- e.g. 'The Children's Place'); else de-slug + word-capitalize ('7th-avenue' ->
-    '7th Avenue', preserving leading digits)."""
+    'Acme Co', preserving leading digits)."""
     if title and title.strip() and title.strip().lower() not in (folder.lower(), folder.replace("-", " ").replace("_", " ").lower()):
         return title.strip()
     return " ".join(w[:1].upper() + w[1:] for w in re.split(r"[-_ ]+", folder) if w) or folder
@@ -11833,7 +12241,7 @@ _TLDISH = {"com", "net", "org", "io", "co", "ai", "app", "dev", "www", "us", "uk
 def _name_domain_label_hit(deslug, pdoms):
     """True if a de-slugged client-folder name equals a significant label of any participant domain -- so a
     folder 'Avonler' matches abe@avonler.com (or @mail.avonler.com), and 'Big Sky' matches @bigsky.com, even
-    when nothing was wired (Sarah's miss). Mirrors granola's name<->domain-label matching so EMAIL and CALLS
+    when nothing was wired (an operator's miss). Mirrors granola's name<->domain-label matching so EMAIL and CALLS
     agree. Skips free-mail + TLD-ish labels so a client is never matched by 'gmail'/'com'."""
     cands = {c for c in (deslug, (deslug or "").replace(" ", "")) if len(c) >= 3}
     if not cands: return False
@@ -12789,7 +13197,7 @@ def _owner_email():
     except Exception: pass
     return ""
 
-# One owner per node (carsearch=carsearch.pro, AFP=Sarah), so the voice profile is a single per-node file
+# One owner per node (e.g. one brand/operator per node), so the voice profile is a single per-node file
 # under STATE_DIR -- no email-keying mismatch.
 def _voice_path(email=None):
     return os.path.join(STATE_DIR, "_voice_profile.json")
@@ -14267,6 +14675,11 @@ def _autoupdate_tick():
     _UPDATE_STATE["last_check"] = time.time()
     if _is_update_source():
         _UPDATE_STATE.update({"source": True, "behind": False, "msg": "source node — self-update disabled (authors framework)"}); return
+    # STANDALONE posture (deep-audit P1-8): a standalone install must NOT silently auto-pull framework code from
+    # a third party's upstream. update_channel:"standalone" is the explicit opt-out (a MANAGED fleet node leaves
+    # it unset -> auto-converges from its update_source as before).
+    if str(CC.get("update_channel", "")).lower() == "standalone":
+        _UPDATE_STATE["msg"] = "standalone — auto-update disabled (cc.config update_channel=standalone)"; return
     if CC.get("auto_update", True) is False:
         _UPDATE_STATE["msg"] = "auto-update disabled (cc.config auto_update=false)"; return
     local = _manifest_version() or "0"
@@ -14312,15 +14725,49 @@ def _autoupdate_loop():
             except Exception: pass
         time.sleep(max(300, int(CC.get("auto_update_check_min", 30)) * 60))
 
+def _node_running_version(url, timeout=8):
+    """Probe ONE node's /api/fw-fingerprint -> the version of code ACTUALLY EXECUTING there (not its on-disk
+    files, which lie between overlay and restart), or None if unreachable. Single-node form of drift_report's
+    probe. (deep-audit 2026-07-09 finding 0.3.)"""
+    import urllib.request
+    try:
+        hdr = {"X-Mesh-Token": MESH_TOKEN} if MESH_TOKEN else {}
+        req = urllib.request.Request(url + "/api/fw-fingerprint", headers=hdr)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            fp = json.loads(r.read().decode())
+        return fp.get("running_version") or fp.get("version")
+    except Exception:
+        return None
+
+def _verify_converged(url, target, timeout=None, interval=5):
+    """The POST-SHIP HEALTH GATE (deep-audit 0.3). After a converge restart, poll a node until its RUNNING version
+    reaches `target`. A restarting node is briefly unreachable -- that's EXPECTED, so we keep polling across the
+    window. Returns True once it comes back on the new code; False if it never does (came back on OLD code, stayed
+    down, or is crash-looping). A False here is what stops a bad ship from being recorded as a success. Biased
+    toward False on ambiguity (a false halt is recoverable next pass; a false 'success' ships a bad build fleetwide)."""
+    timeout = float(CC.get("fleet_verify_timeout", 75)) if timeout is None else float(timeout)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        rv = _node_running_version(url)
+        if rv and _semver(rv) >= _semver(target): return True
+        time.sleep(interval)
+    rv = _node_running_version(url)
+    return bool(rv and _semver(rv) >= _semver(target))
+
 def fleet_converge(force=False, auto=False):
     """Mission Control: converge every TENANT node to the dist's latest in one operation. Refreshes the
     local dist mirror (git pull) so a push can't ship stale code, then for each behind (or all, if force)
     reachable tenant: superadmin cc_update (from the fresh local mirror) + a separate safe restart.
     SKIPS co-located source nodes (same CC_HOME as MC) so the authoring checkout is never overwritten.
     auto=True (the automatic on-ship path) additionally DEFERS a node that is inside its BUSINESS HOURS, so a
-    release doesn't restart it mid-workday; a MANUAL fleet-update (auto=False) pushes regardless."""
-    res = {"mirror": "", "ran": [], "skipped": []}
+    release doesn't restart it mid-workday; a MANUAL fleet-update (auto=False) pushes regardless.
+    SAFETY (deep-audit 0.3): serialized canary -- each node is health-verified back onto the target version
+    after its restart; the FIRST node that fails to come back halts the fan-out, so a bad ship reaches at most
+    one tenant, never the whole fleet at once. Disable the gate with cc.config fleet_canary:false."""
+    res = {"mirror": "", "ran": [], "skipped": [], "halted": None}
     mirror = _dist_dir()
+    target = _mirror_version()                              # the version everyone should land on this converge
+    canary = CC.get("fleet_canary", True) is not False     # health-verify + halt-on-first-failure (default on)
     try:
         code, out, err = sh(["git", "-C", mirror, "pull", "--ff-only"], timeout=90)
         res["mirror"] = "pulled" if code == 0 else ("pull failed: " + (err or out)[-160:])
@@ -14348,6 +14795,16 @@ def fleet_converge(force=False, auto=False):
             rst = superadmin_send(nid, "restart")   # SEPARATE safe self-restart (never cc_update restart:true)
             rec["restart"] = bool(rst.get("ok") and (rst.get("result") or {}).get("ok"))
             _aupd_log("MC converged %s (%s) update=%s stale=%s restart=%s" % (nid, status, ok, n.get("stale_process"), rec.get("restart")))
+            # HEALTH GATE + SERIALIZED CANARY (deep-audit 0.3): don't trust the restart's HTTP 200 -- confirm the
+            # node actually came BACK UP on the target version. If it did not (old code / crash-loop / down), HALT
+            # the fan-out so a bad ship can't cascade to every remaining tenant.
+            if canary and target and rec["restart"]:
+                rec["verified"] = _verify_converged(n.get("url"), target)
+                if not rec["verified"]:
+                    rec["error"] = "did NOT come back on v%s within the health window -- possible bad ship; HALTING fan-out" % target
+                    _aupd_log("CANARY HALT at %s: no converge to v%s -> stopping fan-out to protect the rest of the fleet" % (nid, target))
+                    res["halted"] = {"at": nid, "target": target}
+                    res["ran"].append(rec); break
         else:
             rec["error"] = (upd.get("error") or (upd.get("result") or {}).get("error") or "update failed")[:160]
         res["ran"].append(rec)
@@ -14381,7 +14838,12 @@ def _fleet_converge_loop():
                 mv = _mirror_version(); now = time.time()
                 if mv and mv != _fleet_last_converged():
                     _aupd_log("MC auto-converge: mirror at v%s (fleet last on %s) -> converging now" % (mv, _fleet_last_converged()))
-                    fleet_converge(force=False, auto=True); _fleet_mark_converged(mv); last_full = now
+                    _r = fleet_converge(force=False, auto=True)
+                    if not _r.get("halted"):
+                        _fleet_mark_converged(mv)                # only mark done if no node failed its health check
+                    else:                                        # canary halted -> leave UNMARKED so the next pass retries + it stays visible (deep-audit 0.3)
+                        _aupd_log("fleet NOT marked converged to v%s -- canary halted at %s; will retry next pass" % (mv, (_r["halted"] or {}).get("at")))
+                    last_full = now
                 elif now - last_full >= max(3600, int(CC.get("fleet_converge_min", 180)) * 60):
                     fleet_converge(force=False, auto=True); last_full = now   # periodic backstop for nodes offline at release
         except Exception as e:
@@ -14702,6 +15164,20 @@ def ws_send(sock, data, op=2):
     except OSError: return False
 def set_winsize(fd, rows, cols):
     try: fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    except Exception: pass
+
+# ---- Remote-desktop DEBUG TRACE (2026-07-09): stop guessing at the phone -- record EXACTLY what each /wsvnc
+# connection does (path, headers, upgrade, 5900 bridge, bytes each way, why it closed) so a failed mobile
+# connect is diagnosable from the log instead of inferred. Low volume (only VNC connects). Read it at
+# STATE_DIR/_vnc_debug.log or GET /api/vnc-debug. Gate off with cc.config vnc_debug:false.
+_VNC_DEBUG_LOG = os.path.join(STATE_DIR, "_vnc_debug.log")
+def _vnc_log(msg):
+    if CC.get("vnc_debug", True) is False: return
+    try:
+        if os.path.exists(_VNC_DEBUG_LOG) and os.path.getsize(_VNC_DEBUG_LOG) > 1_000_000:
+            os.replace(_VNC_DEBUG_LOG, _VNC_DEBUG_LOG + ".1")
+        with open(_VNC_DEBUG_LOG, "a") as f:
+            f.write(time.strftime("%H:%M:%S ") + INSTANCE_ID + " " + msg + "\n")
     except Exception: pass
 
 LOGIN_PAGE = """<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
@@ -15239,6 +15715,13 @@ class H(BaseHTTPRequestHandler):
                 self._s(402, json.dumps({"ok": False, "error": "license required", "status": license_status()}))
             return False
         if self._authed() or path in AUTH_EXEMPT or path in AUTH_MESH_INGRESS or path.startswith("/static/"): return True
+        # REMOTE-DESKTOP MOBILE FIX (2026-07-09): iOS Safari does NOT attach the cc_auth cookie to a WebSocket
+        # upgrade, so noVNC's /wsvnc handshake would 401 on a phone even though the dashboard is authed. The authed
+        # page mints a short-lived ticket (_vnc_ticket_new) and hands it to noVNC in the WS URL (?t=); accept it here
+        # for /wsvnc ONLY. A ticket, not the real token, so nothing sensitive ever lands in a URL fleet-wide.
+        if path == "/wsvnc" and AUTH_TOKEN:
+            _qt = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("t", [""])[0]
+            if _qt and _vnc_ticket_ok(_qt): return True
         if self.command == "GET" and "text/html" in (self.headers.get("Accept", "") or ""):
             # serve the login form INLINE at the requested URL (instead of 302 -> /login) so the address bar
             # keeps the #lens hash / query -> after sign-in a reload lands back where you were, not Portfolio.
@@ -15371,40 +15854,70 @@ class H(BaseHTTPRequestHandler):
         (5900) is only ever reached on 127.0.0.1 -- never exposed to the network -- so screen sharing
         rides the same Tailscale-only :8799 surface as the rest of the Command Center; the firewall stays
         up and 5900 stays off the wire."""
+        H = self.headers
+        _cid = "%s:%s" % self.client_address if isinstance(self.client_address, tuple) else str(self.client_address)
+        _vnc_log("REQ path=%r from=%s cookie=%s ticket-in-url=%s ua=%r origin=%r ws-proto=%r ws-ver=%r xff=%r" % (
+            self.path, _cid, ("yes" if H.get("Cookie") else "NO"),
+            ("yes" if "t=" in (self.path or "") else "no"),
+            (H.get("User-Agent") or "")[:70], H.get("Origin"),
+            H.get("Sec-WebSocket-Protocol"), H.get("Sec-WebSocket-Version"), H.get("X-Forwarded-For")))
         key = self.headers.get("Sec-WebSocket-Key")
-        if not key: return self._s(400, "bad ws")
+        if not key:
+            _vnc_log("  -> 400: no Sec-WebSocket-Key (this request never reached the WS upgrade)")
+            return self._s(400, "bad ws")
         accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
         self.send_response(101); self.send_header("Upgrade", "websocket"); self.send_header("Connection", "Upgrade")
         self.send_header("Sec-WebSocket-Accept", accept)
         offered = [p.strip() for p in (self.headers.get("Sec-WebSocket-Protocol") or "").split(",") if p.strip()]
         if "binary" in offered: self.send_header("Sec-WebSocket-Protocol", "binary")  # only echo what was offered
         self.end_headers()
+        _vnc_log("  -> 101 upgraded (subprotocols offered=%r)" % offered)
         sock = self.connection
-        try: vnc = socket.create_connection(("127.0.0.1", 5900), timeout=5)
-        except Exception:
-            ws_send(sock, b"", 8); return            # no VNC server -> Screen Sharing not enabled yet
         try:
+            vnc = socket.create_connection(("127.0.0.1", 5900), timeout=5)
+            _vnc_log("  -> bridged to 127.0.0.1:5900 OK")
+        except Exception as _e:
+            _vnc_log("  -> FAILED to reach 5900 (%s) -> WS close; noVNC shows 'Failed to connect to server'" % _e)
+            ws_send(sock, b"", 8); return            # no VNC server -> Screen Sharing not enabled yet
+        _up = _dn = 0; _why = "?"
+        try:
+            _first = True
             while True:
                 r, _, _ = select.select([sock, vnc], [], [], 120)
+                if not r: _why = "idle-timeout-120s"; break
                 if sock in r:
                     fr = ws_recv(sock)
-                    if fr is None: break
+                    if fr is None: _why = "client-ws-eof"; break
                     op, payload = fr
-                    if op == 8: break
+                    if op == 8: _why = "client-close-frame"; break
                     elif op == 9: ws_send(sock, payload, 10)
                     elif op in (1, 2):
-                        try: vnc.sendall(payload)
-                        except OSError: break
+                        try: vnc.sendall(payload); _up += len(payload)
+                        except OSError: _why = "5900-send-err"; break
                 if vnc in r:
                     try: data = vnc.recv(65536)
-                    except OSError: break
-                    if not data or not ws_send(sock, data, 2): break
+                    except OSError: _why = "5900-recv-err"; break
+                    if not data: _why = "5900-closed"; break
+                    if _first: _vnc_log("  -> first bytes from screen: %r (bridge is LIVE, forwarding to phone)" % data[:16]); _first = False
+                    if not ws_send(sock, data, 2): _why = "client-ws-send-fail"; break
+                    _dn += len(data)
         finally:
+            _vnc_log("  -> CLOSED reason=%s up=%dB down=%dB" % (_why, _up, _dn))
             try: vnc.close()
             except Exception: pass
     def do_GET(self):
         u = urllib.parse.urlparse(self.path); q = urllib.parse.parse_qs(u.query)
+        if "wsvnc" in (self.path or ""):   # catch EVERY vnc attempt, incl a mangled path that never reaches the route
+            _vnc_log("do_GET SAW wsvnc: raw=%r u.path=%r matches-route=%s upgrade-hdr=%r" % (self.path, u.path, (u.path == "/wsvnc"), self.headers.get("Upgrade")))
         if not self._auth_gate(u.path): return
+        if u.path == "/api/vnc-debug":     # read the remote-desktop trace (also at STATE_DIR/_vnc_debug.log)
+            try: _t = "".join(open(_VNC_DEBUG_LOG).readlines()[-250:])
+            except Exception: _t = "(no vnc debug log yet)"
+            return self._s(200, _t, "text/plain; charset=utf-8")
+        if u.path == "/api/policy-audit":  # the policy-engine trace: what each tool call WOULD-BE/was decided (graft G1)
+            try: _t = "mode=%s\n%s" % (POLICY_ENFORCE, "".join(open(_POLICY_AUDIT).readlines()[-300:]))
+            except Exception: _t = "mode=%s\n(no policy audit log yet)" % POLICY_ENFORCE
+            return self._s(200, _t, "text/plain; charset=utf-8")
         if u.path == "/login": return self._s(200, LOGIN_PAGE, "text/html; charset=utf-8")
         if u.path == "/api/health": return self._s(200, json.dumps({"ok": True, "instance": INSTANCE_ID, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "auth": bool(AUTH_TOKEN), "edition": _edition(), "integrity": _CORE_STATUS.get("status"), "licensed": _licensed(), "vitals": (vitals(sample=False) if "vitals" in globals() else None), "degraded": (dict(_DEGRADED) if _DEGRADED.get("since") else None)}))
         if u.path == "/api/vitals":   # RESILIENCE: live vitals + on-demand thread-stack capture (?dump=1) -> catch a runaway's hot loop in the act
@@ -15444,7 +15957,18 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/ideas": return self._s(200, json.dumps(ideas_list()))
         if u.path == "/api/tasks": return self._s(200, json.dumps({"tasks": tasks_load(), "today": _dt.date.today().isoformat()}))
         if u.path == "/api/platform-map":
-            try: _pm = json.load(open(os.path.join(BASE, "platform_map.json")))
+            # The map ships with paths RELATIVE to CC_HOME (P2-11: no baked-in /Users/... abs paths). Absolutize
+            # them against THIS install's CC_HOME at serve time so the frontend + file-get resolve correctly on
+            # any machine. A path that is already absolute (legacy/foreign) is left untouched.
+            def _abs(v): return (v if (not v or os.path.isabs(v)) else os.path.join(CC_HOME, "" if v == "." else v))
+            try:
+                _pm = json.load(open(os.path.join(BASE, "platform_map.json")))
+                for _c in _pm.get("components", []):
+                    for _k in ("path", "claude_md"):
+                        if _k in _c: _c[_k] = _abs(_c[_k])
+                    for _ch in _c.get("children", []):
+                        for _k in ("path", "claude_md"):
+                            if _k in _ch: _ch[_k] = _abs(_ch[_k])
             except Exception: _pm = {"components": []}
             return self._s(200, json.dumps(_pm))
         if u.path == "/api/ccr": return self._s(200, json.dumps({"ccrs": ccr_list(), "self": INSTANCE_ID}))
@@ -15626,6 +16150,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/managed": return self._s(200, json.dumps(managed_overview()))
         if u.path == "/api/doctor": return self._s(200, json.dumps(doctor()))
         if u.path == "/api/ralph": return self._s(200, json.dumps(ralph_list()))
+        if u.path == "/api/campaigns": return self._s(200, json.dumps(campaign_list()))
+        if u.path == "/api/campaign": return self._s(200, json.dumps(campaign_detail((q.get("name") or [""])[0])))
         if u.path == "/api/module-tree":
             regen_treemap()   # debounced -- picks up modules an agent/person added directly on the filesystem
             return self._s(200, json.dumps(_annotate_recency(module_tree(""), past_conversations("studio"))))
@@ -15955,9 +16481,16 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(resume_session(body.get("machine", "studio"), body.get("id", ""), body.get("cwd", ""), body.get("fork", False), body.get("label", ""))))
         if u.path == "/api/ralph-launch":  return self._s(200, json.dumps(ralph_launch(body.get("name", ""))))
         if u.path == "/api/ralph-notify":  return self._s(200, json.dumps(ralph_notify(body)))
+        if u.path == "/api/campaign-create":    return self._s(200, json.dumps(campaign_create(body)))
+        if u.path == "/api/campaign-launch":    return self._s(200, json.dumps(campaign_launch(body.get("name", ""))))
+        if u.path == "/api/campaign-control":   return self._s(200, json.dumps(campaign_control(body.get("name", ""), body.get("action", ""))))
+        if u.path == "/api/campaign-intercept": return self._s(200, json.dumps(campaign_intercept(body.get("name", ""), body.get("action", ""), body.get("directive"))))
+        if u.path == "/api/campaign-notify":    return self._s(200, json.dumps(campaign_notify(body)))
         if u.path == "/api/module-launch": return self._s(200, json.dumps(launch("studio", body.get("name") or (body.get("rel","").split("/")[-1] or "session"), rel=body.get("rel",""))))
         if u.path == "/api/module-note":   return self._s(200, json.dumps(module_note(body.get("rel",""), body.get("text",""))))
         if u.path == "/api/module-add":    return self._s(200, json.dumps(module_add(body.get("parent",""), body.get("name",""), body.get("summary",""), bool(body.get("adopt")))))
+        if u.path == "/api/frontdesk":         # THE FRONT DESK: place a goal into the right scope (Phase 1.3)
+            return self._s(200, json.dumps(front_desk(body)))
         if u.path == "/api/handoff-propose":   # WARM TRANSFER: an out-of-lane agent (or the UI) prepares a transfer
             return self._s(200, json.dumps(handoff_propose(
                 from_session=body.get("from_session"), to=body.get("to"), goal=body.get("goal", ""),
@@ -15993,6 +16526,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/idea-update":   return self._s(200, json.dumps(idea_update(body)))
         if u.path == "/api/idea-delete":   return self._s(200, json.dumps(idea_delete(body.get("id", ""))))
         if u.path == "/api/idea-promote":  return self._s(200, json.dumps(idea_promote(body)))
+        if u.path == "/api/policy-evaluate": return self._s(200, json.dumps(policy_evaluate(body)))   # PreToolUse hook ingress (graft G1)
         if u.path == "/api/ccr-submit":    return self._s(200, json.dumps(ccr_submit(body)))
         if u.path == "/api/ccr-update":    return self._s(200, json.dumps(ccr_update(body)))
         if u.path == "/api/ccr-recheck":   return self._s(200, json.dumps(ccr_recheck()))   # flag open CCRs whose surface changed since filed (likely already addressed)
@@ -16486,7 +17020,7 @@ function leaveNow(){
   else { setTimeout(function(){location.href='/#sessions';}, 400); }
 }
 // After a graceful End, watch for the session to finish its handoff + file away, THEN leave -- so the window
-// never sits on a dead terminal you have to manually refresh/dismiss (Sarah's report). Only navigates when this
+// never sits on a dead terminal you have to manually refresh/dismiss (an operator's report). Only navigates when this
 // is a standalone /term tab; embedded as a workspace-pane iframe (window.top!=self) the parent dashboard
 // reconciles the pane away, so we don't redirect the iframe.
 function endWatch(){ if(endWatch._iv)return; endWatch._iv=setInterval(function(){
@@ -17536,7 +18070,7 @@ function placeholder(){
 (async()=>{await refresh();if(DETAIL.alive)connectTerm();else placeholder();setInterval(refresh,5000);})();
 </script></body></html>"""
 
-PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ClaudeFather — Command Center</title><link rel="icon" type="image/png" href="/static/brand/claudefather_favicon.png?v=2"><link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=2"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#0a0a0f"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/light/style.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/fill/style.css"><style>
+PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ClaudeFather — Command Center</title><link rel="icon" type="image/png" href="/static/brand/claudefather_favicon.png?v=2"><link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=2"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#0a0a0f"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><link rel="stylesheet" href="/static/phosphor/light.css"><link rel="stylesheet" href="/static/phosphor/fill.css"><style>
 :root{--bg:#0a0a0f;--bg2:#12121a;--card:#1a1a24;--card2:#22222e;--ink:#ffffff;--mut:#a0a0b0;--dim:#606070;--line:#2a2a3a;--accent:#c9a227;--accent-rgb:201,162,39;--accent-light:#e8c547;--accent-dark:#9a7a1a;--accent2:#7a1220;--accent2-light:#a01828;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--blue:#3b82f6;--grad:linear-gradient(135deg,#d6b23c,#c9a227);--glow:0 10px 28px rgba(0,0,0,.5)}
 /* brand lockup styled in the .brand rule below (cfmark + gold-foil serif wordmark) */
 /* Self-hosted display font for the brand title -- Cinzel Decorative (SIL OFL 1.1, commercial-OK + redistributable),
@@ -19101,6 +19635,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="modules"><i class="ph-light ph-folders"></i>Projects</button>
 <button data-l="files"><i class="ph-light ph-folder"></i>Files</button>
 <button data-l="gmail"><i class="ph-light ph-envelope-simple"></i>Gmail<span id="gmailBadge" style="display:none;margin-left:6px;background:#ea4335;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
+<button data-l="frontdesk"><i class="ph-light ph-bell"></i>Front Desk</button>
 <button data-l="tasks"><i class="ph-light ph-checks"></i>Tasks<span id="tasksBadge" style="display:none;margin-left:6px;background:var(--accent);color:#15120a;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="calendar"><i class="ph-light ph-calendar-dots"></i>Calendar</button>
 <button data-l="drive"><i class="ph-light ph-cloud"></i>Drive</button>
@@ -19117,6 +19652,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="ccr"><i class="ph-light ph-git-pull-request"></i>Change Requests<span id="ccrBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="propose"><i class="ph-light ph-paper-plane-tilt"></i>Propose Change</button>
 <button data-l="ralph"><i class="ph-light ph-repeat"></i>Ralph Loops</button>
+<button data-l="campaigns"><i class="ph-light ph-strategy"></i>Campaigns</button>
 <button data-l="pipeline"><i class="ph-light ph-flow-arrow"></i>Pipeline</button>
 <button data-l="chief"><i class="ph-light ph-medal"></i>Chief of Staff</button>
 <button data-l="tree"><i class="ph-light ph-git-branch"></i>Convo Tree</button>
@@ -19237,6 +19773,7 @@ function render(){
   else if(LENS=="brief"){loadBrief();return;}
   else if(LENS=="drive"){loadDrive();return;}
   else if(LENS=="ralph"){loadRalph();return;}
+  else if(LENS=="campaigns"){loadCampaigns();return;}
   else if(LENS=="pipeline"){loadPipeline();return;}
   else if(LENS=="jobs")h=(D.jobs||[]).filter(j=>!q||(j.name+j.desc).toLowerCase().includes(q)).map(jobCard).join("")||empty("No active jobs — click ＋ Add.");
   else if(LENS=="machines")h=D.machines.map(machCard).join("");
@@ -19272,6 +19809,7 @@ function render(){
   else if(LENS=="sessions"){loadSessions();return;}
   else if(LENS=="history"){loadHistory();return;}
   else if(LENS=="tree"){loadTree();return;}
+  else if(LENS=="frontdesk"){loadFrontDesk();return;}
   else if(LENS=="tasks"){loadTasks();return;}
   else if(LENS=="ideas"){loadIdeas();return;}
   else if(LENS=="ccr"){loadCcr();return;}
@@ -19500,6 +20038,85 @@ async function newRalph(){
   const cwd=(await promptM("Working directory the agent runs in:",PROJ())||"").trim();
   fetch("/api/ralph-create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,goal,cwd,notify_session:(window.CC&&window.CC.chiefSession)||''})}).then(r=>r.json()).then(r=>{
     if(r&&r.ok){toast("Loop created — the Chief of Staff will be pinged when it finishes. Opening it…");openRalph(r.name);}else toast("Create failed: "+((r||{}).error||"?"),5000);});
+}
+// ---- Campaigns: a GPT DIRECTOR chaining Ralph loops (plan -> intercept -> Claude builds -> repeat) ----
+var CAMPCOL={running:"#3fb950",paused:"#d29922",idle:"#a0a0b0",stopped:"#a0a0b0",done:"#3fb950",capped:"#d29922",halted:"#f85149"};
+async function loadCampaigns(){
+  let L=[];try{L=await(await fetch("/api/campaigns")).json();}catch(e){}
+  const q=(document.getElementById("search")||{value:""}).value.toLowerCase();
+  L=L.filter(c=>!q||(c.name+" "+(c.goal||"")).toLowerCase().includes(q));
+  const head='<div class="card" style="cursor:default;grid-column:1/-1"><h3 style="justify-content:space-between"><span>Campaigns</span>'
+    +'<button class="mini go" onclick="newCampaign()">+ New campaign</button></h3>'
+    +'<div class="meta">A GPT <b>director</b> (external, cross-vendor) plans the next loop from a north-star goal &mdash; you get an <b>intercept window</b> to edit/veto, or it auto-launches &mdash; then a Claude agent builds+runs it (a real Ralph loop), and it repeats until the director says done, the round cap is hit, or you halt. Everything runs in watchable tabs.</div></div>';
+  document.getElementById("grid").innerHTML=head+(L.map(campaignCard).join("")||empty("No campaigns — click + New campaign."));
+  // live countdown + auto-refresh while any campaign is running / has a pending intercept
+  if(window._campTimer)clearInterval(window._campTimer);
+  const active=L.some(c=>c.alive||c.pending);
+  if(active&&LENS=="campaigns"){window._campTimer=setInterval(function(){
+    if(LENS!="campaigns"){clearInterval(window._campTimer);return;}
+    document.querySelectorAll('[data-campdl]').forEach(function(el){
+      var left=Math.max(0,Math.round(parseFloat(el.getAttribute('data-campdl'))-Date.now()/1000));
+      el.textContent=left+"s";
+      if(left<=0){clearInterval(window._campTimer);loadCampaigns();}
+    });
+  },1000);setTimeout(function(){if(LENS=="campaigns")loadCampaigns();},6000);}
+}
+function campaignCard(c){
+  const col=CAMPCOL[c.state]||"#a0a0b0";
+  let btns='';
+  const watch='<button class="mini" title="watch the director + loops live in the campaign tab" onclick="campaignWatch(\''+esc(c.name)+'\')">watch live</button>';
+  if(c.alive){
+    btns=watch+(c.state=="paused"
+      ?'<button class="mini go" onclick="campaignAct(\''+esc(c.name)+'\',\'resume\')">▶ resume</button>'
+      :'<button class="mini" onclick="campaignAct(\''+esc(c.name)+'\',\'pause\')">pause</button>')
+      +'<button class="mini danger" onclick="campaignAct(\''+esc(c.name)+'\',\'halt\')">halt</button>';
+  }else{
+    const ended=(c.state=="done"||c.state=="capped"||c.state=="halted"||c.state=="stopped");
+    btns=(ended?'':'<button class="mini go" title="start the campaign" onclick="campaignLaunch(\''+esc(c.name)+'\')">▶ launch</button>')
+      +'<button class="mini danger" title="delete (reversible: _trash)" onclick="campaignDel(\''+esc(c.name)+'\')">delete</button>';
+  }
+  let intercept='';
+  if(c.pending&&c.pending.directive){
+    const d=c.pending.directive,cl=(d.checklist||[]);
+    intercept='<div style="margin:9px 0;padding:11px 12px;border:1px solid var(--warn);border-radius:10px;background:rgba(245,158,11,.07)">'
+      +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="color:var(--warn)">Director proposes the next loop</b>'
+      +'<span class="meta" style="margin:0">auto-launches in <b data-campdl="'+(c.pending.deadline||0)+'">…</b> unless you act</span></div>'
+      +'<div class="meta" style="color:var(--ink);margin:6px 0 3px"><b>Goal:</b> '+esc(d.goal||"")+'</div>'
+      +(cl.length?'<div class="meta" style="margin:0">'+cl.slice(0,6).map(function(x){return "• "+esc(x);}).join("<br>")+'</div>':'')
+      +'<div class="btns" style="margin-top:8px" onclick="event.stopPropagation()">'
+        +'<button class="mini go" onclick="campaignGo(\''+esc(c.name)+'\')">▶ launch now</button>'
+        +'<button class="mini" onclick="campaignEdit(\''+esc(c.name)+'\')">edit</button>'
+        +'<button class="mini" onclick="campaignAct(\''+esc(c.name)+'\',\'pause\')">pause</button>'
+        +'<button class="mini danger" onclick="campaignAct(\''+esc(c.name)+'\',\'halt\')">halt</button>'
+      +'</div></div>';
+  }
+  return '<div class="card" style="cursor:default"><h3><span>'+esc(c.name)+'</span><span class="badge" style="background:'+col+'22;color:'+col+'">'+esc(c.state)+'</span></h3>'
+    +'<div class="meta"><b>north-star:</b> '+esc(c.goal||"(none)")+'</div>'
+    +'<div class="meta">round '+(c.round||0)+'/'+(c.max_rounds||10)+' · '+(c.rounds_run||0)+' loop(s) run</div>'
+    +intercept
+    +'<div class="btns" style="margin-top:8px" onclick="event.stopPropagation()">'+btns+'</div></div>';
+}
+async function newCampaign(){
+  const name=(await promptM("New campaign name (letters/numbers/-_):")||"").trim(); if(!name)return;
+  const goal=(await promptM("North-star goal (what the whole campaign should achieve):")||"").trim(); if(!goal)return;
+  const cwd=(await promptM("Working directory the agents build in:",PROJ())||"").trim();
+  const mr=(await promptM("Max rounds (hard cap — always terminates):","10")||"10").trim();
+  const iw=(await promptM("Intercept window in seconds (time to edit/veto GPT before each loop auto-launches):","120")||"120").trim();
+  const r=await(await fetch("/api/campaign-create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,goal,cwd,max_rounds:parseInt(mr)||10,intercept_secs:parseInt(iw)||120})})).json();
+  if(!r||!r.ok){toast("Create failed: "+((r||{}).error||"?"),5000);return;}
+  if(await confirmM('Campaign "'+r.name+'" created.\n\nLaunch it now? The GPT director will plan the first loop; you\'ll get the intercept window before it runs.')) campaignLaunch(r.name);
+  else loadCampaigns();
+}
+async function campaignLaunch(n){toast("Launching campaign "+n+"…");const r=await(await fetch("/api/campaign-launch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n})})).json();if(r&&r.ok){toast("Campaign launched — the director is planning. Watch it live.",4000);setTimeout(loadCampaigns,1200);}else toast("Failed: "+((r||{}).error||"?"),5000);}
+async function campaignAct(n,a){await fetch("/api/campaign-control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,action:a})});toast(a+" → "+n);setTimeout(loadCampaigns,700);}
+async function campaignDel(n){if(!await confirmM('Delete campaign "'+n+'"?\n\nMoves it to _trash (reversible).'))return;const r=await(await fetch("/api/campaign-control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,action:"delete"})})).json();if(r&&r.ok){toast("Deleted "+n);loadCampaigns();}else toast("Failed: "+((r||{}).error||"?"),5000);}
+function campaignWatch(n){var s='campaign-'+n;_openTerm({session:s,term:'/term?name='+encodeURIComponent(s)});}
+async function campaignGo(n){const r=await(await fetch("/api/campaign-intercept",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,action:"go"})})).json();if(r&&r.ok){toast("Launching the next loop now…");setTimeout(loadCampaigns,900);}else toast("Failed: "+((r||{}).error||"?"),5000);}
+async function campaignEdit(n){
+  let d={};try{d=(await(await fetch("/api/campaign?name="+encodeURIComponent(n))).json()).pending.directive||{};}catch(e){}
+  const goal=(await promptM("Redirect the next loop — edit its goal (then it launches with this goal + the director's checklist):",d.goal||"")); if(goal==null||!goal.trim())return;
+  const r=await(await fetch("/api/campaign-intercept",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,action:"go",directive:{goal:goal.trim()}})})).json();
+  if(r&&r.ok){toast("Redirected & launching the next loop…");setTimeout(loadCampaigns,900);}else toast("Failed: "+((r||{}).error||"?"),5000);
 }
 function jobCard(j){return '<div class="card" style="cursor:default"><h3><span>'+j.name+'</span>'+badge(j.status)+'</h3>'+(j.component?'<div class="meta">'+j.component+'</div>':'')+'<div class="brief">'+(j.desc||"")+'</div>'+(j.next?'<div class="meta" style="color:var(--accent)">next: '+e2(j.next)+'</div>':'')+'</div>';}
 function machCard(m){const st=ST[m.id]||m.status||"";const ok=st=="online";return '<div class="card" onclick="openMach(\''+m.id+'\')"><h3><span><span class="dot '+(ok?"ok":(st=="offline"?"bad":""))+'"></span> '+m.name+'</span></h3><div class="meta">'+m.role+'</div><div class="brief"><code>'+(m.ssh||"")+'</code></div></div>';}
@@ -19768,7 +20385,7 @@ function stripMinBar(){ // collapsed: a sleek title bar (remembers the choice); 
     +'<span class="us-mb-r">'+sum+'<span class="us-mb-exp" title="expand"></span></span></div>';}
 // fill = % USED (gauge fills as the account is consumed); a touch warmer/brighter as it nears the limit
 function fuelShade(u){return u>=85?['#c99a2e','#e2bb48']:['#a37f27','#b8922e'];}
-function shortName(em){return (em||'').split('@')[0].split('.')[0];}  // sarah.a.karger -> sarah (full email stays in tooltips)
+function shortName(em){return (em||'').split('@')[0].split('.')[0];}  // jane.q.public -> jane (full email stays in tooltips)
 function totalsStrip(){if(STRIPMIN)return stripMinBar();const t=TOKDATA.totals;if(!t)return '';
   var sel=SPENDWIN,selIdx=Math.max(0,US_WINS.map(function(w){return w[0];}).indexOf(sel));
   var rail=US_WINS.map(function(w){var o=t[w[2]]||{},rt=o.ratio||0,over=rt>1,x=over?rt:(rt>0?1/rt:0);
@@ -19847,7 +20464,7 @@ function setSessView(v){SESSVIEW=v;localStorage.setItem('hpcc_sessview',v);loadS
 function sessHint(){return SESSVIEW=='focus'?'One big working terminal. Switch which session is big with the chips above it; the bottom taskbar holds every session (hover to blow one up).':
   SESSVIEW=='grid'?'Equal tiles, all live (auto-refresh). Click a tile header to maximize it into a full terminal.':'Plain list with controls.';}
 // ---- Remote Desktop lens: noVNC over a localhost VNC proxy (mac Screen Sharing) ----
-const VNCURL='/static/novnc/vnc.html?path=wsvnc&resize=scale&reconnect=true&autoconnect=true&show_dot=true&bell=off';
+const VNCURL='/static/novnc/vnc.html?path=wsvnc__VNCT__&resize=scale&reconnect=true&autoconnect=true&show_dot=true&bell=off';
 function vncOpen(){window.open(VNCURL,'_blank');}
 function loadDesktop(){
   let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Remote Desktop</b> <span class="sub">live control of the Mac Studio</span>'
@@ -20704,6 +21321,17 @@ async function resHealthPoll(){
         ? (w+' This node is DEGRADED &mdash; a core system call failed ('+esc(String(h.degraded.reason||'').slice(0,90))+'). Session/chief lists may read empty; it self-heals as calls recover.')
         : (w+' CRITICAL resource pressure &mdash; '+(v.fd_pct||0)+'% file descriptors, '+(v.threads||0)+' threads, '+(v.cpu||0)+'% CPU. The node will self-heal with a clean restart.');
     } else if(el){ el.remove(); }
+    // SPA STALENESS (deep-audit 0.7): the server restarted to DIFFERENT code than this tab was served with.
+    // CC.running_version = what this tab loaded; h.running_version = what's running now. Offer a one-click reload
+    // instead of the "I shipped but nothing changed -> hard-refresh Cmd+Shift+R" folklore. Reuses this 30s poll.
+    var mine=(window.CC&&CC.running_version)||'', now=h.running_version||'', vb=document.getElementById('versBanner');
+    if(now&&mine&&now!==mine){
+      if(!vb){ vb=document.createElement('div'); vb.id='versBanner';
+        vb.style.cssText='position:fixed;left:0;right:0;z-index:99998;padding:7px 14px;font:600 12.5px/1.4 -apple-system,sans-serif;text-align:center;background:#2f81f7;color:#fff;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)';
+        vb.onclick=function(){location.reload();}; document.body.appendChild(vb); }
+      vb.style.top=(document.getElementById('resBanner')?'32px':'0');
+      vb.innerHTML=String.fromCharCode(8635)+' New version '+esc(now)+' is running (this tab loaded '+esc(mine)+'). Click to reload.';
+    } else if(vb){ vb.remove(); }
   }catch(e){}
 }
 setInterval(resHealthPoll,30000);setTimeout(resHealthPoll,4000);
@@ -25372,6 +26000,7 @@ function busyOn(msg,sub){ var o=document.getElementById('cfbusy'); if(!o){ o=doc
 function busyOff(){ var o=document.getElementById('cfbusy'); if(o) o.style.display='none'; }
 // ---- "How this works" explainers: per-feature, auto-shows once, dismissible + never-again, reopen via the ? button ----
 var HELP={
+  frontdesk:{t:'Front Desk',sub:'Where every conversation starts -- tell it what you want to work on and it takes you to the right place.',h:'<p><b>What:</b> the reception for your whole workspace. Type what you want to work on and it routes you to the right department (folder / scope) and opens a session there with your goal already set up -- or talks it through for a moment if it is unclear, and creates a new department if none fits.</p><p><b>Why:</b> you start in the right room with a clean, focused context instead of piling everything into one conversation, and the agent there is briefed on what you are doing so nothing gets repeated. Conversations START here -- they do not end here (your open ones stay in the Sessions bar).</p><p><b>How:</b> type a sentence, glance at the department chip, press Enter. Already know the department? Open Projects and go straight there.</p><p><b>Front Desk vs Chief of Staff:</b> think of a business. The <b>Front Desk</b> is the receptionist &mdash; it gets you started in the right department, and that is where you do your day-to-day work. Your <b>Chief of Staff</b> is the senior manager / owner: you do <i>not</i> check in with them for normal work &mdash; only for things that span multiple departments, are structural, or need to be escalated. Both are always available; you will spend most of your time at the Front Desk and in departments, and only occasionally need the Chief.</p>'},
   studio:{t:'Studio',sub:'Beat-synced video editor -- build, trim, effects, titles, PiP, export.',h:'<p><b>What:</b> a built-in video editor. Drop in clips, add music (upload a track or paste a YouTube link), and <b>Auto-build</b> a beat-synced cut -- then fine-tune it on the timeline.</p><p><b>Timeline:</b> tap a clip to trim (drag its edges), change speed, reorder, or add a flash/zoom on the beat; add titles; drop a clip on the PiP lane for picture-in-picture. Scrub to preview, or Play.</p><p><b>Export:</b> render an MP4 (lands in Files) or a CapCut bundle. Runs on the node&rsquo;s bundled ffmpeg -- no API key needed; works on real footage (no generative model).</p>'},
   agentlab:{t:'Agent Lab',sub:'Experimental \u2014 run specialist subagents as one-shot functions and parallel panels',h:'<p><span class="badge bdg-amber">Experimental</span> Agent Lab is a workbench for our specialist subagents (code-reviewer, cost-reporter, deploy-checker, incident-scanner, security-auditor, and any others the node exposes). Features here are being worked out; when one proves itself it graduates into core or ships as an extension.</p><p><b>Run a specialist</b> \u2014 pick one agent, type a task, and Run it as a one-shot function; you get the answer plus its cost and duration.</p><p><b>Panel</b> \u2014 select several specialists and give them ONE task; they run in parallel and answers land side by side as each finishes, a quick dynamic mini-workflow.</p><p>Every run uses the node&rsquo;s own subscription login.</p>'},
  pillars:{t:'Pillars',sub:'The major building blocks of your product, each with a status and what is in progress.',h:'<p><b>What:</b> the big pieces your product is made of -- each a card showing its health and the item being worked on right now.</p><p><b>Why:</b> one glance tells you what exists and where the active work is, without digging through folders.</p><p><b>How:</b> click a card to drill into its areas, or use the launch button to start a working session focused on that pillar.</p>'},
@@ -25383,6 +26012,7 @@ var HELP={
  brief:{t:'Morning Brief',sub:'A short daily rundown of your day -- meetings, follow-ups, and what needs attention.',h:'<p><b>What:</b> a plain-language summary of your day pulled from your mail, calendar, calls, and tasks -- optionally read aloud in a voice.</p><p><b>Why:</b> instead of checking five places each morning, you get one briefing of what matters and what is overdue (it counts only your working hours).</p><p><b>How:</b> it runs automatically each morning; hit Generate now to make one on demand, and choose which sources and voice it uses in the Settings panel below.</p>'},
  drive:{t:'Drive',sub:'Browse and preview your Google Drive files right inside the dashboard.',h:'<p>Browse folders with breadcrumbs, search, and grid or list view. <b>Spacebar</b> gives you a full-screen preview without leaving. Select several for batch actions, and open or download anything.</p>'},
  ralph:{t:'Ralph Loops',sub:'Set an agent to grind through a long, repetitive job on its own, step by step.',h:'<p><b>What:</b> a Ralph loop is an agent that works a to-do list by itself -- it does the next item, checks it off, and repeats, running in its own terminal until the whole job is done. Perfect for long, repetitive builds or clean-ups that would take many rounds by hand.</p><p><b>Why:</b> you set the goal once and walk away; several loops can run at the same time, and you can open any one to watch it live, edit its list, or stop it.</p><p><b>How:</b> click New loop, or ask your Chief of Staff: \'start a Ralph loop to rename every file in the archive folder to the new format.\'</p>'},
+ campaigns:{t:'Campaigns',sub:'Point an outside AI at a big goal; it plans each step, a Claude agent builds it, and it keeps going on its own.',h:'<p><b>What:</b> a campaign is a self-driving chain of work toward one big goal. An independent outside AI (a different vendor -- GPT via ChatGPT) acts as the <b>director</b>: after each round of work it looks at what was built and decides the next step, then a Claude agent actually builds it. Then the director looks again, and so on -- until the goal is met, a round limit is reached, or you stop it.</p><p><b>Why:</b> you set one north-star goal and let two different AIs push it forward together -- the outside one steering, Claude doing -- without babysitting every step. A second-vendor brain planning the direction catches blind spots one model alone would miss.</p><p><b>How:</b> click New campaign and give it a goal. Before each step launches you get a short <b>intercept window</b> -- edit the plan, launch it now, pause, or halt -- and if you do nothing it launches on its own. Everything runs in tabs you can watch live.</p>'},
  pipeline:{t:'Pipeline Live-View',sub:'A live map of your scheduled automated runs, with a loud alarm if one fails or stalls.',h:'<p>A live run-map of your scheduled automated runs. A loud full-width banner turns <b>red</b> if a run fails or stalls and <b>amber</b> if one is missed -- so a silent failure can never slip by unnoticed.</p>'},
  jobs:{t:'Jobs',sub:'A simple board of the active work items in flight, each tied to a part of your product.',h:'<p><b>What:</b> a lightweight list of the work currently on the go -- each job has a name, which part of the product it belongs to, a status, and the next step.</p><p><b>Why:</b> it is the at-a-glance answer to "what are we actually working on right now," separate from your personal to-dos.</p><p><b>How:</b> click Add to log one, or ask your Chief of Staff to open a job for a piece of work you want tracked here.</p>'},
  machines:{t:'Machines',sub:'The computers in your fleet and whether each one is online right now.',h:'<p><b>What:</b> the other computers this system can reach -- your dev boxes and servers -- each showing a green dot when it is online.</p><p><b>Why:</b> you can confirm a machine is up and start work on it without opening a terminal yourself.</p><p><b>How:</b> click a machine to see its details and launch a session on it.</p>'},
@@ -25513,14 +26143,14 @@ function convoInfo(id){const c=CONVOMAP[id];if(!c)return;closeInfo();
   if(c.ralph){ov.innerHTML='<div class="sheet"><h3><span>Ralph loop</span><button class="mini" title="close" onclick="closeInfo()">✕</button></h3>'
       +'<div style="font-weight:600;font-size:14px;margin:2px 0 10px">'+e2(c.ralph)+'</div>'
       +'<div class="meta">'+c.iters+' iterations collapsed into one entry · last active '+tago(c.mtime)+'</div>'
-      +'<div class="meta">📁 <code>'+e2((c.cwd||"?").replace(/.*\/hptuners(-control)?\//,"…/"))+'</code></div>'
+      +'<div class="meta">📁 <code>'+e2((c.cwd||"?").replace(/^.*\/(?=[^/]+\/[^/]+$)/,"…/"))+'</code></div>'
       +'<div class="meta" style="margin-top:6px">Individual iterations aren\'t meant to be reopened — manage the loop in Ralph Loops.</div>'
       +'<div class="btns" style="margin-top:14px"><button class="mini go" onclick="gotoRalph()">▶ open in Ralph Loops</button></div></div>';
     document.body.appendChild(ov);return;}
   const forks=(c.forks&&c.forks.length)?'<div class="meta">⑂ '+c.forks.length+' fork(s) branch from this thread</div>':'';
   ov.innerHTML='<div class="sheet"><h3><span>Conversation</span><button class="mini" title="close" onclick="closeInfo()">✕</button></h3>'
     +'<div style="font-weight:600;font-size:14px;margin:2px 0 10px;line-height:1.4">'+e2(c.label||"(no opening message)")+'</div>'
-    +'<div class="meta">📁 launched in <code>'+e2((c.cwd||"?").replace(/.*\/hptuners(-control)?\//,"…/"))+'</code></div>'
+    +'<div class="meta">📁 launched in <code>'+e2((c.cwd||"?").replace(/^.*\/(?=[^/]+\/[^/]+$)/,"…/"))+'</code></div>'
     +'<div class="meta">🕑 last active '+tago(c.mtime)+' · id <code>'+esc((c.id||"").slice(0,8))+'</code></div>'+forks
     +'<div class="btns" style="margin-top:14px">'
     +'<button class="mini go" onclick="treeResume(\''+esc(c.id)+'\',\''+esc(c.cwd||"")+'\',false)">▶ resume here</button>'
@@ -25552,8 +26182,8 @@ async function loadChief(){
   h+='<div class="cstats">';
   h+=stat('🟢',(c.sessions_n||0),'Live sessions','sessions',(c.sessions||[]).slice(0,3).join(', '));
   h+=stat('🔁',(c.loops_running||0)+' run','Ralph loops','ralph',(c.loops_n||0)+' total');
-  if(!(window.CC&&window.CC.agency)){  // text2tune-specific product+fleet chrome -> hide on agency tenants (AFP)
-    h+=stat('🌉',(st.bridge=="online"?'up':(st.bridge||'?')),'Live product','sessions','text2tune bridge');
+  if(!(window.CC&&window.CC.agency)){  // product+fleet chrome (non-agency deployments) -> hidden on agency tenants
+    h+=stat('🌉',(st.bridge=="online"?'up':(st.bridge||'?')),'Live product','sessions','product bridge');
     h+=stat('🖥',(st.t490=="online"?'T490':'—')+'·'+(st.t480=="online"?'T480':'—'),'Fleet','machines','edge '+(st.edge||'?'));
   }
   h+=stat('💡',(c.ideas_n||0),'Ideas','ideas','captured');
@@ -25581,6 +26211,51 @@ async function loadChief(){
 let IDEAS=[], MODPATHS=[];
 // ---- Tasks lens: the Morning Command Center ----
 var TASKS_DATA=[], TASKS_TODAY='';
+// ===== THE FRONT DESK (deep-audit Phase 1.3): the reception -- where every conversation STARTS. Type what you
+// want to work on -> route to the right department (scope) + open a session there with the goal seeded (briefing
+// that agent), or a concierge to place you. Escape hatch: "Choose a place myself" -> the Sessions picker.
+var _fdRT=null, _fdRel=null;
+async function loadFrontDesk(){
+  var grid=document.getElementById("grid");
+  var brand=(window.CC&&CC.brand)||"ClaudeFather";
+  grid.innerHTML =
+    '<div class="card" style="grid-column:1/-1;max-width:720px;margin:6vh auto 0;text-align:center;cursor:default">'
+    +'<div style="font-size:22px;font-weight:750;margin-bottom:6px">Welcome to the '+esc(brand)+' front desk</div>'
+    +'<div class="meta" style="margin-bottom:18px;line-height:1.55">This is where every conversation <b>starts</b> &mdash; not where it ends. '
+      +'Tell me what you want to work on and I will take you to the right place (and brief the agent there, so nothing is repeated). '
+      +'Your open conversations stay in the Sessions bar below.</div>'
+    +'<input id="fdInput" placeholder="What do you want to work on?" autocomplete="off" '
+      +'style="width:100%;box-sizing:border-box;padding:13px 15px;font-size:15px;border-radius:11px;border:1px solid var(--line);background:var(--card);color:var(--ink);outline:none">'
+    +'<div id="fdChip" class="meta" style="min-height:20px;margin:11px 2px;text-align:left"></div>'
+    +'<div style="display:flex;gap:8px;justify-content:center;margin-top:4px">'
+      +'<button class="btn go" id="fdGo" onclick="fdSubmit()">Take me there</button>'
+      +'<button class="btn" onclick="gotoLens(\'sessions\')">Choose a place myself</button>'
+    +'</div>'
+    +'<div class="meta" style="margin-top:14px;opacity:.65;font-size:12px">Already know the department? Open Projects and go straight there &mdash; the front desk is just the fastest way to the right room.</div>'
+    +'</div>';
+  var inp=document.getElementById("fdInput");
+  if(inp){ inp.focus(); inp.addEventListener("input",function(){clearTimeout(_fdRT);_fdRT=setTimeout(fdRoute,400);});
+           inp.addEventListener("keydown",function(e){ if(e.key==="Enter"){e.preventDefault();fdSubmit();} }); }
+}
+async function fdRoute(){
+  var el=document.getElementById("fdInput"), chip=document.getElementById("fdChip"); if(!el||!chip)return;
+  var q=el.value||""; _fdRel=null;
+  if(q.trim().length<4){ chip.innerHTML=""; return; }
+  var r; try{ r=await(await fetch('/api/route?q='+encodeURIComponent(q))).json(); }catch(e){ return; }
+  var d=r&&r.destination;
+  if(d&&d.rel){ _fdRel=d.rel; chip.innerHTML='&rarr; <b>'+esc(d.rel)+'</b> <span style="opacity:.6">('+Math.round((d.confidence||0)*100)+'% match'+(r.llm?', smart':'')+')</span> &middot; press Enter to start there'; }
+  else if(r&&r.needs_new_home){ chip.innerHTML='Not sure where this lives &mdash; I will figure it out with you'+(r.suggested_parent?' (likely a new area under <b>'+esc(r.suggested_parent)+'</b>)':'')+'.'; }
+  else chip.innerHTML="";
+}
+async function fdSubmit(){
+  var el=document.getElementById("fdInput"); if(!el)return; var q=el.value||""; if(!q.trim())return;
+  var go=document.getElementById("fdGo"); if(go){go.disabled=true;go.textContent="Opening…";}
+  var body={text:q}; if(_fdRel!==null)body.rel=_fdRel;
+  var r; try{ r=await(await fetch('/api/frontdesk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json(); }
+  catch(e){ if(go){go.disabled=false;go.textContent="Take me there";} toast("Front desk error",3000); return; }
+  if(r&&r.ok&&r.session){ toast(r.concierge?"Placing you with a concierge…":("Opening in "+(r.placed||"your scope")),2600); gotoLens('sessions'); setTimeout(function(){try{openInSessions(r.session);}catch(e){}},350); }
+  else { if(go){go.disabled=false;go.textContent="Take me there";} toast((r&&r.error)||"Couldn't place that",3000); }
+}
 async function loadTasks(){
   var grid=document.getElementById("grid"); grid.innerHTML=empty('<span class="spin"></span> Loading your tasks…');
   var r={}; try{ r=await(await fetch('/api/tasks')).json(); }catch(e){ grid.innerHTML=empty("Couldn't load tasks."); return; }
@@ -26046,13 +26721,14 @@ function applyPreset(){
   ['gmail','calendar','drive'].forEach(function(l){var _gb=document.querySelector('#lens button[data-l="'+l+'"]');if(_gb)_gb.style.display=(window.CC&&window.CC.google)?'':'none';});
   {var _ab=document.querySelector('#lens button[data-l="accounts"]');if(_ab)_ab.style.display=(window.CC&&window.CC.accountWallet)?'':'none';}  // Claude Accounts lens self-hides until the wallet is enabled on this node
   {var _tk=document.querySelector('#lens button[data-l="tasks"]');if(_tk)_tk.style.display='';}  // Tasks is a built-in feature -- always available, outside the preset lens list
+  {var _fd=document.querySelector('#lens button[data-l="frontdesk"]');if(_fd)_fd.style.display='';}  // Front Desk: built-in, always available (deep-audit Phase 1.3)
   {var _nt=document.querySelector('#lens button[data-l="notes"]');if(_nt)_nt.style.display='';}  // Messages (operator<->operator) is a built-in -- always available
   {var _nb=document.querySelector('#lens button[data-l="notebook"]');if(_nb)_nb.style.display='';}  // Notes (notebook) is a core built-in -- always available
   {var _hd=document.querySelector('#lens button[data-l="handoffs"]');if(_hd)_hd.style.display='';}  // Transfers (warm-transfer desk) is a built-in -- always available
   {var _bd=document.querySelector('#lens button[data-l="build"]');if(_bd)_bd.style.display=(window.CC&&window.CC.type==='developer')?'':'none';}  // Build lens = developer-type only (custom sandbox)
   if(!(window.CC&&window.CC.role==='org')){var _pb=document.querySelector('#lens button[data-l="portfolio"]');if(_pb)_pb.style.display='none';
     var _pj=document.querySelector('#lens button[data-l="projects"]');if(_pj)_pj.style.display='none';}  // Portfolio + Projects = ClaudeGrandfather (overseer) only
-  LENS=L[0];   // land on the preset's first lens (portfolio for an overseer, sessions for a project)
+  LENS=(window.CC&&(CC.role==="org"||CC.frontdesk_landing===false))?L[0]:"frontdesk";   // THE FRONT DESK is the default landing for a PROJECT node (where you route into departments); an OVERSEER (org role, e.g. Mission Control) keeps its Portfolio landing -- it oversees a fleet, not departments. Opt out on a project node with cc.config frontdesk_landing:false
   document.querySelectorAll('#lens button').forEach(function(b){b.classList.toggle('on',b.dataset.l===LENS);});
   var vt=document.getElementById('viewtitle');if(vt)vt.textContent=NAV[LENS]||LENS;}
 applyPreset();   // preset hides project-only lenses on an org instance + lands on the first allowed lens
@@ -26123,7 +26799,7 @@ var NAV_CAT={
   agentlab:"Experimental",
   gmail:"Google",calendar:"Google",drive:"Google",
   modules:"Workspace",projects:"Workspace",context:"Workspace",capture:"Workspace",ideas:"Workspace",handoffs:"Workspace",
-  pipeline:"Workspace",ralph:"Workspace",jobs:"Workspace",routines:"Workspace",tree:"Workspace",
+  pipeline:"Workspace",ralph:"Workspace",campaigns:"Workspace",jobs:"Workspace",routines:"Workspace",tree:"Workspace",
   agency:"Agency",calls:"Agency",
   agents:"Team",skills:"Team",teams:"Team",audit:"Team",
   marketplace:"Integrations",vault:"Integrations",
@@ -26353,7 +27029,7 @@ function sbRender(list){
   var doneCount=list.filter(function(s){return SB.done[s.name];}).length;
   // Rebuild the DOM ONLY when the SET of tiles changes -- not every poll -- so the tile under your cursor is
   // not destroyed mid-hover (that's what made them "move around"/hard to use). State is applied in place below.
-  function sbLbl(s){ return (s.label||s.name)+((s.node&&!(s.chief&&s.mine))?(' · '+s.node):''); }   // a NODE's chief -> "Chief of Staff · carsearch"; only YOUR OWN -> just "Chief of Staff"
+  function sbLbl(s){ return (s.label||s.name)+((s.node&&!(s.chief&&s.mine))?(' · '+s.node):''); }   // a NODE's chief -> "Chief of Staff · acme"; only YOUR OWN -> just "Chief of Staff"
   var sig=(window.SB_SCOPE||'')+'#'+list.map(function(s){return s.name+':'+(s.label||'')+':'+(s.node||'');}).join('|');
   if(sig!==SB._sig){
     var tog=window.SB_UNSCOPED?('<button class="sb-tog" onclick="sbScopeToggle()" title="Switch between this overseer\'s own sessions and every node\'s sessions" style="margin:0 8px 0 4px;background:var(--card2,#1a1a22);border:1px solid var(--line,#2a2a33);color:var(--mut,#aab);border-radius:7px;padding:2px 9px;font-size:11px;cursor:pointer">'+(window.SB_SCOPE==='mine'?'◉ Mine':'◈ All nodes')+'</button>'):'';
@@ -27143,7 +27819,7 @@ _AUTOAPPROVE_LOG = os.path.join(STATE_DIR, "_autoapprove.log")
 def _autoapprove_scan():
     """--dangerously-skip-permissions does NOT bypass Claude Code's HARD safety prompt for commands containing
     shell command-substitution ($()/backticks) and a few similar cases -- they stall the session on a 'Do you
-    want to proceed?' menu waiting for a human (this is what Sarah keeps hitting). For an autonomous fleet that
+    want to proceed?' menu waiting for a human (this is what operators keep hitting). For an autonomous fleet that
     is a dead agent. Scan local Claude tmux sessions; when one is idle on that menu, select the 'Yes' option
     (preferring 'Yes, and don't ask again' to cut repeats). Every accept is logged for audit. These are the
     deployment's own trusted agents on its own box -- the same intent as the skip-permissions launch flag.
@@ -27153,10 +27829,10 @@ def _autoapprove_scan():
     for name in out.split():
         try:
             _, pane, _ = sh([TMUX, "capture-pane", "-t", name, "-p"])
-            # agent-declared session title: rename the session label (e.g. "7th Ave bounce-list fix"). Anchored
+            # agent-declared session title: rename the session label (e.g. "Acme bounce-list fix"). Anchored
             # to its OWN line (not an inline mention in code/chat), placeholder rejected, system sessions skipped.
             try:
-                if name not in _FRIENDLY and name != globals().get("CHIEF"):
+                if name not in _FRIENDLY and name not in _service_labels() and name != globals().get("CHIEF"):
                     tl = re.findall(r"(?m)^\s*\[\[\s*CC_TITLE:\s*([^\]\n<>]+?)\s*\]\]\s*$", pane)
                     if tl: _set_agent_title(name, tl[-1])
             except Exception: pass

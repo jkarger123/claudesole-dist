@@ -597,8 +597,8 @@ def selftest():
     assert assert_edge(pa, st_draft, "status", functional=True) == e3, "re-assert same current value must be a no-op"
     print("BITEMPORAL OK -> history=%d current=draft (re-asserted)" % len(edge_history(pa, "status")))
     # ENTITY RESOLUTION: same email under two name-forms -> ONE entity; fuzzy name -> alias merge; merge is reversible.
-    p1 = upsert_entity("person", "Sarah K", keys=["sarah@x.com"])
-    p2 = upsert_entity("person", "Sarah Karger", keys=["sarah@x.com"])
+    p1 = upsert_entity("person", "Alex R", keys=["alex@x.com"])
+    p2 = upsert_entity("person", "Alex Rivera", keys=["alex@x.com"])
     assert p1 == p2, "email key must resolve name variants to one entity"
     p3 = upsert_entity("person", "Jon Smithers", keys=["jon@y.com"])
     p4 = upsert_entity("person", "John Smithers")                    # no key; JW >= 0.87 vs "jon smithers"

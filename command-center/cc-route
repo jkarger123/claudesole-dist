@@ -8,7 +8,6 @@ Q="$*"
 [ -z "${Q// }" ] && { echo "usage: cc-route \"the topic to place\""; exit 1; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
-[ -f "$CFG" ] || CFG="$HOME/hptuners-control/cc.config.json"
 PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
 QENC="$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$Q")"
 RESP="$(curl -s "http://127.0.0.1:${PORT}/api/route?q=${QENC}" 2>/dev/null)"

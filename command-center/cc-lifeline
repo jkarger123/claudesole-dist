@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# cc-lifeline -- open the always-on BREAK-GLASS Claude console on this box (works even if the dashboard is down).
+#   cc-lifeline           attach to the standing FRESH console (a blank helper; detach Ctrl-b then d)
+#   cc-lifeline resume    CONTINUE your most-recent conversation for this project WITH FULL CONTEXT ("the same me")
+#   cc-lifeline status    is the standing console up?
+#   cc-lifeline new       force a FRESH standing console (kills only the lifeline session; launchd respawns one)
+# Reachable from a plain Terminal on the Mac, or after `ssh <user>@<host>`.
+export TMUX_TMPDIR=/tmp
+unset TMUX                       # never let an inherited $TMUX (caller inside a tmux) misdirect us off the brain server
+TMUXBIN=/opt/homebrew/bin/tmux
+SESS=lifeline
+case "${1:-attach}" in
+  status)
+    if "$TMUXBIN" has-session -t "$SESS" 2>/dev/null; then echo "lifeline: UP  (attach: cc-lifeline)"; else
+      echo "lifeline: DOWN -- launchd should respawn it within ~15s; logs: /tmp/lifeline.supervise.err.log"; fi ;;
+  new)
+    "$TMUXBIN" kill-session -t "$SESS" 2>/dev/null; echo "asked launchd for a fresh console; run 'cc-lifeline' in ~15s." ;;
+  resume|continue|-c)
+    # Continue your MOST RECENT conversation for this project, WITH FULL CONTEXT -- the way to reach "the same me".
+    # Works even if the dashboard is down: Claude Code transcripts live in ~/.claude, independent of the server.
+    cd "$(dirname "$(cd "$(dirname "$0")" && pwd)")" 2>/dev/null || cd "$HOME"
+    printf '\033]0;Claude Lifeline (resumed)\007'
+    exec claude --continue --dangerously-skip-permissions ;;
+  *)
+    if ! "$TMUXBIN" has-session -t "$SESS" 2>/dev/null; then     # self-start if it lapsed (launchd normally keeps it up)
+      echo "lifeline console not up -- starting it..."
+      bash "$(cd "$(dirname "$0")" && pwd)/lifeline-supervise.sh" >/dev/null 2>&1 &
+      for _ in $(seq 1 20); do "$TMUXBIN" has-session -t "$SESS" 2>/dev/null && break; sleep 1; done
+    fi
+    "$TMUXBIN" has-session -t "$SESS" 2>/dev/null || { echo "could not start lifeline; see /tmp/lifeline.supervise.err.log"; exit 1; }
+    printf '\033]0;Claude Lifeline\007'    # name the Terminal window
+    exec "$TMUXBIN" attach -t "$SESS" ;;
+esac

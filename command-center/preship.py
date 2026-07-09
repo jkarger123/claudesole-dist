@@ -12,8 +12,9 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(BASE)
 src = open(os.path.join(BASE, "server.py")).read()
 
-# modules pulled in via `import x`, `_opt_import("x")`, or `__import__("x")`
+# modules pulled in via `import x`, `from x import ...`, `_opt_import("x")`, or `__import__("x")`
 mods = set(re.findall(r'^\s*import\s+([a-zA-Z0-9_]+)', src, re.M))
+mods |= set(re.findall(r'^\s*from\s+([a-zA-Z0-9_]+)\s+import', src, re.M))   # `from localmod import y` also crash-loops
 mods |= set(re.findall(r'_opt_import\(\s*["\']([a-zA-Z0-9_]+)["\']', src))
 mods |= set(re.findall(r'__import__\(\s*["\']([a-zA-Z0-9_]+)["\']', src))
 
@@ -26,6 +27,27 @@ missing = [m for m in local if ("command-center/%s.py" % m) not in fw]
 if missing:
     print("PRESHIP FAIL: local modules imported by server.py but MISSING from framework_paths -> remote nodes "
           "would crash-loop on cc-update:", missing)
+    sys.exit(1)
+
+# MANIFEST-COMPLETENESS gate (deep-audit 2026-07-09 finding 0.5): the import check above catches Python modules,
+# but server.py ALSO references command-center helper FILES by path -- `os.path.join(BASE, "ralph_live.py")`,
+# `..."cc-advise")`, etc. If such a file isn't in framework_paths it never propagates, so the feature that spawns
+# it (a tmux tab, a subprocess, the break-glass console) runs a NONEXISTENT file on every tenant. This is the same
+# class as the import gap; we found ralph_live.py + cc-lifeline missing this way. Scan the single-arg BASE joins
+# and require each referenced command-center file to be covered by framework_paths.
+_KNOWN_UNSHIPPED = {"deliverables"}        # STUDIO_OUT_DIR: a runtime OUTPUT dir, not a shipped file
+                                           # (P2-11 CLOSED: platform_map.json now ships relative-path + is in the manifest)
+_refs = set(re.findall(r'os\.path\.join\(\s*BASE\s*,\s*["\']([^"\'/]+)["\']\s*\)', src))
+def _covered(n):
+    if n in _KNOWN_UNSHIPPED: return True
+    if ("command-center/%s" % n) in fw: return True                 # exact file OR a dir entry (e.g. static)
+    return any(p == "command-center/%s" % n or p.startswith("command-center/%s/" % n) for p in fw)
+_uncovered = sorted(n for n in _refs if not _covered(n))
+if _uncovered:
+    print("PRESHIP FAIL: server.py references command-center file(s) via os.path.join(BASE, ...) that are MISSING "
+          "from framework_paths -> the feature runs a nonexistent file on every tenant (same class as the import "
+          "gap). Add them to claudesole.manifest.json (or, if genuinely runtime-only, to preship's "
+          "_KNOWN_UNSHIPPED allowlist with a reason):", _uncovered)
     sys.exit(1)
 
 # Footgun gate (the 2026-06-28 self-DoS class): `tmux kill-server` nukes the SHARED brain tmux server -> every
@@ -119,6 +141,20 @@ if _sh.which("node"):
 else:
     _jsnote = "PAGE-JS gate SKIPPED (node not found)"
 
+# BEHAVIORAL gate (deep-audit 2026-07-09 finding 0.2): run the unit suites (imports server.py by path, no network,
+# ~2s). These existed but were NEVER in the ship path, so a logic regression in mesh auth / CCR / deliverables /
+# save-load could ship fleet-wide unseen. 6 pre-existing DRIFT failures are quarantined with @unittest.skip + an
+# un-skip TODO in each; any NEW failure fails the ship. (_sp = subprocess, imported in the PAGE-JS gate above.)
+_tests = "tests.test_framework tests.test_cognition"
+_tr = _sp.run([sys.executable, "-m", "unittest", "-q"] + _tests.split(), cwd=ROOT, capture_output=True, text=True)
+if _tr.returncode != 0:
+    print("PRESHIP FAIL: behavioral unit tests did not pass -- a logic regression would ship to the whole fleet. "
+          "Run `python3 -m unittest %s` for detail. Tail:" % _tests)
+    for _ln in (_tr.stderr or _tr.stdout or "").strip().splitlines()[-10:]: print("  " + _ln[:200])
+    sys.exit(1)
+_tsumm = (_tr.stderr or "").strip().splitlines()[-1] if (_tr.stderr or "").strip() else "ran"
+
 print("PRESHIP OK: all %d local engine modules imported by server.py are in framework_paths (%s); no "
-      "kill-server footgun; UI design-system clean; %s; no new tenant residue (clean-core: %d hits, ratcheting to 0)"
-      % (len(local), ", ".join(local), _jsnote, sum(_cur.values())))
+      "kill-server footgun; UI design-system clean; %s; no new tenant residue (clean-core: %d hits, ratcheting to 0); "
+      "unit tests %s"
+      % (len(local), ", ".join(local), _jsnote, sum(_cur.values()), _tsumm))

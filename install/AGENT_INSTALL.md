@@ -20,10 +20,22 @@ decisions marked ASK; do everything else yourself and report.
   `docs/MEMORY_SKILLS_AGENTS.md`, `extensions/AUTHORING.md`, `docs/CHANGELOG.md`. Read them if unsure.
 
 ## 1. Prerequisites (check first; report what's missing)
+- **`claude` (Claude Code) -- REQUIRED, and it must be authenticated.** This is the engine: every Chief of Staff,
+  agent, Ralph loop, and the Front Desk concierge runs the `claude` CLI. **Without it (or without auth) the
+  dashboard boots green but every agent FAILS on first launch** -- so treat this as step zero. Check
+  `command -v claude`; then confirm it is logged in (`claude login`) OR that an `ANTHROPIC_API_KEY` /
+  `CLAUDE_CODE_OAUTH_TOKEN` is set (a key can live in the Vault). **Verify it actually works before launching:**
+  `claude -p 'reply OK'` should print `OK`. (The dashboard's Doctor also flags this: red if the CLI is missing,
+  a warning if no auth is detected.)
 - `python3` (3.8+) -- required. `tmux` -- required (the dashboard runs in a tmux session).
 - `git` + (optional) `gh` -- for the GitHub backup storage mode.
 - `node` -- optional (only for some extensions + JS lint). `zip`/`unzip` -- to handle this package.
-- macOS or Linux. On macOS, Homebrew tmux at `/opt/homebrew/bin/tmux` is typical.
+- **macOS-first; Linux runs the server too.** The control server is portable stdlib Python and boots + runs on
+  Linux (supervise with the shipped `install/templates/claudefather.service.template`; use `storage_mode: github`).
+  A few macOS-only features degrade gracefully on Linux (never crash boot): Claude account-switching (macOS
+  Keychain), the `icloud`/`icloud+github` storage modes, launchd supervision (use systemd), and power/thermal
+  vitals. Full split in `docs/PACKAGING.md` ("Platform support"). On macOS, Homebrew tmux at
+  `/opt/homebrew/bin/tmux` is typical (the framework resolves it via `command -v tmux`).
 
 ## 2. Set CC_HOME = this unzipped framework directory
 The unzipped `claudefather/` directory IS the framework home. From inside it:
@@ -44,8 +56,10 @@ Also ASK: the **brand** (display name, e.g. "Acme"), and the **storage mode** (s
 ## 4A. NEW project
 1. ASK the operator for the project root (an existing dir to operate on; create one if needed).
 2. `CC_HOME="$CC_HOME" bash cc-init.sh <project_root> "<project_name>" "<brand>" "<storage_mode>"`
-   (writes `cc.config.json`, makes `agents/ bin/ data/`, installs scanners, creates a starter project
-   CLAUDE.md if absent, installs the pre-commit secret gate if it's a git repo, runs a first security scan).
+   (writes `cc.config.json` incl. a minted login token + an EXPLICIT update posture -- `update_channel`
+   managed/standalone + signature-gated `update_verify`; it prints the posture and how to change it, see
+   `docs/UPDATES.md` -- makes `agents/ bin/ data/`, installs scanners, creates a starter project CLAUDE.md if
+   absent, installs the pre-commit secret gate if it's a git repo, runs a first security scan).
 3. Go to section 6 (start + verify).
 
 ## 4B. MIGRATE an existing project (the safety-first playbook)
@@ -80,11 +94,18 @@ For an iCloud mode, put the project (and optionally this framework) UNDER the iC
 (`~/Library/Mobile Documents/com~apple~CloudDocs/...`) so it actually syncs.
 
 ## 6. Start + supervise + verify
-1. Pick a port (default 8799; use another if taken). Set it in `cc.config.json` ("port": N).
-2. Start: `CC_CONFIG="$CC_HOME/cc.config.json" TMUX_TMPDIR=/tmp tmux new-session -d -s claudefather \
-   "cd $CC_HOME && python3 command-center/server.py"`  (or use the supervisor `command-center/cc-supervise.sh`).
-3. For always-on: install a launchd (macOS) / systemd (Linux) unit that runs the server; see
-   `command-center/cc-instance-supervise.sh` for the supervised pattern.
+1. Pick a port (default 8799; use another if taken). Set it in `cc.config.json` ("port": N). Pick a tmux
+   **session name** for this instance and set it in `cc.config.json` (`"session": "claudefather"` -- any
+   unique name; every printed restart command derives from this key, so the instructions stay correct).
+2. Start: `CC_CONFIG="$CC_HOME/cc.config.json" TMUX_TMPDIR=/tmp tmux new-session -d -s <session> \
+   "cd $CC_HOME && python3 command-center/server.py"`  (or use the generic supervisor
+   `command-center/cc-instance-supervise.sh <CC_CONFIG> <session>`, which resolves tmux portably and stays
+   foreground so a launchd/systemd KeepAlive can restart it).
+3. For always-on, use the shipped templates -- fill in the `__PLACEHOLDERS__` (paths, session, user):
+   - **macOS (launchd):** `install/templates/com.claudefather.instance.plist.template` -> save as
+     `~/Library/LaunchAgents/<label>.plist` -> `launchctl bootstrap gui/$(id -u) <plist>`.
+   - **Linux (systemd):** `install/templates/claudefather.service.template` -> save as
+     `/etc/systemd/system/claudefather.service` -> `sudo systemctl enable --now claudefather`.
 4. **Verify:** `curl -s -o /dev/null -w "%{http_code}" http://localhost:<port>/` must be `200`. Open that
    URL in a browser -> you should see the dashboard with the project's lenses.
 

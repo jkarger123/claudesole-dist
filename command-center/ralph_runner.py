@@ -306,6 +306,8 @@ def run_iteration(n):
     # stream-json -> we can render the iteration LIVE in the `ralph-<name>-live` tab (ralph_live.py follows live.jsonl)
     cmd = ["claude", "--dangerously-skip-permissions", "--max-turns", str(MAX_TURNS), "--verbose", "--output-format", "stream-json", "-p"]
     if MODEL: cmd[1:1] = ["--model", MODEL]
+    _ps = os.environ.get("CC_POLICY_SETTINGS")           # per-action policy engine PreToolUse hook (graft G1)
+    if _ps and os.path.isfile(_ps): cmd[1:1] = ["--settings", _ps]
     env = dict(os.environ); env["PATH"] = env.get("PATH", "") + ":" + os.path.join(HOME, ".local/bin") + ":/opt/homebrew/bin"
     _lf = None                               # ONE handle for the whole iteration: truncate (reset the live tab) + keep open to stream into
     try:
