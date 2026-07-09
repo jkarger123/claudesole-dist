@@ -3,6 +3,23 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.182 -- 2026-07-08  (Third-party review: Ralph loop-finish review + next-task steer + full docs)
+- **Ralph loops can now be gated by the cross-vendor reviewer.** Opt-in per loop (a `loop.json` `advisor` block,
+  or the `🔵 review: on/off` toggle on each loop card): when a loop COMPLETES, an independent external GPT
+  reviews the finished work against the loop's goal + checklist -- visible live in the loop's own tmux tab.
+- **Review + steer.** In `review_and_steer` mode a `revise`/`block` verdict sends the loop back for another
+  bounded pass: the labeled guidance is prepended to `prompt.txt` and a re-open item is added to `progress.md`,
+  so the loop actually addresses the feedback. Rounds are capped (`max_rounds`, default 2) so it always
+  converges; `ship` / cap-reached / `review_only` finalize. Full audit trail in the loop's `advisor.md`; the
+  review is surfaced to the loop's notify session (`/api/ralph-notify` kind `advisor_review`). ALWAYS fail-open
+  -- a broken advisor never blocks loop completion.
+- New: `ralph_runner.py` `_advisor_gate()`, `/api/ralph-advisor`, the Ralph-lens toggle, and the `advisor`
+  param to `ralph_create`.
+- **Documentation:** `docs/CROSS_VENDOR_ADVISOR.md` -- the full canonical system doc (architecture, engine,
+  interactive + Ralph flows, endpoints, config, guardrails, roadmap) including the **OmniAgent / Omnigent
+  provenance** (the "cheatsheet": `conceptsandideas/OmniAgent/` -- the Tier-1 multi-vendor Executor seam this
+  was grafted from).
+
 ## 0.99.181 -- 2026-07-08  (Third-party review: transparent live reviewer + every-surface button)
 - **The reviewer now runs in a WATCHABLE live terminal.** The old flow ran Codex synchronously with its output
   captured and hidden -- a black box that showed only "Assembling context…" and, on a slow call, looked dead.

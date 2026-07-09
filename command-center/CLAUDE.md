@@ -5,6 +5,12 @@
 > self-curating notes, housekeeping). Read it before touching context briefs, the housekeeping loop, the
 > warm-transfer/drift sweep, or session lifecycle — it's the model you're plugging into.
 
+> **▶ CROSS-VENDOR ADVISOR ("Third-party review"): `docs/CROSS_VENDOR_ADVISOR.md`.** The external-GPT
+> second-opinion system — engine `cc-advise` (fail-open, budget-guarded, `--stream`), interactive button in
+> every session (+`/term`), and the Ralph loop-finish review+steer gate (`ralph_runner.py` `_advisor_gate`).
+> Read it before touching `cc-advise`, the `/api/advise*` routes, the advisor panel, or the Ralph advisor hook.
+> Provenance (the "cheatsheet" it was built from) = the OmniAgent/Omnigent analysis in `conceptsandideas/OmniAgent/`.
+
 > **▶ UI WORK? READ `docs/DESIGN_SYSTEM.md` FIRST.** The dashboard has ONE design language — build every lens/
 > feature from the shared primitives (`cc-head`/`cc-list`/`cc-item`/`cc-grid`/`cc-tile`/`cc-panel`/`cc-in`,
 > `mini`/`btn`(+`danger`), `badge bdg-*`, `confirmM`/`promptM`/`alertM`, `toast`/`busyOn`). NEVER hand-roll a

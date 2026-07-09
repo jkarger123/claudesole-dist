@@ -133,6 +133,107 @@ def _notify_iteration(n, checked_this, prog):
                 "done": prog.get("checked", 0), "total": prog.get("total", 0), "next": prog.get("next", "")}):
         log("  pinged the starting session (iteration %d progress)." % n)
 
+# ---- cross-vendor advisor: external GPT review at loop-completion (opt-in) ----------------------------
+# When a loop COMPLETES (all boxes checked), an independent external GPT (Codex on the ChatGPT subscription,
+# a DIFFERENT AI vendor) reviews the finished work against the loop's goal + checklist. In review_and_steer
+# mode a "revise"/"block" verdict can send the loop back for another bounded pass (guidance prepended to
+# prompt.txt + a re-open item added to progress.md). Opt-in per loop via a loop.json `advisor` block; ABSENT
+# = feature off (zero behaviour change). ALWAYS fail-open: any advisor trouble -> finalize the loop, never
+# block completion. The engine is command-center/cc-advise (run with --stream so the review is VISIBLE in
+# this loop's tmux tab). Full system: docs/CROSS_VENDOR_ADVISOR.md. Provenance: conceptsandideas/OmniAgent/.
+ADVISOR = CFG.get("advisor") if isinstance(CFG.get("advisor"), dict) else None
+_ADV_ENGINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cc-advise")
+_ADV_BUDGET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_advise_budget.json")  # shared w/ the interactive advisor
+ADV_BEGIN, ADV_END = "<!-- CC:ADVISOR BEGIN -->", "<!-- CC:ADVISOR END -->"
+
+def _advisor_state():
+    try: return json.loads(read(lp("advisor.json"), "{}")) or {}
+    except Exception: return {}
+
+def _advisor_gate():
+    """On loop completion, get an external cross-vendor review of the finished work. Returns True if the loop
+    should CONTINUE (review_and_steer re-opened it for another pass), False to finalize as done. Fail-open:
+    ANY trouble -> False (never block loop completion)."""
+    cfg = ADVISOR
+    if not cfg or cfg.get("enabled") is False:   # no advisor block, or explicitly disabled -> normal completion
+        return False
+    if DRY or not os.path.isfile(_ADV_ENGINE):
+        return False
+    st = _advisor_state()
+    rounds = int(st.get("rounds", 0))
+    cap = int((cfg.get("budget") or {}).get("max_rounds", cfg.get("max_rounds", 2)))
+    mode = cfg.get("mode", "review_and_steer")
+    verify = bool(cfg.get("verify", False))
+    goal, progress, notes = read(lp("prompt.txt")), read(lp("progress.md")), read(lp("notes.md"))[-6000:]
+    payload = (
+        "=== RALPH LOOP FINISHED -- REVIEW THE COMPLETED WORK ===\n"
+        "A Claude agent ran an autonomous loop to completion (all checklist items checked). OPEN the files under\n"
+        "the repo root and review the finished work against the loop's goal + checklist -- skeptically.\n\n"
+        "Repo root you may read: %s\n\n"
+        "=== LOOP GOAL / ITERATION PROMPT ===\n%s\n\n"
+        "=== COMPLETED CHECKLIST (progress.md) ===\n%s\n\n"
+        "=== SHARED NOTES (notes.md, tail) ===\n%s\n" % (CWD, goal, progress, notes)
+    )
+    pf, rf = lp("_advisor_payload.txt"), lp("_advisor_result.json")
+    try: open(pf, "w", encoding="utf-8").write(payload)
+    except Exception: return False
+    try: os.remove(rf)
+    except Exception: pass
+    log(""); log("  ============================================================")
+    log("  =  EXTERNAL THIRD-PARTY REVIEW (cross-vendor GPT)  round %d/%d" % (rounds + 1, cap))
+    log("  ============================================================")
+    cmd = ["python3", _ADV_ENGINE, "--payload", pf, "--repo", CWD, "--stream",
+           "--result-file", rf, "--mode", mode, "--budget-file", _ADV_BUDGET]
+    if verify: cmd.append("--verify")
+    mcpd = (cfg.get("budget") or {}).get("max_calls_per_day")
+    if mcpd: cmd += ["--max-calls-per-day", str(mcpd)]
+    try:
+        subprocess.run(cmd, cwd=CWD, timeout=int(cfg.get("timeout_sec", 360)))   # inherits stdout -> visible in the loop tab
+    except Exception as e:
+        log("  advisor call failed (%s) -- finalizing (fail-open)." % str(e)[:100]); return False
+    try: v = json.loads(read(rf, "{}")) or {}
+    except Exception: v = {}
+    verdict = v.get("verdict")
+    blocking = v.get("blocking") or []
+    guidance = (v.get("next_task_guidance") or "").strip()
+    # audit trail (viewable in the Ralph lens)
+    try:
+        with open(lp("advisor.md"), "a", encoding="utf-8") as f:
+            f.write("\n## Round %d -- %s -- verdict: %s\n" % (rounds + 1, time.strftime("%Y-%m-%d %H:%M"), verdict))
+            for b in blocking:
+                f.write("- BLOCKING: %s  (%s)\n" % (b.get("issue", ""), b.get("location", "")))
+            if guidance: f.write("\nGuidance for the next pass:\n%s\n" % guidance)
+    except Exception: pass
+    st["rounds"] = rounds + 1; st["last_verdict"] = verdict
+    try: open(lp("advisor.json"), "w").write(json.dumps(st))
+    except Exception: pass
+    # surface to the operator/starting session (reuses the notify path)
+    _notify({"kind": "advisor_review", "verdict": verdict, "round": rounds + 1,
+             "blocking": len(blocking), "guidance": guidance[:400]})
+    if verdict in (None, "skipped", "ship"):
+        log("  external review verdict: %s -- loop stays complete." % (verdict or "no result")); return False
+    if mode != "review_and_steer":
+        log("  external review verdict: %s (review-only) -- loop stays complete." % verdict); return False
+    if rounds + 1 >= cap:
+        log("  external review verdict: %s, but advisor round cap (%d) reached -- finalizing." % (verdict, cap)); return False
+    # STEER: prepend the labeled guidance to prompt.txt + re-open the loop with a task to address it
+    block = (ADV_BEGIN + "\n\U0001f535 EXTERNAL GPT ADVISOR (independent cross-vendor review of the just-finished "
+             "work -- weigh it, you hold the pen). Verdict: %s. Address the blocking items below, update the "
+             "deliverable, then re-check the boxes.\n%s\n" % (verdict, guidance or "(see advisor.md for details)")
+             + ADV_END)
+    try:
+        cur = read(lp("prompt.txt"))
+        cur = re.sub(re.escape(ADV_BEGIN) + r".*?" + re.escape(ADV_END), "", cur, flags=re.S).lstrip()
+        open(lp("prompt.txt"), "w", encoding="utf-8").write(block + "\n\n" + cur)
+    except Exception: pass
+    try:
+        with open(lp("progress.md"), "a", encoding="utf-8") as f:
+            f.write("\n- [ ] Address external reviewer round %d (%s): %s\n"
+                    % (rounds + 1, verdict, (guidance or "see advisor.md")[:120]))
+    except Exception: pass
+    log("  external review verdict: %s -- RE-OPENED the loop for another pass (round %d/%d)." % (verdict, rounds + 1, cap))
+    return True
+
 # ---- control: halt (stop) / pause (wait) -------------------------------------
 PAUSED = threading.Event()
 def control_state():
@@ -288,6 +389,8 @@ def main():
         if is_complete():   # UNCONDITIONAL (was gated on n>START): a relaunched DONE loop must exit instantly, not
                             # burn a full iteration + verifier first. Safe: is_complete() requires total>0 AND
                             # unchecked==0 (+ capstone), so a fresh loop with real items never false-completes here.
+            if _advisor_gate():   # opt-in external cross-vendor review sent the loop back for another pass
+                set_status(state="running", current="external review -> another pass"); n += 1; continue
             log(""); log("  ===== %s COMPLETE -- all items checked =====" % NAME); set_status(state="done")
             _notify_starter(); break   # ping the agent/session that started this loop (via the server)
         if MAX_ITERS and n > (START + MAX_ITERS - 1):

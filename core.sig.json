@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "12d4c9b070725576f46447c5494fc92085d0b62a32590a98253a77660c70be68",
+      "claudesole.manifest.json": "b878bf84430165cd670e36ba4f327559b33bbe897e9451f632ef00583e143bd1",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/cc-advise": "ae1eca57012c608fdca291b111b83dee074f2635d242f1b0c4bd485043f4d7f9",
       "command-center/cc-brief": "c00b5c802f6688afb5a527fc8f3a7072a46ef579daf6ddeb47224262c885b11e",
@@ -55,10 +55,10 @@
       "command-center/morning_brief.py": "1403f522f540b6447fe8a9aa9f19fe1cb4308115889fb798292a38ad12786701",
       "command-center/notebook.py": "c681d06cef3f433fb5de9965661310828ef059ae8b9cca44a268883ee7f1bdac",
       "command-center/preship.py": "960fd8365858089451e33740af7a2e1bb1cc44d09219c63ee6b244b86d24c3e9",
-      "command-center/ralph_runner.py": "516905583666730da9a9022e2213c7bb01afe2d9faa99d4e31093a2d6ad099e5",
+      "command-center/ralph_runner.py": "2f0dcc2fca54b11a0703dcb7ae1e5d5569a8f2a695df3cd715d62ce3766a9d7f",
       "command-center/residue_lint.py": "0b1c757909a27470095d5ea8b48641a9e9e0248ec1729f3598596f2129fd1d6f",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "dbbabdf5cdb0e6e040226d2f0bb7b81e6346a93d479d48ae12c55ca172b2f475",
+      "command-center/server.py": "af5ac3825924ac47c60d619a684ce06d85c3b242c9c1dda77bfc3855adbcb829",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/substack.py": "95e3e4cb6b3370f95000f3fd7c237bbaebfd9fd114c3175bbcf943677df765d6",
       "command-center/ui_lint.py": "0cabb923f1edd1a5f9808e4e04329c46334483b3da38fcf4adba2e3e9b476132",
@@ -151,9 +151,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783570468,
+    "generated": 1783571606,
     "v": 1,
-    "version": "0.99.181"
+    "version": "0.99.182"
   },
-  "sig": "+4fvebLUNjrMT8xadnwNvKYAC+qA7UM39NjQ8C3Xtoi2KczMiZ9gFhNcuTIRlFDSIo8cDvR5ezpYRnA8oQxbCw=="
+  "sig": "RU8I/9NCX/WqSHezZcjUU6cQ8qEGRz+S0JhR10UJzdub9yp6tiwVvNPJnKfN3grmqnwcBffZQ5/0aJCqMMwzCQ=="
 }

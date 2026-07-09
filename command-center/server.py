@@ -8587,10 +8587,29 @@ def ralph_list():
                 if alive and not _live_up:      _ralph_live_spawn(name)           # loop running but live tab missing -> (re)spawn it
                 elif (not alive) and _live_up:  sh([TMUX, "kill-session", "-t", "ralph-" + name + "-live"])   # runner gone -> reap orphan live tab
             except Exception: pass
+            adv = cfg.get("advisor") if isinstance(cfg.get("advisor"), dict) else None
             out.append({"name": name, "state": state, "alive": alive, "iteration": st.get("iteration", 0),
                         "progress": st.get("progress", {}), "current": st.get("current", ""),
-                        "goal": cfg.get("goal", ""), "cwd": cfg.get("cwd", ""), "updated": st.get("updated", 0)})
+                        "goal": cfg.get("goal", ""), "cwd": cfg.get("cwd", ""), "updated": st.get("updated", 0),
+                        "advisor": bool(adv and adv.get("enabled") is not False)})
     return out
+
+def ralph_advisor_set(name, on, mode="review_and_steer", verify=False, max_rounds=2):
+    """Turn the cross-vendor loop-completion review on/off for an existing loop (patches loop.json)."""
+    d = _rdir(name)
+    if not d: return {"ok": False, "error": "no such loop"}
+    p = os.path.join(d, "loop.json")
+    cfg = _rjson(p)
+    if on:
+        cfg["advisor"] = {"enabled": True, "mode": (mode or "review_and_steer"),
+                          "verify": bool(verify), "max_rounds": int(max_rounds or 2)}
+    else:
+        cfg.pop("advisor", None)
+    try:
+        with open(p, "w") as f: json.dump(cfg, f, indent=2)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "advisor": bool(on)}
 
 def ralph_detail(name):
     d = _rdir(name)
@@ -8681,6 +8700,18 @@ def ralph_notify(body):
                (nm, it, ct, done, total, (" -- next: " + nxt[:120]) if nxt else ""))
         _mesh_deliver(ns, msg)
         return {"ok": True, "notified": ns, "kind": "iteration", "iter": it}
+    if kind == "advisor_review":   # a cross-vendor Third-party review fired at this loop's completion (opt-in)
+        vd = (body.get("verdict") or "?"); rnd = body.get("round", 1); nb = body.get("blocking", 0)
+        g = (body.get("guidance") or "").strip()
+        steer = vd in ("revise", "block")
+        msg = ("[\U0001f535 Ralph loop '%s' -- EXTERNAL GPT ADVISOR review (round %s, independent cross-vendor "
+               "second opinion): verdict %s, %d blocking issue(s).%s%s Full review in the loop's advisor.md. "
+               "Weigh it -- Claude holds the pen.]" %
+               (nm, rnd, vd.upper(), nb,
+                (" The loop was RE-OPENED for another pass to address it." if steer else " Loop stays complete."),
+                (" Guidance: " + g[:280]) if g else ""))
+        _mesh_deliver(ns, msg)
+        return {"ok": True, "notified": ns, "kind": "advisor_review", "verdict": vd}
     mark = os.path.join(d, ".notified")
     if os.path.exists(mark): return {"ok": True, "note": "already notified"}
     prog = 0
@@ -8751,6 +8782,11 @@ def ralph_create(body):
            "max_iters": int(body.get("max_iters", 0) or 0), "timeout_sec": int(body.get("timeout_sec", 2700) or 2700),
            "max_turns": int(body.get("max_turns", 200) or 200), "model": body.get("model", ""),
            "notify_session": (body.get("notify_session") or "").strip()}   # tmux session to ping when the loop finishes
+    if body.get("advisor"):   # opt-in cross-vendor review at loop-completion (see docs/CROSS_VENDOR_ADVISOR.md)
+        a = body["advisor"] if isinstance(body["advisor"], dict) else {}
+        cfg["advisor"] = {"enabled": True, "mode": a.get("mode", "review_and_steer"),
+                          "verify": bool(a.get("verify", False)),
+                          "max_rounds": int(a.get("max_rounds", 2) or 2)}
     open(os.path.join(d, "loop.json"), "w").write(json.dumps(cfg, indent=2))
     open(os.path.join(d, "prompt.txt"), "w").write(body.get("prompt", "You are the %s loop, iteration $ITER. Read rules.md, then progress.md, pick the FIRST unchecked item, do it, write the deliverable, and check the box with a one-line summary.\n" % n))
     open(os.path.join(d, "rules.md"), "w").write(body.get("rules", "# %s -- hard rules\n- One deliverable per iteration. ASCII only. Stop on a hard blocker.\n" % n))
@@ -15941,6 +15977,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/module-combine":return self._s(200, json.dumps(module_combine(body.get("a",""), body.get("b",""))))
         if u.path == "/api/module-regen":  return self._s(200, json.dumps({"ok": True, "regenerated": regen_all_children()}))
         if u.path == "/api/ralph-control":  return self._s(200, json.dumps(ralph_control(body.get("name", ""), body.get("action", ""))))
+        if u.path == "/api/ralph-advisor":  return self._s(200, json.dumps(ralph_advisor_set(body.get("name", ""), bool(body.get("on")), body.get("mode", "review_and_steer"), bool(body.get("verify")), body.get("max_rounds", 2))))
         if u.path == "/api/ralph-archive-finished":  return self._s(200, json.dumps(ralph_archive_finished()))
         if u.path == "/api/ralph-save":  return self._s(200, json.dumps(ralph_save(body.get("name", ""), body.get("which", ""), body.get("content", ""))))
         if u.path == "/api/ralph-create":  return self._s(200, json.dumps(ralph_create(body)))
@@ -19440,11 +19477,17 @@ function ralphCard(r){
     btns='<button class="mini go" title="start this loop" onclick="ralphLaunch(\''+esc(r.name)+'\')">▶ '+(ran?'relaunch':'launch')+'</button>'
         +'<button class="mini" title="move to Previous (completed)" onclick="ralphAct(\''+esc(r.name)+'\',\'archive\')">✓ complete</button>'
         +'<button class="mini danger" title="delete (reversible: moves to _trash)" onclick="ralphDel(\''+esc(r.name)+'\')">delete</button>'; }
+  const advBtn='<button class="mini" title="Third-party review at loop-finish: an independent external GPT reviews the completed work; in steer mode a revise/block verdict sends the loop back for another bounded pass. Click to '+(r.advisor?'turn OFF':'turn ON')+'." onclick="ralphAdvisor(\''+esc(r.name)+'\','+(r.advisor?'false':'true')+')"'+(r.advisor?' style="color:#58a6ff"':'')+'>&#128309; review: '+(r.advisor?'on':'off')+'</button>';
   return '<div class="card" onclick="openRalph(\''+esc(r.name)+'\')" style="cursor:pointer"><h3><span>'+esc(r.name)+'</span><span class="badge" style="background:'+col+'22;color:'+col+'">'+r.state+(r.alive?"":"")+'</span></h3>'
     +'<div class="meta">'+esc(r.goal||"(no goal set)")+'</div>'+bar
     +'<div class="meta">'+ck+'/'+tot+' done ('+pct+'%)'+(p.phase?' · '+esc(p.phase):'')+(r.state=="running"&&r.iteration?' · iter '+r.iteration:'')+'</div>'
     +(r.state=="running"&&p.next?'<div class="meta" style="color:#58a6ff">next: '+esc(p.next)+'</div>':'')
-    +'<div class="btns" style="margin-top:8px" onclick="event.stopPropagation()">'+btns+'<button class="mini" onclick="openRalph(\''+esc(r.name)+'\')">open</button></div></div>';
+    +'<div class="btns" style="margin-top:8px" onclick="event.stopPropagation()">'+btns+advBtn+'<button class="mini" onclick="openRalph(\''+esc(r.name)+'\')">open</button></div></div>';
+}
+async function ralphAdvisor(n,on){
+  const r=await(await fetch("/api/ralph-advisor",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,on:on})})).json();
+  if(r&&r.ok){toast("Third-party review "+(on?"ON":"off")+" for "+n+(on?" — an external GPT will review this loop when it finishes.":"."),3500);loadRalph();}
+  else toast("Failed: "+((r||{}).error||"?"),5000);
 }
 async function ralphLaunch(n){toast("Launching "+n+"…");const r=await(await fetch("/api/ralph-launch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n})})).json();if(r&&r.ok){toast("Loop launched — open it to watch.",4000);setTimeout(loadRalph,1200);}else toast("Failed: "+((r||{}).error||"?"),5000);}
 async function ralphAct(n,a){await fetch("/api/ralph-control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,action:a})});toast(a+" → "+n);setTimeout(loadRalph,800);}
