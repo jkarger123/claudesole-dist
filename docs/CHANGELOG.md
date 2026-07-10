@@ -3,6 +3,29 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.187 -- 2026-07-09  (WS2 differentiator: make the discipline visible where you work)
+- **Onboarding finale receipt (deep-audit #7) -- the day-1 "look what it did" wow.** Onboarding now captures a
+  BEFORE snapshot (how many files, how few docs) and shows a dismissible before/after receipt on the Sessions
+  lens: "this workspace went from 214 files with no structure to N self-describing modules (M curated) + a K-line
+  index brief -- you start in the right room with a curated slice, not the whole pile." The differentiator made
+  undeniable exactly when a buyer evaluates a fresh node. `GET /api/onboard-receipt` (empty until onboarded).
+- **Context Health score (deep-audit #6) -- the demoable "vibe coder → context engineer" number.** A single
+  0-100 score + letter grade now headlines the Sessions lens, rolling up cheap signals already computed: module
+  doc **curation** (how many documented modules carry a one-line summary), the 200-line **doc budget**,
+  **structural** integrity (managed blocks in sync + components carrying a CLAUDE.md), and **drift discipline**
+  (unresolved "move it home" proposals). Shows the 4-part breakdown, a trend arrow (persisted daily points), and
+  the single highest-leverage **Best next** fix. The whole point: watch a vibe-coded tree get self-describing over
+  time. `GET /api/context-health` (cached ~5 min). Verified live in a real browser (score/grade/4 bars/Best-next
+  all render).
+- **Assisted "this drifted -- move it?" now shows RIGHT IN the session's pane (deep-audit #3).** When the drift
+  sweep proposes moving a conversation to its proper home, a compact **Move it there / Keep here** banner appears
+  at the top of that session's own pane on the Sessions lens -- instead of only the Transfers tab a normal
+  operator never opens. Move opens/resumes the right scope already briefed and follows you there; Keep is a sticky
+  decline. Painted in-place on each poll (never reloads the terminals); the corner alert is suppressed on the
+  Sessions lens to avoid double-surfacing. One change surfaces ALL the existing enforcement where the user is.
+  Verified live in a real browser (banner present in the drifted pane, names the destination, Move+Keep buttons,
+  sits above the terminal, Keep dismisses it).
+
 ## 0.99.186 -- 2026-07-09  (Auto-converge: co-located tenants now converge reliably -- no more manual restarts)
 - **The fleet auto-converge now reliably updates co-located tenants.** Root cause: the overseer converged every
   tenant through the REMOTE superadmin round-trip, whose `restart` action spawns an `os.execv` in a daemon thread

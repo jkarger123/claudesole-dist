@@ -8237,6 +8237,8 @@ def onboard_start(rel="", mode="adopt", name="", model=None):
     """Launch the Onboarding agent (the STRUCTURER) in the project on the node's BEST model (model=None -> default);
     its brief tells it to delegate the bulk READING to cheap subagents. Then nudge it to begin."""
     mode = "scaffold" if str(mode).lower() == "scaffold" else "adopt"
+    try: _onboard_snapshot()   # capture the BEFORE state so the finale receipt can show the transformation (deep-audit #7)
+    except Exception: pass
     kickoff = ("You are the Onboarding agent -- your full playbook is in your system context. Begin now: ask me the "
                "short intake questions, then DELEGATE the reading to cheap subagents and do the structuring yourself.")
     res = launch("studio", "onboard-" + _slug(name or os.path.basename((rel or "project").rstrip("/")) or "project"),
@@ -8245,6 +8247,38 @@ def onboard_start(rel="", mode="adopt", name="", model=None):
     return {"ok": bool(res.get("ok")), "mode": mode, "structurer_model": (model or "best (node default)"),
             "reader_model": ONBOARD_READER_MODEL, "session": res.get("session"), "term": res.get("term"),
             "rel": rel, "error": res.get("error")}
+
+_ONBOARD_SNAP = os.path.join(STATE_DIR, "_onboard_snapshot.json")   # the BEFORE state, for the finale receipt (#7)
+def _project_file_count(cap=8000):
+    n = 0; SKIP = {"node_modules", ".git", "__pycache__", "deliverables", "_handoffs", "_archive", "_trash", ".venv", "venv", "dist", "build"}
+    for root, dirs, files in os.walk(PROJECT):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP]
+        n += len(files)
+        if n > cap: return cap, True
+    return n, False
+def _onboard_snapshot():
+    """Capture the BEFORE state ONCE, at onboarding: how many files, how few docs. This is the baseline the finale
+    receipt (#7) contrasts against -- the raw vibe-coded pile a buyer starts with."""
+    if os.path.exists(_ONBOARD_SNAP): return
+    files, capped = _project_file_count()
+    docs, curated, _ = _docs_coverage()
+    try: save(_ONBOARD_SNAP, {"ts": int(time.time()), "files": files, "files_capped": capped, "docs": docs})
+    except Exception: pass
+def onboard_receipt():
+    """The day-1 'look what it did' finale (deep-audit #7): BEFORE (captured at onboarding) vs AFTER (now) -- a
+    vibe-coded pile of files became a set of SELF-DESCRIBING modules + a small index brief, so you start in the
+    right room with a curated slice instead of the whole tree. The differentiator made undeniable exactly when a
+    buyer evaluates. ok:False if this node was never onboarded (no snapshot)."""
+    snap = load(_ONBOARD_SNAP, None)
+    if not snap: return {"ok": False}
+    docs_now, curated_now, _ = _docs_coverage()
+    root_cm = os.path.join(PROJECT, "CLAUDE.md")
+    try: root_lines = len(open(root_cm, encoding="utf-8", errors="replace").read().splitlines()) if os.path.isfile(root_cm) else 0
+    except Exception: root_lines = 0
+    return {"ok": True, "at": snap.get("ts"),
+            "before": {"files": snap.get("files"), "files_capped": bool(snap.get("files_capped")), "docs": snap.get("docs", 0)},
+            "after": {"modules": docs_now, "curated": curated_now, "brief_lines": root_lines},
+            "gained_modules": max(0, docs_now - (snap.get("docs") or 0))}
 
 _ONBOARDED_MARK = os.path.join(STATE_DIR, "_onboarded")
 def _onboard_first_boot():
@@ -11789,6 +11823,70 @@ def housekeeping_digest():
     cur = load(_HOUSEKEEP_DIGEST, {"last": None, "recent": []})
     return {"ok": True, "last": cur.get("last"), "recent": cur.get("recent", [])[:30],
             "on": CC.get("housekeeping", True) is not False}
+
+# ---- CONTEXT HEALTH SCORE (deep-audit #6): the demoable "vibe coder -> context engineer" number --------------
+_CTX_HEALTH_HIST = os.path.join(STATE_DIR, "_context_health.json")   # persisted daily points -> the TREND
+_CTX_HEALTH_CACHE = {"at": 0.0, "val": None}
+def _docs_coverage(cap=500):
+    """Bounded, vendor-skipping walk: count DOCUMENTED modules (dirs with a CLAUDE.md) + how many are CURATED
+    (have a one-line summary, not just an auto-stamped map). The core 'is this tree self-describing?' signal."""
+    documented = curated = seen = 0
+    SKIP = {"node_modules", ".git", "__pycache__", "secrets", "deliverables", "_handoffs", "_archive", "_trash", "data"}
+    for root, dirs, files in os.walk(PROJECT):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP]
+        seen += 1
+        if seen > cap: break
+        if "CLAUDE.md" in files:
+            documented += 1
+            try:
+                t, s = _msummary(os.path.join(root, "CLAUDE.md"))
+                if (t or "").strip() or (s or "").strip(): curated += 1
+            except Exception: pass
+    return documented, curated, (seen > cap)
+def _ctx_health_record(score):
+    try:
+        h = load(_CTX_HEALTH_HIST, {"points": []}) or {"points": []}; pts = h.get("points", [])
+        today = time.strftime("%Y-%m-%d")
+        if pts and pts[-1].get("d") == today: pts[-1]["s"] = score
+        else: pts.append({"d": today, "s": score})
+        h["points"] = pts[-90:]; save(_CTX_HEALTH_HIST, h)
+    except Exception: pass
+def context_health(force=False):
+    """One 0-100 'is context being ENGINEERED well?' score + breakdown + the single highest-leverage fix, on the
+    Sessions lens (deep-audit #6). Rolls up cheap signals already computed -- module doc coverage/curation, the
+    200-line doc budget, structural integrity (managed blocks + components carrying a CLAUDE.md), and drift
+    discipline (unresolved auto-proposed moves). Cached ~5 min; persists a daily point so we can show the TREND
+    (the whole point: watch a vibe-coded tree get self-describing over time)."""
+    now = time.time()
+    if not force and _CTX_HEALTH_CACHE["val"] and now - _CTX_HEALTH_CACHE["at"] < 300:
+        return _CTX_HEALTH_CACHE["val"]
+    try:
+        dr = doctor(); iss = dr.get("issues", []) if isinstance(dr, dict) else (dr or [])
+    except Exception: iss = []
+    over_budget = [i for i in iss if str((i or {}).get("path", "")).endswith("/CLAUDE.md") and "budget" in ((i or {}).get("msg") or "")]
+    missing_cm = [i for i in iss if ((i or {}).get("msg") == "registered component has no CLAUDE.md")]
+    block_drift = [i for i in iss if str((i or {}).get("path", "")).startswith("block:")]
+    documented, curated, capped = _docs_coverage()
+    try: open_drift = len([h for h in _hand_load().get("handoffs", []) if h.get("status") == "proposed"])
+    except Exception: open_drift = 0
+    cur = round(100 * curated / documented) if documented else 100
+    budget = max(0, 100 - 12 * len(over_budget))
+    struct = max(0, 100 - 18 * len(missing_cm) - 8 * len(block_drift))
+    disc = max(0, 100 - 12 * open_drift)
+    parts = [("curation", cur, .30, "%d of %d documented modules carry a one-line summary" % (curated, documented)),
+             ("doc budget", budget, .25, ("%d doc(s) over the 200-line budget" % len(over_budget)) if over_budget else "every CLAUDE.md is within the 200-line budget"),
+             ("structure", struct, .25, ("%d module(s) missing a CLAUDE.md, %d managed block(s) drifted" % (len(missing_cm), len(block_drift))) if (missing_cm or block_drift) else "managed blocks in sync; components documented"),
+             ("drift discipline", disc, .20, ("%d unresolved 'move it home' proposal(s)" % open_drift) if open_drift else "no conversations sitting off-lane")]
+    score = int(round(sum(v * w for _, v, w, _ in parts)))
+    worst = min(parts, key=lambda p: p[1])
+    grade = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D" if score >= 40 else "F"
+    _ctx_health_record(score)
+    out = {"ok": True, "score": score, "grade": grade, "documented": documented, "curated": curated,
+           "parts": [{"key": k, "score": v, "detail": d} for k, v, w, d in parts],
+           "top_fix": {"key": worst[0], "detail": worst[3], "score": worst[1]},
+           "trend": (load(_CTX_HEALTH_HIST, {"points": []}) or {}).get("points", [])[-14:], "ts": int(now)}
+    _CTX_HEALTH_CACHE.update({"at": now, "val": out})
+    return out
 
 _NOTES_CURATE_SEEN = {}          # rel -> last curate ts (throttle ~once/day per folder)
 _NOTES_CURATE_MIN = 12           # only curate a folder once its learnings pass this (below = no bloat to fix)
@@ -16207,6 +16305,10 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(hygiene(), default=str))
         if u.path == "/api/housekeeping-digest":   # the visible record of what automatic housekeeping has been doing
             return self._s(200, json.dumps(housekeeping_digest(), default=str))
+        if u.path == "/api/context-health":        # deep-audit #6: the 0-100 "vibe coder -> context engineer" score
+            return self._s(200, json.dumps(context_health(force=("force" in q)), default=str))
+        if u.path == "/api/onboard-receipt":       # deep-audit #7: the before/after "look what it did" finale
+            return self._s(200, json.dumps(onboard_receipt(), default=str))
         if u.path == "/api/pending-archives":      # conversations about to be auto-archived (heads-up + countdown)
             return self._s(200, json.dumps(pending_archives(), default=str))
         if u.path == "/api/session-exists":        # broken-out /term tab: was the session FILED AWAY or just detached?
@@ -18495,6 +18597,30 @@ body.ss-dragging .basketwrap{box-shadow:0 0 0 2px rgba(var(--accent-rgb),.35) in
 #opAlert .opa-x:hover{color:#fff}
 #opAlert .opa-body{font-size:12.5px;color:var(--near,#e8e8ef);margin:8px 0 11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto}
 #opAlert .opa-act{text-align:right}
+/* in-pane Assisted Move/Keep banner (deep-audit #3): the drift proposal shown WHERE THE USER IS, at the top of the drifted session's pane */
+.homove{display:flex;align-items:center;gap:9px;padding:8px 11px;background:rgba(var(--accent-rgb),.10);border-bottom:1px solid rgba(var(--accent-rgb),.42);font-size:12.5px;flex:0 0 auto}
+.homove .hm-ic{flex:0 0 auto;font-size:14px}
+.homove .hm-t{flex:1;min-width:0;color:#e8e8ef;line-height:1.35}
+.homove .hm-a{display:flex;gap:6px;flex:0 0 auto}
+@media(max-width:820px){.homove{flex-wrap:wrap;gap:6px}.homove .hm-a{margin-left:auto}}
+/* Context Health score card (deep-audit #6) -- headlines the Sessions lens */
+.cxcard{display:flex;align-items:center;gap:18px;flex-wrap:wrap;background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:11px 15px}
+.cxscore{display:flex;flex-direction:column;align-items:center;gap:1px;flex:0 0 auto;min-width:64px}
+.cxnum{font-size:31px;font-weight:800;line-height:1}
+.cxg{font-size:11px;color:var(--dim);white-space:nowrap;display:flex;align-items:center;gap:3px}
+.cxbars{display:flex;flex-direction:column;gap:3px;flex:1;min-width:210px}
+.cxbar{display:flex;align-items:center;gap:8px;font-size:11px}
+.cxbl{flex:0 0 100px;color:var(--dim);text-transform:capitalize}
+.cxtrack{flex:1;height:6px;background:rgba(255,255,255,.07);border-radius:4px;overflow:hidden}
+.cxfill{display:block;height:100%;border-radius:4px;transition:width .4s}
+.cxbv{flex:0 0 24px;text-align:right;color:#e8e8ef}
+.cxfix{flex:1 0 100%;font-size:11.5px;color:var(--dim);margin-top:1px}
+@media(max-width:820px){.cxbl{flex-basis:74px}.cxcard{gap:12px;padding:10px 12px}}
+/* onboarding finale receipt (deep-audit #7) -- dismissible day-1 before/after */
+.onbr{display:flex;align-items:center;gap:11px;background:linear-gradient(90deg,rgba(var(--accent-rgb),.14),rgba(var(--accent-rgb),.04));border:1px solid rgba(var(--accent-rgb),.4);border-radius:12px;padding:10px 14px;font-size:12.5px;color:#e8e8ef}
+.onbr-ic{font-size:20px;flex:0 0 auto}
+.onbr-t{flex:1;min-width:0;line-height:1.4}
+.onbr-x{cursor:pointer;color:var(--dim);font-size:18px;line-height:1;flex:0 0 auto}.onbr-x:hover{color:#fff}
 /* gentle warm-transfer prompt (gold, no pulse, stacked above the red notes alert) -- suggestion, not alarm */
 #hoAlert{position:fixed;right:18px;bottom:200px;z-index:99997;width:344px;max-width:calc(100vw - 36px);background:#15151c;border:1.5px solid rgba(var(--accent-rgb),.65);border-radius:14px;box-shadow:0 14px 50px rgba(0,0,0,.6),0 0 0 4px rgba(var(--accent-rgb),.13);padding:13px 15px;transform:translateY(28px) scale(.96);opacity:0;pointer-events:none;transition:all .28s cubic-bezier(.2,.8,.25,1)}
 #hoAlert.show{transform:none;opacity:1;pointer-events:auto}
@@ -24125,12 +24251,37 @@ async function hoOriginFile(){var n=SO_NAME;hoOriginHide();if(n){try{await fetch
 async function hoDecline(id){try{await fetch('/api/handoff-decline',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});}catch(e){}toast('Declined',2000);loadHandoffs();}
 async function hoRoute(){var el=document.getElementById('hoRouteOut');var q=((document.getElementById('hoRouteQ')||{}).value||'').trim();if(!q){el.innerHTML='';return;}el.innerHTML='Routing&hellip;';try{var d=await(await fetch('/api/route?q='+encodeURIComponent(q))).json();if(d.needs_new_home){el.innerHTML='&rarr; <b style="color:var(--accent)">No home yet</b> &mdash; would create one under <code>'+esc(d.suggested_parent||'(root)')+'</code>.';}else{var dd=d.destination||{};el.innerHTML='&rarr; <code>'+esc(dd.rel)+'</code> <span class="sub">('+Math.round((dd.confidence||0)*100)+'% match)</span>'+((d.alternatives&&d.alternatives.length>1)?(' &middot; also: '+d.alternatives.slice(1,4).map(function(a){return '<code>'+esc(a.rel)+'</code>';}).join(', ')):'');}}catch(e){el.innerHTML='route failed';}}
 function hoSetBadge(n){var b=document.getElementById('transfersBadge');if(b){if(n>0){b.textContent=n>99?'99+':n;b.style.display='inline-block';}else{b.textContent='';b.style.display='none';}}try{paintNavNotif();}catch(e){}}
-var HO_ALERT_SEEN={};
+var HO_ALERT_SEEN={}, HO_BYSESSION={};
 async function hoBadgePoll(){try{var d=await(await fetch('/api/handoffs?status=proposed')).json();hoSetBadge(d.proposed||0);
+  HO_BYSESSION={}; (d.handoffs||[]).forEach(function(p){ if(p.from_session) HO_BYSESSION[p.from_session]=p; });
+  try{ if(LENS==='sessions') hoPaintPaneBanners(); }catch(e){}
   var top=(d.handoffs||[])[0];
-  if(top&&LENS!=="handoffs"&&!HO_ALERT_SEEN[top.id])hoShowAlert(top);
+  // IN-PANE confirms (deep-audit #3): on the Sessions lens the proposal shows as a Move/Keep banner RIGHT IN the
+  // drifted session's pane -- so the corner alert (for OTHER lenses) is suppressed there to avoid double-surfacing.
+  if(top&&LENS!=="handoffs"&&LENS!=="sessions"&&!HO_ALERT_SEEN[top.id])hoShowAlert(top);
   else if(!d.proposed)hoHideAlert();
 }catch(e){}}
+// The Assisted "this drifted -- move it?" prompt, shown WHERE THE USER IS: a compact banner at the top of the
+// drifted session's own pane (not just the Transfers tab). Painted in-place on each poll so it never reloads the
+// terminals. Move -> hoAccept (opens/resumes the right scope + follows you there); Keep -> hoDecline (sticky).
+function hoMoveBanner(p){
+  var dest=p.needs_new_home?('a new home &ldquo;'+e2((p.to_subject||'').slice(0,40))+'&rdquo;')
+                           :('<code>'+e2(p.to_scope||'?')+'</code>'+(p.confidence?(' <span class="sub">'+Math.round(p.confidence*100)+'%</span>'):''));
+  return '<div class="homove" data-hid="'+esc(p.id)+'"><span class="hm-ic">&#9889;</span>'
+    +'<span class="hm-t">This looks like it belongs in '+dest+' &mdash; move it there so it opens already briefed?</span>'
+    +'<span class="hm-a"><button class="mini go" onclick="hoAccept(\''+esc(p.id)+'\')">&#128260; Move it there</button>'
+    +'<button class="mini" title="keep this conversation here -- and stop suggesting this move" onclick="hoDecline(\''+esc(p.id)+'\')">Keep here</button></span></div>';
+}
+function hoPaintPaneBanners(){
+  document.querySelectorAll('#wkspace .wkpane[data-ccsess]').forEach(function(pane){
+    var name=pane.getAttribute('data-ccsess'), p=HO_BYSESSION[name];
+    var cur=pane.querySelector(':scope > .homove');
+    if(p){
+      if(!cur){ var head=pane.querySelector(':scope > .sthead'); if(head) head.insertAdjacentHTML('afterend', hoMoveBanner(p)); else pane.insertAdjacentHTML('afterbegin', hoMoveBanner(p)); }
+      else if(cur.getAttribute('data-hid')!==p.id){ cur.insertAdjacentHTML('afterend', hoMoveBanner(p)); cur.remove(); }
+    } else if(cur){ cur.remove(); }
+  });
+}
 // GENTLE prompt when a conversation drifts -- it pops up, clearly says what it'd do, and is one tap to dismiss.
 var HO_REVIEW_PKT=null;
 function hoShowAlert(p){var el=document.getElementById("hoAlert");
@@ -25594,13 +25745,54 @@ async function loadSessions(quiet){
   var _ci=s.findIndex(x=>x.chief); if(_ci>0){s.unshift(s.splice(_ci,1)[0]);}   // pin the Chief of Staff to the top
   SESSDATA=s;
   paintSessTools(s.length);   // controls (live count + view modes + Admin) now live in the always-visible topbar -- no second bar
-  let head='<div id="tkstripwrap" style="grid-column:1/-1;margin:0 0 7px">'+totalsStrip()+'</div>';   // slim: just the metered-usage strip (hidden on mobile); the old title/control card + hint are gone -> the terminal moves up
+  let head='<div id="onbreceipt" style="grid-column:1/-1;margin:0 0 7px"></div>'   // deep-audit #7: the onboarding before/after receipt (dismissible)
+    +'<div id="cxhealth" style="grid-column:1/-1;margin:0 0 7px"></div>'   // deep-audit #6: the Context Health score headlines the Sessions lens
+    +'<div id="tkstripwrap" style="grid-column:1/-1;margin:0 0 7px">'+totalsStrip()+'</div>';   // slim: just the metered-usage strip (hidden on mobile); the old title/control card + hint are gone -> the terminal moves up
   let body;
   if(!s.length)body=empty("No live sessions — click ▶ New session above to start one.");
   else body=renderWorkspace(s);
   document.getElementById("grid").innerHTML='<div class="modstack">'+head+body+'</div>';   // clean vertical stack -- usage strip (in head) sits ABOVE the focus block, never overlapped
   unpeekNow(); startSnaps(); ccWireDropzones(); wkWire();   // wire split-pane resizers + the dock->workspace drop
   termApplySaved(); termResizeInit();   // restore the user's remembered terminal height + wire the drag-resize grip
+  try{ hoBadgePoll(); }catch(e){}   // paint any in-pane Move/Keep banners for drifted sessions right away (deep-audit #3)
+  try{ loadContextHealth(); }catch(e){}   // the Context Health score (deep-audit #6)
+  try{ loadOnboardReceipt(); }catch(e){}   // the onboarding before/after receipt (deep-audit #7)
+}
+// ---- Onboarding finale receipt (deep-audit #7): before/after "look what it did", dismissible day-1 wow --------
+async function loadOnboardReceipt(){
+  var el=document.getElementById('onbreceipt'); if(!el)return;
+  if(localStorage.getItem('cf_onboard_receipt_seen')==='1'){ el.innerHTML=''; return; }
+  var d; try{ d=await(await fetch('/api/onboard-receipt')).json(); }catch(e){ el.innerHTML=''; return; }
+  if(!d||!d.ok){ el.innerHTML=''; return; }
+  var b=d.before||{}, a=d.after||{};
+  var filesTxt=(b.files||0)+(b.files_capped?'+':'')+' file'+((b.files===1)?'':'s');
+  el.innerHTML='<div class="onbr"><span class="onbr-ic">&#127891;</span>'
+    +'<span class="onbr-t"><b>Onboarding receipt</b> &mdash; this workspace went from <b>'+esc(filesTxt)+'</b>'
+    +((b.docs)?(' ('+b.docs+' documented)'):' with no structure')
+    +' to <b>'+(a.modules||0)+' self-describing module'+((a.modules===1)?'':'s')+'</b>'
+    +((a.curated)?(' ('+a.curated+' curated)'):'')
+    +' + a <b>'+(a.brief_lines||0)+'-line</b> index brief. You start in the right room with a curated slice, not the whole pile.</span>'
+    +'<span class="onbr-x" title="dismiss" onclick="onbrDismiss()">&times;</span></div>';
+}
+function onbrDismiss(){try{localStorage.setItem('cf_onboard_receipt_seen','1');}catch(e){}var el=document.getElementById('onbreceipt');if(el)el.innerHTML='';}
+// ---- Context Health score (deep-audit #6): the demoable "vibe coder -> context engineer" number -------------
+function cxGradeColor(g){return g==='A'?'var(--ok)':g==='B'?'#7bc96f':g==='C'?'var(--accent)':g==='D'?'#d29922':'var(--err)';}
+async function loadContextHealth(){
+  var el=document.getElementById('cxhealth'); if(!el)return;
+  var d; try{ d=await(await fetch('/api/context-health')).json(); }catch(e){ el.innerHTML=''; return; }
+  if(!d||!d.ok){ el.innerHTML=''; return; }
+  var col=cxGradeColor(d.grade);
+  var tp=d.trend||[]; var delta=(tp.length>=2)?(tp[tp.length-1].s-tp[tp.length-2].s):0;
+  var arrow=delta>0?('<span style="color:var(--ok)" title="up '+delta+' since last">&#9650;'+delta+'</span>')
+           :delta<0?('<span style="color:var(--err)" title="down '+Math.abs(delta)+' since last">&#9660;'+Math.abs(delta)+'</span>')
+           :'<span class="sub" title="unchanged">&mdash;</span>';
+  var bars=(d.parts||[]).map(function(p){var c=p.score>=75?'var(--ok)':p.score>=50?'var(--accent)':'var(--err)';
+    return '<div class="cxbar" title="'+esc(p.detail)+'"><span class="cxbl">'+esc(p.key)+'</span><span class="cxtrack"><span class="cxfill" style="width:'+Math.max(3,p.score)+'%;background:'+c+'"></span></span><span class="cxbv">'+p.score+'</span></div>';}).join('');
+  el.innerHTML='<div class="cxcard" title="How well this workspace is context-engineered: are modules self-describing, docs within budget, structure in sync, and conversations kept in-lane? Rises as the tree gets documented + tidy.">'
+    +'<div class="cxscore"><div class="cxnum" style="color:'+col+'">'+d.score+'</div><div class="cxg">Context Health &nbsp;<b style="color:'+col+'">'+d.grade+'</b>&nbsp; '+arrow+'</div></div>'
+    +'<div class="cxbars">'+bars+'</div>'
+    +'<div class="cxfix">&#10549; Best next: <b>'+esc((d.top_fix||{}).detail||'looking good')+'</b></div>'
+    +'</div>';
 }
 // ---- Give Claude a file: drag-drop / tap-to-attach onto a session ----------------------------------
 // Upload the dropped/picked file, then the server types its absolute path into the tmux session so Claude
