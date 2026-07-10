@@ -69,3 +69,27 @@ anything"; `instruct` routes through the node's agent (which itself runs under t
   auth), so the owner reaches a node cross-family. Verifies the grant, runs the allowlisted action.
 - `POST /api/superadmin-send` / `…-grant` / `…-derive` — MC side. Require the master **and** operator auth,
   so only the Mission Control operator can issue grants or derive node keys.
+
+## Per-node mesh tokens (lateral peer channel) — deep-audit #4
+
+Separate from the superadmin (owner→node) channel above, the **lateral peer channel** (chief↔chief messages,
+CCRs, usage/vault-lease) authenticates with the family **`MESH_TOKEN`**. Historically that token is **shared** by
+every node: convenient, but a single node's leaked token can spoof the whole family, and rotating it means
+re-keying every node. Per-node tokens fix both, mirroring the superadmin derived-key model:
+
+- **Derivation:** `node_mesh_token = HMAC(mesh_master, "mesh-v1:" + node_id)`. The `mesh_master` lives **only on
+  Mission Control** (never distributed); each node is provisioned with just its **own** derived token in
+  `cc.config.json` → `mesh_node_token`.
+- **Presentation:** a caller sends its `X-Mesh-Node: <id>` alongside `X-Mesh-Token: <its own token>`. A verifier
+  holding the master re-derives that node's token and checks it — so a leaked token can't impersonate another node.
+- **DUAL-ACCEPT + OFF BY DEFAULT (the safe rollout):** with **no `mesh_master` set**, this is entirely inert — only
+  the shared family token is checked, exactly as before. Where a master **is** set, the shared token is **still
+  accepted**, so a mixed/rolling fleet is never severed. (Note the peer→peer direction is only per-node-verified by
+  a verifier that holds the master, i.e. MC-ward traffic; a full peer roster for lateral per-node verification is a
+  documented future increment.)
+- **Provisioning (gated — it is a credential change):** set a strong random `mesh_master` in MC's `cc.config.json`
+  (keep it secret), restart MC, then `POST /api/mesh-provision` (operator-auth) to get the roster `{id: token}`;
+  put each token in that node's `cc.config.json` `mesh_node_token` and restart it. Retire the shared `mesh_token`
+  only after **every** node carries its own — until then dual-accept keeps the mesh whole.
+- Endpoint: `POST /api/mesh-provision` (operator-only, MC side) — `{node:"<id>"}` for one token, or no body for the
+  whole roster.

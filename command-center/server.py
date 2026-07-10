@@ -421,13 +421,42 @@ MESH_REPLY_SLA = int(os.environ.get("MESH_REPLY_SLA") or CC.get("mesh_reply_sla"
 MESH_TOKEN = os.environ.get("MESH_TOKEN") or CC.get("mesh_token")  # the FAMILY badge (off unless set)
 SUPERADMIN_TOKENS = [t for t in (CC.get("superadmin_tokens") or ([os.environ["MESH_SUPERADMIN_TOKEN"]] if os.environ.get("MESH_SUPERADMIN_TOKEN") else [])) if t]
 MESH_ENFORCE = bool(os.environ.get("MESH_AUTH_ENFORCE") or CC.get("mesh_auth_enforce"))
-def _mesh_token_ok(val):
-    """True if the presented X-Mesh-Token is this node's family token OR a trusted superadmin master key."""
+# PER-NODE MESH TOKENS (deep-audit #4). The FAMILY MESH_TOKEN is SHARED by every node -- convenient (any peer can
+# reach any peer) but a single node's leaked token can spoof the WHOLE family, and rotating means re-keying all
+# nodes. Per-node tokens fix both: each node holds its OWN token, DERIVED from a family master that lives ONLY on
+# Mission Control (mirrors the SA_MASTER/SA_NODE_KEY model already used for superadmin grants):
+#     node_mesh_token = HMAC(MESH_MASTER, "mesh-v1:" + node_id)
+# A caller presents its id (X-Mesh-Node) + its own token; a verifier holding the master re-derives + checks it -> a
+# leaked node token can't impersonate another node, and revoking one node = rotating just its token. DUAL-ACCEPT and
+# OFF BY DEFAULT: with no MESH_MASTER configured this is INERT (only the shared family token is checked, exactly as
+# before); where a master IS present, the shared token is STILL accepted so a mixed fleet never breaks during rollout.
+MESH_MASTER = os.environ.get("MESH_MESH_MASTER") or CC.get("mesh_master") or ""       # family master -- MC ONLY, never distributed
+MESH_NODE_TOKEN = os.environ.get("MESH_NODE_TOKEN") or CC.get("mesh_node_token") or ""  # THIS node's own derived token (provisioned like SA_NODE_KEY)
+def _mesh_derive_token(node_id):
+    """This family's per-node mesh token for `node_id`, derived from the master. Empty if no master here (only MC)."""
+    nid = re.sub(r"[^A-Za-z0-9_.-]", "", (node_id or ""))[:64]
+    if not MESH_MASTER or not nid: return ""
+    return hmac.new(MESH_MASTER.encode(), ("mesh-v1:" + nid).encode(), hashlib.sha256).hexdigest()
+def _mesh_out_token():
+    """The token THIS node sends outbound: its own per-node token if provisioned, else the shared family token."""
+    return MESH_NODE_TOKEN or MESH_TOKEN
+def _mesh_token_ok(val, node_id=None):
+    """True if the presented X-Mesh-Token is (a) this node's family token, (b) a trusted superadmin master key, or
+    (c) -- when a claimed X-Mesh-Node id is given AND we hold the family master -- that node's DERIVED per-node
+    token. Dual-accept: (a)/(b) keep working so a mixed/rolling fleet is never severed (deep-audit #4)."""
     val = val or ""
     if MESH_TOKEN and hmac.compare_digest(val, MESH_TOKEN): return True
     for t in SUPERADMIN_TOKENS:
         if hmac.compare_digest(val, t): return True
+    if node_id and MESH_MASTER:                                  # per-node verification (MC holds the master)
+        dt = _mesh_derive_token(node_id)
+        if dt and hmac.compare_digest(val, dt): return True
     return False
+def _mesh_ingress_ok(headers):
+    """Verify a mesh request from its headers -- reads BOTH X-Mesh-Token and the claimed X-Mesh-Node id so per-node
+    tokens are honored on every ingress route (single call site for all of them)."""
+    try: return _mesh_token_ok(headers.get("X-Mesh-Token", ""), headers.get("X-Mesh-Node"))
+    except Exception: return _mesh_token_ok(headers.get("X-Mesh-Token", "") if headers else "")
 
 # ---- Superadmin grants: cryptographically-authorized platform-owner instructions to ANY node (CCR
 # ccr-1782174717859). Goal: a node compromise must NOT grant fleet-wide forging power. Stdlib has no
@@ -708,7 +737,7 @@ def superadmin_send(node_id, action, params=None, ttl=120):
     try:
         import urllib.request
         hdr = {"Content-Type": "application/json"}
-        if MESH_TOKEN: hdr["X-Mesh-Token"] = MESH_TOKEN
+        if _mesh_out_token(): hdr["X-Mesh-Token"] = _mesh_out_token(); hdr["X-Mesh-Node"] = INSTANCE_ID
         req = urllib.request.Request(url + "/api/superadmin-exec", data=json.dumps(g["grant"]).encode(), headers=hdr)
         with urllib.request.urlopen(req, timeout=20) as r:
             return {"ok": True, "node": node_id, "result": json.loads(r.read().decode())}
@@ -1907,7 +1936,7 @@ def _mesh_worker():
                     _mesh_update(mid, status="failed", error="unknown peer"); continue
                 try:
                     hdr = {"Content-Type": "application/json"}
-                    if MESH_TOKEN: hdr["X-Mesh-Token"] = MESH_TOKEN
+                    if _mesh_out_token(): hdr["X-Mesh-Token"] = _mesh_out_token(); hdr["X-Mesh-Node"] = INSTANCE_ID
                     path = "/api/mesh-recv" if m.get("kind") == "reply" else "/api/chief-say"
                     # ENVELOPE: stamp the SENDER's transport-verified facts so the receiver never has to guess
                     # staleness or (mis)trust a hand-typed version. sent_at = when this msg was enqueued;
@@ -2643,7 +2672,7 @@ def _mesh_get(url, timeout=4.0):
     """GET a peer endpoint with the family mesh token (for cross-node fleet data)."""
     try:
         req = urllib.request.Request(url)
-        if MESH_TOKEN: req.add_header("X-Mesh-Token", MESH_TOKEN)
+        if _mesh_out_token(): req.add_header("X-Mesh-Token", _mesh_out_token()); req.add_header("X-Mesh-Node", INSTANCE_ID)
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8", "replace"))
     except Exception:
@@ -4746,6 +4775,24 @@ def peers():
                 seen.add(url); out.append({"id": e.get("id") or url, "url": url})
     return out
 
+def mesh_provision_roster(node_id=None):
+    """MC-side (deep-audit #4): derive per-node mesh tokens for distribution. With a family master set, returns the
+    token for one node (node_id) or the whole roster {id: token} for every known peer + self -- each value goes in
+    that node's cc.config `mesh_node_token`. Off until MESH_MASTER is set on MC (a gated, credential step): with no
+    master this returns guidance instead of tokens, and the fleet keeps running on the shared family token."""
+    if not MESH_MASTER:
+        return {"ok": False, "enabled": False,
+                "error": "per-node mesh tokens are OFF: no family master set. To enable (gated): set a strong random "
+                         "`mesh_master` in Mission Control's cc.config.json (keep it SECRET -- it never leaves MC), "
+                         "restart MC, then call this again to get each node's `mesh_node_token`. The shared family "
+                         "token keeps working throughout (dual-accept), so rollout never severs the mesh."}
+    if node_id:
+        nid = re.sub(r"[^A-Za-z0-9_.-]", "", node_id)[:64]
+        return {"ok": True, "enabled": True, "node": nid, "mesh_node_token": _mesh_derive_token(nid)}
+    ids = sorted({INSTANCE_ID} | {p["id"] for p in peers() if p.get("id")})
+    return {"ok": True, "enabled": True, "roster": {i: _mesh_derive_token(i) for i in ids},
+            "note": "put each node's token in its cc.config.json `mesh_node_token`, then restart it. Shared token still accepted (dual-accept)."}
+
 def peer_add(pid, url):
     """Register a mesh peer from the dashboard/API instead of hand-editing peers.json on every machine.
     OPERATOR-auth only (never mesh ingress): peers.json is the routing map for mesh + superadmin sends,
@@ -4903,7 +4950,7 @@ def _opnote_worker():
                     ok = False
                     try:
                         hdr = {"Content-Type": "application/json"}
-                        if MESH_TOKEN: hdr["X-Mesh-Token"] = MESH_TOKEN
+                        if _mesh_out_token(): hdr["X-Mesh-Token"] = _mesh_out_token(); hdr["X-Mesh-Node"] = INSTANCE_ID
                         body = json.dumps({"from": INSTANCE_ID, "from_label": _side_label(), "text": item["text"]}).encode()
                         req = urllib.request.Request(url + "/api/opnote-recv", data=body, headers=hdr)
                         with urllib.request.urlopen(req, timeout=20) as r:
@@ -5502,7 +5549,7 @@ def vault_get(sid, default=None):
     try:
         body = json.dumps({"id": sid, "node": INSTANCE_ID}).encode()
         req = urllib.request.Request(VAULT_URL + "/api/vault-lease", data=body, headers={"Content-Type": "application/json"})
-        if MESH_TOKEN: req.add_header("X-Mesh-Token", MESH_TOKEN)
+        if _mesh_out_token(): req.add_header("X-Mesh-Token", _mesh_out_token()); req.add_header("X-Mesh-Node", INSTANCE_ID)
         with urllib.request.urlopen(req, timeout=8) as r: res = json.loads(r.read().decode())
         if res.get("ok") and res.get("value") is not None:
             _vault_cache[sid] = (res["value"], now + min(int(res.get("ttl") or VAULT_LEASE_TTL), 3600)); return res["value"]
@@ -14471,7 +14518,7 @@ def ccr_propose(body):
     import urllib.request
     try:
         hdr = {"Content-Type": "application/json"}
-        if MESH_TOKEN: hdr["X-Mesh-Token"] = MESH_TOKEN
+        if _mesh_out_token(): hdr["X-Mesh-Token"] = _mesh_out_token(); hdr["X-Mesh-Node"] = INSTANCE_ID
         req = urllib.request.Request(url + "/api/ccr-submit", data=json.dumps(payload).encode(), headers=hdr)
         with urllib.request.urlopen(req, timeout=30) as r:
             res = json.loads(r.read().decode())
@@ -14552,7 +14599,7 @@ def drift_report():
         node = {"id": nid, "url": url, "version": None, "status": "unreachable", "diff": [], "reachable": False}
         try:
             hdr = {}
-            if MESH_TOKEN: hdr["X-Mesh-Token"] = MESH_TOKEN
+            if _mesh_out_token(): hdr["X-Mesh-Token"] = _mesh_out_token(); hdr["X-Mesh-Node"] = INSTANCE_ID
             req = urllib.request.Request(url + "/api/fw-fingerprint", headers=hdr)
             with urllib.request.urlopen(req, timeout=12) as r:
                 fp = json.loads(r.read().decode())
@@ -14987,7 +15034,7 @@ def license_self_activate():
     try:
         body = json.dumps({"fingerprint": _hw_fingerprint(), "code": code, "node": INSTANCE_ID}).encode()
         req = urllib.request.Request(url + "/api/license-activate", data=body, headers={"Content-Type": "application/json"})
-        if MESH_TOKEN: req.add_header("X-Mesh-Token", MESH_TOKEN)
+        if _mesh_out_token(): req.add_header("X-Mesh-Token", _mesh_out_token()); req.add_header("X-Mesh-Node", INSTANCE_ID)
         with urllib.request.urlopen(req, timeout=12) as r: res = json.loads(r.read().decode())
         if res.get("ok") and res.get("license"): return license_install(res["license"])
         return {"ok": False, "error": res.get("error", "activation failed")}
@@ -15078,7 +15125,7 @@ def _node_running_version(url, timeout=8):
     probe. (deep-audit 2026-07-09 finding 0.3.)"""
     import urllib.request
     try:
-        hdr = {"X-Mesh-Token": MESH_TOKEN} if MESH_TOKEN else {}
+        hdr = {"X-Mesh-Token": _mesh_out_token(), "X-Mesh-Node": INSTANCE_ID} if _mesh_out_token() else {}
         req = urllib.request.Request(url + "/api/fw-fingerprint", headers=hdr)
         with urllib.request.urlopen(req, timeout=timeout) as r:
             fp = json.loads(r.read().decode())
@@ -16111,7 +16158,7 @@ class H(BaseHTTPRequestHandler):
         h = self.headers.get("Authorization", "") or ""
         if h.startswith("Bearer ") and hmac.compare_digest(h[7:].strip(), AUTH_TOKEN): return True
         if hmac.compare_digest(self.headers.get("X-CC-Token", "") or "", AUTH_TOKEN): return True
-        if _mesh_token_ok(self.headers.get("X-Mesh-Token", "")): return True   # family or superadmin token
+        if _mesh_ingress_ok(self.headers): return True   # family or superadmin token
         c = self._cookies().get(AUTH_COOKIE, "")
         if c and hmac.compare_digest(c, AUTH_TOKEN): return True
         return False
@@ -16473,12 +16520,12 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/pipeline":   return self._s(200, json.dumps(pipeline_payload()))
         if u.path == "/api/usage": return self._s(200, json.dumps(usage_payload()))
         if u.path == "/api/usage-store":   # peer-to-peer (mesh-token gated): this node's store rollup
-            if not _mesh_token_ok(self.headers.get("X-Mesh-Token", "")): return self._s(403, json.dumps({"error": "mesh token required"}))
+            if not _mesh_ingress_ok(self.headers): return self._s(403, json.dumps({"error": "mesh token required"}))
             if not FLEET_SHARE: return self._s(403, json.dumps({"error": "this node does not share usage (fleet_share off)", "store_id": _store_id()}))
             return self._s(200, json.dumps(usage_store()))
         if u.path == "/api/usage-fleet": return self._s(200, json.dumps(usage_fleet()))
         if u.path == "/api/account-windows-store":   # peer-to-peer (mesh-token gated): this user's account readings
-            if not _mesh_token_ok(self.headers.get("X-Mesh-Token", "")): return self._s(403, json.dumps({"error": "mesh token required"}))
+            if not _mesh_ingress_ok(self.headers): return self._s(403, json.dumps({"error": "mesh token required"}))
             if not FLEET_SHARE: return self._s(403, json.dumps({"error": "this node does not share usage (fleet_share off)", "store_id": _store_id()}))
             return self._s(200, json.dumps(account_windows_store()))
         if u.path == "/api/backup-status": return self._s(200, json.dumps(backup_status()))
@@ -16982,7 +17029,7 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
         if u.path == "/api/chief-open":    return self._s(200, json.dumps(chief_open()))
         if u.path == "/api/chief-say":
-            if MESH_ENFORCE and not _mesh_token_ok(self.headers.get("X-Mesh-Token")): return self._s(403, json.dumps({"ok": False, "error": "mesh auth"}))
+            if MESH_ENFORCE and not _mesh_ingress_ok(self.headers): return self._s(403, json.dumps({"ok": False, "error": "mesh auth"}))
             return self._s(200, json.dumps(chief_say(body.get("text", ""), body.get("sender", ""),
                                                       sent_at=body.get("sent_at"), from_version=body.get("from_version"), msg_id=body.get("msg_id"))))
         if u.path == "/api/chief-broadcast": return self._s(200, json.dumps(mesh_send(body.get("text", ""), None, body.get("targets") or None, expect_reply=body.get("expect_reply", True))))
@@ -17023,7 +17070,7 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps({"ok": True, "id": eid}, default=str))
         if u.path == "/api/mesh-send":     return self._s(200, json.dumps(mesh_send(body.get("text", ""), body.get("target") or None, body.get("targets") or None, expect_reply=body.get("expect_reply", True))))
         if u.path == "/api/mesh-recv":
-            if MESH_ENFORCE and not _mesh_token_ok(self.headers.get("X-Mesh-Token")): return self._s(403, json.dumps({"ok": False, "error": "mesh auth"}))
+            if MESH_ENFORCE and not _mesh_ingress_ok(self.headers): return self._s(403, json.dumps({"ok": False, "error": "mesh auth"}))
             return self._s(200, json.dumps(mesh_recv(body.get("sender", ""), body.get("text", ""))))
         if u.path == "/api/mesh-reply":
             # /api/mesh-reply is a LOCAL trigger: only our OWN Stop hook (loopback, no token) should call it to
@@ -17033,7 +17080,7 @@ class H(BaseHTTPRequestHandler):
             # send no token) keep working with zero relaunch -- unlike a blanket token gate.
             _cip = (self.client_address[0] if self.client_address else "")
             _proxied = any(self.headers.get(h) for h in ("X-Forwarded-For", "X-Real-Ip", "Forwarded"))
-            if not (_cip in ("127.0.0.1", "::1") and not _proxied) and not _mesh_token_ok(self.headers.get("X-Mesh-Token")):
+            if not (_cip in ("127.0.0.1", "::1") and not _proxied) and not _mesh_ingress_ok(self.headers):
                 return self._s(403, json.dumps({"ok": False, "error": "mesh-reply: local origin or mesh token required"}))
             return self._s(200, json.dumps(mesh_reply(body.get("to", ""), body.get("text", ""))))
         if u.path == "/api/mesh-clear":    return self._s(200, json.dumps(mesh_clear()))
@@ -17202,7 +17249,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/autonudge-session":   return self._s(200, json.dumps(autonudge_session(body.get("name", ""), body.get("on"), body.get("msg"))))
         if u.path == "/api/slack-session":       return self._s(200, json.dumps(slack_session(body.get("name", ""), body.get("on"))))
         if u.path == "/api/vault-lease":
-            ok = _mesh_token_ok(self.headers.get("X-Mesh-Token", "")) or self._operator_only()
+            ok = _mesh_ingress_ok(self.headers) or self._operator_only()
             return self._s(200, json.dumps(vault_lease(body.get("id", ""), body.get("node", ""), authed=ok)))
         if u.path == "/api/core-sign":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
@@ -17213,6 +17260,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/update-rollback":          # deep-audit #5: restore the pre-update framework snapshot (then restart)
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(update_rollback()))
+        if u.path == "/api/mesh-provision":           # deep-audit #4: MC derives per-node mesh tokens for distribution
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(mesh_provision_roster(body.get("node"))))
         if u.path == "/api/recovery-keygen":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(recovery_keygen()))
@@ -17223,7 +17273,7 @@ class H(BaseHTTPRequestHandler):
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(license_install(body.get("license") or body)))
         if u.path == "/api/license-activate":         # PUBLIC activation: a sold box posts {fingerprint, code} (or a family node w/ mesh token)
-            fam = _mesh_token_ok(self.headers.get("X-Mesh-Token", ""))
+            fam = _mesh_ingress_ok(self.headers)
             return self._s(200, json.dumps(license_activate(body.get("fingerprint", ""), body.get("code"), family=fam, customer=body.get("customer", ""))))
         if u.path == "/api/license-activate-self":     # THIS node: go fetch our license from the configured activation server
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))

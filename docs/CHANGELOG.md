@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.192 -- 2026-07-10  (WS3 fleet-safety batch 2: per-node mesh tokens -- dual-accept, off by default)
+- **Per-node mesh tokens (deep-audit #4).** The lateral peer channel (chief↔chief, CCRs, usage/vault-lease) has
+  always authenticated with ONE shared family `mesh_token` -- so a single node's leaked token could spoof the whole
+  family, and rotating it meant re-keying every node. Nodes can now hold their OWN token, DERIVED from a family
+  master that lives only on Mission Control (mirrors the superadmin derived-key model):
+  `node_token = HMAC(mesh_master, "mesh-v1:" + node_id)`. A caller presents `X-Mesh-Node: <id>` + its own token; a
+  verifier holding the master re-derives + checks it, so a leaked token can't impersonate another node and revoking
+  one node is a single-token rotation. **DUAL-ACCEPT and OFF BY DEFAULT:** with no `mesh_master` configured this is
+  entirely inert (only the shared token is checked, exactly as before -- the live fleet is unchanged); where a
+  master IS set, the shared token is STILL accepted so a mixed/rolling fleet is never severed. Provision (a gated
+  credential step) via `POST /api/mesh-provision` (operator-only, MC derives each node's token). Model + rollout in
+  `docs/SUPERADMIN.md`. Verified: mesh stays 9/9 reachable; 4 new unit tests (dual-accept, derivation, ingress).
+
 ## 0.99.191 -- 2026-07-10  (WS3 fleet-safety batch 1: node-side post-ship rollback · accurate "converged" marker)
 - **Node-side post-ship rollback (deep-audit #5).** Before overlaying a framework update, `cc-update.sh` now
   snapshots the current framework (tar) and drops a pending-update marker. Once the node boots healthy on the new

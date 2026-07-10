@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "7cabb272d3ace80b7b4025fb30fd1a17156e424ac37ed8900b19e75abd36c6cb",
+      "claudesole.manifest.json": "c5c54052101ec00ecde54a6e2eae88806f29136d7bbd3e78d69a6f44e2c99ae9",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/campaign_runner.py": "0a385adb090626c76c1f3baf4a1ed944cd0a80983ef752686e471003a012e339",
       "command-center/cc-advise": "e449156a34ddcb9068fc1c89223a2d3f8574b6dba15f2e3d3fe748bf2f49a70f",
@@ -66,7 +66,7 @@
       "command-center/residue_lint.py": "0b1c757909a27470095d5ea8b48641a9e9e0248ec1729f3598596f2129fd1d6f",
       "command-center/rollback_guard.py": "603ae76f8f854b46e0dd152a123e11cc85c760a8c82e7865ab5eeaf75b2ac800",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "d9c56358a04bdb958f7c7e0414fa6f7fa0fb3e035cd419fdb5fd5e18543eb7af",
+      "command-center/server.py": "b13a0343bfd7ad3629fcba374770806944875980142d852f2db2228fbc527566",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/static/phosphor/fill.css": "555980683a582c1910a954648b4ae38f58d76e797f02bfdc2c5e817901e6d4fc",
       "command-center/static/phosphor/light.css": "f2e59699faaeee27da9edb86dd18f5ed3bd5113db3e4e388fdd23afcaf308865",
@@ -164,9 +164,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783664985,
+    "generated": 1783689608,
     "v": 1,
-    "version": "0.99.191"
+    "version": "0.99.192"
   },
-  "sig": "pTfxd91U26+4Lq1Cn3MaL1gPkrbq4P3dl43UCsu5BFKT4Ij3ggQZTySs1eHs2gqJ97NfCLCwp3E6X8jkXsLvCw=="
+  "sig": "yoUGvCJ0vI/sMONoUKLtXhabEli91g2Cf6+HPttcdUtP+gPGwajc9wZddKWwY/WA1Y8V0fPaYZzNebF0Xan9Dg=="
 }
