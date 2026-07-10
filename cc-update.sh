@@ -7,16 +7,48 @@
 set -uo pipefail
 CC_HOME="${CC_HOME:-$(cd "$(dirname "$0")" && pwd)}"   # self-locate: the script lives at CC_HOME root (robust to any deployment path / remote superadmin cc_update), not a hardcoded $HOME default
 MAN="$CC_HOME/claudesole.manifest.json"
-SRC=""; DRY=""; ALLOW_UNSIGNED=""
+SRC=""; DRY=""; ALLOW_UNSIGNED=""; ROLLBACK=""
 for _a in "$@"; do
   case "$_a" in
     --dry-run) DRY=1 ;;
     --allow-unsigned) ALLOW_UNSIGNED=1 ;;   # proceed past an UNSIGNED upstream (never past active tampering)
+    --rollback) ROLLBACK=1 ;;               # restore the pre-update framework snapshot (deep-audit #5)
     *) [ -z "$SRC" ] && SRC="$_a" ;;
   esac
 done
-[ -z "$SRC" ] && { echo "usage: cc-update.sh <git-url|local-dir> [--dry-run] [--allow-unsigned]"; exit 1; }
 [ -f "$MAN" ] || { echo "no manifest at $MAN"; exit 1; }
+
+# Resolve this install's STATE dir (honors CC_CONFIG + cc.config state_dir, exactly like server.py) -- home of the
+# rollback snapshot + the pending-update marker (deep-audit #5: node-side post-ship rollback).
+STATE="$(python3 - "$CC_HOME" <<'PY' 2>/dev/null || echo "$CC_HOME/command-center"
+import json, os, sys
+home = sys.argv[1]
+cfg = os.environ.get("CC_CONFIG") or os.path.join(home, "cc.config.json")
+d = os.path.join(home, "command-center")
+try: d = os.path.expanduser((json.load(open(cfg)) or {}).get("state_dir") or d)
+except Exception: pass
+print(d)
+PY
+)"
+ROLLBACK_DIR="$STATE/_rollback"; SNAP="$ROLLBACK_DIR/rollback.tar.gz"; PENDING="$STATE/_update_pending.json"
+
+# --rollback: restore the snapshot taken before the last update, then print the restart command. Self-heal path
+# for a node that came up broken on a new version (invoked by the supervisor guard, an operator, or MC).
+if [ -n "$ROLLBACK" ]; then
+  [ -f "$SNAP" ] || { echo "no rollback snapshot at $SNAP -- nothing to restore"; exit 1; }
+  echo "rolling back framework from $SNAP ..."
+  tar -xzf "$SNAP" -C "$CC_HOME" || { echo "rollback extract FAILED"; exit 1; }
+  [ -f "$CC_HOME/VERSION" ] && python3 -c "import json;print(json.load(open('$MAN')).get('version',''))" > "$CC_HOME/VERSION"
+  python3 -c "import json,os;p='$PENDING';os.path.exists(p) and os.remove(p)" 2>/dev/null || true
+  echo "  restored framework to $(python3 -c "import json;print(json.load(open('$MAN')).get('version'))")"
+  _CFG="${CC_CONFIG:-$CC_HOME/cc.config.json}"
+  SESS="$(python3 -c "import json,sys;print((json.load(open(sys.argv[1])).get('session') or 'claudefather'))" "$_CFG" 2>/dev/null || echo claudefather)"
+  TMUXBIN="$(command -v tmux || echo /opt/homebrew/bin/tmux)"
+  echo "Done. Restart to load the rollback: TMUX_TMPDIR=/tmp $TMUXBIN kill-session -t $SESS"
+  exit 0
+fi
+
+[ -z "$SRC" ] && { echo "usage: cc-update.sh <git-url|local-dir> [--dry-run] [--allow-unsigned] | --rollback"; exit 1; }
 
 TMP=""
 if [ -d "$SRC" ]; then UP="$SRC"
@@ -57,6 +89,47 @@ fi
 EXCL=(); while IFS= read -r pat; do [ -n "$pat" ] && EXCL+=( --exclude="$pat" ); done \
   < <(python3 -c "import json;[print(p) for p in json.load(open('$UP/claudesole.manifest.json')).get('never_ship',[])]" 2>/dev/null)
 [ ${#EXCL[@]} -eq 0 ] && EXCL=( --exclude='secrets/' --exclude='secrets' --exclude='*.local' --exclude='.env' --exclude='.env.*' )
+
+# SNAPSHOT BEFORE OVERLAY (deep-audit #5): tar the CURRENT (about-to-be-replaced) framework into the rollback dir
+# and drop a pending-update marker, so a node that comes up BROKEN on the new version can be restored to exactly
+# the code it was running. Cheap (code is small), reversible, and skipped on a dry run. Never fatal -- a snapshot
+# failure warns but still applies the update (we don't block a legit update because the snapshot couldn't be taken).
+# Only for a REAL install (has cc.config.json) -- a bare dist mirror has no running node to protect, and writing
+# the snapshot/marker there would pollute the dist repo's `git add -A`. Skipped on dry runs.
+if [ -z "$DRY" ] && [ -f "$CC_HOME/cc.config.json" ]; then
+  mkdir -p "$ROLLBACK_DIR" 2>/dev/null
+  if python3 - "$CC_HOME" "$MAN" "$UP/claudesole.manifest.json" "$SNAP" "$PENDING" <<'PY'
+import glob, json, os, sys, tarfile, time
+home, man, upman, snap, pending = sys.argv[1:6]
+from_v = (json.load(open(man)) or {}).get("version", "")
+to_v = (json.load(open(upman)) or {}).get("version", "")
+fps = (json.load(open(man)) or {}).get("framework_paths", [])
+never = (json.load(open(man)) or {}).get("never_ship", []) or ["secrets/", "secrets", ".env", ".env.*", "*.local"]
+def excluded(rel):
+    base = os.path.basename(rel.rstrip("/"))
+    import fnmatch
+    return any(fnmatch.fnmatch(base, p.rstrip("/")) or ("/" + p.rstrip("/") + "/") in ("/" + rel + "/") for p in never)
+# collect the CURRENT (about-to-be-replaced) framework files that exist, glob-expanded, minus never_ship
+members = []
+for p in fps:
+    for ab in glob.glob(os.path.join(home, p)):
+        rel = os.path.relpath(ab, home)
+        if excluded(rel): continue
+        members.append(rel)
+try:
+    with tarfile.open(snap, "w:gz") as t:
+        for rel in sorted(set(members)):
+            t.add(os.path.join(home, rel), arcname=rel,
+                  filter=lambda ti: None if excluded(ti.name) else ti)
+    open(pending, "w").write(json.dumps({"from": from_v, "to": to_v, "snapshot": snap,
+        "ts": int(time.time()), "attempts": 0, "confirmed": False}))
+    print("  snapshot saved (rollback point v%s) -> %s" % (from_v, snap))
+except Exception as e:
+    print("  (warning: could not take a rollback snapshot: %s -- applying the update anyway)" % str(e)[:100])
+    sys.exit(1)
+PY
+  then :; else :; fi
+fi
 
 python3 -c "import json;[print(p) for p in json.load(open('$UP/claudesole.manifest.json'))['framework_paths']]" | while read -r p; do
   for s in $UP/$p; do

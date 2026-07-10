@@ -1,7 +1,7 @@
 {
   "product": "ClaudeFather",
   "former_name": "Claudesole",
-  "version": "0.99.190",
+  "version": "0.99.191",
   "description": "Manifest that defines which paths are FRAMEWORK (ship + propagate to every ClaudeFather deployment on update) vs PRESERVE (per-deployment config/data/secrets/learnings -- never overwritten by an update).",
   "framework_paths": [
     "core.sig.json",
@@ -40,6 +40,7 @@
     "command-center/cc-front",
     "command-center/cc-instance-supervise.sh",
     "command-center/verify_update.py",
+    "command-center/rollback_guard.py",
     "command-center/platform_map.json",
     "docs/UPDATES.md",
     "install/templates/com.claudefather.instance.plist.template",

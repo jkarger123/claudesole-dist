@@ -9490,6 +9490,16 @@ def doctor():
         issues.append({"sev": "warn", "path": "claude", "msg": "Claude Code is installed but NO authentication was detected (no keychain login, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN) -- if agents fail on launch, run `claude login`, or set ANTHROPIC_API_KEY (it can live in the vault). Verify with: claude -p 'ok'."})
     if _semver(BOOT_VERSION) < _semver(_manifest_version()):   # files updated by a converge but this process never re-exec'd
         issues.append({"sev": "warn", "path": "runtime", "msg": "running STALE code: this process booted on v%s but the framework on disk is v%s -- restart to load the update (the converge's restart didn't land)" % (BOOT_VERSION, _manifest_version())})
+    try:                                                       # ROLLBACK (#5): a pending-update marker still UNCONFIRMED after a while = the new version may not have come up healthy
+        _up = _update_pending()
+        if _up and not _up.get("confirmed") and (time.time() - int(_up.get("ts") or 0)) > 300:
+            _tv = _up.get("to") or "?"
+            if _semver(BOOT_VERSION) >= _semver(_tv):          # we ARE on the target now (a late/manual restart) -> just clear it
+                try: os.remove(_UPDATE_PENDING)
+                except Exception: pass
+            else:
+                issues.append({"sev": "err", "path": "update", "msg": "an update to v%s has NOT confirmed healthy (still running v%s, %d launch attempt(s)) -- the new version may not be coming up. The supervisor auto-rolls back after repeated failures; to roll back NOW: POST /api/update-rollback (or run cc-update.sh --rollback), then restart." % (_tv, BOOT_VERSION, int(_up.get("attempts") or 0))})
+    except Exception: pass
     try:                                                       # RESILIENCE: surface resource pressure BEFORE it wedges the node (the immune system's dashboard face)
         if "vitals" in globals():
             _v = vitals(sample=False) or {}
@@ -14594,6 +14604,41 @@ def _aupd_log(msg):
             f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + INSTANCE_ID + " " + msg + "\n")
     except Exception: pass
 
+# NODE-SIDE POST-SHIP ROLLBACK (deep-audit #5). cc-update.sh snapshots the prior framework + drops
+# _update_pending.json BEFORE overlaying. If the node comes up HEALTHY on the new version, we CONFIRM (clear the
+# marker). If it never boots healthy, the supervisor guard (rollback_guard.py) restores the snapshot after a few
+# failed launches. This bounds a bad ship's damage to a self-healing blip on ONE node (the MC canary already keeps
+# it from reaching the rest of the fleet).
+_UPDATE_PENDING = os.path.join(STATE_DIR, "_update_pending.json")
+def _update_pending():
+    try: return load(_UPDATE_PENDING, None)
+    except Exception: return None
+def _update_confirm():
+    """Called shortly after boot (proof we came up + stayed serving): if a just-applied update reached its target
+    version, mark it CONFIRMED and clear the pending marker so the supervisor guard won't roll it back."""
+    p = _update_pending()
+    if not p or p.get("confirmed"): return
+    to_v = p.get("to") or ""
+    if to_v and _semver(BOOT_VERSION) >= _semver(to_v):
+        try: os.remove(_UPDATE_PENDING)                       # healthy on the new version -> update took; keep the snapshot as last-good
+        except Exception: pass
+        _aupd_log("update to v%s CONFIRMED healthy (running v%s) -- cleared pending marker" % (to_v, BOOT_VERSION))
+def _update_confirm_daemon():
+    time.sleep(25)                                            # if we were going to crash on boot, it'd have happened by now
+    try: _update_confirm()
+    except Exception: pass
+def update_rollback():
+    """Restore the pre-update framework snapshot (operator/MC self-heal). Runs cc-update.sh --rollback, which
+    extracts the snapshot + clears the marker; the caller then restarts to load the rolled-back code."""
+    p = _update_pending()
+    script = os.path.join(CC_HOME, "cc-update.sh")
+    if not os.path.isfile(script): return {"ok": False, "error": "cc-update.sh not found"}
+    _cfg = os.environ.get("CC_CONFIG") or os.path.join(CC_HOME, "cc.config.json")
+    code, out, err = sh(["env", "CC_HOME=" + CC_HOME, "CC_CONFIG=" + _cfg, "bash", script, "--rollback"], timeout=120)
+    ok = code == 0
+    _aupd_log("MANUAL rollback requested -> %s%s" % ("ok" if ok else "FAILED", "" if ok else (": " + (err or out)[-160:])))
+    return {"ok": ok, "from": (p or {}).get("to"), "to": (p or {}).get("from"), "out": (out or "")[-600:], "error": None if ok else (err or out or "rollback failed")[-200:]}
+
 def _update_source():
     """The canonical upstream a tenant pulls from. Default: the public dist git repo (so freshness never
     depends on anyone having git-pulled a local mirror). A private/enterprise fleet overrides this per node
@@ -15171,6 +15216,12 @@ def fleet_converge(force=False, auto=False):
                 res["halted"] = {"at": nid, "target": target}
                 res["ran"].append(rec); break
         res["ran"].append(rec)
+    # PENDING (deep-audit #27): nodes still-behind that this pass could NOT finish -- deferred for business hours,
+    # or unreachable, or updated-but-not-verified. The auto-converge loop uses this to retry SOON (not the hourly
+    # backstop) and to withhold the "fleet converged" marker until they actually land, so a node quiet/offline at
+    # release doesn't sit on old code for an hour while the fleet reads as converged.
+    res["pending"] = ([s["id"] for s in res["skipped"] if s.get("why") == "unreachable" or "business hours" in (s.get("why") or "")]
+                      + [r["id"] for r in res["ran"] if r.get("error") and not r.get("verified")])
     return res
 
 _FLEET_CONV_MARK = os.path.join(STATE_DIR, "_fleet_converged_ver")   # last dist version we converged the fleet to
@@ -15194,21 +15245,35 @@ def _fleet_converge_loop():
     full sweep still backstops nodes that were offline at release. Runs ONLY on the overseer (the fleet hub) so
     co-located instances don't each race a converge. Disable with cc.config fleet_auto_converge:false."""
     time.sleep(120)
-    last_full = 0.0
+    next_backstop = 0.0
+    attempted_mv = None                                                      # the mirror version we've already run a pass for
+    _long = lambda: max(3600, int(CC.get("fleet_converge_min", 180)) * 60)   # hourly-ish backstop when fully converged
+    _soon = lambda: max(120, int(CC.get("fleet_pending_retry_sec", 300)))    # quick retry while stragglers remain (deep-audit #27)
     while True:
         try:
             if ROLE == "org" and CC.get("fleet_auto_converge", True) is not False:
                 mv = _mirror_version(); now = time.time()
+                _r = None
                 if mv and mv != _fleet_last_converged():
-                    _aupd_log("MC auto-converge: mirror at v%s (fleet last on %s) -> converging now" % (mv, _fleet_last_converged()))
-                    _r = fleet_converge(force=False, auto=True)
-                    if not _r.get("halted"):
-                        _fleet_mark_converged(mv)                # only mark done if no node failed its health check
-                    else:                                        # canary halted -> leave UNMARKED so the next pass retries + it stays visible (deep-audit 0.3)
-                        _aupd_log("fleet NOT marked converged to v%s -- canary halted at %s; will retry next pass" % (mv, (_r["halted"] or {}).get("at")))
-                    last_full = now
-                elif now - last_full >= max(3600, int(CC.get("fleet_converge_min", 180)) * 60):
-                    fleet_converge(force=False, auto=True); last_full = now   # periodic backstop for nodes offline at release
+                    if mv != attempted_mv:                       # brand-new release -> converge IMMEDIATELY (fast propagation)
+                        _aupd_log("MC auto-converge: mirror at v%s (fleet last on %s) -> converging now" % (mv, _fleet_last_converged()))
+                        _r = fleet_converge(force=False, auto=True); attempted_mv = mv
+                    elif now >= next_backstop:                   # same release, marker withheld for stragglers -> retry on the SOON cadence, not every watch tick
+                        _r = fleet_converge(force=False, auto=True)
+                elif now >= next_backstop:
+                    _r = fleet_converge(force=False, auto=True)   # backstop: pick up nodes deferred/offline at release
+                if _r is not None:
+                    # Only mark the fleet converged when this pass left NOTHING outstanding -- not halted AND no
+                    # pending (business-hours-deferred / unreachable / unverified) stragglers. Otherwise withhold the
+                    # marker + retry SOON, so a straggler lands in minutes, not the next hourly sweep (deep-audit #27).
+                    outstanding = bool(_r.get("halted")) or bool(_r.get("pending"))
+                    if mv and not outstanding:
+                        _fleet_mark_converged(mv)
+                    elif _r.get("halted"):
+                        _aupd_log("fleet NOT marked converged to v%s -- canary halted at %s; retrying soon" % (mv, (_r["halted"] or {}).get("at")))
+                    elif _r.get("pending"):
+                        _aupd_log("fleet NOT yet fully converged to v%s -- pending %s; retrying in ~%ds (not the hourly backstop)" % (mv, ",".join(map(str, _r["pending"]))[:120], _soon()))
+                    next_backstop = now + (_soon() if outstanding else _long())
         except Exception as e:
             try: _aupd_log("fleet auto-converge error: %s" % str(e)[:140])
             except Exception: pass
@@ -17145,6 +17210,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/edition-ack":              # deep-audit #34: accept the current edition as the new security baseline
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(edition_ack()))
+        if u.path == "/api/update-rollback":          # deep-audit #5: restore the pre-update framework snapshot (then restart)
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(update_rollback()))
         if u.path == "/api/recovery-keygen":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(recovery_keygen()))
@@ -29382,6 +29450,7 @@ if __name__ == "__main__":
     _daemon("sk_inbound", _sk_inbound_loop)              # Slack (team): poll thread/channel replies + inject back into the routed session
     _daemon("autoupdate", _autoupdate_loop)              # PULL convergence: every tenant self-updates from the dist (boot + timer); source nodes self-skip
     _daemon("core_integrity", _core_integrity_loop)      # INTEGRITY: verify framework files vs the signed manifest; appliances self-heal drift from the signed dist
+    _daemon("update_confirm", _update_confirm_daemon)    # ROLLBACK (#5): once we've booted healthy on a just-applied update, clear its pending marker so the supervisor won't roll it back
     _daemon("acct_windows", _acct_windows_loop)          # USAGE: keep the account fuel-gauge fresh (refresh the live login's 5h/weekly windows ~30m; shared-lock deduped across co-located instances)
     _daemon("substack", _substack_loop)                  # SUBSTACK: poll tracked publications' RSS into the read cache (no-op until publications are configured)
     _daemon("chief_watchdog", _chief_watchdog)           # CHIEF WATCHDOG: keep the always-on Chief of Staff (the mesh comms endpoint) alive -- respawn if its claude exits

@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.191 -- 2026-07-10  (WS3 fleet-safety batch 1: node-side post-ship rollback · accurate "converged" marker)
+- **Node-side post-ship rollback (deep-audit #5).** Before overlaying a framework update, `cc-update.sh` now
+  snapshots the current framework (tar) and drops a pending-update marker. Once the node boots healthy on the new
+  version, it self-confirms (clears the marker). If the node instead fails to come up across several launches, the
+  supervisor's `rollback_guard.py` restores the snapshot before launching -- so a node that won't boot on a bad
+  ship self-heals to its last-good version instead of crash-looping. Bounds a bad ship to a self-healing blip on
+  ONE node (the MC canary already keeps it off the rest of the fleet). Operator/MC can also roll back on demand:
+  `POST /api/update-rollback` or `cc-update.sh --rollback`; Doctor turns RED if an update stays unconfirmed. The
+  snapshot is skipped for a bare dist mirror (no running node) and never blocks a legit update.
+- **Accurate "fleet converged" marker + faster straggler pickup (deep-audit #27).** The auto-converge loop used to
+  mark the whole fleet "converged to vX" after the first pass even when that pass DEFERRED business-hours nodes or
+  SKIPPED unreachable ones -- so a node quiet/offline at release could sit on old code until the next hourly sweep.
+  Now the marker only advances when a pass leaves NOTHING outstanding; while stragglers remain it retries on a
+  short cadence (~5 min, `fleet_pending_retry_sec`) instead of the hourly backstop, and a brand-new release still
+  converges immediately.
+
 ## 0.99.190 -- 2026-07-10  (WS1 security batch 2: vault-key Keychain-wrap + honest at-rest docs · PAGE XSS hardening)
 - **Vault encryption key can now be wrapped in the macOS Keychain (deep-audit #11).** By default the Fernet key
   is a 0600 FILE beside the ciphertext, so "encrypted at rest" only defends against single-file exfiltration -- a
