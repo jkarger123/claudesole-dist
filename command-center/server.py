@@ -1808,7 +1808,7 @@ def _web_manifest():
 # Peer/machine-to-machine ingress: NOT gated by the operator token (that's a human surface). These are
 # peer surface, protected on their own MESH_TOKEN track, so enabling operator auth on a node never severs
 # the mesh (a peer POSTs here with X-Mesh-Token or nothing, never the operator cookie/bearer).
-AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store", "/api/account-windows-store", "/api/vault-lease", "/api/opnote-recv", "/api/agent-msg-recv")
+AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store", "/api/account-windows-store", "/api/vault-lease", "/api/opnote-recv", "/api/agent-msg-recv", "/api/agent-msg-reply")
 
 # Security frame stamped onto EVERY inbound peer message (appended AFTER the literal "[message from X]" so
 # the Stop-hook sender regex still matches). Makes the trust boundary explicit in the message itself -- a
@@ -1906,6 +1906,94 @@ def agent_ask(to_addr, question, frm="operator", hop=0):
     _agentmsg_log({"dir": "served", "agent": agent, "from": frm, "ok": bool(r.get("ok")), "hop": hop})
     if not r.get("ok"): return {"ok": False, "error": r.get("error", "agent run failed"), "agent": agent, "node": INSTANCE_ID}
     return {"ok": True, "answer": r.get("result", ""), "agent": agent, "node": INSTANCE_ID, "cost": r.get("cost")}
+
+# ---- LIVE HANDOFF (telephone line increment 2) -- deliver to a target's RUNNING session; its reply routes back to
+# the REQUESTER's session by convo id (via the generalized Stop hook -> /api/agent-msg-reply). Rides _mesh_deliver
+# (compact-lock safe, no second injector). Same guards as the ask path + a convo-scoped ping-pong (one round-trip).
+_AGENTMSG_CONVOS = {}                                           # convo_id -> {from_session, reply_via_node, ts}
+def _agentmsg_convo_gc():
+    now = time.time()
+    for k in [k for k, v in _AGENTMSG_CONVOS.items() if now - v.get("ts", 0) > 3600]: _AGENTMSG_CONVOS.pop(k, None)
+def _agent_target_session(agent):
+    """Resolve a live-handoff target: 'chief' -> this node's Chief of Staff session (always reply-hooked); else a
+    literal tmux session name IF it exists. Returns the session name or ''."""
+    if agent in ("chief", "cos", "chief-of-staff"): return CHIEF
+    return agent if sh([TMUX, "has-session", "-t", agent])[0] == 0 else ""
+def _agent_live_inject(session, frm, message, convo, hop):
+    framed = "[agent-msg from %s #%s hop=%d] %s%s" % (frm, convo, hop, AGENT_PEER_FRAME, (message or "").strip())
+    _mesh_deliver(session, framed)
+def agent_handoff(to_addr, message, from_session, hop=0):
+    """INITIATOR of a live handoff: deliver `message` into `to_addr`'s (= "[node/]chief|session") running session so
+    it answers with LIVE context; its reply comes back to `from_session` by convo id. Returns {ok, convo, target}."""
+    if not AGENT_TELEPHONE: return {"ok": False, "error": "the agent telephone line is OFF on this node (enable cc.config agent_telephone)"}
+    if not (message or "").strip(): return {"ok": False, "error": "empty message"}
+    if not (from_session or "").strip(): return {"ok": False, "error": "no requesting session (from_session) -- the reply has nowhere to land"}
+    if hop > AGENT_MSG_HOP_CAP: return {"ok": False, "error": "hop cap exceeded"}
+    node, _, agent = (to_addr or "").partition("/")
+    if not agent: node, agent = "", node
+    if not _agentmsg_rate_ok(from_session, to_addr): return {"ok": False, "error": "rate limit to %s" % to_addr}
+    _agentmsg_convo_gc()
+    convo = hashlib.sha256(("%s|%s|%s" % (from_session, to_addr, time.time())).encode()).hexdigest()[:10]
+    frm_addr = "%s/%s" % (INSTANCE_ID, from_session)
+    if node and node != INSTANCE_ID:                            # REMOTE target: relay; reply comes back to us by convo
+        purl = next((p["url"] for p in peers() if p.get("id") == node), "")
+        if not purl: return {"ok": False, "error": "unknown node '%s'" % node}
+        _AGENTMSG_CONVOS[convo] = {"from_session": from_session, "reply_via_node": "", "ts": time.time()}
+        import urllib.request
+        body = json.dumps({"to_agent": agent, "message": message, "convo": convo, "from": frm_addr,
+                           "hop": hop + 1, "live": True, "origin_node": INSTANCE_ID}).encode()
+        hdr = {"Content-Type": "application/json"}
+        if _mesh_out_token(): hdr["X-Mesh-Token"] = _mesh_out_token(); hdr["X-Mesh-Node"] = INSTANCE_ID
+        try:
+            with urllib.request.urlopen(urllib.request.Request(purl.rstrip("/") + "/api/agent-msg-recv", data=body, headers=hdr), timeout=20) as rr:
+                res = json.loads(rr.read().decode())
+        except Exception as e:
+            _AGENTMSG_CONVOS.pop(convo, None); return {"ok": False, "error": "peer unreachable: " + str(e)[:120]}
+        _agentmsg_log({"dir": "handoff-out", "to": to_addr, "from": from_session, "convo": convo, "ok": bool(res.get("ok"))})
+        return {**res, "convo": convo}
+    # LOCAL target
+    sess = _agent_target_session(agent)
+    if not sess: return {"ok": False, "error": "no live session for '%s' here (try 'chief' or a running session name)" % agent}
+    _AGENTMSG_CONVOS[convo] = {"from_session": from_session, "reply_via_node": "", "ts": time.time()}
+    _agent_live_inject(sess, frm_addr, message, convo, hop)
+    _agentmsg_log({"dir": "handoff-local", "to": sess, "from": from_session, "convo": convo, "ok": True})
+    return {"ok": True, "convo": convo, "target": sess, "note": "delivered to %s; its reply will land in %s" % (sess, from_session)}
+def _agent_recv_live(to_agent, message, convo, frm, hop, reply_via_node):
+    """TARGET-side of a remote live handoff: record where the reply must go (back to the origin node), then inject
+    into the local target session. Its Stop hook will POST the reply to our /api/agent-msg-reply by convo."""
+    if not AGENT_TELEPHONE: return {"ok": False, "error": "telephone off on target"}
+    if hop > AGENT_MSG_HOP_CAP: return {"ok": False, "error": "hop cap exceeded"}
+    sess = _agent_target_session(to_agent)
+    if not sess: return {"ok": False, "error": "no live session for '%s' on %s" % (to_agent, INSTANCE_ID)}
+    _agentmsg_convo_gc()
+    _AGENTMSG_CONVOS[convo] = {"from_session": "", "reply_via_node": reply_via_node, "ts": time.time()}
+    _agent_live_inject(sess, frm, message, convo, hop)
+    _agentmsg_log({"dir": "handoff-served", "to": sess, "from": frm, "convo": convo, "ok": True})
+    return {"ok": True, "convo": convo, "target": "%s/%s" % (INSTANCE_ID, sess)}
+def agent_msg_reply(convo, text):
+    """Route a target's reply (from its Stop hook) back to the requester by convo id: deliver into the requesting
+    LOCAL session, or relay to the origin node if this was the target/relay side. One round-trip (convo cleared)."""
+    convo = re.sub(r"[^a-z0-9]", "", (convo or ""))[:16]
+    rec = _AGENTMSG_CONVOS.pop(convo, None)
+    if not rec: return {"ok": False, "error": "unknown or expired convo"}
+    if rec.get("from_session"):                                # WE are the requester's node -> deliver locally
+        _mesh_deliver(rec["from_session"], "[reply from telephone-line #%s] %s" % (convo, (text or "").strip()))
+        _agentmsg_log({"dir": "reply-in", "convo": convo, "to": rec["from_session"], "ok": True})
+        return {"ok": True, "delivered_to": rec["from_session"]}
+    if rec.get("reply_via_node"):                              # WE are the target/relay -> send the reply back to origin
+        purl = next((p["url"] for p in peers() if p.get("id") == rec["reply_via_node"]), "")
+        if not purl: return {"ok": False, "error": "origin node '%s' not routable" % rec["reply_via_node"]}
+        import urllib.request
+        body = json.dumps({"convo": convo, "text": text}).encode()
+        hdr = {"Content-Type": "application/json"}
+        if _mesh_out_token(): hdr["X-Mesh-Token"] = _mesh_out_token(); hdr["X-Mesh-Node"] = INSTANCE_ID
+        try:
+            urllib.request.urlopen(urllib.request.Request(purl.rstrip("/") + "/api/agent-msg-reply", data=body, headers=hdr), timeout=15).read()
+        except Exception as e:
+            return {"ok": False, "error": "relay to origin failed: " + str(e)[:120]}
+        _agentmsg_log({"dir": "reply-relay", "convo": convo, "via": rec["reply_via_node"], "ok": True})
+        return {"ok": True, "relayed_to": rec["reply_via_node"]}
+    return {"ok": False, "error": "convo has no destination"}
 
 def mesh_enqueue(peer, text, kind="msg", expect_reply=None):
     """Create a durable PENDING outbound delivery for the worker. kind='msg' (an initiating message ->
@@ -17168,12 +17256,22 @@ class H(BaseHTTPRequestHandler):
             if not (_cip in ("127.0.0.1", "::1") and not _proxied) and not _mesh_ingress_ok(self.headers):
                 return self._s(403, json.dumps({"ok": False, "error": "mesh-reply: local origin or mesh token required"}))
             return self._s(200, json.dumps(mesh_reply(body.get("to", ""), body.get("text", ""))))
-        if u.path == "/api/agent-msg-send":            # WS4 telephone line: a LOCAL caller (operator / cc-ask) asks an agent
+        if u.path == "/api/agent-msg-send":            # WS4 telephone line: a LOCAL caller (operator / cc-ask). live=handoff, else headless ask
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            if body.get("live"):
+                return self._s(200, json.dumps(agent_handoff(body.get("to", ""), body.get("message") or body.get("question", ""), body.get("from") or "", 0)))
             return self._s(200, json.dumps(agent_ask(body.get("to", ""), body.get("question", ""), body.get("from") or "operator", 0)))
-        if u.path == "/api/agent-msg-recv":            # WS4 telephone line: a PEER delivers an ask -> run it LOCALLY here
+        if u.path == "/api/agent-msg-recv":            # WS4 telephone line: a PEER delivers. live=inject into a session, else headless ask
             if MESH_ENFORCE and not _mesh_ingress_ok(self.headers): return self._s(403, json.dumps({"ok": False, "error": "mesh auth"}))
+            if body.get("live"):
+                return self._s(200, json.dumps(_agent_recv_live(body.get("to_agent", ""), body.get("message", ""), body.get("convo", ""), body.get("from") or "?", int(body.get("hop") or 0), body.get("origin_node") or "")))
             return self._s(200, json.dumps(agent_ask(body.get("to_agent", ""), body.get("question", ""), body.get("from") or "?", int(body.get("hop") or 0))))
+        if u.path == "/api/agent-msg-reply":           # WS4 telephone line: a target's Stop hook (loopback) OR a relay (mesh) routes a reply back by convo
+            _cip = (self.client_address[0] if self.client_address else "")
+            _proxied = any(self.headers.get(h) for h in ("X-Forwarded-For", "X-Real-Ip", "Forwarded"))
+            if not (_cip in ("127.0.0.1", "::1") and not _proxied) and not _mesh_ingress_ok(self.headers):
+                return self._s(403, json.dumps({"ok": False, "error": "agent-msg-reply: local origin or mesh token required"}))
+            return self._s(200, json.dumps(agent_msg_reply(body.get("convo", ""), body.get("text", ""))))
         if u.path == "/api/mesh-clear":    return self._s(200, json.dumps(mesh_clear()))
         # Superadmin: exec is reachable cross-family (the SA signature IS the auth -> in AUTH_MESH_INGRESS).
         # send/grant/derive need the MASTER + are operator-authed (NOT mesh-ingress) -> MC operator only.

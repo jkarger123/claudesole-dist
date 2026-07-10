@@ -12,6 +12,10 @@ and `MESH_CC=http://localhost:<port>` in env. Idempotent per user-message uuid. 
 import sys, os, json, re, time, urllib.request
 
 MSG_RE = re.compile(r"^\s*\[message from ([a-z0-9_\-]+)\]\s*(.*)", re.S | re.I)
+# WS4 telephone line (increment 2): the SAME hook also forwards an agent's reply to an '[agent-msg from <addr>
+# #<convo> ...]' back to the requester via /api/agent-msg-reply, keyed by the convo id (so it lands in the
+# REQUESTING agent's session, not the chief). Additive -- the '[message from]' path above is untouched.
+AGENT_MSG_RE = re.compile(r"^\s*\[agent-msg from ([a-z0-9_\-./]+) #([a-z0-9]+)", re.I)
 DEBUG = os.environ.get("MESH_HOOK_DEBUG")
 
 def _dbg(msg):
@@ -62,8 +66,8 @@ def _reply_after(lines, i):
     for e in lines[i + 1:]:
         ut = _user_text(e)
         if ut is not None:                   # a genuine user turn (not a tool_result)
-            if MSG_RE.match(ut):
-                break                        # next mesh message -> this reply is done
+            if MSG_RE.match(ut) or AGENT_MSG_RE.match(ut):
+                break                        # next mesh/agent message -> this reply is done
             if started:
                 break                        # operator turn AFTER the reply block -> reply is done
             continue                         # operator turn BEFORE any reply -> skip it, keep looking for the reply
@@ -104,25 +108,30 @@ def main():
             if ut is None:
                 continue
             m = MSG_RE.match(ut)
-            if not m:
+            am = AGENT_MSG_RE.match(ut) if not m else None
+            if not m and not am:
                 continue                     # operator turn -> never forwarded
             uid = e.get("uuid") or ("idx%d:%s" % (i, ut[:40]))
             if uid in done:
                 continue
-            peer = m.group(1)
             reply = _reply_after(lines, i)
             if not reply:
-                pending_without_reply = True  # mesh msg seen but reply not produced/flushed yet
+                pending_without_reply = True  # msg seen but reply not produced/flushed yet
                 continue
             try:
-                data = json.dumps({"to": peer, "text": reply}).encode()
-                req = urllib.request.Request(cc + "/api/mesh-reply", data=data,
-                                             headers={"Content-Type": "application/json"})
+                if am:                        # WS4 telephone line: route the reply back by convo id
+                    convo = am.group(2)
+                    data = json.dumps({"convo": convo, "text": reply}).encode()
+                    ep = "/api/agent-msg-reply"; tgt = "agent#" + convo
+                else:                         # inter-chief mesh reply (unchanged)
+                    data = json.dumps({"to": m.group(1), "text": reply}).encode()
+                    ep = "/api/mesh-reply"; tgt = m.group(1)
+                req = urllib.request.Request(cc + ep, data=data, headers={"Content-Type": "application/json"})
                 r = urllib.request.urlopen(req, timeout=8).read()
                 with open(statef, "a") as f:
                     f.write(uid + "\n")
                 done.add(uid)
-                _dbg("FORWARDED to %s (%r) via %s -> %s" % (peer, reply[:40], cc, r[:60]))
+                _dbg("FORWARDED to %s (%r) via %s -> %s" % (tgt, reply[:40], cc, r[:60]))
             except Exception as e2:
                 _dbg("POST FAILED cc=%s err=%s" % (cc, e2))
         if not pending_without_reply:

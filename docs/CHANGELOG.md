@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.194 -- 2026-07-10  (WS4 flagship: telephone line increment 2 -- the live-session handoff path)
+- **`cc-ask --live <node/chief|session> "<message>"` -- hand off to a target's RUNNING session, reply comes back
+  to yours (deep-audit WS4).** Where increment 1's `cc-ask` is a headless info query, `--live` delivers the message
+  into a target's live session (its Chief of Staff, or a named session) so it answers with its actual working
+  context; the reply routes back to the REQUESTING session by conversation id -- not the chief. It rides the
+  existing compact-lock-safe injector (`_mesh_deliver`) and the existing reply Stop hook (`mesh_stop_hook.py`,
+  extended ADDITIVELY to also forward `[agent-msg from <addr> #<convo>]` replies to `/api/agent-msg-reply` -- the
+  inter-chief mesh path is untouched). Cross-node: the initiator relays to the target node, whose reply relays back
+  by convo id (peer-routed, no self-URL). Same guards as increment 1 (OFF by default, hop cap, rate limit, per-node
+  mesh transport) plus a convo-scoped **ping-pong guard** (exactly one round-trip, convo cleared after the reply).
+  Endpoints: `/api/agent-msg-send` (live mode), `/api/agent-msg-recv` (live inject), `/api/agent-msg-reply`
+  (convo-keyed, origin-aware auth). Verified live end-to-end (handoff → inject → reply-routed → ping-pong-refused)
+  + 6 unit tests. The Comms lens, cross-family talk-grants, and policy-gated subtasks are a later increment.
+
 ## 0.99.193 -- 2026-07-10  (WS4 flagship: agent↔agent telephone line -- increment 1, the safe headless "ask" path)
 - **Agents can now ASK another scope's specialist a question and get the answer back (deep-audit WS4 flagship).**
   `cc-ask <agent|node/agent> "<question>"` (for agents AND humans) routes to the target's node, which runs the

@@ -1,29 +1,34 @@
 #!/usr/bin/env bash
-# cc-ask <agent|node/agent> "<question>"
+# cc-ask [--live] <agent|node/agent> "<question>"
 #
-# THE AGENT TELEPHONE LINE (WS4). Ask another scope's specialist a question and get the answer back -- a headless,
-# read-only info query (the target runs the named subagent; no live session is occupied). For agents AND humans.
-# Examples:
-#   cc-ask security-auditor "any exposed secrets in this repo's config?"
-#   cc-ask carsearch/cost-reporter "what's this month's spend so far?"
+# THE AGENT TELEPHONE LINE (WS4). Two modes:
+#   (default) ASK a specialist a question -> a HEADLESS, read-only info query, answer returned inline (no live
+#             session occupied). e.g.  cc-ask security-auditor "any exposed secrets in this repo's config?"
+#   --live    HAND OFF to a target's RUNNING session ('chief' or a session name) so it answers with LIVE context;
+#             the reply lands back in YOUR session asynchronously.  e.g.  cc-ask --live carsearch/chief "can you
+#             confirm the bridge is processing jobs right now?"
 # OFF by default -- the operator enables it per node with cc.config `agent_telephone`. Resolves this node's
-# port + token from its cc.config.json (honors CC_CONFIG). Bounded by hop-cap + rate-limit + a callable allowlist.
+# port + token from cc.config.json (honors CC_CONFIG). Bounded by hop-cap + rate-limit + a callable allowlist.
 set -uo pipefail
+LIVE=""; [ "${1:-}" = "--live" ] && { LIVE=1; shift; }
 TO="${1:-}"; Q="${2:-}"
-[ -z "$TO" ] || [ -z "$Q" ] && { echo "usage: cc-ask <agent|node/agent> \"<question>\""; exit 1; }
+[ -z "$TO" ] || [ -z "$Q" ] && { echo "usage: cc-ask [--live] <agent|node/agent> \"<question>\""; exit 1; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
 PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
 TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
 FROMS="${CC_SESSION:-operator}"
-BODY="$(python3 -c "import json,sys;print(json.dumps({'to':sys.argv[1],'question':sys.argv[2],'from':sys.argv[3]}))" "$TO" "$Q" "$FROMS")"
+BODY="$(LIVE="$LIVE" python3 -c "import json,os,sys;print(json.dumps({'to':sys.argv[1],'question':sys.argv[2],'message':sys.argv[2],'from':sys.argv[3],'live':bool(os.environ.get('LIVE'))}))" "$TO" "$Q" "$FROMS")"
 RES="$(curl -s -X POST "http://127.0.0.1:${PORT}/api/agent-msg-send" -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODY" 2>/dev/null)"
 if [ -z "$RES" ]; then echo "could not reach the dashboard on port ${PORT}"; exit 1; fi
-python3 -c "
-import json,sys
+LIVE="$LIVE" python3 -c "
+import json,os,sys
 d=json.loads(sys.argv[1])
 if not d.get('ok'):
-    print('cc-ask:', d.get('error','ask failed')); sys.exit(0)
-print('--- %s@%s answered ---' % (d.get('agent','?'), d.get('node','?')))
-print((d.get('answer') or '').strip())
+    print('cc-ask:', d.get('error','failed')); sys.exit(0)
+if os.environ.get('LIVE'):
+    print('* handed off to %s (convo %s) -- its reply will arrive in this session shortly.' % (d.get('target') or d.get('to') or '?', d.get('convo','?')))
+else:
+    print('--- %s@%s answered ---' % (d.get('agent','?'), d.get('node','?')))
+    print((d.get('answer') or '').strip())
 " "$RES"
