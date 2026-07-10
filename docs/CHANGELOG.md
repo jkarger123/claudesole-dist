@@ -3,6 +3,24 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.190 -- 2026-07-10  (WS1 security batch 2: vault-key Keychain-wrap + honest at-rest docs · PAGE XSS hardening)
+- **Vault encryption key can now be wrapped in the macOS Keychain (deep-audit #11).** By default the Fernet key
+  is a 0600 FILE beside the ciphertext, so "encrypted at rest" only defends against single-file exfiltration -- a
+  stolen disk image of the host has both. Opt in with `vault_keychain: true` (macOS) and the key moves into the
+  login Keychain (separately encrypted, not in a `DEPLOY_ROOT` disk image). Migration is safe: an existing key is
+  written to the Keychain, read back + byte-verified, THEN the plaintext file is removed. Once wrapped, a key that
+  becomes unreadable (locked Keychain / revoked access) makes the vault FAIL LOUD (Doctor RED) rather than mint a
+  new key that would orphan every stored secret. Opt-in (not auto) so a live box's key is never migrated without
+  intent. Doctor now recommends enabling it whenever the key is still a co-located file on macOS, and
+  `docs/CREDENTIALS.md` documents the at-rest boundary honestly (what each posture does and does not defend).
+- **PAGE XSS hardening (deep-audit WS1 spot-pass).** The dashboard's `esc()` helper now also escapes the
+  double-quote, closing an attribute-breakout class: a value containing `"` used inside a double-quoted HTML
+  attribute (`title="..."`, `value="..."`, an `onclick="...('...')"`) could previously inject an event handler.
+  Escaping `"` renders identically in text, so this is a pure hardening. Also added escaping to a handful of
+  render paths that interpolated externally-influenced strings unescaped -- most importantly the component file
+  listing, which built markup directly from RAW filesystem names (a file named `<img onerror=...>` was a stored
+  XSS the moment an operator opened that component) -- plus the org-chart machine/component/job/doc cards.
+
 ## 0.99.189 -- 2026-07-10  (WS1 security batch 1: converge retry-before-halt · extensions fail-CLOSED · edition tripwire)
 - **Fleet converge now RETRIES a node once before halting the fan-out (deep-audit WS1).** Previously the *first*
   node that didn't come back on the new version within its health window halted the entire convergence -- so one

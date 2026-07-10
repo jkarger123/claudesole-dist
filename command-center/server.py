@@ -5321,18 +5321,78 @@ VAULT_LEASE_TTL = int(CC.get("vault_lease_ttl") or 600)      # seconds a leased 
 _VAULT_LOCK = threading.Lock()
 _vault_cache = {}                                            # node-side in-memory lease cache: sid -> (value, expires_epoch)
 
+# VAULT KEY at-rest hardening (deep-audit #11): by default the Fernet key lives in a 0600 file (VAULT_KEY_FILE)
+# right beside the ciphertext, so encryption-at-rest only defends against SINGLE-FILE exfiltration (a backup of
+# _vault.json alone) -- a stolen disk image of the whole host has BOTH. Opt into `vault_keychain:true` (macOS) to
+# wrap the key in the login KEYCHAIN instead: separately encrypted, locked when the user is logged out, and NOT in
+# a disk image of DEPLOY_ROOT. Opt-in (not default) because a Keychain read that ever misfires must never silently
+# mint a NEW key and orphan every stored secret -- so when wrapped we FAIL LOUD rather than regenerate.
+VAULT_KC_SERVICE = "ClaudeFather-vault-key"
+_VAULT_KC_MARK = os.path.join(VAULT_DIR, ".keychain_wrapped")   # set once migrated -> never silently regenerate
+def _vault_kc_acct():
+    try: return hashlib.sha256(os.path.realpath(DEPLOY_ROOT).encode()).hexdigest()[:16]
+    except Exception: return "default"
+def _vault_kc_enabled():
+    """Keychain-wrap the vault key? Opt-in via cc.config vault_keychain:true, macOS only, needs the `security` CLI."""
+    if CC.get("vault_keychain") is not True: return False
+    if sys.platform != "darwin": return False
+    try: return bool(shutil.which("security"))
+    except Exception: return False
+def _vault_kc_read():
+    try:
+        r = sh(["security", "find-generic-password", "-s", VAULT_KC_SERVICE, "-a", _vault_kc_acct(), "-w"])
+        return (r[1] or "").strip() if r[0] == 0 and (r[1] or "").strip() else None
+    except Exception: return None
+def _vault_kc_write(key):
+    try: return sh(["security", "add-generic-password", "-U", "-s", VAULT_KC_SERVICE, "-a", _vault_kc_acct(), "-w", key])[0] == 0
+    except Exception: return False
+
 def _vault_fernet():
-    """Load (create on first use) the MC vault encryption key. Returns a Fernet, or None if crypto unavailable."""
+    """Load (create on first use) the install vault encryption key. Returns a Fernet, or None if unavailable.
+    KEYCHAIN-WRAP (deep-audit #11, macOS opt-in): store the key in the login Keychain so it's NOT co-located with
+    the ciphertext in a disk image; a legacy on-disk key is migrated in (verified read-back, then the plaintext file
+    is removed). Once wrapped, a failed Keychain read returns None (Doctor RED) instead of minting a new key that
+    would orphan every stored secret. Off-macOS / opt-out -> the 0600 file key, unchanged. Any Keychain error before
+    migration falls back to the file so the vault never breaks."""
     if not _HAS_CRYPTO: return None
     try: from cryptography.fernet import Fernet
     except Exception: return None
     try:
+        if _vault_kc_enabled():
+            k = _vault_kc_read()
+            if k: return Fernet(k.encode())
+            if os.path.exists(_VAULT_KC_MARK):
+                # We PREVIOUSLY moved the key into the Keychain but can't read it now (locked keychain, access
+                # revoked). Do NOT regenerate -- that orphans every secret. Fail loud; Doctor surfaces it.
+                _core_log("vault-key-keychain-unreadable", {"acct": _vault_kc_acct()})
+                return None
+            if os.path.isfile(VAULT_KEY_FILE):                       # migrate the legacy file key INTO the Keychain
+                with open(VAULT_KEY_FILE, "rb") as f: fk = f.read().strip()
+                if _vault_kc_write(fk.decode()) and (_vault_kc_read() or "").encode() == fk:
+                    try: open(_VAULT_KC_MARK, "w").close(); os.remove(VAULT_KEY_FILE)   # verified -> drop the co-located plaintext
+                    except Exception: pass
+                    _core_log("vault-key-migrated", {"to": "keychain"})
+                return Fernet(fk)                                   # use it regardless -- migration is best-effort, never lose the key
+            nk = Fernet.generate_key()                              # fresh install, wrap-first
+            if _vault_kc_write(nk.decode()) and (_vault_kc_read() or "").encode() == nk:
+                try: open(_VAULT_KC_MARK, "w").close()
+                except Exception: pass
+                return Fernet(nk)
+            # Keychain write failed on a fresh key -> fall through to the file so the vault still works.
         if not os.path.isfile(VAULT_KEY_FILE):
             fd = os.open(VAULT_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "wb") as f: f.write(Fernet.generate_key())
         os.chmod(VAULT_KEY_FILE, 0o600)
         with open(VAULT_KEY_FILE, "rb") as f: return Fernet(f.read().strip())
     except Exception: return None
+def _vault_key_posture():
+    """Where the vault key lives, for Doctor/transparency: 'keychain' (wrapped), 'file' (co-located 0600 plaintext),
+    or 'none' (no key yet). 'file' on macOS is a recommend-to-wrap signal (#11)."""
+    try:
+        if _vault_kc_enabled() and (_vault_kc_read() or os.path.exists(_VAULT_KC_MARK)): return "keychain"
+        if os.path.isfile(VAULT_KEY_FILE): return "file"
+    except Exception: pass
+    return "none"
 def vault_available(): return _vault_fernet() is not None
 def _vault_enc(plain):
     fn = _vault_fernet()
@@ -9513,6 +9573,14 @@ def doctor():
         # a node that leases secrets from an upstream over PLAINTEXT http:// exposes them on the wire (deep-audit #33)
         if VAULT_URL and VAULT_URL.lower().startswith("http://") and not VAULT_URL.lower().startswith("http://127.0.0.1") and not VAULT_URL.lower().startswith("http://localhost"):
             issues.append({"sev": "warn", "path": "vault", "msg": "This node leases secrets from %s over PLAINTEXT http:// -- the leased values travel unencrypted. Use an https:// vault_url (or a Tailscale-served https endpoint); http is only safe to a loopback/on-box upstream." % VAULT_URL})
+        # vault-key at-rest posture (deep-audit #11): a 0600 key file sits BESIDE the ciphertext, so a stolen disk
+        # image of DEPLOY_ROOT has both -> recommend wrapping the key in the macOS Keychain (loopback-safe, opt-in).
+        if sys.platform == "darwin" and vault_available() and _vault_key_posture() == "file":
+            issues.append({"sev": "warn", "path": "vault", "msg": "The vault encryption key is a 0600 FILE (%s) co-located with the ciphertext -- encryption-at-rest then only defends against single-file exfiltration, not a stolen disk image of this host (which has both). Set cc.config `vault_keychain:true` and restart to wrap the key in the login Keychain (separately encrypted, not in a DEPLOY_ROOT disk image; the plaintext file is migrated in + removed). See docs/CREDENTIALS.md for the honest at-rest model." % VAULT_KEY_FILE})
+        # once wrapped, a key we can no longer read (locked/again-access-revoked keychain) is a HARD stop -- we refuse
+        # to mint a new key (that would orphan every stored secret); surface it so the operator unlocks/repairs it.
+        if _vault_kc_enabled() and os.path.exists(_VAULT_KC_MARK) and not _vault_kc_read():
+            issues.append({"sev": "err", "path": "vault", "msg": "The vault key was Keychain-wrapped but is NOT readable now (login Keychain locked, or access to '%s' was revoked) -- the vault is refusing to mint a new key (that would orphan every stored secret). Unlock the login Keychain for this user, or restore Keychain access, then restart." % VAULT_KC_SERVICE})
     except Exception: pass
     # AUTO-UPDATE transparency (deep-audit P1-8): a non-source node that auto-installs framework code from the
     # BUILT-IN public mirror (update_source not overridden) is NOT silent about it -- surface the posture + the
@@ -20051,7 +20119,11 @@ function lensTopbar(){var isPf=(LENS=="portfolio");
 }
 const CST={production:["Production","#3fb950"],live:["Live","#3fb950"],stable:["Stable","#58a6ff"],wip:["WIP","#d29922"],building:["Building","#d29922"],blocked:["Blocked","#f85149"],idea:["Idea","#a371f7"],running:["Running","#3fb950"],paused:["Paused","#a0a0b0"],done:["Done","#3fb950"]};
 function badge(s){const x=CST[s]||[s||"?","#a0a0b0"];return '<span class="badge" style="background:'+x[1]+'22;color:'+x[1]+'">'+x[0]+'</span>';}
-function esc(s){return (s||"").replace(/'/g,"").replace(/</g,"&lt;");}
+// esc: strip ' (safe inside single-quoted JS-string args like onclick="f('...')"), escape < (no tag can open) AND
+// " (deep-audit WS1 XSS spot-pass: without this, esc() inside a DOUBLE-quoted attribute like title="..."/value="..."
+// let a " break out and inject an event handler). Escaping " renders identically in text, so this is a pure
+// hardening with no visual change. Use e2() when a value ALSO needs > and & escaped (full attribute contexts).
+function esc(s){return (s||"").replace(/'/g,"").replace(/</g,"&lt;").replace(/"/g,"&quot;");}
 function e2(s){return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
 // base64url-encode a path for a download URL -> clean ASCII (no %20/%28/%29) that proxies/tunnels won't drop.
 function b64u(s){ try{ return btoa(unescape(encodeURIComponent(s||""))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); }catch(e){ return encodeURIComponent(s||""); } }
@@ -20167,7 +20239,7 @@ function render(){
 }
 function empty(t){return "<p style='color:var(--mut)'>"+t+"</p>";}
 function compCard(c){const k=c.kind=="spine"?'<span class="badge bdg-amber">spine</span>':'';
-  return '<div class="card" onclick="openComp(\''+c.id+'\')"><h3><span>'+c.name+'</span><span style="display:flex;gap:5px">'+k+badge(c.status)+'</span></h3><div class="brief">'+(c.summary||"")+'</div>'+((c.areas&&c.areas.length)?'<div class="meta">'+c.areas.length+' areas · <code>'+(c.path||"")+'</code></div>':'')+(c.active?'<div class="meta" style="color:var(--accent)">▶ '+e2(c.active).slice(0,80)+'</div>':'')+'</div>';}
+  return '<div class="card" onclick="openComp(\''+c.id+'\')"><h3><span>'+esc(c.name)+'</span><span style="display:flex;gap:5px">'+k+badge(c.status)+'</span></h3><div class="brief">'+esc(c.summary||"")+'</div>'+((c.areas&&c.areas.length)?'<div class="meta">'+c.areas.length+' areas · <code>'+esc(c.path||"")+'</code></div>':'')+(c.active?'<div class="meta" style="color:var(--accent)">▶ '+e2(c.active).slice(0,80)+'</div>':'')+'</div>';}
 function rouCard(r){
   var off=(r.enabled===false);
   var last=r.last_run?('ran '+tago(r.last_run)+(r.last_status?(' · '+(r.last_status=='ok'?'✅ ok':(r.last_status=='running'?'⏳ running':'❌ '+esc(r.last_status)+(r.last_exit!=null?(' (exit '+r.last_exit+')'):''))) ):'')):'never run';
@@ -20462,29 +20534,29 @@ async function campaignEdit(n){
   const r=await(await fetch("/api/campaign-intercept",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,action:"go",directive:{goal:goal.trim()}})})).json();
   if(r&&r.ok){toast("Redirected & launching the next loop…");setTimeout(loadCampaigns,900);}else toast("Failed: "+((r||{}).error||"?"),5000);
 }
-function jobCard(j){return '<div class="card" style="cursor:default"><h3><span>'+j.name+'</span>'+badge(j.status)+'</h3>'+(j.component?'<div class="meta">'+j.component+'</div>':'')+'<div class="brief">'+(j.desc||"")+'</div>'+(j.next?'<div class="meta" style="color:var(--accent)">next: '+e2(j.next)+'</div>':'')+'</div>';}
-function machCard(m){const st=ST[m.id]||m.status||"";const ok=st=="online";return '<div class="card" onclick="openMach(\''+m.id+'\')"><h3><span><span class="dot '+(ok?"ok":(st=="offline"?"bad":""))+'"></span> '+m.name+'</span></h3><div class="meta">'+m.role+'</div><div class="brief"><code>'+(m.ssh||"")+'</code></div></div>';}
+function jobCard(j){return '<div class="card" style="cursor:default"><h3><span>'+esc(j.name)+'</span>'+badge(j.status)+'</h3>'+(j.component?'<div class="meta">'+esc(j.component)+'</div>':'')+'<div class="brief">'+esc(j.desc||"")+'</div>'+(j.next?'<div class="meta" style="color:var(--accent)">next: '+e2(j.next)+'</div>':'')+'</div>';}
+function machCard(m){const st=ST[m.id]||m.status||"";const ok=st=="online";return '<div class="card" onclick="openMach(\''+m.id+'\')"><h3><span><span class="dot '+(ok?"ok":(st=="offline"?"bad":""))+'"></span> '+esc(m.name)+'</span></h3><div class="meta">'+esc(m.role)+'</div><div class="brief"><code>'+esc(m.ssh||"")+'</code></div></div>';}
 function openComp(id){const c=D.components.find(x=>x.id==id);
-  let h='<h2>'+c.name+' '+(c.kind=="spine"?'<span class="badge bdg-amber">spine</span> ':'')+badge(c.status)+'</h2>'
-   +'<div class="brief" style="margin:8px 0">'+(c.summary||"")+'</div>';
+  let h='<h2>'+esc(c.name)+' '+(c.kind=="spine"?'<span class="badge bdg-amber">spine</span> ':'')+badge(c.status)+'</h2>'
+   +'<div class="brief" style="margin:8px 0">'+esc(c.summary||"")+'</div>';
   if(c.active)h+='<div class="meta" style="color:var(--accent)">▶ active: '+e2(c.active)+'</div>';
   if(c.notes)h+='<div class="meta">'+e2(c.notes)+'</div>';
   if(c.areas&&c.areas.length)h+='<div style="margin:9px 0;display:flex;flex-wrap:wrap;gap:5px">'+c.areas.map(a=>'<span class="badge bdg-plain">'+e2(a)+'</span>').join('')+'</div>';
-  if(c.key_files&&c.key_files.length)h+='<div class="meta">key files: '+c.key_files.slice(0,6).map(f=>'<code>'+f.split("/").pop()+'</code>').join(' ')+'</div>';
-  h+='<div class="meta" style="margin-top:8px">Path: <code>'+PROJ()+'/'+(c.path||"")+'</code></div>'
+  if(c.key_files&&c.key_files.length)h+='<div class="meta">key files: '+c.key_files.slice(0,6).map(f=>'<code>'+esc(f.split("/").pop())+'</code>').join(' ')+'</div>';
+  h+='<div class="meta" style="margin-top:8px">Path: <code>'+PROJ()+'/'+esc(c.path||"")+'</code></div>'
    +'<div class="btns" style="margin-top:14px"><button class="btn go" onclick="openLaunch(\'studio\',\''+id+'\')">▶ Claude — Studio</button>'
    +'<button class="btn" onclick="openLaunch(\'t490\',\''+id+'\')">▶ Claude — T490</button>'
-   +'<button class="btn" onclick="reveal(\''+(c.path||"")+'\')">Reveal</button></div>'
+   +'<button class="btn" onclick="reveal(\''+esc(c.path||"")+'\')">Reveal</button></div>'
    +'<div class="row" id="compfiles" style="margin-top:10px"></div>'
    +'<div class="btns"><button class="btn" onclick="closeM()">Close</button></div>';
   showM(h);
   fetch("/api/workspace?path="+encodeURIComponent(c.path||"")).then(r=>r.json()).then(d=>{
     let x=document.getElementById("compfiles");if(!x)return;
-    x.innerHTML=(d.files||[]).slice(0,10).map(f=>'<div class="sess"><span class="lbl">'+(f.deliv?"⭐ ":"📄 ")+f.name+'</span><button class="mini" onclick="reveal(\''+f.path+'\')">reveal</button></div>').join("");});
+    x.innerHTML=(d.files||[]).slice(0,10).map(f=>'<div class="sess"><span class="lbl">'+(f.deliv?"⭐ ":"📄 ")+esc(f.name)+'</span><button class="mini" onclick="reveal(\''+esc(f.path)+'\')">reveal</button></div>').join("");});   // deep-audit WS1 XSS: esc raw filesystem names (name in text, path in a single-quoted onclick arg)
 }
 function openMach(id){const m=D.machines.find(x=>x.id==id);const st=ST[id]||m.status||"";
-  showM('<h2>'+m.name+' <span class="dot '+(st=="online"?"ok":"bad")+'"></span></h2><div class="meta">'+m.role+'</div><div class="brief" style="margin:8px 0">'+(m.notes||"")+'</div>'
-   +'<div class="meta">SSH: <code>'+(m.ssh||"")+'</code>'+(m.alias?' · alias <code>'+m.alias+'</code>':'')+'</div>'
+  showM('<h2>'+esc(m.name)+' <span class="dot '+(st=="online"?"ok":"bad")+'"></span></h2><div class="meta">'+esc(m.role)+'</div><div class="brief" style="margin:8px 0">'+esc(m.notes||"")+'</div>'
+   +'<div class="meta">SSH: <code>'+esc(m.ssh||"")+'</code>'+(m.alias?' · alias <code>'+esc(m.alias)+'</code>':'')+'</div>'
    +'<div class="btns" style="margin-top:14px"><button class="btn go" onclick="openLaunch(\''+id+'\',\'\')">▶ Open Claude here</button>'
    +'<button class="btn" onclick="closeM()">Close</button></div>');}
 function PROJ(){return (window.CC&&window.CC.project)||"";}
@@ -26283,8 +26355,8 @@ async function loadDoctor(){
   g.innerHTML=h;
 }
 function docCard(b){const ok=b.targets&&b.insync==b.targets;const col=ok?"#3fb950":(b.present?"#d29922":"#f85149");
-  return '<div class="card" style="cursor:default"><h3><span>'+b.title+'</span><span class="badge bdg-cyan">v'+b.version+'</span></h3>'
-   +'<div class="meta">Scope: '+(SCOPELABEL[b.scope]||b.scope)+(b.hasStub?" · has bucket stub":"")+'</div>'
+  return '<div class="card" style="cursor:default"><h3><span>'+esc(b.title)+'</span><span class="badge bdg-cyan">v'+esc(b.version)+'</span></h3>'
+   +'<div class="meta">Scope: '+esc(SCOPELABEL[b.scope]||b.scope)+(b.hasStub?" · has bucket stub":"")+'</div>'
    +'<div class="meta" style="color:'+col+'">'+b.insync+'/'+b.targets+' folders in sync'+(b.present>b.insync?(" · "+(b.present-b.insync)+" on an old version"):"")+'</div>'
    +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="applyBlock(\''+b.id+'\')">▶ Apply</button>'
    +'<button class="mini" onclick="editBlock(\''+b.id+'\')">Edit</button>'

@@ -14,6 +14,8 @@ not," no per-extension secret files.
   - **per-node values** (`per_node[node]`) -> each node gets its OWN credential for the same logical name
     (billing isolation: `STRIPE_KEY` = afp:k1, shopos:k2). Per-node wins over shared for that node.
 - **Encrypted at rest** (Fernet), audited (`_vault_audit.log`), rotatable/revocable in one place (the Vault lens).
+  See **[Encryption at rest -- the honest boundary](#encryption-at-rest----the-honest-boundary)** for exactly what
+  that defends against (and the macOS Keychain option that hardens it).
 
 ## The single resolver
 All code + extensions read a secret ONE way -- `_deploy_env(key)` -- which resolves, in order:
@@ -75,9 +77,32 @@ Agents are told this automatically (injected into every launch brief). APIs: `PO
   `secret("KEY")`, never `cc.config`. (Granola is the reference: `GRANOLA_API_KEY` via `granola._api_key()` ->
   `_deploy_env` since v0.99.5 -- before that it read cc.config only, so a vault key was silently ignored.)
 
+## Encryption at rest -- the honest boundary
+Be precise about what "encrypted at rest" buys you, because the default posture co-locates the key with the data:
+
+- **Default (file key).** The Fernet key is a 0600 file at `<DEPLOY_ROOT>/.vault_key`, sitting **beside** the
+  ciphertext at `<DEPLOY_ROOT>/.vault/_vault.json`. Both are gitignored and never shipped, so this fully defends
+  against **single-file exfiltration** -- a backup or copy of `_vault.json` alone is useless without the key. It
+  does **NOT** defend against a **stolen disk image / full backup of the host**, which contains *both* files. On
+  that threat, at-rest encryption is only as strong as OS file permissions + disk-level encryption (FileVault).
+- **Hardened (macOS Keychain-wrap, opt-in).** Set `vault_keychain: true` in `cc.config.json` (macOS only) and
+  restart. The key is stored in the **login Keychain** instead of a file: separately encrypted, unlocked only when
+  the box's user is logged in, and **not present in a disk image of `DEPLOY_ROOT`**. On first load after opting in,
+  an existing `.vault_key` is migrated into the Keychain (written, read back + byte-verified, then the plaintext
+  file is deleted). Once wrapped, if the key ever becomes unreadable (locked Keychain, revoked access) the vault
+  **fails loud** (Doctor RED) and refuses to mint a new key -- it will never silently orphan your stored secrets.
+  Co-located instances under the same user share the one Keychain entry (keyed per install root); a different-user
+  install (e.g. a cross-user node) has its own. Doctor **recommends** enabling this whenever the key is still a
+  co-located file on macOS.
+- **Defense in depth (all platforms):** keep FileVault (or the platform's full-disk encryption) on -- it is what
+  protects the ciphertext (and the file key, if used) in a stolen-disk scenario. The vault layer is *additional*
+  to, not a replacement for, disk encryption. Leasing to a remote node must be over https/loopback (`vault_url`);
+  Doctor warns on a plaintext `http://` upstream.
+
 ## Hard rules
 - The vault key (`.vault_key`) + store (`.vault/`) + migrated `.env` archives are gitignored, NEVER shipped,
   per-install. Encryption requires `cryptography` (the vault refuses to store plaintext without it).
+- On macOS, prefer `vault_keychain: true` so the key is not co-located with the ciphertext (see the boundary above).
 - No credential is ever committed, echoed in full, or shipped in the framework. Nothing hardcoded.
 - `.env.claudefather` is deprecated to a bootstrap/import path only -- after migration the vault is the one store.
 - Scope is the consent boundary: a node only ever gets secrets it is scoped for.
