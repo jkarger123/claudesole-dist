@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.188 -- 2026-07-10  (Context Health: tiny score chip, not a full-width card)
+- **Context Health (deep-audit #6) is now a TINY chip in the Sessions topbar, not a full-width card.** The score
+  took too much real estate at the top of the workspace. It's now a compact "Ctx NN" pill (colored grade dot +
+  number) sitting inline with the live-session count / auto-compact / Admin controls -- essentially zero footprint,
+  so the terminal starts higher. Click it to open the full breakdown popup (score, letter grade, trend arrow, the
+  4-part bars -- curation / doc budget / structure / drift discipline -- and the single "Best next" fix). Backend
+  (`GET /api/context-health`) unchanged; purely a presentation shrink. Verified live in a real browser (chip renders
+  in the topbar, click opens the popup with all 4 bars).
+
 ## 0.99.187 -- 2026-07-09  (WS2 differentiator: make the discipline visible where you work)
 - **Onboarding finale receipt (deep-audit #7) -- the day-1 "look what it did" wow.** Onboarding now captures a
   BEFORE snapshot (how many files, how few docs) and shows a dismissible before/after receipt on the Sessions

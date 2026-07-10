@@ -18616,6 +18616,11 @@ body.ss-dragging .basketwrap{box-shadow:0 0 0 2px rgba(var(--accent-rgb),.35) in
 .cxbv{flex:0 0 24px;text-align:right;color:#e8e8ef}
 .cxfix{flex:1 0 100%;font-size:11.5px;color:var(--dim);margin-top:1px}
 @media(max-width:820px){.cxbl{flex-basis:74px}.cxcard{gap:12px;padding:10px 12px}}
+/* Context Health TINY chip (deep-audit #6) -- lives in the sessions topbar next to the token/auto-compact controls; click -> the breakdown popup (.cxcard) */
+.cxchip{display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:11.5px;color:var(--dim);padding:2px 8px;border:1px solid var(--line);border-radius:20px;background:var(--card2);white-space:nowrap}
+.cxchip:hover{border-color:var(--accent)}
+.cxchip b{color:#e8e8ef}
+.cxdot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
 /* onboarding finale receipt (deep-audit #7) -- dismissible day-1 before/after */
 .onbr{display:flex;align-items:center;gap:11px;background:linear-gradient(90deg,rgba(var(--accent-rgb),.14),rgba(var(--accent-rgb),.04));border:1px solid rgba(var(--accent-rgb),.4);border-radius:12px;padding:10px 14px;font-size:12.5px;color:#e8e8ef}
 .onbr-ic{font-size:20px;flex:0 0 auto}
@@ -20679,7 +20684,7 @@ function sessToolsHTML(count){
   // Workspace model (no focus/grid/list): drag sessions up from the taskbar into resizable split panes.
   var live=(count!=null)?('<span class="sesslive" title="'+count+' live session'+(count==1?'':'s')+'">🟢 '+count+'</span>'):'<span class="sesslive"></span>';
   var hint='<span class="sub" style="font-size:11px;color:var(--dim)" title="Drag a session up from the taskbar into the workspace to split the screen; drag the bar between panes to resize; ⏷ pushes a pane back down.">drag from the taskbar ↓ to split</span>';
-  return live+hint+acmpBtn()+'<button class="mini" title="Admin shell — a plain shell in this project for sudo / interactive commands (type your password here)" onclick="openAdminShell()">Admin</button>';
+  return live+hint+acmpBtn()+cxChipHTML()+'<button class="mini" title="Admin shell — a plain shell in this project for sudo / interactive commands (type your password here)" onclick="openAdminShell()">Admin</button>';
 }
 function paintSessTools(count){var el=document.getElementById('lensTools');if(el)el.innerHTML=(LENS=='sessions')?sessToolsHTML(count):'';}
 function setSessView(v){SESSVIEW=v;localStorage.setItem('hpcc_sessview',v);loadSessions(true);syncHash();}
@@ -25746,8 +25751,8 @@ async function loadSessions(quiet){
   SESSDATA=s;
   paintSessTools(s.length);   // controls (live count + view modes + Admin) now live in the always-visible topbar -- no second bar
   let head='<div id="onbreceipt" style="grid-column:1/-1;margin:0 0 7px"></div>'   // deep-audit #7: the onboarding before/after receipt (dismissible)
-    +'<div id="cxhealth" style="grid-column:1/-1;margin:0 0 7px"></div>'   // deep-audit #6: the Context Health score headlines the Sessions lens
     +'<div id="tkstripwrap" style="grid-column:1/-1;margin:0 0 7px">'+totalsStrip()+'</div>';   // slim: just the metered-usage strip (hidden on mobile); the old title/control card + hint are gone -> the terminal moves up
+    // Context Health (deep-audit #6) is a TINY score chip in the sessions topbar (sessToolsHTML) -- click for the breakdown
   let body;
   if(!s.length)body=empty("No live sessions — click ▶ New session above to start one.");
   else body=renderWorkspace(s);
@@ -25775,12 +25780,23 @@ async function loadOnboardReceipt(){
     +'<span class="onbr-x" title="dismiss" onclick="onbrDismiss()">&times;</span></div>';
 }
 function onbrDismiss(){try{localStorage.setItem('cf_onboard_receipt_seen','1');}catch(e){}var el=document.getElementById('onbreceipt');if(el)el.innerHTML='';}
-// ---- Context Health score (deep-audit #6): the demoable "vibe coder -> context engineer" number -------------
+// ---- Context Health score (deep-audit #6): a TINY score chip in the sessions topbar; click for the breakdown ---
+var CXHEALTH=null;
 function cxGradeColor(g){return g==='A'?'var(--ok)':g==='B'?'#7bc96f':g==='C'?'var(--accent)':g==='D'?'#d29922':'var(--err)';}
+function cxChipHTML(){
+  if(!CXHEALTH||!CXHEALTH.ok) return '<span id="cxchip"></span>';
+  var d=CXHEALTH, col=cxGradeColor(d.grade);
+  return '<span id="cxchip" class="cxchip" onclick="cxShowDetail()" title="Context Health '+d.score+'/100 ('+d.grade+') — how well this workspace is context-engineered (docs, budget, structure, focus). Click for the breakdown.">'
+    +'<span class="cxdot" style="background:'+col+'"></span>Ctx <b style="color:'+col+'">'+d.score+'</b></span>';
+}
 async function loadContextHealth(){
-  var el=document.getElementById('cxhealth'); if(!el)return;
-  var d; try{ d=await(await fetch('/api/context-health')).json(); }catch(e){ el.innerHTML=''; return; }
-  if(!d||!d.ok){ el.innerHTML=''; return; }
+  var d; try{ d=await(await fetch('/api/context-health')).json(); }catch(e){ return; }
+  if(!d||!d.ok){ CXHEALTH=null; return; }
+  CXHEALTH=d;
+  var slot=document.getElementById('cxchip'); if(slot) slot.outerHTML=cxChipHTML();
+}
+function cxShowDetail(){
+  var d=CXHEALTH; if(!d||!d.ok) return;
   var col=cxGradeColor(d.grade);
   var tp=d.trend||[]; var delta=(tp.length>=2)?(tp[tp.length-1].s-tp[tp.length-2].s):0;
   var arrow=delta>0?('<span style="color:var(--ok)" title="up '+delta+' since last">&#9650;'+delta+'</span>')
@@ -25788,11 +25804,14 @@ async function loadContextHealth(){
            :'<span class="sub" title="unchanged">&mdash;</span>';
   var bars=(d.parts||[]).map(function(p){var c=p.score>=75?'var(--ok)':p.score>=50?'var(--accent)':'var(--err)';
     return '<div class="cxbar" title="'+esc(p.detail)+'"><span class="cxbl">'+esc(p.key)+'</span><span class="cxtrack"><span class="cxfill" style="width:'+Math.max(3,p.score)+'%;background:'+c+'"></span></span><span class="cxbv">'+p.score+'</span></div>';}).join('');
-  el.innerHTML='<div class="cxcard" title="How well this workspace is context-engineered: are modules self-describing, docs within budget, structure in sync, and conversations kept in-lane? Rises as the tree gets documented + tidy.">'
-    +'<div class="cxscore"><div class="cxnum" style="color:'+col+'">'+d.score+'</div><div class="cxg">Context Health &nbsp;<b style="color:'+col+'">'+d.grade+'</b>&nbsp; '+arrow+'</div></div>'
+  showM('<h3 style="margin:0 0 3px">Context Health</h3>'
+    +'<div class="meta sub" style="margin-bottom:11px">How well this workspace is context-engineered: are modules self-describing, docs within budget, structure in sync, and conversations kept in-lane? Rises as the tree gets documented + tidy.</div>'
+    +'<div class="cxcard" style="cursor:default">'
+    +'<div class="cxscore"><div class="cxnum" style="color:'+col+'">'+d.score+'</div><div class="cxg">Grade &nbsp;<b style="color:'+col+'">'+d.grade+'</b>&nbsp; '+arrow+'</div></div>'
     +'<div class="cxbars">'+bars+'</div>'
     +'<div class="cxfix">&#10549; Best next: <b>'+esc((d.top_fix||{}).detail||'looking good')+'</b></div>'
-    +'</div>';
+    +'</div>'
+    +'<div style="margin-top:12px;text-align:right"><button class="mini" onclick="closeM()">Close</button></div>');
 }
 // ---- Give Claude a file: drag-drop / tap-to-attach onto a session ----------------------------------
 // Upload the dropped/picked file, then the server types its absolute path into the tmux session so Claude
