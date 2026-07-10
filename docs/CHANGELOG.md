@@ -3,6 +3,16 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.195 -- 2026-07-10  (WS4 flagship: telephone line increment 3 -- the Telephone lens makes it visible)
+- **A Telephone lens gives the agent telephone line a real home in the dashboard (deep-audit WS4).** Until now the
+  line was CLI-only (`cc-ask`) and invisible; the new **Telephone** tab shows, at a glance: whether the line is on
+  for this node, every addressable specialist **across the fleet** (the overseer aggregates each node's directory),
+  an **Ask** box so you can query a specialist right from the UI and read the answer inline, and the recent **call
+  log**. Plain-language help + an on/off badge, built entirely from the shared design-system primitives (passes
+  `ui_lint`). Backend `GET /api/agent-comms` (directory + best-effort fleet scrape + log). Registered in the
+  project + overseer presets, categorized under Team. Verified in a real browser (6 checks: header, specialist
+  list, Ask box, call log, help bar). Cross-family talk-grants + policy-gated live subtasks remain a later increment.
+
 ## 0.99.194 -- 2026-07-10  (WS4 flagship: telephone line increment 2 -- the live-session handoff path)
 - **`cc-ask --live <node/chief|session> "<message>"` -- hand off to a target's RUNNING session, reply comes back
   to yours (deep-audit WS4).** Where increment 1's `cc-ask` is a headless info query, `--live` delivers the message

@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "4b69449533684ef8b576f6c19288e642b74f01c384b293b3ecf77d3c844587b2",
+      "claudesole.manifest.json": "dee7f3fe132a8a7da9519e7438513a792a07ef4b5b0726daceb8646b220d6553",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/campaign_runner.py": "0a385adb090626c76c1f3baf4a1ed944cd0a80983ef752686e471003a012e339",
       "command-center/cc-advise": "e449156a34ddcb9068fc1c89223a2d3f8574b6dba15f2e3d3fe748bf2f49a70f",
@@ -67,7 +67,7 @@
       "command-center/residue_lint.py": "0b1c757909a27470095d5ea8b48641a9e9e0248ec1729f3598596f2129fd1d6f",
       "command-center/rollback_guard.py": "603ae76f8f854b46e0dd152a123e11cc85c760a8c82e7865ab5eeaf75b2ac800",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "7107007b593e7cf91bfe68e6ae90a7085417cc0dbc382302f61e85b4109b92ad",
+      "command-center/server.py": "ccbc9b1ecf497d29da5f0e74efa62462f18c03d3cf1790e68629574be761509a",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/static/phosphor/fill.css": "555980683a582c1910a954648b4ae38f58d76e797f02bfdc2c5e817901e6d4fc",
       "command-center/static/phosphor/light.css": "f2e59699faaeee27da9edb86dd18f5ed3bd5113db3e4e388fdd23afcaf308865",
@@ -160,14 +160,14 @@
       "install/templates/claudefather.service.template": "5aff7dc5fbfbc04d3ae84a45d53a0c369ba81911d97161c9a4c6624200641bd6",
       "install/templates/com.claudefather.instance.plist.template": "1ba0b4b24a37c0e1ad291e171a21daae22b36b5d882f3d720a60546b74884f83",
       "make-install-package.sh": "afb82e14548797e298bd9d8d8934e1eb4d2a95c77294bc5efca7651fed50bbc5",
-      "presets/overseer.json": "cb7513e42e2ba2359dff686e2ba3df57c0f3716ce4e82c5950a66d58f25a0787",
-      "presets/project.json": "f403039e1d0efe082a801395b50ce2628a04a257a7d434ce2793b409a030f70c",
+      "presets/overseer.json": "b01c5449641ef86887a45810e84a3ce1b343c39527c93bff136553c7060d97c0",
+      "presets/project.json": "32564bb682d7797368b49787e34250a8e7c66176cd21f76f7afe145de1d9db99",
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783712528,
+    "generated": 1783715423,
     "v": 1,
-    "version": "0.99.194"
+    "version": "0.99.195"
   },
-  "sig": "OT4G7TaKQXSHgcOOn7qXzkCVHghk8dvs6qCySnPrapbyPZ/EAl03+/6GjBgn4KWzjk8z+C4vrE2tazk2mKsRCQ=="
+  "sig": "qJw5F4OS16oMc/ezDGmf6c5vVNtKBswZUbbu3pWn26i8cjugTgIVvZd0RK7drfYtQ2nND3rHjhGyqnTTj4+1Ag=="
 }

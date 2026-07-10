@@ -1808,7 +1808,7 @@ def _web_manifest():
 # Peer/machine-to-machine ingress: NOT gated by the operator token (that's a human surface). These are
 # peer surface, protected on their own MESH_TOKEN track, so enabling operator auth on a node never severs
 # the mesh (a peer POSTs here with X-Mesh-Token or nothing, never the operator cookie/bearer).
-AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store", "/api/account-windows-store", "/api/vault-lease", "/api/opnote-recv", "/api/agent-msg-recv", "/api/agent-msg-reply")
+AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store", "/api/account-windows-store", "/api/vault-lease", "/api/opnote-recv", "/api/agent-msg-recv", "/api/agent-msg-reply", "/api/agent-directory")
 
 # Security frame stamped onto EVERY inbound peer message (appended AFTER the literal "[message from X]" so
 # the Stop-hook sender regex still matches). Makes the trust boundary explicit in the message itself -- a
@@ -1994,6 +1994,19 @@ def agent_msg_reply(convo, text):
         _agentmsg_log({"dir": "reply-relay", "convo": convo, "via": rec["reply_via_node"], "ok": True})
         return {"ok": True, "relayed_to": rec["reply_via_node"]}
     return {"ok": False, "error": "convo has no destination"}
+def agent_comms_payload():
+    """The Telephone lens: this node's addressable specialists + (on the overseer) the whole fleet's, the on/off
+    state, and the recent call log. Read-only; the fleet scrape is best-effort + short-timeout."""
+    d = agent_directory()
+    try: log = list(reversed((load(_AGENTMSG_LOG, []) or [])[-40:]))
+    except Exception: log = []
+    fleet = []
+    if ROLE == "org":                                          # overseer aggregates every reachable peer's directory
+        for p in peers():
+            if p.get("id") == INSTANCE_ID: continue
+            pd = _scrape_json(p["url"].rstrip("/") + "/api/agent-directory", timeout=2.0)
+            if pd and pd.get("agents"): fleet.append({"node": pd.get("node") or p.get("id"), "telephone": pd.get("telephone"), "agents": pd.get("agents")})
+    return {"node": d["node"], "telephone": d["telephone"], "agents": d["agents"], "fleet": fleet, "log": log}
 
 def mesh_enqueue(peer, text, kind="msg", expect_reply=None):
     """Create a durable PENDING outbound delivery for the worker. kind='msg' (an initiating message ->
@@ -16803,6 +16816,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/doctor": return self._s(200, json.dumps(doctor()))
         if u.path == "/api/agent-directory":        # WS4 telephone line: this node's addressable specialists (+ on/off)
             return self._s(200, json.dumps(agent_directory()))
+        if u.path == "/api/agent-comms":            # WS4 Telephone lens: directory (local + fleet) + on/off + call log
+            return self._s(200, json.dumps(agent_comms_payload()))
         if u.path == "/api/ralph": return self._s(200, json.dumps(ralph_list()))
         if u.path == "/api/campaigns": return self._s(200, json.dumps(campaign_list()))
         if u.path == "/api/campaign": return self._s(200, json.dumps(campaign_detail((q.get("name") or [""])[0])))
@@ -20365,6 +20380,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="calls"><i class="ph-light ph-phone-call"></i>Calls</button>
 <button data-l="capture"><i class="ph-light ph-scissors"></i>Capture</button>
 <button data-l="comms"><i class="ph-light ph-chats-circle"></i>Comms<span id="commsBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
+<button data-l="telephone"><i class="ph-light ph-phone-outgoing"></i>Telephone</button>
 <button data-l="notes"><i class="ph-light ph-chat-circle-text"></i>Messages<span id="notesBadge" style="display:none;margin-left:6px;background:#f85149;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="notebook"><i class="ph-light ph-notebook"></i>Notes</button>
 <button data-l="handoffs"><i class="ph-light ph-arrows-left-right"></i>Transfers<span id="transfersBadge" style="display:none;margin-left:6px;background:var(--accent);color:#15120a;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
@@ -20520,6 +20536,7 @@ function render(){
   else if(LENS=="capture"){loadCapture();return;}
   else if(LENS=="context"){loadContext();return;}
   else if(LENS=="comms"){loadComms();return;}
+  else if(LENS=="telephone"){loadTelephone();return;}
   else if(LENS=="notes"){loadNotes();return;}
   else if(LENS=="notebook"){loadNotebook();return;}
   else if(LENS=="handoffs"){loadHandoffs();return;}
@@ -24587,6 +24604,53 @@ async function gmailBadgePoll(){
     if(n>0){b.textContent=n>99?'99+':n;b.style.display='';}else b.style.display='none';}catch(e){}
 }
 if(window.CC&&window.CC.google){setInterval(gmailBadgePoll,30000);setTimeout(gmailBadgePoll,2000);}
+// ---- Telephone line lens (WS4): who's askable across the fleet + ask one + the call log --------------------
+var TELDIR=[];
+function telAgentOptions(){
+  var opts=TELDIR.map(function(x){return '<option value="'+esc(x.addr)+'">'+esc(x.addr)+(x.desc?(' — '+esc(x.desc.slice(0,50))):'')+'</option>';}).join('');
+  return '<option value="">— pick a specialist —</option>'+opts;
+}
+async function loadTelephone(){
+  var d={};try{d=await(await fetch('/api/agent-comms')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load the telephone line.");return;}
+  // build the flat addressable list: local (bare name) + fleet (node/name)
+  TELDIR=[];
+  (d.agents||[]).forEach(function(a){TELDIR.push({addr:a.name,desc:a.desc||'',node:d.node,on:d.telephone});});
+  (d.fleet||[]).forEach(function(f){(f.agents||[]).forEach(function(a){TELDIR.push({addr:(f.node||'?')+'/'+a.name,desc:a.desc||'',node:f.node,on:f.telephone});});});
+  var onHere=d.telephone;
+  var badge=onHere?'<span class="badge bdg-green">on</span>':'<span class="badge bdg-plain">off</span>';
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Telephone line</b> '+badge
+    +' <span class="sub">'+((d.agents||[]).length)+' specialist'+((d.agents||[]).length==1?'':'s')+' here'+(d.fleet&&d.fleet.length?(' · '+d.fleet.length+' peer node'+(d.fleet.length==1?'':'s')):'')+'</span>'
+    +'<button class="mini" title="Refresh the directory + call log" onclick="loadTelephone()" style="margin-left:auto">&#8635; Refresh</button></div>';
+  if(!onHere)h+='<div class="meta" style="margin-top:8px;color:#d29922">This node&#39;s telephone line is <b>off</b>. Turn it on by setting <code>agent_telephone: true</code> in its cc.config.json and restarting. You can still see who is reachable elsewhere below.</div>';
+  h+='</div>';
+  // --- ask box ---
+  h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Ask a specialist</b> <span class="sub">headless info query — the answer comes back here</span></div>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:9px;align-items:flex-start">'
+    +'<select id="telAgent" class="cc-in" style="min-width:230px">'+telAgentOptions()+'</select>'
+    +'<input id="telQ" class="cc-in" style="flex:1;min-width:240px" placeholder="e.g. any exposed secrets in this repo&#39;s config?">'
+    +'<button class="btn go" title="Ask the selected specialist (runs headless, answer appears below)" onclick="telAsk()">Ask</button></div>'
+    +'<div id="telAnswer" style="margin-top:11px"></div></div>';
+  // --- call log ---
+  var log=(d.log||[]);
+  var rows=log.slice(0,30).map(function(r){
+    var when=r.ts?tago(r.ts):''; var okd=r.ok?'<span class="badge bdg-green">ok</span>':'<span class="badge bdg-red">fail</span>';
+    var what=esc(r.dir||'')+(r.to?(' &rarr; '+esc(r.to)):'')+(r.agent?(' &rarr; '+esc(r.agent)):'')+(r.from?(' <span class="sub">(from '+esc(r.from)+')</span>'):'');
+    return '<div class="cc-item" style="display:flex;gap:10px;align-items:center"><span style="flex:1;min-width:0">'+what+'</span>'+okd+'<span class="sub" style="flex:0 0 auto">'+esc(when)+'</span></div>';
+  }).join('');
+  h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Recent calls</b> <span class="sub">last '+log.length+'</span></div>'
+    +(rows||('<div class="meta" style="margin-top:8px">No calls yet. When an agent uses <code>cc-ask</code>, each call is logged here.</div>'))+'</div>';
+  document.getElementById("grid").innerHTML=h;
+}
+async function telAsk(){
+  var addr=(document.getElementById('telAgent')||{}).value||''; var q=(document.getElementById('telQ')||{}).value||'';
+  var box=document.getElementById('telAnswer');
+  if(!addr||!q.trim()){if(box)box.innerHTML='<span class="sub">Pick a specialist and type a question.</span>';return;}
+  if(box)box.innerHTML='<span class="sub">asking '+esc(addr)+'…</span>';
+  var r={};try{r=await(await fetch('/api/agent-msg-send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:addr,question:q})})).json();}catch(e){if(box)box.innerHTML='<span style="color:var(--err)">request failed</span>';return;}
+  if(!box)return;
+  if(!r.ok){box.innerHTML='<div class="meta" style="color:#d29922">'+esc(r.error||'ask failed')+'</div>';return;}
+  box.innerHTML='<div class="cc-panel" style="white-space:pre-wrap">'+esc((r.answer||'').trim())+'</div><div class="sub" style="margin-top:5px">— '+esc(r.agent||'')+'@'+esc(r.node||'')+(r.cost?(' · $'+(r.cost).toFixed(4)):'')+'</div>';
+}
 async function loadComms(){
   let d={};try{d=await(await fetch('/api/mesh')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load comms.");return;}
   const me=d.self||"me";const peers=(d.peers||[]).filter(p=>p.id!==me);
@@ -26803,6 +26867,7 @@ function busyOn(msg,sub){ var o=document.getElementById('cfbusy'); if(!o){ o=doc
 function busyOff(){ var o=document.getElementById('cfbusy'); if(o) o.style.display='none'; }
 // ---- "How this works" explainers: per-feature, auto-shows once, dismissible + never-again, reopen via the ? button ----
 var HELP={
+  telephone:{t:'Telephone line',sub:'Let an agent ask another scope’s specialist a question -- or hand a task to a live session -- and get the answer back.',h:'<p><b>What:</b> a private line between your agents. Any agent (or you) can <b>ask</b> a specialist on this node or another node a question -- it runs headless and answers, occupying no session -- or, with a live handoff, drop a message into a target’s <b>running</b> session so it answers with its actual working context; that reply comes back to whoever asked.</p><p><b>Why:</b> it turns a chief from a babysitter into an orchestrator -- one scope can get a fact another scope owns, or a quick pre-brief, without you relaying it by hand.</p><p><b>How:</b> from a session an agent runs <code>cc-ask &lt;agent|node/agent&gt; "question"</code> (headless), or <code>cc-ask --live &lt;node/chief&gt; "message"</code> (live handoff). Here you can see who is reachable across the fleet, ask one yourself, and watch the recent call log.</p><p><b>Safety:</b> OFF by default -- enable per node with <code>agent_telephone</code> in its config. Every call is rate-limited, hop-capped, allow-listed, and carried over the per-node mesh token; a live handoff is exactly one round-trip.</p>'},
   frontdesk:{t:'Front Desk',sub:'Where every conversation starts -- tell it what you want to work on and it takes you to the right place.',h:'<p><b>What:</b> the reception for your whole workspace. Type what you want to work on and it routes you to the right department (folder / scope) and opens a session there with your goal already set up -- or talks it through for a moment if it is unclear, and creates a new department if none fits.</p><p><b>Why:</b> you start in the right room with a clean, focused context instead of piling everything into one conversation, and the agent there is briefed on what you are doing so nothing gets repeated. Conversations START here -- they do not end here (your open ones stay in the Sessions bar).</p><p><b>How:</b> type a sentence, glance at the department chip, press Enter. Already know the department? Open Projects and go straight there.</p><p><b>Front Desk vs Chief of Staff:</b> think of a business. The <b>Front Desk</b> is the receptionist &mdash; it gets you started in the right department, and that is where you do your day-to-day work. Your <b>Chief of Staff</b> is the senior manager / owner: you do <i>not</i> check in with them for normal work &mdash; only for things that span multiple departments, are structural, or need to be escalated. Both are always available; you will spend most of your time at the Front Desk and in departments, and only occasionally need the Chief.</p>'},
   studio:{t:'Studio',sub:'Beat-synced video editor -- build, trim, effects, titles, PiP, export.',h:'<p><b>What:</b> a built-in video editor. Drop in clips, add music (upload a track or paste a YouTube link), and <b>Auto-build</b> a beat-synced cut -- then fine-tune it on the timeline.</p><p><b>Timeline:</b> tap a clip to trim (drag its edges), change speed, reorder, or add a flash/zoom on the beat; add titles; drop a clip on the PiP lane for picture-in-picture. Scrub to preview, or Play.</p><p><b>Export:</b> render an MP4 (lands in Files) or a CapCut bundle. Runs on the node&rsquo;s bundled ffmpeg -- no API key needed; works on real footage (no generative model).</p>'},
   agentlab:{t:'Agent Lab',sub:'Experimental \u2014 run specialist subagents as one-shot functions and parallel panels',h:'<p><span class="badge bdg-amber">Experimental</span> Agent Lab is a workbench for our specialist subagents (code-reviewer, cost-reporter, deploy-checker, incident-scanner, security-auditor, and any others the node exposes). Features here are being worked out; when one proves itself it graduates into core or ships as an extension.</p><p><b>Run a specialist</b> \u2014 pick one agent, type a task, and Run it as a one-shot function; you get the answer plus its cost and duration.</p><p><b>Panel</b> \u2014 select several specialists and give them ONE task; they run in parallel and answers land side by side as each finishes, a quick dynamic mini-workflow.</p><p>Every run uses the node&rsquo;s own subscription login.</p>'},
@@ -27622,7 +27687,7 @@ var NAV_CAT={
   modules:"Workspace",projects:"Workspace",context:"Workspace",capture:"Workspace",ideas:"Workspace",handoffs:"Workspace",
   pipeline:"Workspace",ralph:"Workspace",campaigns:"Workspace",jobs:"Workspace",routines:"Workspace",tree:"Workspace",
   agency:"Agency",calls:"Agency",
-  agents:"Team",skills:"Team",teams:"Team",audit:"Team",
+  agents:"Team",skills:"Team",teams:"Team",audit:"Team",telephone:"Team",
   marketplace:"Integrations",vault:"Integrations",
   usage:"System",server:"System",accounts:"System",security:"System",backup:"System",machines:"System",desktop:"System",
   history:"System",docs:"System",doctor:"System",ccr:"System",propose:"System",settings:"System"
