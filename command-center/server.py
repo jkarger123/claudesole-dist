@@ -14835,28 +14835,61 @@ def fleet_converge(force=False, auto=False):
             res["skipped"].append({"id": nid, "why": status}); continue
         if auto and not force and n.get("quiet_now"):   # inside its business hours -> don't restart it mid-workday
             res["skipped"].append({"id": nid, "why": "business hours -- deferred (converges after hours, or on a manual update)"}); continue
-        upd = superadmin_send(nid, "cc_update", {"upstream": mirror})
-        ok = bool(upd.get("ok") and (upd.get("result") or {}).get("ok"))
-        rec = {"id": nid, "from": status, "update": ok, "stale_process": bool(n.get("stale_process"))}
-        # restart if the pull landed OR the node's process is running stale code (files already current but not
-        # reloaded -- the pull is a no-op, so the RESTART is the whole fix). This is what makes a converge actually
-        # take effect instead of silently leaving old code running.
-        if ok or n.get("stale_process"):
-            rst = superadmin_send(nid, "restart")   # SEPARATE safe self-restart (never cc_update restart:true)
-            rec["restart"] = bool(rst.get("ok") and (rst.get("result") or {}).get("ok"))
-            _aupd_log("MC converged %s (%s) update=%s stale=%s restart=%s" % (nid, status, ok, n.get("stale_process"), rec.get("restart")))
-            # HEALTH GATE + SERIALIZED CANARY (deep-audit 0.3): don't trust the restart's HTTP 200 -- confirm the
-            # node actually came BACK UP on the target version. If it did not (old code / crash-loop / down), HALT
-            # the fan-out so a bad ship can't cascade to every remaining tenant.
-            if canary and target and rec["restart"]:
-                rec["verified"] = _verify_converged(n.get("url"), target)
-                if not rec["verified"]:
-                    rec["error"] = "did NOT come back on v%s within the health window -- possible bad ship; HALTING fan-out" % target
-                    _aupd_log("CANARY HALT at %s: no converge to v%s -> stopping fan-out to protect the rest of the fleet" % (nid, target))
-                    res["halted"] = {"at": nid, "target": target}
-                    res["ran"].append(rec); break
+        # CO-LOCATED tenant? (its home is a real local dir on THIS host, distinct from the authoring checkout.)
+        # The overseer is on the SAME machine, so converge it DIRECTLY -- the remote superadmin round-trip proved
+        # UNRELIABLE for these (the restart action returns ok:True before an os.execv that can fail silently ->
+        # `restart=True` while the OLD code keeps running; they stayed behind on 2/3 ships). (deep-audit: co-located
+        # converge fix.)
+        # SAME-USER co-located tenant = its home is a local dir (not the authoring checkout) AND it has a
+        # `cc-<id>` session on OUR tmux server. That last check keeps a CROSS-USER node (e.g. AFP under sarahaios,
+        # whose session lives on ITS OWN tmux server) on the superadmin path -- we must not run its cc-update.sh
+        # as this user or write into another user's install.
+        _home = n.get("home"); _sess = "cc-" + str(nid)
+        _colo = bool(_home and os.path.isdir(_home) and os.path.realpath(_home) != os.path.realpath(CC_HOME)
+                     and sh([TMUX, "has-session", "-t", _sess])[0] == 0)
+        rec = {"id": nid, "from": status}
+        if _colo:
+            # 1) run its OWN cc-update.sh locally, and VERIFY the on-disk manifest actually reached target (exit-0
+            #    alone lied -- a build could report success without landing the files).
+            _cfg = os.path.join(_home, "cc.config.json"); _sh = os.path.join(_home, "cc-update.sh")
+            try: sh(["env", "CC_HOME=" + _home, "CC_CONFIG=" + _cfg, "bash", _sh, mirror], timeout=180)
+            except Exception: pass
+            try: _diskv = (json.load(open(os.path.join(_home, "claudesole.manifest.json"))) or {}).get("version")
+            except Exception: _diskv = None
+            ok = bool(target and _diskv and _semver(_diskv) >= _semver(target))
+            rec.update({"update": ok, "disk_version": _diskv, "colocated": True})
+            if not ok:
+                rec["error"] = "cc-update did not land v%s on disk (disk=%s)" % (target, _diskv)
+                _aupd_log("MC co-located converge FAILED for %s: files not at target (disk=%s) -> not restarting into old code" % (nid, _diskv))
+                res["ran"].append(rec)
+                if canary: res["halted"] = {"at": nid, "target": target}; break
+                continue
+            # 2) restart the RELIABLE way: kill its tmux session so launchd relaunches it fresh on the new code.
+            if sh([TMUX, "has-session", "-t", _sess])[0] == 0:
+                sh([TMUX, "kill-session", "-t", _sess]); rec["restart"] = True; rec["restart_via"] = "tmux-relaunch"
+            else:                                            # no local tmux session found -> fall back to the self-restart
+                rst = superadmin_send(nid, "restart"); rec["restart"] = bool(rst.get("ok") and (rst.get("result") or {}).get("ok")); rec["restart_via"] = "superadmin"
+            _aupd_log("MC converged %s (co-located, local) disk=%s restart=%s via=%s" % (nid, _diskv, rec.get("restart"), rec.get("restart_via")))
         else:
-            rec["error"] = (upd.get("error") or (upd.get("result") or {}).get("error") or "update failed")[:160]
+            # REMOTE tenant: the superadmin round-trip is the only path (different host).
+            upd = superadmin_send(nid, "cc_update", {"upstream": mirror})
+            ok = bool(upd.get("ok") and (upd.get("result") or {}).get("ok"))
+            rec.update({"update": ok, "stale_process": bool(n.get("stale_process"))})
+            if ok or n.get("stale_process"):
+                rst = superadmin_send(nid, "restart"); rec["restart"] = bool(rst.get("ok") and (rst.get("result") or {}).get("ok")); rec["restart_via"] = "superadmin"
+                _aupd_log("MC converged %s (%s) update=%s stale=%s restart=%s" % (nid, status, ok, n.get("stale_process"), rec.get("restart")))
+            else:
+                rec["error"] = (upd.get("error") or (upd.get("result") or {}).get("error") or "update failed")[:160]
+                res["ran"].append(rec); continue
+        # HEALTH GATE + SERIALIZED CANARY (deep-audit 0.3): confirm the node actually came BACK UP on the target
+        # version -- don't trust an HTTP 200 / a spawned restart thread. A failure HALTS the fan-out.
+        if canary and target and rec.get("restart"):
+            rec["verified"] = _verify_converged(n.get("url"), target)
+            if not rec["verified"]:
+                rec["error"] = "did NOT come back on v%s within the health window -- HALTING fan-out" % target
+                _aupd_log("CANARY HALT at %s: no converge to v%s -> stopping fan-out to protect the rest of the fleet" % (nid, target))
+                res["halted"] = {"at": nid, "target": target}
+                res["ran"].append(rec); break
         res["ran"].append(rec)
     return res
 

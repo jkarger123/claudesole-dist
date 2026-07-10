@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.186 -- 2026-07-09  (Auto-converge: co-located tenants now converge reliably -- no more manual restarts)
+- **The fleet auto-converge now reliably updates co-located tenants.** Root cause: the overseer converged every
+  tenant through the REMOTE superadmin round-trip, whose `restart` action spawns an `os.execv` in a daemon thread
+  and returns `ok:True` BEFORE the exec -- and an `os.execv` failure is swallowed. So co-located tenants reported
+  `restart=True` while the OLD code kept running, leaving them behind (they needed a manual `tmux kill-session` on
+  2 of 3 recent ships). Fix: since the overseer is on the SAME host, a SAME-USER co-located tenant (its home is a
+  local dir + it has a `cc-<id>` session on our tmux server) is now converged DIRECTLY -- run its `cc-update.sh`
+  locally, **verify the on-disk manifest actually reached the target version** (exit-0 alone lied), then relaunch
+  it via `tmux kill-session` so launchd brings it back fresh on the new code. A cross-user node (e.g. AFP under
+  another account, whose session lives on its own tmux server) correctly stays on the superadmin path -- we never
+  run its updater as the wrong user. The serialized canary still health-verifies each node. Verified with a forced
+  converge: all co-located tenants restart via `tmux-relaunch` and `verified=True`; AFP via superadmin, verified.
+
 ## 0.99.185 -- 2026-07-09  (Security batch: mesh-reply spoof gate, superadmin replay persistence, vault hardening)
 - **`/api/mesh-reply` can no longer be spoofed by a remote caller.** It was the only mesh-ingress route with NO
   auth re-check, so anyone who could reach the port could enqueue a forged `[reply from us]` to any peer. Now
