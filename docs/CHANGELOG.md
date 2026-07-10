@@ -3,6 +3,26 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.189 -- 2026-07-10  (WS1 security batch 1: converge retry-before-halt · extensions fail-CLOSED · edition tripwire)
+- **Fleet converge now RETRIES a node once before halting the fan-out (deep-audit WS1).** Previously the *first*
+  node that didn't come back on the new version within its health window halted the entire convergence -- so one
+  transient blip (a slow restart, a network hiccup, a cc-update that needed a second clean pass) could strand the
+  rest of the fleet on old code. Now a miss re-issues the restart (or re-runs cc-update, for a co-located tenant)
+  and re-verifies with a fresh window; only a node that STILL won't converge halts the fan-out. The canary
+  safety guarantee is unchanged (a genuinely bad ship still reaches ≤1 node, then stops).
+- **Extension authorization now FAILS CLOSED for a new/tampered signed install (deep-audit #10).** When the signed
+  core manifest can't be verified, we no longer treat every catalog extension as official ("fail open"). Instead we
+  fail to the LAST-KNOWN-GOOD official set (an established install stays available but closed -- a rogue extension
+  never in the signed set still can't load), and to an EMPTY set (run nothing unsigned) on a signed build that has
+  no prior verified trust at all. A legitimately UNSIGNED dev/standalone checkout (no core.sig.json ever) is
+  unchanged (stays open). Rogue-dir quarantine still acts only on a LIVE positive verification, never the cache.
+- **Edition tripwire (deep-audit #34): a change in the authority tier is now surfaced LOUD.** Edition
+  auto-detection is trivially flipped (set `update_role: source` or drop a `.cc-source` file and a locked appliance
+  becomes `authoring` -- unlocking core-mutation, self-signing, and grant-minting). The node now BASELINES its
+  edition on first boot and keeps any later change flagged (RED in Doctor + logged; an appliance->authoring
+  ESCALATION also fires an OS notification) until an operator acknowledges it (`POST /api/edition-ack` re-baselines).
+  Checked at boot + every 15 min by the core-integrity loop.
+
 ## 0.99.188 -- 2026-07-10  (Context Health: tiny score chip, not a full-width card)
 - **Context Health (deep-audit #6) is now a TINY chip in the Sessions topbar, not a full-width card.** The score
   took too much real estate at the top of the workspace. It's now a compact "Ctx NN" pill (colored grade dot +

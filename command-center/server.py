@@ -5218,21 +5218,39 @@ def _custom_approved():
     try: return set(json.load(open(CUSTOM_APPROVED_FILE)).get("approved", []))
     except Exception: return set()
 
-def _official_ext_ids():
+_OFFICIAL_EXT_CACHE = os.path.join(STATE_DIR, "_official_ext_ids.json")   # last VERIFIED official set (fail to this, not open)
+def _official_ext_ids(fresh=False):
     """Extension ids in the MC-SIGNED core manifest -- the authority on a tenant (verified vs superadmin.pub).
-    Returns None if the signed manifest is UNAVAILABLE/unverifiable (no core.sig.json, no crypto, bad sig) so
-    callers can FAIL-OPEN -- we never block/quarantine a node's whole catalog over a transient signing gap
-    (the missing/invalid manifest is flagged separately by core integrity + Doctor)."""
+
+    When the signed manifest verifies, we cache the official set (last-known-good). When it CAN'T verify now, we
+    FAIL to that cache (an established install stays available but CLOSED -- a rogue ext never in the signed set
+    still can't load) rather than fail-open to everything. Only two cases still return None (caller fails open):
+      - a truly UNSIGNED build (no core.sig.json ever) -- a dev/standalone checkout that legitimately never signs;
+    Fail-CLOSED (empty set) when a build SHIPS a core.sig.json that no longer verifies AND we have no prior trust:
+    a fresh/tampered install has no established trust to preserve, so it must run nothing unsigned (deep-audit #10)."""
     try:
         payload = _core_manifest_trusted()
-        if not payload: return None                          # cannot verify -> caller fails open
-        out = set()
-        for rel in (payload.get("files") or {}):
-            mm = re.match(r"extensions/([^/]+)/extension\.json$", rel)
-            if mm: out.add(mm.group(1))
-        return out
+        if payload:
+            out = set()
+            for rel in (payload.get("files") or {}):
+                mm = re.match(r"extensions/([^/]+)/extension\.json$", rel)
+                if mm: out.add(mm.group(1))
+            try:                                             # remember the last VERIFIED set (write only on change)
+                cur = load(_OFFICIAL_EXT_CACHE, None) or {}
+                if sorted(out) != (cur.get("ids") or []): save(_OFFICIAL_EXT_CACHE, {"ids": sorted(out), "ts": int(time.time())})
+            except Exception: pass
+            return out
     except Exception:
-        return None
+        pass
+    # Could NOT verify the signed manifest right now (missing crypto, bad sig, transient gap).
+    if fresh: return None                                    # quarantine path: only act on a LIVE verification, never the cache
+    try: cached = load(_OFFICIAL_EXT_CACHE, None)
+    except Exception: cached = None
+    if cached and isinstance(cached.get("ids"), list):
+        return set(cached["ids"])                            # established trust -> fail to last-known-good (CLOSED, still available)
+    if os.path.isfile(CORE_SIG_FILE):
+        return set()                                         # signed build whose manifest won't verify + no history -> FAIL CLOSED (new/tampered)
+    return None                                              # never signed (dev/standalone) -> fail open, unchanged
 
 def _ext_authorized(eid):
     """'official' | 'custom' | None(unauthorized). Official: in the signed manifest (or ANY catalog ext on an
@@ -5263,8 +5281,8 @@ def _ext_quarantine_rogue():
     """Appliance self-defense: move any rogue extension dir (under extensions/ but NOT official/approved) into
     `_quarantine/` so it cannot load. Authoring is permissive (it's the builder). Never deletes; fully reversible."""
     if _authoring(): return []
-    if not _official_ext_ids(): return []                    # SAFETY: only quarantine when we POSITIVELY know the
-                                                             # signed official set (None/empty -> never nuke a catalog)
+    if not _official_ext_ids(fresh=True): return []          # SAFETY: only quarantine on a LIVE positive verification of
+                                                             # the signed official set (None/empty/cache -> never nuke a catalog)
     moved = []
     try:
         qroot = os.path.join(DEPLOY_ROOT, "_quarantine")
@@ -9503,6 +9521,17 @@ def doctor():
         if (not _is_update_source() and CC.get("auto_update", True) is not False
                 and not CC.get("update_source") and str(CC.get("update_channel", "")).lower() != "standalone"):
             issues.append({"sev": "warn", "path": "update", "msg": "This node AUTO-INSTALLS framework code from the built-in ClaudeFather public mirror (%s) every ~%d min and self-restarts. Fine for a MANAGED fleet node; a STANDALONE install should either point cc.config `update_source` at its own trusted upstream, or set `update_channel:\"standalone\"` (or `auto_update:false`) to stop auto-pulling a third party's code. Updates are signature-gated (update_verify=%s -- set \"enforce\" to block unverified updates)." % (OFFICIAL_DIST_GIT, int(CC.get("auto_update_check_min", 30)), (CC.get("update_verify") or "warn"))})
+    except Exception: pass
+    # EDITION TRIPWIRE (deep-audit #34): a change in the authority tier -- especially appliance -> authoring, which
+    # unlocks core-mutating ops + self-signing + grant-minting -- is trivially triggered (update_role / .cc-source),
+    # so surface it LOUD and keep it flagged until acknowledged.
+    try:
+        _et = _edition_tripwire()
+        if _et.get("changed"):
+            issues.append({"sev": ("err" if _et.get("escalated") else "warn"), "path": "edition",
+                "msg": ("EDITION ESCALATED %s -> %s (%s): appliance locks are now OFF and this node can self-sign core / mint superadmin grants. If you did not intend this, revert the trigger; if you did, acknowledge to re-baseline (POST /api/edition-ack)." % (_et["baseline"], _et["cur"], _et.get("reason"))
+                        if _et.get("escalated") else
+                        "edition changed %s -> %s (%s) since the last baseline -- acknowledge to clear this (POST /api/edition-ack)." % (_et["baseline"], _et["cur"], _et.get("reason")))})
     except Exception: pass
     # Turnkey hardening (docs/HARDENING.md): a locked appliance should carry a signed core manifest + verify clean.
     if not _authoring():
@@ -14574,6 +14603,61 @@ def _edition():
     return "authoring" if _is_update_source() else "appliance"
 def _authoring(): return _edition() == "authoring"
 
+def _edition_signal():
+    """WHY this node resolves to its edition -- the SPECIFIC signal in effect (for the #34 tripwire message)."""
+    e = str(CC.get("edition", "")).lower()
+    if e in ("authoring", "appliance"): return "cc.config edition=" + e
+    if str(CC.get("update_role", "")).lower() == "source": return "cc.config update_role=source"
+    try:
+        if os.path.isfile(os.path.join(CC_HOME, ".cc-source")): return ".cc-source marker file in CC_HOME"
+    except Exception: pass
+    try:
+        if os.path.realpath(CC_HOME) == os.path.realpath(_dist_dir()): return "CC_HOME is the dist mirror dir"
+    except Exception: pass
+    try:
+        code, out, _ = sh(["git", "-C", CC_HOME, "remote", "-v"], timeout=8)
+        if code == 0 and CORE_AUTHORING_REPO in out: return "git remote = authoring core repo"
+    except Exception: pass
+    return "default (no source signal)"
+
+_EDITION_SEEN = os.path.join(STATE_DIR, "_edition_seen.json")   # security baseline for the #34 edition tripwire
+def _edition_tripwire(record=True):
+    """STICKY tripwire on an EDITION CHANGE (deep-audit #34). Edition auto-detection is trivially flipped -- set
+    cc.config update_role=source or drop a `.cc-source` file and an appliance becomes 'authoring', turning OFF every
+    appliance lock and letting the node self-sign core / mint superadmin grants. The first observation BASELINES the
+    edition; thereafter any change from the baseline stays flagged (RED in Doctor + logged; an appliance->authoring
+    ESCALATION also fires a notify) until an operator acknowledges it (edition_ack re-baselines). Returns
+    {cur, baseline, changed, escalated, reason, baseline_reason}."""
+    cur = _edition(); reason = _edition_signal()
+    try: base = load(_EDITION_SEEN, None)
+    except Exception: base = None
+    if not base or not base.get("edition"):
+        if record:
+            try: save(_EDITION_SEEN, {"edition": cur, "reason": reason, "ts": int(time.time())})
+            except Exception: pass
+        return {"cur": cur, "baseline": cur, "changed": False, "escalated": False, "reason": reason}
+    changed = base.get("edition") != cur
+    escalated = bool(changed and base.get("edition") == "appliance" and cur == "authoring")
+    out = {"cur": cur, "baseline": base.get("edition"), "changed": changed, "escalated": escalated,
+           "reason": reason, "baseline_reason": base.get("reason")}
+    if changed and record and base.get("logged_change_to") != cur:      # log/notify ONCE per new target, not every tick
+        try: _core_log("edition-tripwire", out)
+        except Exception: pass
+        if escalated:
+            try: notify_send("ClaudeFather SECURITY: edition changed %s -> %s (%s). Appliance locks are now OFF and this node can self-sign core / mint grants. If you did not do this, investigate immediately." % (base.get("edition"), cur, reason))
+            except Exception: pass
+        try:
+            base["logged_change_to"] = cur; save(_EDITION_SEEN, base)
+        except Exception: pass
+    return out
+
+def edition_ack():
+    """Operator accepts the CURRENT edition as the new security baseline -- clears the #34 tripwire."""
+    cur = _edition()
+    try: save(_EDITION_SEEN, {"edition": cur, "reason": _edition_signal(), "ts": int(time.time()), "acked": True})
+    except Exception: pass
+    return {"ok": True, "edition": cur}
+
 CORE_SIG_FILE = os.path.join(CC_HOME, "core.sig.json")        # SHIPPED: signed manifest of framework-file hashes
 CORE_INTEGRITY_LOG = os.path.join(STATE_DIR, "_core_integrity.log")
 _CORE_STATUS = {"status": "unchecked", "checked": 0, "drift": [], "healed": [], "ts": 0}
@@ -14679,6 +14763,8 @@ def _core_integrity_loop():
         try: core_verify(heal=True)
         except Exception: pass
         try: _ext_quarantine_rogue()                          # appliance: move any unauthorized extension dir out of harm's way
+        except Exception: pass
+        try: _edition_tripwire()                              # #34: detect + LOUD-alarm an edition change (esp. appliance->authoring escalation) at boot + periodically
         except Exception: pass
         time.sleep(900)                                       # re-verify every 15 min (+ on boot)
 
@@ -14902,6 +14988,15 @@ def _verify_converged(url, target, timeout=None, interval=5):
     rv = _node_running_version(url)
     return bool(rv and _semver(rv) >= _semver(target))
 
+def _retry_restart(nid, via, sess):
+    """Re-trigger ONE node's restart the same way the first converge attempt did -- used by the retry-before-halt
+    gate (deep-audit WS1). A co-located node re-kills its tmux session (launchd relaunches); a remote node
+    re-sends the superadmin restart. Returns True if the restart was re-issued."""
+    if via == "tmux-relaunch" and sh([TMUX, "has-session", "-t", sess])[0] == 0:
+        sh([TMUX, "kill-session", "-t", sess]); return True
+    rst = superadmin_send(nid, "restart")
+    return bool(rst.get("ok") and (rst.get("result") or {}).get("ok"))
+
 def fleet_converge(force=False, auto=False):
     """Mission Control: converge every TENANT node to the dist's latest in one operation. Refreshes the
     local dist mirror (git pull) so a push can't ship stale code, then for each behind (or all, if force)
@@ -14955,6 +15050,16 @@ def fleet_converge(force=False, auto=False):
             try: _diskv = (json.load(open(os.path.join(_home, "claudesole.manifest.json"))) or {}).get("version")
             except Exception: _diskv = None
             ok = bool(target and _diskv and _semver(_diskv) >= _semver(target))
+            if not ok:
+                # RETRY ONCE before halting the whole fleet (deep-audit WS1: retry-before-halt) -- cc-update can miss
+                # on a transient (a busy disk, a self-overwriting cc-update.sh that needs a second clean pass).
+                _aupd_log("MC co-located converge: %s not at v%s on disk (disk=%s) -- retrying cc-update once" % (nid, target, _diskv))
+                try: sh(["env", "CC_HOME=" + _home, "CC_CONFIG=" + _cfg, "bash", _sh, mirror], timeout=180)
+                except Exception: pass
+                try: _diskv = (json.load(open(os.path.join(_home, "claudesole.manifest.json"))) or {}).get("version")
+                except Exception: _diskv = None
+                ok = bool(target and _diskv and _semver(_diskv) >= _semver(target))
+                rec["retried_update"] = True
             rec.update({"update": ok, "disk_version": _diskv, "colocated": True})
             if not ok:
                 rec["error"] = "cc-update did not land v%s on disk (disk=%s)" % (target, _diskv)
@@ -14984,8 +15089,17 @@ def fleet_converge(force=False, auto=False):
         if canary and target and rec.get("restart"):
             rec["verified"] = _verify_converged(n.get("url"), target)
             if not rec["verified"]:
-                rec["error"] = "did NOT come back on v%s within the health window -- HALTING fan-out" % target
-                _aupd_log("CANARY HALT at %s: no converge to v%s -> stopping fan-out to protect the rest of the fleet" % (nid, target))
+                # RETRY ONCE before halting the whole fleet (deep-audit WS1: retry-before-halt). The first restart
+                # may just have been slow / raced its health window / hit a transient blip; re-issue the restart and
+                # re-verify with a fresh window. Only a node that STILL won't come back halts the fan-out -- so one
+                # flaky tenant no longer strands the rest of the fleet on old code.
+                _aupd_log("converge: %s did not come back on v%s within the window -- retrying restart once before halting" % (nid, target))
+                _retry_restart(nid, rec.get("restart_via"), _sess)
+                rec["retried_restart"] = True
+                rec["verified"] = _verify_converged(n.get("url"), target)
+            if not rec["verified"]:
+                rec["error"] = "did NOT come back on v%s even after a retry -- HALTING fan-out" % target
+                _aupd_log("CANARY HALT at %s: no converge to v%s after retry -> stopping fan-out to protect the rest of the fleet" % (nid, target))
                 res["halted"] = {"at": nid, "target": target}
                 res["ran"].append(rec); break
         res["ran"].append(rec)
@@ -16960,6 +17074,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/core-sign":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(core_sign()))
+        if u.path == "/api/edition-ack":              # deep-audit #34: accept the current edition as the new security baseline
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(edition_ack()))
         if u.path == "/api/recovery-keygen":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(recovery_keygen()))
