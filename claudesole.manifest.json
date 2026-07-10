@@ -1,7 +1,7 @@
 {
   "product": "ClaudeFather",
   "former_name": "Claudesole",
-  "version": "0.99.184",
+  "version": "0.99.185",
   "description": "Manifest that defines which paths are FRAMEWORK (ship + propagate to every ClaudeFather deployment on update) vs PRESERVE (per-deployment config/data/secrets/learnings -- never overwritten by an update).",
   "framework_paths": [
     "core.sig.json",
@@ -138,10 +138,26 @@
     "peers.json"
   ],
   "never_ship": [
-    "secrets", "secrets/", ".env", ".env.*", "*.local",
-    "_handoffs", "deliverables", "node_modules", "release",
-    "_trash", "_archive", "*.corrupt", "*.tmp.*", ".DS_Store",
-    ".git", ".git/", "__pycache__", "*.pyc", "*.log", "*.jsonl"
+    "secrets",
+    "secrets/",
+    ".env",
+    ".env.*",
+    "*.local",
+    "_handoffs",
+    "deliverables",
+    "node_modules",
+    "release",
+    "_trash",
+    "_archive",
+    "*.corrupt",
+    "*.tmp.*",
+    ".DS_Store",
+    ".git",
+    ".git/",
+    "__pycache__",
+    "*.pyc",
+    "*.log",
+    "*.jsonl"
   ],
   "_never_ship_comment": "Paths/patterns that must NEVER be copied into a shipped bundle even when they sit INSIDE a framework_path dir (e.g. extensions/*/secrets/, desktop/node_modules, module _handoffs/, deliverables symlinks to the dev SSD). The single source of truth for the rsync --exclude set used by cc-update.sh, make-install-package.sh, and cc-newinstance.sh. Adding an exclude here protects every copier at once. (deep-audit 2026-07-09 finding 0.4.)",
   "preserve_regions": {

@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.185 -- 2026-07-09  (Security batch: mesh-reply spoof gate, superadmin replay persistence, vault hardening)
+- **`/api/mesh-reply` can no longer be spoofed by a remote caller.** It was the only mesh-ingress route with NO
+  auth re-check, so anyone who could reach the port could enqueue a forged `[reply from us]` to any peer. Now
+  origin-aware: a genuinely-LOCAL call (loopback, unproxied -- our own Stop hook's path) is allowed with no token,
+  but a remote/proxied caller must present the mesh token. Non-breaking -- existing long-running chiefs keep
+  forwarding replies with zero relaunch (verified: local 200, remote-no-token 403, remote-with-token 200).
+- **Superadmin replay-nonce cache is now persisted** (`STATE_DIR/_sa_nonces.json`, TTL-pruned). It was
+  process-local, so a node restart (or a co-located sibling process) reopened the replay window for a captured,
+  still-unexpired grant. Now a used nonce stays used across restarts.
+- **Vault hardening:** the vault audit log (`_vault_audit.log`) rotates at 2 MB (was unbounded); Doctor warns
+  when a node leases secrets from an upstream over plaintext `http://` (the leased values would travel
+  unencrypted -- loopback/on-box http is still fine).
+
 ## 0.99.184 -- 2026-07-09  (Front Desk: the concierge completes the hot-swap in-chat)
 - **The Front Desk concierge can now COMPLETE a placement itself -- no "go click Transfers" dead-end.** New
   `cc-handoff go` (`/api/handoff-go` -> `handoff_go()` = propose + accept in one, `by:"frontdesk"`): the concierge

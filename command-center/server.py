@@ -446,7 +446,10 @@ SA_ALLOWED_KEYS = ("mesh_auth_enforce", "mesh_reply_sla", "subscription_monthly"
                    "deliverables_root", "storage_mode", "account_wallet", "fleet_share", "fleet_view", "side_label",
                    "extension_routine_host", "switch_proof_n", "deliverable_gdoc", "housekeeping_eod",
                    "housekeeping_eod_hour", "email_archive_mbox", "email_archive_db")
-_SA_SEEN = {}                  # nonce -> exp_ts (single-use replay cache)
+# PERSISTED single-use replay cache (deep-audit #9): nonce -> exp_ts. Kept on disk + pruned so a node RESTART
+# (or a co-located sibling process) can't reopen the replay window for a captured, still-unexpired grant.
+_SA_SEEN_FILE = os.path.join(STATE_DIR, "_sa_nonces.json")
+_SA_SEEN = {k: int(v) for k, v in (load(_SA_SEEN_FILE, {}) or {}).items() if str(v).isdigit() and int(v) >= int(time.time())}
 _SA_LOCK = threading.Lock()
 # PUBLIC-KEY superadmin (the "every install is auto-under my superadmin" model): MC holds an Ed25519 PRIVATE
 # key; the matching PUBLIC key ships in the framework (superadmin.pub) so EVERY install verifies the owner's
@@ -592,6 +595,8 @@ def _sa_verify(grant):
         for n in [k for k, e in _SA_SEEN.items() if e < now]: _SA_SEEN.pop(n, None)  # purge expired
         if nonce in _SA_SEEN: return (False, "replay (nonce already used)")
         _SA_SEEN[nonce] = int(payload.get("exp", now + SA_SKEW))
+        try: save(_SA_SEEN_FILE, _SA_SEEN)   # PERSIST so a restart can't reopen the replay window (deep-audit #9)
+        except Exception: pass
     return (True, payload)
 
 def superadmin_exec(grant):
@@ -5342,6 +5347,8 @@ def _vault_save(d):
             raise
 def _vault_audit(action, sid, node, result):
     try:
+        if os.path.exists(VAULT_AUDIT) and os.path.getsize(VAULT_AUDIT) > 2_000_000:
+            os.replace(VAULT_AUDIT, VAULT_AUDIT + ".1")   # rotate (deep-audit #33): the audit log was unbounded
         with open(VAULT_AUDIT, "a") as f:
             f.write(json.dumps({"ts": int(time.time()), "action": action, "secret": sid, "node": node or "", "result": result, "host": INSTANCE_ID}) + "\n")
     except Exception: pass
@@ -9451,6 +9458,9 @@ def doctor():
                 issues.append({"sev": "err", "path": "vault", "msg": "The credential VAULT is DISABLED: the `cryptography` package (Fernet) is not installed for this CC's python, so NO secret can be stored or leased -- every save fails. On PEP-668 python (recent Homebrew/Debian) `pip install --user` silently no-ops; run: python3 -m pip install --user --break-system-packages cryptography (or install into a venv the CC runs under), then restart the CC. Verify: python3 -c 'import cryptography'."})
             else:
                 issues.append({"sev": "err", "path": "vault", "msg": "The credential VAULT cannot initialize its Fernet key -- secrets cannot be stored or leased. Ensure the vault dir + key file are writable and 0600 (%s). Then restart the CC." % VAULT_KEY_FILE})
+        # a node that leases secrets from an upstream over PLAINTEXT http:// exposes them on the wire (deep-audit #33)
+        if VAULT_URL and VAULT_URL.lower().startswith("http://") and not VAULT_URL.lower().startswith("http://127.0.0.1") and not VAULT_URL.lower().startswith("http://localhost"):
+            issues.append({"sev": "warn", "path": "vault", "msg": "This node leases secrets from %s over PLAINTEXT http:// -- the leased values travel unencrypted. Use an https:// vault_url (or a Tailscale-served https endpoint); http is only safe to a loopback/on-box upstream." % VAULT_URL})
     except Exception: pass
     # AUTO-UPDATE transparency (deep-audit P1-8): a non-source node that auto-installs framework code from the
     # BUILT-IN public mirror (update_source not overridden) is NOT silent about it -- surface the posture + the
@@ -16633,7 +16643,17 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/mesh-recv":
             if MESH_ENFORCE and not _mesh_token_ok(self.headers.get("X-Mesh-Token")): return self._s(403, json.dumps({"ok": False, "error": "mesh auth"}))
             return self._s(200, json.dumps(mesh_recv(body.get("sender", ""), body.get("text", ""))))
-        if u.path == "/api/mesh-reply":     return self._s(200, json.dumps(mesh_reply(body.get("to", ""), body.get("text", ""))))
+        if u.path == "/api/mesh-reply":
+            # /api/mesh-reply is a LOCAL trigger: only our OWN Stop hook (loopback, no token) should call it to
+            # deliver our chief's reply to a peer -- there is NO legitimate remote caller. A remote request (a real
+            # remote IP, or a proxied one carrying a forwarding header) must present the mesh token, else it could
+            # enqueue a SPOOFED "[reply from us]" to any peer (deep-audit #8). Origin-aware so existing hooks (which
+            # send no token) keep working with zero relaunch -- unlike a blanket token gate.
+            _cip = (self.client_address[0] if self.client_address else "")
+            _proxied = any(self.headers.get(h) for h in ("X-Forwarded-For", "X-Real-Ip", "Forwarded"))
+            if not (_cip in ("127.0.0.1", "::1") and not _proxied) and not _mesh_token_ok(self.headers.get("X-Mesh-Token")):
+                return self._s(403, json.dumps({"ok": False, "error": "mesh-reply: local origin or mesh token required"}))
+            return self._s(200, json.dumps(mesh_reply(body.get("to", ""), body.get("text", ""))))
         if u.path == "/api/mesh-clear":    return self._s(200, json.dumps(mesh_clear()))
         # Superadmin: exec is reachable cross-family (the SA signature IS the auth -> in AUTH_MESH_INGRESS).
         # send/grant/derive need the MASTER + are operator-authed (NOT mesh-ingress) -> MC operator only.
