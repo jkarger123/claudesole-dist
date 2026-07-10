@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.196 -- 2026-07-10  (WS4 graft: cc-dispatch -- bounded background sub-agent workers)
+- **`cc-dispatch <agent> "<task>"` -- hand a subtask to a background specialist and get the result in your session
+  (deep-audit WS4, graft 3.5).** The "orchestrator, not tmux-babysitter" pattern: instead of doing a subtask
+  inline (or spinning up and watching a session), a chief/agent fires a headless sub-agent worker and keeps
+  working; when it finishes, its result is delivered back into the caller's session (via the compact-lock-safe
+  injector). Distinct from Agent Lab (UI, synchronous, one task → many specialists) and the telephone line (a
+  question to ANOTHER scope) -- dispatch is async and runs THIS node's own subagents on its subscription. The one
+  real risk, runaway fan-out, is capped by a concurrent **spawn bound** (`dispatch_cap`, default 6) enforced at the
+  dispatch layer; over the cap is refused with a clear error. `cc-dispatch --list` shows active + recent workers.
+  Endpoints `POST /api/dispatch` + `GET /api/dispatch-status`. Verified live end-to-end (a real cost-reporter
+  worker ran and completed) + 5 unit tests (guards, spawn cap, async result delivery, status).
+
 ## 0.99.195 -- 2026-07-10  (WS4 flagship: telephone line increment 3 -- the Telephone lens makes it visible)
 - **A Telephone lens gives the agent telephone line a real home in the dashboard (deep-audit WS4).** Until now the
   line was CLI-only (`cc-ask`) and invisible; the new **Telephone** tab shows, at a glance: whether the line is on

@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# cc-dispatch <agent> "<task>"      -- fire a background specialist worker; its result lands back in THIS session
+# cc-dispatch --list                -- show active + recent dispatches
+#
+# THE ORCHESTRATOR PATTERN (WS4). Instead of doing a subtask yourself (or babysitting a tmux session), hand it to
+# a background sub-agent and keep working -- the result is delivered into your session when it finishes. Bounded by
+# a concurrent spawn cap (cc.config `dispatch_cap`, default 6) so fan-out can never run away. For agents AND humans.
+#   cc-dispatch security-auditor "audit the extensions/ dir for exposed secrets and summarize"
+#   cc-dispatch code-reviewer "review the diff on the current branch for correctness bugs"
+# Runs the node's own subagents on its subscription login. Resolves port + token from cc.config.json (honors CC_CONFIG).
+set -uo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
+PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
+TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
+
+if [ "${1:-}" = "--list" ]; then
+  RES="$(curl -s "http://127.0.0.1:${PORT}/api/dispatch-status" -H "X-CC-Token: $TOK" 2>/dev/null)"
+  [ -z "$RES" ] && { echo "could not reach the dashboard on port ${PORT}"; exit 1; }
+  python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+print('dispatches: %d running / cap %d' % (d.get('active',0), d.get('cap',0)))
+for r in d.get('dispatches',[])[:15]:
+    st=r.get('status'); ok='' if st=='running' else (' ok' if r.get('ok') else ' FAIL')
+    print('  #%s  %-16s %-8s%s  %s' % (r.get('id'), r.get('agent'), st, ok, (r.get('task') or '')[:56]))
+" "$RES"
+  exit 0
+fi
+
+AGENT="${1:-}"; TASK="${2:-}"
+[ -z "$AGENT" ] || [ -z "$TASK" ] && { echo "usage: cc-dispatch <agent> \"<task>\"   |   cc-dispatch --list"; exit 1; }
+FROMS="${CC_SESSION:-operator}"
+BODY="$(python3 -c "import json,sys;print(json.dumps({'agent':sys.argv[1],'task':sys.argv[2],'from':sys.argv[3]}))" "$AGENT" "$TASK" "$FROMS")"
+RES="$(curl -s -X POST "http://127.0.0.1:${PORT}/api/dispatch" -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODY" 2>/dev/null)"
+[ -z "$RES" ] && { echo "could not reach the dashboard on port ${PORT}"; exit 1; }
+python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+if not d.get('ok'): print('cc-dispatch:', d.get('error','failed')); sys.exit(0)
+print('* dispatched #%s to %s -- %s' % (d.get('dispatch_id'), d.get('agent'), d.get('note','')))
+" "$RES"

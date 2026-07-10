@@ -2008,6 +2008,65 @@ def agent_comms_payload():
             if pd and pd.get("agents"): fleet.append({"node": pd.get("node") or p.get("id"), "telephone": pd.get("telephone"), "agents": pd.get("agents")})
     return {"node": d["node"], "telephone": d["telephone"], "agents": d["agents"], "fleet": fleet, "log": log}
 
+# ==== cc-dispatch (WS4 graft 3.5) -- inbox-driven sub-agent dispatch ==========================================
+# Lets a chief/agent (or the operator) FIRE OFF bounded background sub-agent workers for tasks and get the results
+# back in its OWN session -- the "orchestrator, not tmux-babysitter" pattern. Distinct from Agent Lab (UI,
+# synchronous, one task -> many specialists) and the telephone line (a question to ANOTHER scope): dispatch is
+# ASYNC, session-callable, and runs THIS node's own subagents. The ONLY real risk is runaway fan-out, capped by
+# `spawn_bounds` at the dispatch layer (cc.config `dispatch_cap`, default 6 concurrent). Rides `_agent_run`
+# (subscription) + `_mesh_deliver` (compact-lock-safe result delivery).
+DISPATCH_CAP = int(CC.get("dispatch_cap") or 6)                 # max CONCURRENT dispatches (the spawn bound)
+DISPATCH_TIMEOUT = int(CC.get("dispatch_timeout") or 300)
+_DISPATCHES = {}                                               # id -> {agent, task, from_session, status, started, ended, ok, cost, err}
+_DISPATCH_LOG = os.path.join(STATE_DIR, "_dispatches.json")
+_DISPATCH_LOCK = threading.Lock()
+def _dispatch_persist():
+    try:
+        recs = sorted(_DISPATCHES.values(), key=lambda r: r.get("started", 0))[-60:]
+        save(_DISPATCH_LOG, recs)
+    except Exception: pass
+def _dispatch_active():
+    return [r for r in _DISPATCHES.values() if r.get("status") == "running"]
+def agent_dispatch(agent, task, from_session):
+    """Spawn ONE bounded background worker (subagent `agent`) on `task`; its result is delivered back into
+    `from_session` when done. Returns {ok, dispatch_id} at once (async). Fail-closed on every guard."""
+    agent = re.sub(r"[^A-Za-z0-9_.-]", "", (agent or ""))[:48]
+    if not agent or not any(a.get("name") == agent for a in _subagents_available()):
+        return {"ok": False, "error": "unknown agent '%s' (see the Agent Lab / cc-ask directory)" % agent}
+    if not (task or "").strip(): return {"ok": False, "error": "empty task"}
+    if not (from_session or "").strip(): return {"ok": False, "error": "no from_session -- the result would have nowhere to land"}
+    with _DISPATCH_LOCK:
+        active = len(_dispatch_active())
+        if active >= DISPATCH_CAP:
+            return {"ok": False, "error": "dispatch cap reached (%d/%d running) -- wait for one to finish" % (active, DISPATCH_CAP)}
+        did = hashlib.sha256(("%s|%s|%s" % (agent, from_session, time.time())).encode()).hexdigest()[:8]
+        _DISPATCHES[did] = {"id": did, "agent": agent, "task": task.strip()[:400], "from_session": from_session,
+                            "status": "running", "started": int(time.time()), "ended": 0, "ok": None, "cost": None}
+        _dispatch_persist()
+    def _work():
+        r = _agent_run(agent, task.strip(), timeout=DISPATCH_TIMEOUT, cwd=PROJECT)
+        with _DISPATCH_LOCK:
+            rec = _DISPATCHES.get(did, {})
+            rec.update({"status": "done", "ended": int(time.time()), "ok": bool(r.get("ok")),
+                        "cost": r.get("cost"), "err": None if r.get("ok") else r.get("error", "failed")})
+            _dispatch_persist()
+        if r.get("ok"):
+            out = (r.get("result") or "").strip()
+            body = out if len(out) <= 1600 else (out[:1600] + " …[truncated; full result in the Dispatch log]")
+            msg = "[dispatch #%s complete -- %s]\n%s" % (did, agent, body)
+        else:
+            msg = "[dispatch #%s FAILED -- %s: %s]" % (did, agent, (r.get("error") or "")[:200])
+        try:
+            if sh([TMUX, "has-session", "-t", from_session])[0] == 0: _mesh_deliver(from_session, msg)
+        except Exception: pass
+    threading.Thread(target=_work, daemon=True).start()
+    return {"ok": True, "dispatch_id": did, "agent": agent, "note": "worker running; the result will land in %s when done (up to %ds)" % (from_session, DISPATCH_TIMEOUT)}
+def dispatch_status():
+    """Active + recent dispatches for the Agent Lab lens / cc-dispatch --list."""
+    try: recent = load(_DISPATCH_LOG, []) or []
+    except Exception: recent = []
+    return {"cap": DISPATCH_CAP, "active": len(_dispatch_active()), "dispatches": list(reversed(recent))[:40]}
+
 def mesh_enqueue(peer, text, kind="msg", expect_reply=None):
     """Create a durable PENDING outbound delivery for the worker. kind='msg' (an initiating message ->
     peer /api/chief-say, tagged '[message from]') or 'reply' (our chief's answer -> peer /api/mesh-recv,
@@ -16818,6 +16877,8 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(agent_directory()))
         if u.path == "/api/agent-comms":            # WS4 Telephone lens: directory (local + fleet) + on/off + call log
             return self._s(200, json.dumps(agent_comms_payload()))
+        if u.path == "/api/dispatch-status":        # WS4 cc-dispatch: active + recent background workers
+            return self._s(200, json.dumps(dispatch_status()))
         if u.path == "/api/ralph": return self._s(200, json.dumps(ralph_list()))
         if u.path == "/api/campaigns": return self._s(200, json.dumps(campaign_list()))
         if u.path == "/api/campaign": return self._s(200, json.dumps(campaign_detail((q.get("name") or [""])[0])))
@@ -17271,6 +17332,9 @@ class H(BaseHTTPRequestHandler):
             if not (_cip in ("127.0.0.1", "::1") and not _proxied) and not _mesh_ingress_ok(self.headers):
                 return self._s(403, json.dumps({"ok": False, "error": "mesh-reply: local origin or mesh token required"}))
             return self._s(200, json.dumps(mesh_reply(body.get("to", ""), body.get("text", ""))))
+        if u.path == "/api/dispatch":                  # WS4 cc-dispatch: fire a bounded background sub-agent worker; result returns to from_session
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(agent_dispatch(body.get("agent", ""), body.get("task", ""), body.get("from") or "")))
         if u.path == "/api/agent-msg-send":            # WS4 telephone line: a LOCAL caller (operator / cc-ask). live=handoff, else headless ask
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             if body.get("live"):
