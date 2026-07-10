@@ -2047,8 +2047,10 @@ def agent_dispatch(agent, task, from_session):
         r = _agent_run(agent, task.strip(), timeout=DISPATCH_TIMEOUT, cwd=PROJECT)
         with _DISPATCH_LOCK:
             rec = _DISPATCHES.get(did, {})
+            _res = (r.get("result") or "").strip() if r.get("ok") else ""
             rec.update({"status": "done", "ended": int(time.time()), "ok": bool(r.get("ok")),
-                        "cost": r.get("cost"), "err": None if r.get("ok") else r.get("error", "failed")})
+                        "cost": r.get("cost"), "err": None if r.get("ok") else r.get("error", "failed"),
+                        "result": _res[:600] + (" …" if len(_res) > 600 else "")})   # preview for the Agent Lab / --list; full copy went to the session
             _dispatch_persist()
         if r.get("ok"):
             out = (r.get("result") or "").strip()
@@ -25382,6 +25384,7 @@ async function loadAgentLab(){
     var d=await(await fetch("/api/lab-agents")).json();
     AGENTLAB.agents=(d&&d.agents)||d||[];
   }catch(e){ g.innerHTML=empty("Could not load available specialists."); return; }
+  try{ AGENTLAB.dispatch=await(await fetch("/api/dispatch-status")).json(); }catch(e){ AGENTLAB.dispatch=null; }
   if(!AGENTLAB.agents.length){ g.innerHTML=alHead()+empty("No specialists are available on this node yet."); return; }
   if(!AGENTLAB.sel) AGENTLAB.sel=AGENTLAB.agents[0].name;
   renderAgentLab();
@@ -25453,6 +25456,27 @@ function renderAgentLab(){
     h+='</div>';
   }
   h+='</div>';
+
+  // ---- Background dispatches (cc-dispatch): async workers fired from a session; result returns THERE ----
+  var DS=AGENTLAB.dispatch;
+  if(DS){
+    var ds=DS.dispatches||[]; var running=DS.active||0;
+    h+='<div class="cc-panel"><div class="cc-p-h"><b>Background dispatches</b> <span class="cc-p-sub">'
+      +running+' running / cap '+(DS.cap||0)+' &middot; fired from a session with <code>cc-dispatch</code>; the result lands back in that session</span>'
+      +'<span class="cc-p-act"><button class="mini" title="Refresh the dispatch list" onclick="loadAgentLab()">&#8635;</button></span></div>';
+    if(!ds.length){ h+='<div class="cc-p-note">No dispatches yet. From a session (or the chief), run <code>cc-dispatch &lt;agent&gt; "task"</code> to hand a subtask to a background specialist -- the answer comes back in that session, and shows here.</div>'; }
+    ds.slice(0,15).forEach(function(r,ix){
+      var st=r.status==='running'?'<span class="badge bdg-dim">running</span>':(r.ok?'<span class="badge bdg-green">done</span>':'<span class="badge bdg-red">failed</span>');
+      var dur=(r.ended&&r.started)?(' &middot; '+(r.ended-r.started)+'s'):'';
+      h+='<div class="cc-p-note"'+(ix?' style="border-top:1px solid var(--line);padding-top:8px;margin-top:8px"':'')+'>'
+        +'<b>'+esc(r.agent||'?')+'</b> '+st+' <span class="sub">#'+esc(r.id||'')+dur+(r.cost?(' &middot; $'+Number(r.cost).toFixed(4)):'')+'</span>'
+        +'<div style="margin-top:3px">'+esc(r.task||'')+'</div>';
+      if(r.status!=='running'&&r.ok&&r.result) h+='<div style="margin-top:5px;padding-left:9px;border-left:2px solid rgba(90,205,205,.5);white-space:pre-wrap;color:var(--mut)">'+esc(r.result)+'</div>';
+      else if(r.status!=='running'&&!r.ok&&r.err) h+='<div class="sub" style="margin-top:4px;color:#d29922">'+esc(r.err)+'</div>';
+      h+='</div>';
+    });
+    h+='</div>';
+  }
 
   g.innerHTML='<div class="modstack">'+h+'</div>';
 }

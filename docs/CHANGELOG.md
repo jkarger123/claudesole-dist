@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.197 -- 2026-07-10  (cc-dispatch UI: a Background dispatches panel in Agent Lab)
+- **cc-dispatch is now visible in the dashboard.** The Agent Lab lens gained a **Background dispatches** panel:
+  the concurrent-running count vs the spawn cap, and the recent workers with their status (running / done / failed),
+  duration, cost, the task, and a **result preview** for finished ones. Dispatch records now retain a truncated
+  result (the full copy still goes to the caller's session). Read-only monitor -- you fire dispatches from a session
+  with `cc-dispatch`; this is where you watch them. Browser-verified (4 checks). Also fixed unit-test hygiene: the
+  dispatch + agent-msg tests now redirect their log files to temp instead of writing the node's real state.
+
 ## 0.99.196 -- 2026-07-10  (WS4 graft: cc-dispatch -- bounded background sub-agent workers)
 - **`cc-dispatch <agent> "<task>"` -- hand a subtask to a background specialist and get the result in your session
   (deep-audit WS4, graft 3.5).** The "orchestrator, not tmux-babysitter" pattern: instead of doing a subtask
