@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.193 -- 2026-07-10  (WS4 flagship: agent↔agent telephone line -- increment 1, the safe headless "ask" path)
+- **Agents can now ASK another scope's specialist a question and get the answer back (deep-audit WS4 flagship).**
+  `cc-ask <agent|node/agent> "<question>"` (for agents AND humans) routes to the target's node, which runs the
+  named subagent HEADLESS via `_agent_run` and relays the answer -- the lateral channel that turns a chief into a
+  real orchestrator. This first increment is the SAFE path: a synchronous, read-only info query that occupies NO
+  live session and adds NO new injector (so none of the autonomous-injector chaos class). All safety is mechanism,
+  not prose: **OFF BY DEFAULT** (`cc.config agent_telephone`), a hard **hop cap**, a per-(from→to) **rate limit**, a
+  callable-agent **allowlist** (`agent_telephone_agents`), and cross-node transport gated by the per-node mesh
+  token (#4). Endpoints: `POST /api/agent-msg-send` (local caller, operator-authed), `POST /api/agent-msg-recv`
+  (peer delivery -- mesh-ingress + enforce gated), `GET /api/agent-directory` (addressable specialists + on/off).
+  Verified live end-to-end (a real security-auditor answered over the line) + 7 unit tests for the guards. The
+  live-session HANDOFF path (inject + Stop-hook reply), cross-family talk-grants, and a Comms lens are a later
+  increment.
+
 ## 0.99.192 -- 2026-07-10  (WS3 fleet-safety batch 2: per-node mesh tokens -- dual-accept, off by default)
 - **Per-node mesh tokens (deep-audit #4).** The lateral peer channel (chief↔chief, CCRs, usage/vault-lease) has
   always authenticated with ONE shared family `mesh_token` -- so a single node's leaked token could spoof the whole
