@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.199 -- 2026-07-11  (fix: mobile terminal chrome leaking onto touchscreen desktops/laptops)
+- **The session terminal's on-screen key bar (^C / esc / tab / arrows), mobile top-bar pill, copy button and
+  drop bar were showing on non-phone devices** -- specifically any desktop or laptop that has *a* touch input
+  available (a touchscreen ThinkPad with a trackpad, a touchscreen monitor, an attached tablet). They were gated
+  on `@media(any-pointer:coarse)`, which fires when *any* pointer is coarse -- so a touchscreen laptop whose
+  PRIMARY input is the trackpad still got the phone-only chrome. Changed all four terminal-view gates to
+  `@media(pointer:coarse)` (fires only when the *primary* pointer is touch = an actual phone). Verified live on
+  a touchscreen Windows laptop (the bar is gone) and phones still get the key bar.
+
 ## 0.99.198 -- 2026-07-11  (Messages lens revamp: iMessage-style, mobile-first)
 - **The Messages lens (operator<->operator notes) is fully redesigned.** It rendered poorly on phones -- the peer
   rail became a cramped horizontal strip that ate half the screen. It is now a real messaging app:

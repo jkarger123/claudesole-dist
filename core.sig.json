@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "6ef1a14720351290a0c48fa35a08d5bbed1f0152b635504ed430f062182e7f9c",
+      "claudesole.manifest.json": "516c6832f737fa224baf86098f645bf9b20821c60b91365d089dd73d0d2f334c",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/campaign_runner.py": "0a385adb090626c76c1f3baf4a1ed944cd0a80983ef752686e471003a012e339",
       "command-center/cc-advise": "e449156a34ddcb9068fc1c89223a2d3f8574b6dba15f2e3d3fe748bf2f49a70f",
@@ -68,7 +68,7 @@
       "command-center/residue_lint.py": "0b1c757909a27470095d5ea8b48641a9e9e0248ec1729f3598596f2129fd1d6f",
       "command-center/rollback_guard.py": "603ae76f8f854b46e0dd152a123e11cc85c760a8c82e7865ab5eeaf75b2ac800",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "d7aeea0f0874e9f599058a69f5cbe71e937ee62ed3f2d6d4684d8e2f637bcd3b",
+      "command-center/server.py": "b0ade769709ba033b20994179b8143621ddaa0c61e543bd1e77fb595a52b6a48",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/static/phosphor/fill.css": "555980683a582c1910a954648b4ae38f58d76e797f02bfdc2c5e817901e6d4fc",
       "command-center/static/phosphor/light.css": "f2e59699faaeee27da9edb86dd18f5ed3bd5113db3e4e388fdd23afcaf308865",
@@ -166,9 +166,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783750159,
+    "generated": 1783796065,
     "v": 1,
-    "version": "0.99.198"
+    "version": "0.99.199"
   },
-  "sig": "rxWJyBLsBFsucOB9oMinAjC3tKd4yFmbPkrV0xvsj2K7eYxpsC/eqx9+KpXQcF1g9LtISSond56PVA5yesfnBA=="
+  "sig": "8t05VxnXfFk5gXxU2jrEHXVWIfqM2APQmmO1qEtpmcbfTof3kTuyyjehL7atvnOYAGG+ZV4cetwq0+888hpmAQ=="
 }

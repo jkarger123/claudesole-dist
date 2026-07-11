@@ -17809,7 +17809,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 .mdlmenu-t button .l{flex:1}
 .mdlmenu-t button .ck{color:#e8c547;font-weight:800}
 #cpbtn{display:none}                     /* copy panel is a touch-only affordance; desktop uses native drag-select + Ctrl+C (Claude Code in classic TUI mode -> the terminal owns the mouse) */
-@media(any-pointer:coarse){#cpbtn{display:inline-block}}
+@media(pointer:coarse){#cpbtn{display:inline-block}}
 #live{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;z-index:11;display:none;background:#e8c547;color:#15120a;font:700 12px -apple-system,sans-serif;border:0;border-radius:18px;padding:8px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);cursor:pointer}
 #live.show{display:block}
 #selcopy{position:fixed;right:14px;bottom:14px;z-index:12;display:none;background:#e8c547;color:#15120a;font:700 12px -apple-system,sans-serif;border:0;border-radius:18px;padding:8px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);cursor:pointer}
@@ -17828,7 +17828,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 /* on-screen key bar: iPhone keyboards have no arrow keys, so Claude's option menus are unanswerable -- these send the real key sequences. Touch devices only. */
 #keybar{display:none;gap:3px;padding:5px;background:#15151c;border-top:1px solid #2a2a3a;flex:0 0 auto}
 #compose{display:none;gap:6px;padding:5px 5px calc(5px + env(safe-area-inset-bottom));background:#12121a;border-top:1px solid #2a2a3a;align-items:center;flex:0 0 auto}
-@media(any-pointer:coarse){#keybar,#compose{display:flex}#live{bottom:132px}#selcopy{bottom:132px}}
+@media(pointer:coarse){#keybar,#compose{display:flex}#live{bottom:132px}#selcopy{bottom:132px}}
 #keybar button{flex:1;min-width:0;background:#22222e;color:#fff;border:1px solid #3a3a4a;border-radius:8px;padding:11px 0;font:15px -apple-system,sans-serif;cursor:pointer}
 #keybar button:active{background:#34344a}
 #compose input{flex:1;min-width:0;background:#0a0a0f;color:#fff;border:1px solid #3a3a4a;border-radius:9px;padding:11px;font:16px -apple-system,sans-serif}
@@ -17841,7 +17841,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #more{display:none}                      /* overflow toggle: desktop hides it -- everything is inline */
 #moremenu{display:contents}              /* desktop: wrapper vanishes -> children flow inline as before */
 .fontgrp{display:contents}               /* desktop: A- [13] A+ flow inline exactly as before */
-@media(any-pointer:coarse){
+@media(pointer:coarse){
   #bar{top:env(safe-area-inset-top);right:env(safe-area-inset-right);left:auto;display:flex;align-items:center;gap:6px;max-width:calc(100vw - 10px);padding:5px 8px;border-radius:0 0 0 14px;box-shadow:0 4px 16px rgba(0,0,0,.45)}
   #bar>#st{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:#c8c8d6}
   #bar>button{margin-left:0;min-width:44px;min-height:44px;display:inline-flex;align-items:center;justify-content:center;padding:0 10px;font-size:15px;line-height:1}
@@ -19148,7 +19148,7 @@ body.wk-dragging .wkdrop{display:flex;pointer-events:auto}
 .ccdropbar{display:flex;align-items:center;gap:6px;flex:0 0 auto;padding:7px 10px;min-height:38px;background:var(--card2,#15151c);border-bottom:1px solid var(--line,#2a2a3a);color:var(--mut,#9a9aab);font-size:12px;cursor:pointer}
 .ccdropbar:hover{color:var(--ink,#fff);background:var(--card,#1a1a24)}
 .ccdropbar b{color:var(--accent)}
-@media(any-pointer:coarse){.ccdropbar{min-height:46px;font-size:13px}}
+@media(pointer:coarse){.ccdropbar{min-height:46px;font-size:13px}}
 .ccdrop{position:absolute;inset:0;z-index:40;display:none;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center;padding:18px;background:rgba(10,10,15,.86);border:3px dashed var(--accent);border-radius:12px;color:var(--ink,#fff);font:600 16px -apple-system,sans-serif;pointer-events:none}
 .ccdrop.show{display:flex;pointer-events:auto}
 .ccdrop .ccdico{font-size:40px}
