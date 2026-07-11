@@ -1,5 +1,9 @@
 # Command Center — the engine
 
+<!-- LATEST-HANDOFF -->
+**>> Resume here:** read `_handoffs/20260711-0537__command-center.md` first -- it is the latest handoff.
+<!-- /LATEST-HANDOFF -->
+
 > **▶ THE DISCIPLINE SYSTEM: `docs/ENGINEERING_AUTOPILOT.md`** — how we control the context payload (Menu/Scout/
 > Vault) AND auto-enforce engineer-grade habits (folder structure, filing, warm-transfer routing, record-keeping,
 > self-curating notes, housekeeping). Read it before touching context briefs, the housekeeping loop, the

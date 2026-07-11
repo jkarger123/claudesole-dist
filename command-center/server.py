@@ -5154,7 +5154,13 @@ def op_threads():
 
 def op_thread(peer):
     d = _opnotes_load()
-    return {"ok": True, "peer": peer, "label": _op_peer_name(peer), "messages": d["threads"].get(peer, [])}
+    pending = {i.get("id") for i in d.get("outq", []) if i.get("peer") == peer}
+    out = []
+    for m in d["threads"].get(peer, []):
+        if m.get("dir") == "out" and m.get("id") in pending:
+            m = dict(m); m["pending"] = True
+        out.append(m)
+    return {"ok": True, "peer": peer, "label": _op_peer_name(peer), "messages": out}
 
 def op_note_read(peer):
     with _OPNOTES_LOCK:
@@ -8422,6 +8428,26 @@ def portfolio():
     for r in out: roll[r["rag"]] = roll.get(r["rag"], 0) + 1
     return {"instances": out, "roll": roll, "n": len(out), "role": ROLE, "brand": BRAND}
 
+def fleet_attention():
+    """Overseer-only fleet rollup of the per-node Attention feature (cmux #3). HTTP-scrapes each registered
+    node's /api/attention and aggregates -- so it works for REMOTE + cross-user nodes too (NOT shared-tmux).
+    A node that is down, or hasn't installed/enabled the feature, simply contributes 0 and never blocks."""
+    nodes = []; twaiting = 0; tdone = 0; any_on = False; seen = set()
+    for inst in instances_list():
+        base = (inst.get("url") or ("http://127.0.0.1:%s" % inst.get("port"))).rstrip("/")
+        if base in seen: continue
+        seen.add(base)
+        a = _scrape_auth(base + "/api/attention")   # carry the family token -- /api/attention is auth-gated
+        up = a is not None; en = bool(a and a.get("enabled")); any_on = any_on or en
+        w = int((a or {}).get("waiting") or 0); d = int((a or {}).get("done") or 0)
+        items = [dict(it, node=inst.get("id")) for it in ((a or {}).get("items") or [])][:12]
+        twaiting += w; tdone += d
+        nodes.append({"id": inst.get("id"), "url": base, "port": inst.get("port"),
+                      "status": "up" if up else "down", "enabled": en,
+                      "waiting": w, "done": d, "items": items})
+    return {"role": ROLE, "nodes": nodes, "n": len(nodes), "any_enabled": any_on,
+            "waiting": twaiting, "done": tdone, "at": time.time()}
+
 # Protected system services (tmux sessions the chief watches but never lists as "work"). Per-deployment:
 # set "services" in cc.config.json as [[name,label,desc],...]. Falls back to this deployment's fleet.
 # Per-instance services. Only the master (no CC_CONFIG) gets the default fleet; any instance
@@ -8716,16 +8742,21 @@ def session_bar():
     (busy = Claude is mid-turn). The frontend watches for busy->idle transitions to flash a tile gold ('done').
     Busy is computed in parallel so a dozen sessions don't serialize a dozen capture-pane calls."""
     sess = [s for s in tmux_sessions() if s.get("kind") != "service"]   # taskbar = WORK + CHIEFS + running Ralph loops (so you can watch a loop live); services + servers stay hidden
+    _attn_on = _attn_enabled()
     busy = {}
     def chk(n):
         try: busy[n] = _pane_busy(n)
         except Exception: busy[n] = False
+        if _attn_on:
+            try: _attn_scrape_set(n, term_snapshot(n, 40))   # refresh the scrape state so the taskbar dot is live
+            except Exception: pass
     ts = [threading.Thread(target=chk, args=(s["name"],)) for s in sess]
     for t in ts: t.start()
     for t in ts: t.join()
     local = [{"name": s["name"], "label": s["label"], "kind": s.get("kind", "work"),
               "node": s.get("node", ""), "mine": s.get("mine", True), "model": s.get("model"),
               "loc": s.get("loc", ""), "cwd": s.get("cwd", ""), "busy": busy.get(s["name"], False),
+              "attn": (_attn_state_for(s["name"]) if _attn_on else None),
               "chief": s.get("chief", False), "attached": s.get("attached", False),
               "protected": bool(s.get("protected", False))} for s in sess]
     return {"sessions": local + _remote_sessions(),   # local (drivable) + fleet (read-only, deep-link) tiles
@@ -8852,7 +8883,110 @@ def term_snapshot(name, lines=60):
     try: lines = max(8, min(200, int(lines)))
     except Exception: lines = 60
     code, o, _ = sh([TMUX, "capture-pane", "-t", name, "-p", "-S", "-%d" % lines])
-    return o if code == 0 else ""
+    o = o if code == 0 else ""
+    if name and _attn_enabled():
+        try: _attn_scrape_set(name, o)   # piggyback the grid's snapshot poll -> zero extra capture-pane
+        except Exception: pass
+    return o
+
+# ---- Session attention (cmux-style rings + notify bus) --------------------------------------------
+# OPT-IN, OFF by default (cc.config "attention" or the _attention_cfg.json toggle). A live taskbar is never
+# disrupted until the operator flips it on. TWO signal sources merge into one per-session state:
+#   (1) SCRAPE -- classify the live pane text (running/permission/error/idle). Cheap, needs no agent
+#       cooperation, and piggybacks on the snapshot the sessions grid ALREADY polls (no extra capture-pane).
+#   (2) PUSH   -- an agent/loop/script emits an explicit event via `cc-notify` -> /api/notify (need-input/
+#       done/info). Reliable for "asked you a question" / "finished", which a scrape can't tell from plain idle.
+# SELF-SCOPED per node: a node only ever reflects its OWN visible sessions; the MC overseer aggregates over HTTP.
+ATTN_CFG   = os.path.join(STATE_DIR, "_attention_cfg.json")
+ATTN_STORE = os.path.join(STATE_DIR, "_attention.json")   # pushed events only: {name:{state,title,body,ts,src,seen}}
+_ATTN_SCRAPE = {}   # in-memory scrape cache {name:{state,ts}} -- rebuilt live from snapshots, never persisted
+
+def _attn_enabled():
+    try:
+        if os.path.isfile(ATTN_CFG):
+            return bool((load(ATTN_CFG, {}) or {}).get("enabled"))
+    except Exception: pass
+    return bool(CC.get("attention"))
+
+# RELIABLE BY DESIGN: the scrape only tells running (Claude's live "esc to interrupt" spinner) from idle, plus
+# a tight permission-box match on the very bottom lines. It must NEVER keyword-match the agent's OWN output --
+# a session DISCUSSING "api error" / "rate limit" / "esc to retry" is not erroring (that false-positive lit up
+# every session that merely talked about errors, incl. this one). Error/waiting/done come from the deterministic
+# PUSH channel (cc-notify / Claude Code hooks), which cannot false-positive. (Learned live 2026-07-10.)
+_RE_ATTN_PERM = re.compile(r"(do you want to proceed\?|do you trust the files in this folder\?|❯\s*1\.\s*yes)", re.I)
+
+def _classify_attn(text):
+    """SCRAPE state from the pane's LIVE UI region only (the bottom few lines), never deep scrollback/conversation.
+    running = Claude's spinner is up; permission = Claude's approval box is up; else idle."""
+    lines = [l for l in (text or "").lower().splitlines() if l.strip()]
+    if not lines: return "idle"
+    bottom = "\n".join(lines[-6:])                       # the live UI chrome, NOT the message body / history
+    if "esc to interrupt" in bottom: return "running"   # mid-turn spinner -- the one fully reliable scrape signal
+    if _RE_ATTN_PERM.search("\n".join(lines[-4:])): return "permission"   # Claude's own approval box, bottom-anchored
+    return "idle"
+
+def _attn_scrape_set(name, text):
+    st = _classify_attn(text)
+    _ATTN_SCRAPE[name] = {"state": st, "ts": time.time()}
+    if st == "running":            # the agent moved on -> a stale pushed waiting/done no longer applies
+        try:
+            store = load(ATTN_STORE, {}) or {}
+            if name in store: store.pop(name, None); save(ATTN_STORE, store)
+        except Exception: pass
+    return st
+
+def notify_push(name, kind="info", title="", body="", src="cc-notify"):
+    """Record a pushed attention event from a session (cc-notify / OSC / Stop-hook).
+    kind: need-input | done | info | clear."""
+    name = (name or "").strip()
+    if not name: return {"ok": False, "error": "no session"}
+    store = load(ATTN_STORE, {}) or {}
+    if kind == "clear":
+        store.pop(name, None); save(ATTN_STORE, store); return {"ok": True, "cleared": True}
+    state = {"need-input": "waiting", "done": "done", "info": "info"}.get(kind, "info")
+    store[name] = {"state": state, "title": (title or "")[:200], "body": (body or "")[:400],
+                   "ts": time.time(), "src": (src or "cc-notify")[:40], "seen": False}
+    save(ATTN_STORE, store)
+    return {"ok": True, "state": state}
+
+def _attn_state_for(name):
+    """Merged state for one session. An actively-RUNNING pane wins (agent moved on); else an explicit pushed
+    waiting/done wins over the scrape; else the scrape."""
+    scrape = (_ATTN_SCRAPE.get(name) or {}).get("state")
+    if scrape == "running": return "running"
+    push = ((load(ATTN_STORE, {}) or {}).get(name) or {}).get("state")
+    if push in ("waiting", "done"): return push
+    return scrape or "idle"
+
+def attention_summary():
+    """This node's attention posture, scoped to its OWN visible sessions. NEEDS-YOU = waiting|permission|error;
+    'done' is a separate finished bucket. Also marks pushed events seen + prunes dead sessions."""
+    if not _attn_enabled():
+        return {"enabled": False, "waiting": 0, "done": 0, "items": [], "states": {}}
+    names = [s["name"] for s in tmux_sessions()]
+    store = load(ATTN_STORE, {}) or {}
+    states = {}; items = []; waiting = 0; done = 0; fresh = []
+    for nm in names:
+        st = _attn_state_for(nm); states[nm] = st
+        ev = store.get(nm) or {}
+        if st in ("waiting", "permission", "error"):
+            waiting += 1
+            items.append({"name": nm, "state": st, "title": ev.get("title", ""), "src": ev.get("src", "")})
+            if ev and not ev.get("seen"): fresh.append({"name": nm, "state": st, "title": ev.get("title", ""),
+                                                         "body": ev.get("body", ""), "src": ev.get("src", "")})
+        elif st == "done":
+            done += 1
+            if ev and not ev.get("seen"): fresh.append({"name": nm, "state": st, "title": ev.get("title", ""),
+                                                         "body": ev.get("body", ""), "src": ev.get("src", "")})
+    dirty = False
+    for nm in list(store):                       # prune events whose session is gone; mark surviving ones seen
+        if nm not in names: store.pop(nm, None); dirty = True
+        elif not store[nm].get("seen"): store[nm]["seen"] = True; dirty = True
+    if dirty:
+        try: save(ATTN_STORE, store)
+        except Exception: pass
+    return {"enabled": True, "node": PROJECT, "waiting": waiting, "done": done,
+            "items": items, "fresh": fresh, "states": states}
 
 _SCROLLED = set()   # sessions a browser put into copy-mode via touch-scroll -> any keystroke snaps to live
 
@@ -16665,7 +16799,14 @@ class H(BaseHTTPRequestHandler):
             except Exception: days = 7
             return self._s(200, json.dumps(convo_tree(days)))
         if u.path == "/api/term-snapshot":
-            return self._s(200, json.dumps({"text": term_snapshot((q.get("name") or [""])[0], (q.get("lines") or ["60"])[0])}))
+            _nm = (q.get("name") or [""])[0]
+            _resp = {"text": term_snapshot(_nm, (q.get("lines") or ["60"])[0])}
+            if _nm and _attn_enabled():
+                try: _resp["attn"] = _attn_state_for(_nm)
+                except Exception: pass
+            return self._s(200, json.dumps(_resp))
+        if u.path == "/api/attention":
+            return self._s(200, json.dumps(attention_summary()))
         if u.path == "/api/compact-state":
             return self._s(200, json.dumps(_COMPACT_STATE.get((q.get("name") or [""])[0], {})))
         if u.path == "/api/session-follow":    # Front Desk M2: did the watched session get handed off? -> UI auto-follows
@@ -16808,6 +16949,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/portfolio":
             if ROLE == "org": return self._s(200, json.dumps(portfolio()))
             return self._s(403, json.dumps({"instances": [], "roll": {}, "n": 0, "role": ROLE, "gated": True, "error": "portfolio is ClaudeGrandfather (overseer) only"}))
+        if u.path == "/api/fleet-attention":
+            if ROLE == "org": return self._s(200, json.dumps(fleet_attention()))
+            return self._s(403, json.dumps({"role": ROLE, "gated": True, "nodes": [], "n": 0, "waiting": 0, "done": 0, "any_enabled": False}))
         if u.path == "/api/peers":         return self._s(200, json.dumps({"peers": peers(), "self": INSTANCE_ID}))
         if u.path == "/api/daemons":       return self._s(200, json.dumps(daemons_status(), default=str))
         if u.path == "/api/mcp-hygiene":   return self._s(200, json.dumps(mcp_hygiene_status(), default=str))
@@ -17183,6 +17327,15 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(advise_run(body.get("session_id") or body.get("name") or "", bool(body.get("verify")))))
         if u.path == "/api/advise-inject":    # manual gate: inject the review into the session (guarded injector)
             return self._s(200, json.dumps(advise_inject(body.get("session_id") or body.get("name") or "", body.get("text") or "")))
+        if u.path == "/api/notify":           # a session pushes an attention event (cc-notify / OSC / Stop-hook)
+            return self._s(200, json.dumps(notify_push(body.get("session") or body.get("name") or "",
+                body.get("kind") or "info", body.get("title") or "", body.get("body") or "", body.get("src") or "cc-notify")))
+        if u.path == "/api/attention-toggle": # OPT-IN switch for the attention rings + notify bus (OFF by default)
+            try:
+                cfg = load(ATTN_CFG, {}) or {}; cfg["enabled"] = bool(body.get("on")); save(ATTN_CFG, cfg)
+                return self._s(200, json.dumps({"ok": True, "enabled": cfg["enabled"]}))
+            except Exception as e:
+                return self._s(200, json.dumps({"ok": False, "error": str(e)[:120]}))
         if u.path == "/api/advise-toggle":    # persist per-session prefs (autoinject / verify)
             return self._s(200, json.dumps(advise_set_pref(body.get("session_id") or body.get("name") or "", body.get("key") or "", body.get("value"))))
         if u.path == "/api/autocompact":      # turn graceful auto-compact on/off + set the % threshold (persists to cc.config, live)
@@ -18910,6 +19063,31 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .stile.big{height:580px;grid-column:1/-1;border-color:var(--accent);box-shadow:var(--glow)}
 .sthead{display:flex;align-items:center;gap:7px;padding:7px 9px;background:var(--card2);cursor:pointer;border-bottom:1px solid var(--line);flex:0 0 auto}
 .stdot{flex:0 0 auto}.stname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;font-size:12.5px}
+/* Session attention (opt-in): CSS state dot + tile ring. All colors from palette vars. */
+.stdot.dot{width:11px;height:11px;border-radius:50%;position:relative;display:inline-block;background:var(--dim)}
+.stdot.dot::after{content:"";position:absolute;inset:-3px;border-radius:50%;pointer-events:none}
+.stdot.dot.st-running{background:var(--ok)}
+.stdot.dot.st-waiting{background:var(--blue)}
+.stdot.dot.st-permission{background:var(--warn)}
+.stdot.dot.st-error{background:var(--err)}
+.stdot.dot.st-done{background:var(--ok);box-shadow:0 0 7px rgba(var(--ok-rgb),.7)}
+.stdot.dot.st-idle{background:var(--dim)}
+.stile.attn-wait{border-color:rgba(var(--blue-rgb),.75);box-shadow:0 0 0 1px rgba(var(--blue-rgb),.45),0 0 22px rgba(var(--blue-rgb),.20)}
+.stile.attn-perm{border-color:rgba(var(--warn-rgb),.8);box-shadow:0 0 0 1px rgba(var(--warn-rgb),.45),0 0 22px rgba(var(--warn-rgb),.20)}
+.stile.attn-err{border-color:rgba(var(--err-rgb),.8);box-shadow:0 0 0 1px rgba(var(--err-rgb),.45),0 0 22px rgba(var(--err-rgb),.20)}
+.stile.attn-done{border-color:rgba(var(--ok-rgb),.55)}
+.stdot.dot.st-waiting::after{box-shadow:0 0 0 0 rgba(var(--blue-rgb),.6);animation:attnRing 1.7s ease-out infinite}
+.stdot.dot.st-permission::after{box-shadow:0 0 0 0 rgba(var(--warn-rgb),.6);animation:attnRing 1.7s ease-out infinite}
+.stdot.dot.st-error::after{box-shadow:0 0 0 0 rgba(var(--err-rgb),.6);animation:attnRing 1.7s ease-out infinite}
+@keyframes attnRing{0%{box-shadow:0 0 0 0 rgba(var(--blue-rgb),.55)}70%{box-shadow:0 0 0 7px rgba(var(--blue-rgb),0)}100%{box-shadow:0 0 0 0 rgba(var(--blue-rgb),0)}}
+.attnchip{display:inline-flex;align-items:center;gap:6px;cursor:pointer;border-radius:999px;padding:4px 11px 4px 9px;font-size:12px;font-weight:700;border:1px solid var(--line);background:var(--card2);color:var(--mut);white-space:nowrap}
+.attnchip .adot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
+.attnchip.live{color:var(--ink);border-color:rgba(var(--blue-rgb),.55);background:linear-gradient(180deg,rgba(var(--blue-rgb),.20),rgba(var(--blue-rgb),.08))}
+.attnchip.live .adot{background:var(--blue);animation:attnRing 1.7s ease-out infinite}
+.attnchip .done{color:var(--dim);font-weight:600}
+.stile.attnflash{animation:attnFlash .9s ease}
+@keyframes attnFlash{0%,100%{outline:0 solid transparent;outline-offset:2px}30%{outline:2px solid var(--accent);outline-offset:2px}}
+@media(prefers-reduced-motion:reduce){.stdot.dot::after,.attnchip .adot,.stile.attnflash{animation:none}}
 .stbtns{display:flex;gap:3px;flex:0 0 auto}.stbtns .mini{padding:2px 6px}
 .snap{flex:1;margin:0;padding:8px;overflow:hidden;font:10.5px/1.32 ui-monospace,Menlo,monospace;color:#ccccdd;background:#0a0a0f;white-space:pre-wrap;word-break:break-word}
 .stframe{flex:1;border:0;width:100%;background:#0a0a0f}
@@ -19133,32 +19311,60 @@ body.wk-dragging .wkdrop{display:flex;pointer-events:auto}
 .basketwrap.bk-over{outline:2px dashed rgba(var(--accent-rgb),.7);outline-offset:3px;border-radius:8px}
 body.ss-dragging .basketwrap{box-shadow:0 0 0 2px rgba(var(--accent-rgb),.35) inset;border-radius:8px}
 @media(max-width:980px){.basketwrap{display:none}}
-/* NOTES lens: operator<->operator chat (messaging-app layout: peer rail + conversation + composer) */
-.noteswrap{grid-column:1/-1;display:flex;gap:0;height:calc(100vh - 210px);min-height:420px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card,rgba(255,255,255,.02))}
-.note-rail{flex:0 0 230px;border-right:1px solid var(--line);overflow:auto;background:rgba(0,0,0,.12)}
-.note-peer{display:flex;gap:9px;align-items:center;padding:11px 12px;cursor:pointer;border-bottom:1px solid var(--line)}
-.note-peer:hover{background:var(--card)}
-.note-peer.on{background:rgba(var(--accent-rgb),.12);box-shadow:inset 3px 0 0 0 var(--accent)}
-.np-av{flex:0 0 34px;width:34px;height:34px;border-radius:50%;background:var(--grad,linear-gradient(135deg,#c9a227,#8a6d10));color:#15120a;font-weight:800;display:flex;align-items:center;justify-content:center;font-size:15px}
-.np-meta{flex:1;min-width:0}
-.np-name{font-weight:700;font-size:13px;display:flex;align-items:center;gap:6px;color:var(--mut)}
-.np-unread{background:#f85149;color:#fff;border-radius:9px;font-size:10px;font-weight:800;padding:0 6px;min-width:16px;text-align:center}
-.np-last{font-size:11px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
-.note-conv{flex:1;min-width:0;display:flex;flex-direction:column}
-.note-head{padding:11px 14px;border-bottom:1px solid var(--line);font-weight:700;color:var(--mut);display:flex;align-items:baseline;gap:9px}
-.note-head .sub{font-size:11px;color:var(--dim);font-weight:400}
-.note-msgs{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:9px}
-.note-row{display:flex}
-.note-row.out{justify-content:flex-end}
-.note-row.in{justify-content:flex-start}
-.note-bub{max-width:74%;padding:9px 13px;border-radius:14px;font-size:13.5px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
-.note-row.in .note-bub{background:var(--card,rgba(255,255,255,.05));border:1px solid var(--line);border-bottom-left-radius:4px;color:var(--near,#e8e8ef)}
-.note-row.out .note-bub{background:linear-gradient(135deg,rgba(var(--accent-rgb),.92),rgba(var(--accent-rgb),.72));color:#15120a;border-bottom-right-radius:4px}
-.note-t{font-size:10px;opacity:.6;margin-top:4px}
-.note-empty-conv{color:var(--dim);font-size:12.5px;margin:auto;text-align:center}
-.note-compose{display:flex;gap:8px;padding:11px;border-top:1px solid var(--line);align-items:flex-end}
-.note-compose textarea{flex:1;min-width:0;resize:vertical;background:var(--inp,rgba(0,0,0,.25));color:var(--near,#e8e8ef);border:1px solid var(--line);border-radius:9px;padding:9px 11px;font:inherit;font-size:13.5px}
-@media(max-width:820px){.noteswrap{flex-direction:column;height:calc(100dvh - 180px)}.note-rail{flex:0 0 auto;max-height:130px;display:flex;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line)}.note-peer{flex:0 0 auto;border-bottom:0;border-right:1px solid var(--line)}.np-last{display:none}}
+/* MESSAGES lens: operator<->operator chat -- iMessage-style, mobile-first (list<->conversation swap on phones) */
+.mwrap{grid-column:1/-1;display:flex;gap:0;height:calc(100vh - 210px);min-height:440px;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--card,rgba(255,255,255,.02))}
+.m-rail{flex:0 0 258px;border-right:1px solid var(--line);overflow:auto;background:rgba(0,0,0,.14);display:flex;flex-direction:column}
+.m-rail-h{padding:13px 15px 9px;font-weight:800;font-size:16px;color:var(--near,#e8e8ef);letter-spacing:.2px;display:flex;align-items:baseline;justify-content:space-between;border-bottom:1px solid var(--line)}
+.m-rail-h .sub{font-size:11px;color:var(--dim);font-weight:500}
+.m-peer{display:flex;gap:11px;align-items:center;padding:11px 14px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,.04);transition:background .12s}
+.m-peer:hover{background:var(--card)}
+.m-peer.on{background:rgba(var(--accent-rgb),.13)}
+.m-av{flex:0 0 40px;width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.35)}
+.m-pmeta{flex:1;min-width:0}
+.m-prow1{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.m-pname{font-weight:700;font-size:14px;color:var(--near,#e8e8ef);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.m-ptime{font-size:11px;color:var(--dim);flex:0 0 auto}
+.m-prow2{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:2px}
+.m-plast{font-size:12.5px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.m-unread{background:var(--accent,#e8c547);color:#15120a;border-radius:11px;font-size:11px;font-weight:800;padding:1px 7px;min-width:20px;text-align:center;flex:0 0 auto}
+.m-conv{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0}
+.m-chead{display:flex;align-items:center;gap:11px;padding:10px 14px;border-bottom:1px solid var(--line);background:rgba(0,0,0,.10);flex:0 0 auto}
+.m-chead .m-av{flex:0 0 36px;width:36px;height:36px;font-size:15px}
+.m-back{display:none;flex:0 0 auto;width:34px;height:34px;border:none;background:transparent;color:var(--accent,#e8c547);font-size:30px;line-height:1;cursor:pointer;align-items:center;justify-content:center;border-radius:9px;margin-left:-6px}
+.m-back:active{background:rgba(var(--accent-rgb),.15)}
+.m-ctitle{flex:1;min-width:0}
+.m-cname{font-weight:800;font-size:15.5px;color:var(--near,#e8e8ef);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.m-csub{font-size:11px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.m-msgs{flex:1;overflow:auto;padding:14px 14px 6px;display:flex;flex-direction:column;min-height:0}
+.m-day{align-self:center;font-size:10.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--dim);background:rgba(255,255,255,.05);padding:3px 12px;border-radius:20px;margin:14px 0 8px}
+.m-row{display:flex;margin-top:8px}
+.m-row.cont{margin-top:2px}
+.m-row.out{justify-content:flex-end}
+.m-row.in{justify-content:flex-start}
+.m-bub{max-width:80%;padding:8px 13px 6px;border-radius:18px;font-size:14.5px;line-height:1.4;white-space:pre-wrap;word-break:break-word}
+.m-row.in .m-bub{background:var(--card2,rgba(255,255,255,.07));border:1px solid var(--line);color:var(--near,#e8e8ef);border-bottom-left-radius:5px}
+.m-row.out .m-bub{background:linear-gradient(135deg,rgba(var(--accent-rgb),.95),rgba(var(--accent-rgb),.78));color:#15120a;border-bottom-right-radius:5px}
+.m-row.cont.in .m-bub{border-top-left-radius:6px}
+.m-row.cont.out .m-bub{border-top-right-radius:6px}
+.m-meta{font-size:10px;margin-top:3px;display:flex;gap:4px;align-items:center;justify-content:flex-end;opacity:.6}
+.m-row.in .m-meta{justify-content:flex-start}
+.m-tick{font-weight:700}
+.m-empty{margin:auto;text-align:center;color:var(--dim);font-size:13px;line-height:1.6;padding:24px}
+.m-compose{display:flex;gap:9px;padding:10px 12px;border-top:1px solid var(--line);align-items:flex-end;background:rgba(0,0,0,.10);flex:0 0 auto}
+.m-compose textarea{flex:1;min-width:0;resize:none;height:42px;max-height:120px;overflow-y:auto;background:var(--inp,rgba(0,0,0,.28));color:var(--near,#e8e8ef);border:1px solid var(--line);border-radius:21px;padding:10px 16px;font:inherit;font-size:14.5px;line-height:1.35}
+.m-compose textarea:focus{border-color:var(--accent);outline:none}
+.m-send{flex:0 0 auto;width:42px;height:42px;border-radius:50%;border:none;background:var(--grad,linear-gradient(135deg,#e8c547,#c9a227));color:#15120a;font-size:17px;font-weight:800;cursor:pointer;display:flex;align-items:center;justify-content:center;touch-action:manipulation}
+.m-send:active{transform:scale(.9)}
+@media(max-width:820px){
+  .mwrap{flex-direction:column;height:calc(100dvh - 118px - var(--cf-dock-h,0px));min-height:0;border-radius:0;border-left:0;border-right:0;border-top:0;margin:0 -14px -80px}
+  .mwrap .m-rail{flex:1;border-right:0}
+  .mwrap .m-conv{flex:1}
+  .mwrap.show-conv .m-rail{display:none}
+  .mwrap:not(.show-conv) .m-conv{display:none}
+  .m-back{display:flex}
+  .m-bub{max-width:82%}
+  .m-compose{padding-bottom:calc(10px + env(safe-area-inset-bottom))}
+}
 /* CAN'T-MISS corner alert: a new operator note slides into the bottom-right and STAYS until opened/dismissed */
 #opAlert{position:fixed;right:18px;bottom:54px;z-index:99998;width:330px;max-width:calc(100vw - 36px);background:#15151c;border:1.5px solid #f85149;border-radius:14px;box-shadow:0 14px 50px rgba(0,0,0,.6),0 0 0 4px rgba(248,81,73,.18);padding:13px 15px;transform:translateY(28px) scale(.96);opacity:0;pointer-events:none;transition:all .28s cubic-bezier(.2,.8,.25,1)}
 #opAlert.show{transform:none;opacity:1;pointer-events:auto;animation:opPulse 2.6s ease-in-out infinite}
@@ -19360,6 +19566,17 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 .sb-tile.chief .sb-lbl{color:var(--accent-light)}
 .sb-tile.done{border-color:var(--accent);color:var(--ink);animation:sbpulse 1.15s ease-in-out infinite}
 .sb-tile.done .sb-dot{background:var(--accent)}
+/* Attention states on the taskbar dot (opt-in; these follow busy/done so the state color wins) */
+.sb-tile.sb-a-running .sb-dot{background:var(--ok);box-shadow:0 0 6px rgba(var(--ok-rgb),.55);animation:none}
+.sb-tile.sb-a-idle .sb-dot{background:#3a3a4a;box-shadow:none;animation:none}
+.sb-tile.sb-a-waiting{border-color:rgba(var(--blue-rgb),.7);box-shadow:0 0 0 1px rgba(var(--blue-rgb),.4),0 0 12px rgba(var(--blue-rgb),.25)}
+.sb-tile.sb-a-waiting .sb-dot{background:var(--blue);box-shadow:0 0 8px var(--blue);animation:sbblink 1s ease-in-out infinite}
+.sb-tile.sb-a-permission{border-color:rgba(var(--warn-rgb),.75);box-shadow:0 0 0 1px rgba(var(--warn-rgb),.4),0 0 12px rgba(var(--warn-rgb),.25)}
+.sb-tile.sb-a-permission .sb-dot{background:var(--warn);box-shadow:0 0 8px var(--warn);animation:sbblink 1s ease-in-out infinite}
+.sb-tile.sb-a-error{border-color:rgba(var(--err-rgb),.75);box-shadow:0 0 0 1px rgba(var(--err-rgb),.4),0 0 12px rgba(var(--err-rgb),.25)}
+.sb-tile.sb-a-error .sb-dot{background:var(--err);box-shadow:0 0 8px var(--err);animation:sbblink 1s ease-in-out infinite}
+.sb-tile.sb-a-done .sb-dot{background:var(--accent);box-shadow:0 0 8px var(--accent);animation:sbblink 1s ease-in-out infinite}
+@media(prefers-reduced-motion:reduce){.sb-tile.sb-a-waiting .sb-dot,.sb-tile.sb-a-permission .sb-dot,.sb-tile.sb-a-error .sb-dot,.sb-tile.sb-a-done .sb-dot{animation:none}}
 @keyframes sbblink{0%,100%{opacity:1}50%{opacity:.35}}
 @keyframes sbpulse{0%,100%{box-shadow:0 0 0 0 rgba(var(--accent-rgb),0);background:var(--card)}50%{box-shadow:0 0 16px 2px rgba(var(--accent-rgb),.6);background:rgba(var(--accent-rgb),.18)}}
 /* ===== ss-* : drag ANYTHING -> session. Dock tiles glow as drop targets while a sendable is in flight. ===== */
@@ -21263,7 +21480,7 @@ function sessToolsHTML(count){
   // Workspace model (no focus/grid/list): drag sessions up from the taskbar into resizable split panes.
   var live=(count!=null)?('<span class="sesslive" title="'+count+' live session'+(count==1?'':'s')+'">🟢 '+count+'</span>'):'<span class="sesslive"></span>';
   var hint='<span class="sub" style="font-size:11px;color:var(--dim)" title="Drag a session up from the taskbar into the workspace to split the screen; drag the bar between panes to resize; ⏷ pushes a pane back down.">drag from the taskbar ↓ to split</span>';
-  return live+hint+acmpBtn()+cxChipHTML()+'<button class="mini" title="Admin shell — a plain shell in this project for sudo / interactive commands (type your password here)" onclick="openAdminShell()">Admin</button>';
+  return live+hint+acmpBtn()+cxChipHTML()+attnBarHTML()+'<button class="mini" title="Admin shell — a plain shell in this project for sudo / interactive commands (type your password here)" onclick="openAdminShell()">Admin</button>';
 }
 function paintSessTools(count){var el=document.getElementById('lensTools');if(el)el.innerHTML=(LENS=='sessions')?sessToolsHTML(count):'';}
 function setSessView(v){SESSVIEW=v;localStorage.setItem('hpcc_sessview',v);loadSessions(true);syncHash();}
@@ -24756,8 +24973,14 @@ async function loadComms(){
   clearInterval(window.COMMSTIMER);window.COMMSTIMER=setInterval(function(){if(LENS!="comms"){clearInterval(window.COMMSTIMER);return;}commsRefresh();},5000);
 }
 // ===== NOTES lens: operator<->operator chat (human notes between node owners; NOT the chief mesh) =====
-var NOTES={peer:null,threads:[]};
+var NOTES={peer:null,threads:[],view:"list"};
 function notesTime(ts){if(!ts)return"";try{return new Date(ts*1000).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});}catch(e){return"";}}
+function mHue(s){var h=0;s=s||"";for(var i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))%360;return h;}
+function mAvStyle(s){var h=mHue(s);return "background:linear-gradient(135deg,hsl("+h+",56%,52%),hsl("+((h+42)%360)+",58%,42%))";}
+function mRel(ts){if(!ts)return"";var s=Math.floor(Date.now()/1000)-ts;if(s<60)return"now";if(s<3600)return Math.floor(s/60)+"m";if(s<86400)return Math.floor(s/3600)+"h";var d=new Date(ts*1000),n=new Date();if(s<604800)return d.toLocaleDateString([],{weekday:"short"});if(d.getFullYear()===n.getFullYear())return d.toLocaleDateString([],{month:"short",day:"numeric"});return d.toLocaleDateString([],{month:"short",day:"numeric",year:"2-digit"});}
+function mClock(ts){if(!ts)return"";try{return new Date(ts*1000).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});}catch(e){return"";}}
+function mDay(ts){var d=new Date(ts*1000),n=new Date();var sd=new Date(d.getFullYear(),d.getMonth(),d.getDate()),sn=new Date(n.getFullYear(),n.getMonth(),n.getDate());var diff=Math.round((sn-sd)/86400000);if(diff<=0)return"Today";if(diff===1)return"Yesterday";if(diff<7)return d.toLocaleDateString([],{weekday:"long"});return d.toLocaleDateString([],{weekday:"short",month:"short",day:"numeric"});}
+function mGrow(el){if(!el)return;el.style.height="auto";el.style.height=Math.min(120,Math.max(42,el.scrollHeight))+"px";}
 // ---- THE TRANSFERS lens: the warm-transfer desk (Assisted -- you confirm each proposed handoff) ----
 function hoAgo(ts){var s=Math.max(0,Math.floor(Date.now()/1000-(ts||0)));return s<60?(s+'s'):s<3600?(Math.floor(s/60)+'m'):s<86400?(Math.floor(s/3600)+'h'):(Math.floor(s/86400)+'d');}
 async function loadHandoffs(){
@@ -24974,25 +25197,38 @@ async function loadNotes(){
   var box=document.getElementById("grid");if(!box)return;
   var d={};try{d=await(await fetch("/api/opnotes")).json();}catch(e){box.innerHTML=empty("Couldn't load notes.");return;}
   NOTES.threads=d.threads||[];
-  if(!NOTES.threads.length){box.innerHTML=empty("No other nodes to message yet. Notes let you leave a message for another node's operator — e.g. Mission Control ↔ AFP — saved as a thread, with a reply coming back here.");return;}
+  if(!NOTES.threads.length){box.innerHTML=empty("No other nodes to message yet. Messages let you leave a note for another node's operator — e.g. Mission Control ↔ AFP — saved as a thread, with their reply coming back here.");return;}
   if(!NOTES.peer||!NOTES.threads.some(function(t){return t.peer===NOTES.peer;}))NOTES.peer=NOTES.threads[0].peer;
   var th={messages:[]};try{th=await(await fetch("/api/opnotes?peer="+encodeURIComponent(NOTES.peer))).json();}catch(e){}
   try{await fetch("/api/opnote-read",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({peer:NOTES.peer})});notesBadgePoll();}catch(e){}
   var rail=NOTES.threads.map(function(t){
-    return '<div class="note-peer'+(t.peer===NOTES.peer?" on":"")+'" onclick="notesPick(\''+esc(t.peer)+'\')">'
-      +'<div class="np-av">'+e2((t.label||t.peer).slice(0,1).toUpperCase())+'</div>'
-      +'<div class="np-meta"><div class="np-name">'+e2(t.label||t.peer)+(t.unread?' <span class="np-unread">'+t.unread+'</span>':'')+'</div>'
-      +'<div class="np-last">'+e2(t.last||"no messages yet")+'</div></div></div>';
+    var nm=t.label||t.peer;
+    return '<div class="m-peer'+(t.peer===NOTES.peer?" on":"")+'" onclick="notesPick(\''+esc(t.peer)+'\')">'
+      +'<div class="m-av" style="'+mAvStyle(t.peer)+'">'+e2(nm.slice(0,1).toUpperCase())+'</div>'
+      +'<div class="m-pmeta">'
+        +'<div class="m-prow1"><span class="m-pname">'+e2(nm)+'</span><span class="m-ptime">'+mRel(t.last_ts)+'</span></div>'
+        +'<div class="m-prow2"><span class="m-plast">'+(t.last?e2(t.last):'<span style="opacity:.55">no messages yet</span>')+'</span>'+(t.unread?'<span class="m-unread">'+t.unread+'</span>':'')+'</div>'
+      +'</div></div>';
   }).join("");
-  var cur=NOTES.threads.filter(function(t){return t.peer===NOTES.peer;})[0]||{label:NOTES.peer};
-  var conv=(th.messages||[]).map(function(m){var out=m.dir==="out";
-    return '<div class="note-row '+(out?"out":"in")+'"><div class="note-bub">'+e2(m.text)+'<div class="note-t">'+notesTime(m.ts)+'</div></div></div>';
-  }).join("")||'<div class="note-empty-conv">No messages yet — leave '+e2(cur.label||NOTES.peer)+' a note below.</div>';
-  box.innerHTML='<div class="noteswrap">'
-    +'<div class="note-rail">'+rail+'</div>'
-    +'<div class="note-conv"><div class="note-head">✍️ '+e2(cur.label||NOTES.peer)+' <span class="sub">operator note · saved thread · they get a corner alert</span></div>'
-    +'<div class="note-msgs" id="noteMsgs">'+conv+'</div>'
-    +'<div class="note-compose"><textarea id="noteInput" rows="2" placeholder="Leave '+e2(cur.label||NOTES.peer)+' a note… (Enter to send, Shift+Enter = newline)" onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){event.preventDefault();notesSend();}"></textarea><button class="btn go" onclick="notesSend()">Send</button></div>'
+  var cur=NOTES.threads.filter(function(t){return t.peer===NOTES.peer;})[0]||{label:NOTES.peer,peer:NOTES.peer};
+  var nm=cur.label||NOTES.peer;
+  var msgs=th.messages||[],lastDay=null,lastDir=null,conv="";
+  msgs.forEach(function(m){
+    var day=mDay(m.ts);
+    if(day!==lastDay){conv+='<div class="m-day">'+e2(day)+'</div>';lastDay=day;lastDir=null;}
+    var out=m.dir==="out";var cont=(lastDir===m.dir)?" cont":"";lastDir=m.dir;
+    var tick=out?(' <span class="m-tick">'+(m.pending?'○':'✓')+'</span>'):'';
+    conv+='<div class="m-row '+(out?"out":"in")+cont+'"><div class="m-bub">'+e2(m.text)+'<div class="m-meta">'+mClock(m.ts)+tick+'</div></div></div>';
+  });
+  if(!msgs.length)conv='<div class="m-empty">No messages yet.<br>Say hi to '+e2(nm)+' below.</div>';
+  box.innerHTML='<div class="mwrap'+(NOTES.view==="conv"?" show-conv":"")+'">'
+    +'<div class="m-rail"><div class="m-rail-h">Messages <span class="sub">'+NOTES.threads.length+' node'+(NOTES.threads.length==1?'':'s')+'</span></div>'+rail+'</div>'
+    +'<div class="m-conv">'
+      +'<div class="m-chead"><button class="m-back" onclick="notesBack()" aria-label="Back">‹</button>'
+        +'<div class="m-av" style="'+mAvStyle(cur.peer||NOTES.peer)+'">'+e2(nm.slice(0,1).toUpperCase())+'</div>'
+        +'<div class="m-ctitle"><div class="m-cname">'+e2(nm)+'</div><div class="m-csub">operator note · they get a corner alert</div></div></div>'
+      +'<div class="m-msgs" id="noteMsgs">'+conv+'</div>'
+      +'<div class="m-compose"><textarea id="noteInput" rows="1" placeholder="Message '+e2(nm)+'…" oninput="mGrow(this)" onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){event.preventDefault();notesSend();}"></textarea><button class="m-send" onclick="notesSend()" aria-label="Send">➤</button></div>'
     +'</div></div>';
   var mc=document.getElementById("noteMsgs");if(mc)mc.scrollTop=mc.scrollHeight;
   clearInterval(window.NOTESTIMER);window.NOTESTIMER=setInterval(function(){if(LENS!=="notes"){clearInterval(window.NOTESTIMER);return;}notesRefresh();},5000);
@@ -25595,7 +25831,8 @@ async function nbToggleRec(){
   };
   mr.start();if(btn)btn.innerHTML="&#9209; Stop";if(st)st.textContent="recording&hellip; tap Stop when done";
 }
-function notesPick(p){NOTES.peer=p;loadNotes();}
+function notesPick(p){NOTES.peer=p;NOTES.view="conv";loadNotes();}
+function notesBack(){NOTES.view="list";loadNotes();}
 async function notesSend(){var ta=document.getElementById("noteInput");if(!ta)return;var v=ta.value.trim();if(!v)return;ta.value="";
   try{var r=await(await fetch("/api/opnote-send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({peer:NOTES.peer,text:v})})).json();if(!r||!r.ok){toast("Send failed: "+((r||{}).error||"?"),5000);ta.value=v;return;}}catch(e){toast("Send failed.",4000);ta.value=v;return;}
   toast("Note sent — it'll pop in their corner.",3000);loadNotes();}
@@ -26219,12 +26456,20 @@ async function viewCMD(path){
   var t=''; try{ t=await(await fetch('/api/file-get?b64='+b64u(path))).text(); }catch(e){ t='(could not load '+path+')'; }
   var pre=document.querySelector('.pj-md'); if(pre) pre.textContent=t||'(empty)';
 }
+function faRow(fa){
+  if(!fa||!fa.any_enabled)return '';   // no node has the Attention feature on -> show nothing (zero clutter)
+  var w=fa.waiting||0,dn=fa.done||0;
+  var per=(fa.nodes||[]).filter(function(n){return n.enabled&&(n.waiting||n.done);})
+    .map(function(n){return '<span class="sub" style="margin-right:12px;cursor:pointer" title="open this node" onclick="window.open(\''+n.url+'\',\'_blank\',\'noopener\')">'+esc(n.id)+': <b>'+n.waiting+'</b> waiting'+(n.done?(' · '+n.done+' done'):'')+'</span>';}).join('');
+  return '<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">'
+    +'<span class="attnchip'+(w>0?' live':'')+'" title="Sessions waiting on a human, across every node"><span class="adot"></span>'+w+' waiting across the fleet'+(dn?(' <span class="done">· '+dn+' done</span>'):'')+'</span>'+per+'</div>';
+}
 async function loadPortfolio(){document.getElementById("grid").innerHTML=empty("Scanning the portfolio…");
-  let d={};try{d=await(await fetch('/api/portfolio')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load portfolio.");return;}
+  let d={},fa={};try{const[pr,far]=await Promise.all([fetch('/api/portfolio'),fetch('/api/fleet-attention')]);d=await pr.json();try{fa=await far.json();}catch(e){}}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load portfolio.");return;}
   const insts=d.instances||[],roll=d.roll||{};
   let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Portfolio</b> <span class="sub">'+(d.n||0)+' project ClaudeFather(s) overseen by '+esc(d.brand||'')+' &middot; use <b>Add a ClaudeFather</b> (top right) to provision a new one</span></div>'
     +'<div style="display:flex;gap:22px;margin-top:12px;flex-wrap:wrap">'
-    +pchip('#3fb950',roll.green||0,'healthy')+pchip('#d29922',roll.amber||0,'warnings')+pchip('#f85149',roll.red||0,'critical')+pchip('#8b949e',roll.down||0,'down')+'</div></div>';
+    +pchip('#3fb950',roll.green||0,'healthy')+pchip('#d29922',roll.amber||0,'warnings')+pchip('#f85149',roll.red||0,'critical')+pchip('#8b949e',roll.down||0,'down')+'</div>'+faRow(fa)+'</div>';
   if(!insts.length){h+=empty("No child ClaudeFathers yet. Click ➕ Add a ClaudeFather above to provision one.");document.getElementById("grid").innerHTML=h;return;}
   h+='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>&#128172; Message the chiefs</b> <span class="sub">reach a peer ClaudeFather Chief of Staff (or all at once); replies come back here (~20-40s each)</span></div>'
     +'<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><select id="chieftarget" class="mini" style="min-width:150px"><option value="">All chiefs</option>'+insts.map(p=>'<option value="'+esc(p.id)+'">'+esc(p.id)+'</option>').join('')+'</select>'
@@ -26389,7 +26634,7 @@ async function loadSessions(quiet){
   document.body.classList.add("cf-sessions");document.body.classList.remove("cf-glens");   // set directly here (the landing lens may not route through render()/lensTopbar) -> mobile session dock + layout apply
   if(!quiet)document.getElementById("grid").innerHTML=empty("Loading sessions…");
   let s=[],tok={};
-  try{const[a,b,c]=await Promise.all([fetch("/api/sessions"),fetch("/api/token-usage"),fetch("/api/autocompact")]);s=await a.json();tok=await b.json();try{ACMP=(await c.json())||ACMP;}catch(e){}}catch(e){}
+  try{const[a,b,c,at]=await Promise.all([fetch("/api/sessions"),fetch("/api/token-usage"),fetch("/api/autocompact"),fetch("/api/attention")]);s=await a.json();tok=await b.json();try{ACMP=(await c.json())||ACMP;}catch(e){}try{const ad=await at.json();ATTN_ON=!!ad.enabled;ATTN=ad.states||{};}catch(e){}}catch(e){}
   TOKDATA=tok||{};
   s=s.filter(x=>!x.protected||PANES.indexOf(x.name)>=0||x.chief);   // protected (bridge/crons/loops) stay hidden -- EXCEPT any pulled up into the workspace AND the Chief of Staff (always-on mesh endpoint)
   if(SESSBIG && !s.find(x=>x.name==SESSBIG)) s.unshift({name:SESSBIG,label:SESSBIG,attached:true,protected:false});
@@ -26405,7 +26650,7 @@ async function loadSessions(quiet){
   if(!s.length)body=empty("No live sessions — click ▶ New session above to start one.");
   else body=renderWorkspace(s);
   document.getElementById("grid").innerHTML='<div class="modstack">'+head+body+'</div>';   // clean vertical stack -- usage strip (in head) sits ABOVE the focus block, never overlapped
-  unpeekNow(); startSnaps(); ccWireDropzones(); wkWire();   // wire split-pane resizers + the dock->workspace drop
+  unpeekNow(); startSnaps(); attnStart(); ccWireDropzones(); wkWire();   // wire split-pane resizers + the dock->workspace drop
   termApplySaved(); termResizeInit();   // restore the user's remembered terminal height + wire the drag-resize grip
   try{ hoBadgePoll(); }catch(e){}   // paint any in-pane Move/Keep banners for drifted sessions right away (deep-audit #3)
   try{ loadContextHealth(); }catch(e){}   // the Context Health score (deep-audit #6)
@@ -26647,8 +26892,8 @@ function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="c
   +'<button class="mini" onclick="endSess(\''+esc(x.name)+'\',false)" title="handoff + close">end</button>'
   +'<button class="mini danger" onclick="endSess(\''+esc(x.name)+'\',true)" title="force kill">kill</button></div></div>';}
 function sessTile(x,i){const big=(SESSBIG==x.name);
-  return '<div class="stile'+(big?' big':'')+'" data-name="'+esc(x.name)+'"'+(big?(' data-ccsess="'+esc(x.name)+'"'):'')+'>'
-    +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)
+  return '<div class="stile'+(big?' big':'')+attnTileCls(x.name)+'" id="atile_'+attnCssid(x.name)+'" data-name="'+esc(x.name)+'"'+(big?(' data-ccsess="'+esc(x.name)+'"'):'')+'>'
+    +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')">'+attnDotHTML(x)+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)
     +'<span class="stbtns" onclick="event.stopPropagation()">'
     +'<button class="mini" title="'+(big?'minimize':'maximize')+'" onclick="tileClick(\''+esc(x.name)+'\')">'+(big?'▒':'⤢')+'</button>'
     +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
@@ -26661,7 +26906,43 @@ function sessTile(x,i){const big=(SESSBIG==x.name);
     +'</div>';}
 function tileClick(name){SESSBIG=(SESSBIG==name)?null:name;loadSessions(true);syncHash();}
 async function refreshSnap(i,name){const el=document.getElementById('snap_'+i);if(!el)return;
-  try{const d=await(await fetch('/api/term-snapshot?name='+encodeURIComponent(name)+'&lines='+(SESSVIEW=='focus'?20:46))).json();el.textContent=(d.text||'(no output yet)');el.scrollTop=el.scrollHeight;}catch(e){}}
+  try{const d=await(await fetch('/api/term-snapshot?name='+encodeURIComponent(name)+'&lines='+(SESSVIEW=='focus'?20:46))).json();el.textContent=(d.text||'(no output yet)');el.scrollTop=el.scrollHeight;
+    if(ATTN_ON&&d.attn&&ATTN[name]!==d.attn){ATTN[name]=d.attn;paintAttnOne(name);}}catch(e){}}
+// ---- Session attention (cmux-style rings + notify bus) -- OPT-IN, off by default -----------------
+var ATTN_ON=false, ATTN={}, ATTNTIMER=null, ATTNJUMP=-1;
+function attnCssid(n){return (n||'').replace(/[^A-Za-z0-9_-]/g,'_');}
+function attnLabel(s){return ({running:'working',waiting:'waiting on you',permission:'permission prompt',error:'stalled / error',done:'done — needs review',idle:'idle'})[s]||s;}
+function attnTileCls(n){if(!ATTN_ON)return '';var s=ATTN[n];return s=='waiting'?' attn-wait':s=='permission'?' attn-perm':s=='error'?' attn-err':s=='done'?' attn-done':'';}
+function attnDotHTML(x){if(!ATTN_ON)return '<span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>';var s=ATTN[x.name]||'idle';return '<span class="stdot dot st-'+s+'" title="'+esc(attnLabel(s))+'"></span>';}
+function attnCounts(){var w=0,d=0;(SESSDATA||[]).forEach(function(x){var s=ATTN[x.name];if(s=='waiting'||s=='permission'||s=='error')w++;else if(s=='done')d++;});return {w:w,d:d};}
+function attnChipHTML(w,d){if(!ATTN_ON)return '<span id="attnchip"></span>';w=w||0;d=d||0;
+  var txt=w+' waiting'+(d?(' <span class="done">· '+d+' done</span>'):'');
+  return '<span id="attnchip" class="attnchip'+(w>0?' live':'')+'" onclick="attnJump()" title="Sessions waiting on you — click (or ⌘/Ctrl+Shift+U) to jump to the next one"><span class="adot"></span>'+txt+'</span>';}
+function attnBarHTML(){var c=attnCounts();
+  return (ATTN_ON?attnChipHTML(c.w,c.d):'')
+    +'<button class="mini" title="Attention rings — color each taskbar dot by what the agent is doing (working / waiting on you / permission / stalled) and ping you when one needs input. Off by default; nothing else changes." onclick="attnToggle()">Attention '+(ATTN_ON?'on':'off')+'</button>';}
+function refreshAttnChip(){var c=attnCounts();var chip=document.getElementById('attnchip');if(chip)chip.outerHTML=attnChipHTML(c.w,c.d);}
+function paintAttnOne(name){if(!ATTN_ON)return;var s=ATTN[name]||'idle';var el=document.getElementById('atile_'+attnCssid(name));
+  if(el){el.classList.remove('attn-wait','attn-perm','attn-err','attn-done');var c=({waiting:'attn-wait',permission:'attn-perm',error:'attn-err',done:'attn-done'})[s];if(c)el.classList.add(c);
+    var dot=el.querySelector('.stdot');if(dot){dot.className='stdot dot st-'+s;dot.title=attnLabel(s);}}
+  refreshAttnChip();}
+function paintAttn(){if(!ATTN_ON)return;(SESSDATA||[]).forEach(function(x){paintAttnOne(x.name);});}
+function attnJump(){var need=(SESSDATA||[]).filter(function(x){var s=ATTN[x.name];return s=='waiting'||s=='permission'||s=='error';});
+  if(!need.length){toast('Nothing is waiting on you right now.');return;}
+  ATTNJUMP=(ATTNJUMP+1)%need.length;var x=need[ATTNJUMP];var el=document.getElementById('atile_'+attnCssid(x.name));
+  if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.remove('attnflash');void el.offsetWidth;el.classList.add('attnflash');}}
+function attnSessLabel(n){var x=(SESSDATA||[]).find(function(s){return s.name==n;});return x?(x.label||n):n;}
+function attnToastFresh(f){var lab=({waiting:'needs your input',permission:'permission prompt',error:'stalled',done:'finished'})[f.state]||f.state;
+  toast('<b>'+esc(attnSessLabel(f.name))+'</b> — '+lab+(f.title?(': '+esc(f.title)):'')+' <span class="sub">via '+esc(f.src||'')+'</span>',5200);}
+async function attnToggle(){var on=!ATTN_ON;try{var r=await(await fetch('/api/attention-toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:on})})).json();ATTN_ON=!!r.enabled;}catch(e){return;}
+  toast(ATTN_ON?'Attention rings <b>on</b> — taskbar dots now show what each agent is doing.':'Attention rings off.');loadSessions(true);}
+function attnStart(){if(ATTNTIMER){clearInterval(ATTNTIMER);ATTNTIMER=null;}if(!ATTN_ON)return;
+  const tick=async()=>{if(LENS!='sessions'||!ATTN_ON){if(ATTNTIMER)clearInterval(ATTNTIMER);return;}
+    let d;try{d=await(await fetch('/api/attention')).json();}catch(e){return;}
+    if(!d||!d.enabled){ATTN_ON=false;return;}
+    ATTN=d.states||{};(d.fresh||[]).forEach(attnToastFresh);paintAttn();};
+  tick();ATTNTIMER=setInterval(tick,4000);
+  if(!window._attnKeys){window._attnKeys=1;document.addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&e.shiftKey&&(e.key=='U'||e.key=='u')){if(LENS=='sessions'&&ATTN_ON){e.preventDefault();attnJump();}}});}}
 function startSnaps(){if(SNAPTIMER)clearInterval(SNAPTIMER);
   const doit=()=>{if(LENS!='sessions'){clearInterval(SNAPTIMER);return;}
     refreshTokens();
@@ -26988,7 +27269,7 @@ var HELP={
  capture:{t:'Capture',sub:'A tray to save any snippet, link, or note now and sort it into the right place later.',h:'<p><b>What:</b> a catch-all inbox for things you clip from anywhere -- a paragraph, a link, a thought. Each saved clip is remembered so nothing gets lost.</p><p><b>Why:</b> you grab things in the moment without deciding where they go; later, Process clips groups them by subject and proposes a tidy summary plus tasks -- and nothing files itself until you approve.</p><p><b>How:</b> paste text or a URL and Save clip, then click Process clips; or ask your Chief of Staff to file what you have captured.</p>'},
  context:{t:'Context',sub:'Everything your assistant knows about your world, and the dials for what it gets fed.',h:'<p><b>What:</b> the memory behind the whole system -- your emails, calls, files, and notes, each tagged with where it came from and how much to trust it. It also lets you preview exactly what an agent would be handed for a given topic.</p><p><b>Why:</b> good answers depend on good context; this makes sure agents get a small, relevant, sourced slice rather than an overwhelming dump (too much context makes AI worse, not better).</p><p><b>How:</b> hit Re-ingest to pull in your latest data, type a subject to let The Scout surface things you might have missed, and toggle the context features to taste.</p>'},
  comms:{t:'Comms',sub:'Your Chief of Staff messaging the Chiefs of your other systems, with replies here.',h:'<p>Your Chief of Staff talks to the Chiefs of your other systems over a reliable connection. Message one or all of them; their replies come back here.</p>'},
- notes:{t:'Messages',sub:'Leave a message for the person who runs another one of your systems.',h:'<p><b>What:</b> a simple chat between you and the human operator of another node -- for example you at headquarters and a colleague running a separate install.</p><p><b>Why:</b> it is a person-to-person line (not the agents), saved as a thread, and the other person gets a hard-to-miss corner alert when a note arrives.</p><p><b>How:</b> pick a person on the left and type your note; their reply comes back here.</p>'},
+ notes:{t:'Messages',sub:'Leave a message for the person who runs another one of your systems.',h:'<p><b>What:</b> a simple chat between you and the human operator of another node -- for example you at headquarters and a colleague running a separate install.</p><p><b>Why:</b> it is a person-to-person line (not the agents), saved as a thread, and the other person gets a hard-to-miss corner alert when a note arrives.</p><p><b>How:</b> pick a node on the left (on a phone, tap to open the conversation and use ‹ to go back), type your note and press Enter; their reply comes back here. A ○ next to your message means it is still being delivered, ✓ means delivered.</p>'},
  notebook:{t:'Notes',sub:'Jot or dictate a quick note -- it turns into tasks and joins your morning brief.',h:'<p><b>What:</b> your personal notepad -- type or speak a note and, on save, the system pulls out the tasks, decisions, and follow-ups inside it.</p><p><b>Why:</b> a thought you capture here does not just sit there; it becomes to-dos and feeds your context and morning brief.</p><p><b>How:</b> write or hit Dictate and talk, then Save; use Add to Tasks to push the action items into your task list. Search finds any past note.</p>'},
  handoffs:{t:'Transfers',sub:'When a conversation drifts off-topic, this moves it to the right place with a clean start.',h:'<p><b>What:</b> the warm-transfer desk. When an agent\'s conversation wanders out of its lane, it prepares a tidy hand-off packet -- the goal, where it left off, and the key pointers -- to move to a better-suited home.</p><p><b>Why:</b> work ends up in the right folder with fresh, focused memory instead of one conversation trying to do everything and getting muddled.</p><p><b>How:</b> review each proposed transfer and click Move it there, or Keep it here to decline. The Workspace hygiene panel below also tidies idle conversations automatically.</p>'},
  build:{t:'Build',sub:'A safe sandbox to create and run your own custom tools (developer nodes only).',h:'<p><b>What:</b> a workshop for building your own custom add-ons -- small programs with defined inputs and outputs that run in a locked-down sandbox.</p><p><b>Why:</b> it is the one place you can run non-official code, safely walled off from your secrets and requiring your approval before it runs.</p><p><b>How:</b> scaffold one, edit its code file, Approve it, then Run. This tab appears only on developer-type nodes.</p>'},
@@ -28020,6 +28301,9 @@ function sbRender(list){
     var t=bar.querySelector('.sb-tile[data-n="'+((window.CSS&&CSS.escape)?CSS.escape(s.name):s.name)+'"]'); if(!t)return;
     t.classList.toggle('busy', !!s.busy); t.classList.toggle('done', !!SB.done[s.name]); t.classList.toggle('chief', !!s.chief);
     t.classList.toggle('up', LENS==='sessions' && PANES.indexOf(s.name)>=0);   // mark which sessions are pulled up into the workspace
+    ['waiting','permission','error','done','running','idle'].forEach(function(k){t.classList.remove('sb-a-'+k);});   // attention state on the taskbar dot (opt-in)
+    if(s.attn){ var eff=(s.attn==='idle'&&SB.done[s.name])?'done':s.attn;   // just finished a turn -> 'your turn' (compose with the gold done-flash, don't grey it out)
+      ATTN[s.name]=eff; t.classList.add('sb-a-'+eff); t.setAttribute('data-attn',eff); }
   });
   document.title=(doneCount? '\u{1F7E1} '+doneCount+' done · ':'')+SB.baseTitle;   // cue even when in another browser tab
 }

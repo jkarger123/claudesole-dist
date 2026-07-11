@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.198 -- 2026-07-11  (Messages lens revamp: iMessage-style, mobile-first)
+- **The Messages lens (operator<->operator notes) is fully redesigned.** It rendered poorly on phones -- the peer
+  rail became a cramped horizontal strip that ate half the screen. It is now a real messaging app:
+  - **Mobile:** a full-screen thread LIST; tap a node to slide into the CONVERSATION (with a ‹ back arrow), so each
+    view gets the whole screen. The compose bar sits above the bottom dock (safe-area aware).
+  - **Desktop:** a clean two-pane (thread rail + conversation), both always visible.
+  - **Polish throughout:** deterministic per-node colorized avatars, day separators (Today / Yesterday / weekday),
+    relative timestamps in the list + exact clock times on bubbles, consecutive-message grouping, a pill compose
+    box with a round send button, and a delivery indicator on your sent notes (○ = still delivering, ✓ = delivered,
+    driven by a new `pending` flag from `op_thread`).
+  Pure frontend rewrite of the `notes` lens (new `m-*` classes replace the old `note-*`) + one additive backend
+  field. Browser-verified desktop + mobile (11 checks: two-pane, list<->conversation swap, back-to-list).
+
 ## 0.99.197 -- 2026-07-10  (cc-dispatch UI: a Background dispatches panel in Agent Lab)
 - **cc-dispatch is now visible in the dashboard.** The Agent Lab lens gained a **Background dispatches** panel:
   the concurrent-running count vs the spawn cap, and the recent workers with their status (running / done / failed),
