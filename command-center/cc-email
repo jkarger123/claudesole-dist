@@ -23,6 +23,17 @@ import sys, os, json, subprocess, time
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 import email_archive
+try:
+    sys.path.insert(0, BASE)
+    import cc_resolve as _ccr
+    def _resolve_cfg_path():
+        _p, _e = _ccr.resolve_config_path()
+        if _e:
+            sys.stderr.write(_e + "\n"); sys.exit(3)
+        return _p
+except Exception:
+    def _resolve_cfg_path():
+        return os.environ.get("CC_CONFIG") or os.path.join(os.path.dirname(BASE), "cc.config.json")
 
 
 def _claude(prompt):
@@ -36,10 +47,7 @@ def _claude(prompt):
 
 
 def _load_cc():
-    p = os.environ.get("CC_CONFIG")
-    if not p:
-        home = os.environ.get("CC_HOME") or os.path.dirname(BASE)
-        p = os.path.join(home, "cc.config.json")
+    p = _resolve_cfg_path()
     try:
         with open(p) as f:
             return json.load(f)

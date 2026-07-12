@@ -25,9 +25,20 @@ import json, os, sys, time, shutil, urllib.request
 
 BASE = os.path.dirname(os.path.realpath(__file__))   # realpath: resolve the /opt/homebrew/bin symlink to the real dir
 HOME = os.path.dirname(BASE)
+try:
+    sys.path.insert(0, BASE)
+    import cc_resolve as _ccr
+    def _resolve_cfg_path():
+        _p, _e = _ccr.resolve_config_path()
+        if _e:
+            sys.stderr.write(_e + "\n"); sys.exit(3)
+        return _p
+except Exception:
+    def _resolve_cfg_path():
+        return os.environ.get("CC_CONFIG") or os.path.join(os.path.dirname(BASE), "cc.config.json")
 
 def _cfg():
-    p = os.environ.get("CC_CONFIG") or os.path.join(os.environ.get("CC_HOME") or HOME, "cc.config.json")
+    p = _resolve_cfg_path()
     try: return json.load(open(p))
     except Exception: return {}
 

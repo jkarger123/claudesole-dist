@@ -30088,6 +30088,10 @@ if __name__ == "__main__":
                 else:
                     _acct_log_active(_bem)
         except Exception: pass
+        try:                             # self-register into the co-located node registry so cc-* CLIs in ANY
+            import cc_resolve            # shell (even a bare terminal w/o CC_CONFIG) route to the right node
+            cc_resolve.register(INSTANCE_ID, PROJECT, CC_HOME, _CC_CONFIG, PORT)
+        except Exception: pass
         try: regen_treemap(force=True)   # stamp the whole-tree module map into the root CLAUDE.md
         except Exception: pass
         try: seed_framework_blocks()     # stamp framework governance (CCR policy) into project nodes' CLAUDE.md

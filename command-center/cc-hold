@@ -7,7 +7,8 @@ DAYS="${1:-}"
 SESS="${CC_SESSION:-}"
 [ -z "$SESS" ] && { echo "cc-hold: no \$CC_SESSION set (can't identify this conversation)"; exit 1; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
-CFG="${CC_CONFIG:-$HERE/../cc.config.json}"
+_SELF="$(python3 -c 'import os,sys;print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$0")"
+CFG="$(python3 "$_SELF/cc_resolve.py" 2>&1)" || { echo "$CFG" >&2; exit 3; }
 PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
 TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
 if [ -n "$DAYS" ]; then MODE="hold"; else MODE="agent_hold"; fi

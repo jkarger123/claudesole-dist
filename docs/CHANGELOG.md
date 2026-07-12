@@ -3,6 +3,24 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.200 -- 2026-07-11  (fix: co-located nodes -- stray deliverables/notifications no longer sink to the default node)
+- **On a box that runs several ClaudeFather instances (they SHARE the `command-center/` dir + the cc-* CLIs on
+  PATH), any cc-* command run from a bare shell -- no `CC_CONFIG` in the env (an admin shell, a `!`-prefix
+  command, a manually-opened terminal) -- silently targeted the ROOT/default node.** So one node became a
+  catch-all sink for other nodes' deliverables (its "new file ready" card popped for another node's files),
+  notifications, notes, etc. Confirmed live: carsearch data-catalog deliverables were landing in the hptuners
+  node's Files lens.
+- **Fix -- a single shared node-resolver (`cc_resolve.py`) that EVERY cc-* CLI now uses.** Resolution order,
+  and it never silently sinks to a default: (1) explicit `--node <id>`, (2) `$CC_CONFIG` (a launched session
+  carries its own), (3) **the node whose `project_root` contains the current working dir** (fixes bare shells),
+  (4) the only instance on the box (a standalone install is never ambiguous), (5) **fail loud** with an
+  actionable error. Instances are discovered from a runtime registry each server self-registers into on boot
+  (`_colocated_nodes.json`) UNIONed with a filesystem scan of the co-located configs -- covers any layout.
+- Wired into all 20 cc-* CLIs (14 bash + 6 python), symlink-safe. Verified end-to-end: a deliverable made in
+  carsearch's tree with no env now routes to carsearch (was: hptuners); a stray call from `/tmp` fails loud
+  instead of leaking; the normal env-set path is unchanged. Also: added `cc-notify` to the manifest (it was
+  missing, so it had never shipped) and relocated the misfiled carsearch deliverables out of the hptuners node.
+
 ## 0.99.199 -- 2026-07-11  (fix: mobile terminal chrome leaking onto touchscreen desktops/laptops)
 - **The session terminal's on-screen key bar (^C / esc / tab / arrows), mobile top-bar pill, copy button and
   drop bar were showing on non-phone devices** -- specifically any desktop or laptop that has *a* touch input

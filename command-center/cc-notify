@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# cc-notify -- a session tells the dashboard it needs attention (or finished). Lights the taskbar dot + pings
+# the operator when the Attention feature is ON (off by default; if off, this is a harmless no-op record).
+# For agents AND scripts, in ANY language. Resolves this node's port + token from cc.config.json (via CC_CONFIG
+# if set, else next to this script, else the default control-plane config), same as cc-task.
+#
+#   cc-notify --need-input "Formal or casual tone for reply #4?"   # -> blue ring, 'waiting on you'
+#   cc-notify --done "Spec + mockup delivered"                     # -> 'done, needs review'
+#   cc-notify --info "round 2/4 started"                           # -> logged, no ring
+#   cc-notify --clear                                              # -> clear this session's pushed event
+# The session is auto-detected from $TMUX (the current pane's session); override with --session <name>.
+set -uo pipefail
+
+KIND="info"; TITLE=""; BODY=""; SESSION=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --need-input) KIND="need-input"; shift; TITLE="${1:-}"; [ $# -gt 0 ] && shift ;;
+    --done)       KIND="done";       shift; TITLE="${1:-}"; [ $# -gt 0 ] && shift ;;
+    --info)       KIND="info";       shift; TITLE="${1:-}"; [ $# -gt 0 ] && shift ;;
+    --clear)      KIND="clear";      shift ;;
+    --session)    shift; SESSION="${1:-}"; [ $# -gt 0 ] && shift ;;
+    --body)       shift; BODY="${1:-}"; [ $# -gt 0 ] && shift ;;
+    *)            TITLE="$1"; shift ;;
+  esac
+done
+
+# auto-detect the tmux session this pane belongs to
+if [ -z "$SESSION" ] && [ -n "${TMUX:-}" ]; then
+  SESSION="$(tmux display-message -p '#{session_name}' 2>/dev/null || true)"
+fi
+[ -z "$SESSION" ] && { echo "cc-notify: no session (run inside a tmux session or pass --session <name>)"; exit 1; }
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+_SELF="$(python3 -c 'import os,sys;print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$0")"
+CFG="$(python3 "$_SELF/cc_resolve.py" 2>&1)" || { echo "$CFG" >&2; exit 3; }
+PORT="$(python3 -c "import json;print(json.load(open('$CFG')).get('port') or 8799)" 2>/dev/null || echo 8799)"
+TOK="$(python3 -c "import json;print(json.load(open('$CFG')).get('auth_token') or '')" 2>/dev/null || echo '')"
+BODYJSON="$(python3 -c "import json,sys;print(json.dumps({'session':sys.argv[1],'kind':sys.argv[2],'title':sys.argv[3],'body':sys.argv[4],'src':'cc-notify'}))" "$SESSION" "$KIND" "$TITLE" "$BODY")"
+
+HTTP="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${PORT}/api/notify" \
+     -H "Content-Type: application/json" -H "X-CC-Token: $TOK" -d "$BODYJSON" 2>/dev/null || echo 000)"
+if [ "$HTTP" = "200" ]; then
+  echo "✓ notified ($KIND): ${TITLE:-$SESSION}"
+elif [ "$HTTP" = "404" ]; then
+  echo "cc-notify: this node (port ${PORT}) has no /api/notify -- Attention feature not installed/updated here."; exit 1
+elif [ "$HTTP" = "403" ]; then
+  echo "cc-notify: auth rejected on port ${PORT} (check auth_token in $CFG)."; exit 1
+else
+  echo "cc-notify: dashboard on port ${PORT} returned HTTP ${HTTP}."; exit 1
+fi
