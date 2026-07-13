@@ -3,6 +3,28 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.202 -- 2026-07-13  (Google Workspace: first-class MULTI-ACCOUNT -- server core + Gmail switcher)
+- **A node can now hold MULTIPLE Google accounts and switch between them, config-driven** (CCR
+  ccr-1783914617047, increments I-partial + II + IV-core). Each node still has its own workspace (per-install
+  vault/secrets); this adds multiple accounts WITHIN a node. Foundation, backward-compatible: a single-account
+  node behaves exactly as before (no switcher shown).
+  - **Server core:** the whole `/api/google/*` surface is account-aware via a thread-local active account
+    (`_g_as`), set per-request from a `?account=`/body `account` param -- so all ~20 gmail/calendar/drive helpers
+    stay account-agnostic. The single global access-token cache `_GOOGLE_TOK` became a PER-ACCOUNT dict; the
+    gmail/calendar/drive caches (`_gm_key`, `_g_cached`) are now account-scoped (two accounts can never serve
+    each other's inbox -- the highest-severity correctness risk, closed). New `_google_accounts()` lister (vault
+    `google_tokens` dict UNION token files) is the single source of truth; `google_status()` returns the account
+    list + active + per-account capabilities.
+  - **Gmail lens switcher:** the rail shows an account dropdown (when >1 account); switching threads the chosen
+    account through every gmail list/label/message/thread/attachment/send/modify call.
+  - **Vault import is now additive-MERGE** (was skip): a newly-minted 2nd account's token joins the existing
+    `{account: token}` dict instead of being dropped, and the account list refreshes immediately.
+  - Verified live against two accounts: james works end-to-end (inbox, 50 rows, switcher renders both accounts,
+    switching updates the active account); per-account routing + account-scoped caches confirmed; all default-
+    account lenses (status/gmail/calendar/drive) unchanged. Browser-verified. (Remaining CCR increments -- per-
+    account OAuth-client minting, per-account agent MCP blocks, calendar/drive switchers, guided "add account" --
+    are the next push.)
+
 ## 0.99.201 -- 2026-07-12  (fix: session launch dies instantly when the node has an MCP config)
 - **On a node with a live `.mcp.json` (e.g. the wired Google Workspace MCP), launching a session that carries a
   prompt -- an extension SETUP session, an agent/Ralph launch with a brief -- opened and IMMEDIATELY closed.**

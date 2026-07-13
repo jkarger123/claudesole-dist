@@ -4,7 +4,7 @@
 **Sub-tools in this folder** (you can launch into any of these; file a learning to the one it belongs to):
 - `airtable/` -- >> Resume here: read _handoffs/20260708-1825__airtable.md first -- it is the latest handoff.
 - `edge-mcp/` -- Core integration extension that runs MCP servers which must live on a user's OWN computer (GUI apps like
-- `google-workspace/` -- A ClaudeFather integration extension (extension.json id google-workspace). It does two things:
+- `google-workspace/` -- >> Resume here: read _handoffs/20260713-0401__google-workspace.md first -- it is the latest handoff.
 - `granola/` -- Turn Granola call transcripts into REVIEWED updates to the agency tree: a dated note in the matched
 - `incident-commander/payload/` -- I am the Incident Commander for this ClaudeFather. Scoped agent-tool: my own dir, this charter, tools/,
 - `morning-brief/` -- Turn the operator's own data into a short spoken brief of their day, ready before they start and played in

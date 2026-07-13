@@ -1,5 +1,9 @@
 # Google Workspace extension -- headless OAuth Gmail / Calendar / Drive
 
+<!-- LATEST-HANDOFF -->
+**>> Resume here:** read `_handoffs/20260713-0401__google-workspace.md` first -- it is the latest handoff.
+<!-- /LATEST-HANDOFF -->
+
 A ClaudeFather **integration extension** (`extension.json` id `google-workspace`). It does two things:
 1. **Mints + stores a headless Google OAuth refresh token** for one controlled account (Path B).
 2. That stored token is consumed by (a) the **dashboard** server-side to render LIVE Gmail/Calendar/Drive

@@ -751,8 +751,48 @@ def superadmin_send(node_id, action, params=None, ttl=120):
 # the request path. Stdlib urllib only. Self-hides on nodes with no token (window.CC.google=false).
 GOOGLE_SECRETS_DIR = os.path.join(CC_HOME, "extensions", "google-workspace", "secrets")
 GOOGLE_TOKENS_DIR = os.path.join(GOOGLE_SECRETS_DIR, "tokens")
-_GOOGLE_TOK = {"access": None, "exp": 0, "email": None, "scopes": []}
+_GOOGLE_TOK = {}                 # {account: {"access","exp","email","scopes","tz"}} -- PER-ACCOUNT access-token cache
 _GOOGLE_LOCK = threading.Lock()
+_G_REQ = threading.local()       # per-request active-account override, set by the /api/google/* routes (via _g_as)
+_G_ACCTS_MEMO = {"at": 0, "v": []}
+
+def _google_accounts():
+    """Every Google account configured on THIS node: the vault `google_tokens` dict UNION any legacy token files.
+    Sorted; memoized 10s. This is the per-node account registry (the vault is per-install) -- the single source of
+    truth the account switcher + agent MCP wiring read, so nothing is hand-listed."""
+    now = time.time()
+    if now - _G_ACCTS_MEMO["at"] < 10 and _G_ACCTS_MEMO["v"]: return _G_ACCTS_MEMO["v"]
+    accts = set()
+    try:
+        raw = _vault_local("google_tokens")
+        if raw:
+            t = json.loads(raw)
+            if isinstance(t, dict): accts.update(t)
+    except Exception: pass
+    try:
+        for f in os.listdir(GOOGLE_TOKENS_DIR):
+            if f.endswith(".json") and ".migrated-" not in f: accts.add(f[:-5])
+    except Exception: pass
+    v = sorted(accts); _G_ACCTS_MEMO.update(at=now, v=v); return v
+
+def _g_acct(acct=None):
+    """The account THIS call should act as: explicit arg -> thread override (a route's ?account=) -> cc.config
+    `google_account` -> alphabetically-first configured. Always a REAL configured account (or None if none set up)."""
+    accts = _google_accounts()
+    for a in (acct, getattr(_G_REQ, "acct", None), CC.get("google_account")):
+        if a and a in accts: return a
+    return accts[0] if accts else None
+
+def _gtok(acct=None):
+    """The per-account slice of the access-token cache (created on first use)."""
+    return _GOOGLE_TOK.setdefault(_g_acct(acct) or "_none_", {"access": None, "exp": 0, "email": None, "scopes": [], "tz": ""})
+
+class _g_as:
+    """`with _g_as(account): ...` -> every Google call on this thread acts AS `account` for the duration
+    (the whole multi-account seam: routes wrap their handler in this, helpers stay account-agnostic)."""
+    def __init__(self, acct): self.acct = acct or None
+    def __enter__(self): self._prev = getattr(_G_REQ, "acct", None); _G_REQ.acct = self.acct; return self
+    def __exit__(self, *a): _G_REQ.acct = self._prev
 # Bounded timeouts so a FLAPPING uplink fails FAST instead of hanging the user. The LIST endpoints
 # (gmail/calendar/drive list) use the SHORT timeout: a cold fetch that can't complete in ~9s bails out
 # -> stale-while-revalidate serves last-good (or the frontend shows "offline, retrying") instead of a
@@ -777,7 +817,7 @@ def _google_token_load(acct=None):
     """Return (acct, token_dict) from the VAULT (preferred -- key 'google_token:<acct>') or the legacy token
     file (fallback). The token JSON holds client_id/client_secret/refresh_token. Read-only at runtime (the
     access token is cached in RAM, never written back), so vault-backing it is safe + lossless."""
-    acct = acct or CC.get("google_account")
+    acct = _g_acct(acct)
     raw = _vault_local("google_tokens")                          # ONE vault key: {account: token_dict} (sanitization-safe)
     if raw:
         try:
@@ -827,15 +867,17 @@ def _google_vault_resync():
             return []
     return changed
 
-def _google_access_token():
+def _google_access_token(acct=None):
     """Refresh-token -> short-lived access token, cached until ~90s before expiry. Thread-safe. On a refresh
     failure it resyncs the vault from any fresher token FILE (a re-mint) and retries once -- so a re-mint takes
     effect WITHOUT a restart."""
     with _GOOGLE_LOCK:
         now = time.time()
-        if _GOOGLE_TOK["access"] and now < _GOOGLE_TOK["exp"] - 90:
-            return _GOOGLE_TOK["access"]
-        acct, d = _google_token_load()
+        acct = _g_acct(acct)
+        m = _gtok(acct)                                          # this account's cache slice
+        if m["access"] and now < m["exp"] - 90:
+            return m["access"]
+        acct, d = _google_token_load(acct)
         if not d: return None
         for attempt in (1, 2):
             try:
@@ -843,12 +885,12 @@ def _google_access_token():
                     "refresh_token": d["refresh_token"], "grant_type": "refresh_token"}).encode()
                 req = urllib.request.Request(d.get("token_uri", "https://oauth2.googleapis.com/token"), data=data)
                 r = json.loads(urllib.request.urlopen(req, timeout=GOOGLE_TOKEN_TIMEOUT).read())
-                _GOOGLE_TOK.update(access=r["access_token"], exp=now + int(r.get("expires_in", 3600)),
-                                   email=acct, scopes=d.get("scopes", []))
-                return _GOOGLE_TOK["access"]
+                m.update(access=r["access_token"], exp=now + int(r.get("expires_in", 3600)),
+                         email=acct, scopes=d.get("scopes", []))
+                return m["access"]
             except Exception:
                 if attempt == 1 and _google_vault_resync():   # a re-mint's fresh FILE token -> pull into vault, retry once
-                    acct, d = _google_token_load()
+                    acct, d = _google_token_load(acct)
                     if d: continue
                 return None
 
@@ -873,10 +915,10 @@ _SVC_SCOPE = {"gmail:readonly": "gmail.readonly", "gmail:organize": "gmail.modif
               "calendar:full": "calendar", "drive:readonly": "drive", "drive:full": "drive",
               "sheets:readonly": "spreadsheets", "sheets:full": "spreadsheets", "docs:readonly": "documents",
               "docs:full": "documents", "forms:readonly": "forms", "forms:full": "forms.body"}
-def _google_scope_gaps():
+def _google_scope_gaps(acct=None):
     """Services the .mcp.json wires the agent for but the MINTED TOKEN does NOT grant -> those tools 403 at
     runtime until a re-mint. Returns [service, ...]; empty when the token covers everything configured."""
-    granted = _GOOGLE_TOK.get("scopes") or []
+    granted = _gtok(acct).get("scopes") or []
     if not granted: return []
     gaps = []
     for svc in _mcp_google_perms():
@@ -913,12 +955,15 @@ def _heal_google_mcp_paths(apply=True):
     except Exception as e:
         return {"drifted": False, "fixed": False, "keys": [], "error": str(e)[:120]}
 
-def google_status():
-    if not google_configured(): return {"configured": False}
-    tok = _google_access_token()
-    s = _GOOGLE_TOK.get("scopes", [])
-    gaps = _google_scope_gaps()
-    return {"configured": bool(tok), "email": _GOOGLE_TOK.get("email"),
+def google_status(acct=None):
+    accts = _google_accounts()
+    active = _g_acct(acct)
+    if not google_configured(): return {"configured": False, "accounts": accts, "account": active}
+    with _g_as(active):                                          # compute caps for the active/requested account
+        tok = _google_access_token()
+        s = _gtok().get("scopes", [])
+        gaps = _google_scope_gaps()
+    return {"configured": bool(tok), "email": active, "account": active, "accounts": accts,
             "canRead": any("gmail.readonly" in x or "gmail.modify" in x for x in s),
             "canSend": any("gmail.send" in x or "gmail.compose" in x for x in s),
             "canModify": any("gmail.modify" in x for x in s),
@@ -927,8 +972,8 @@ def google_status():
             "canForms": any("forms" in x for x in s),
             "remint_needed": bool(gaps), "missing_services": gaps}
 
-def _g_api(method, url, params=None, body=None, raw=False, timeout=30):
-    tok = _google_access_token()
+def _g_api(method, url, params=None, body=None, raw=False, timeout=30, acct=None):
+    tok = _google_access_token(acct)
     if not tok: return {"error": "google not configured"}
     if params: url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params, doseq=True)
     data = json.dumps(body).encode() if body is not None else None
@@ -979,7 +1024,7 @@ def _gmail_list_live(view="inbox", q="", maxn=25, page_token=""):
                 "subject": hs.get("subject", "(no subject)"), "date": hs.get("date", ""),
                 "snippet": m.get("snippet", ""), "unread": "UNREAD" in lab, "starred": "STARRED" in lab}
     msgs = [x for x in _g_parallel([(lambda i=i: fetch(i)) for i in ids]) if x]
-    return {"messages": msgs, "view": view, "q": q, "email": _GOOGLE_TOK.get("email"), "nextPage": r.get("nextPageToken", "")}
+    return {"messages": msgs, "view": view, "q": q, "email": _g_acct(), "nextPage": r.get("nextPageToken", "")}
 
 # ---- Gmail list cache + background sync. Was: a full live Gmail pull on EVERY browser refresh (two users =
 # 2x the work, and a flaky uplink = spin forever). Now: a short-TTL per-view cache served to every browser
@@ -989,7 +1034,7 @@ GM_TTL = 60                  # serve cache up to this old; the background loop r
 _GM_CACHE = {}               # key -> {"data":..., "at":ts, "ok":True}
 _GM_ACTIVE = {}              # key -> last-requested ts (only these are kept warm; idle views stop polling)
 _GM_LOCK = threading.Lock()
-def _gm_key(view, q, maxn): return "%s|%s|%s" % (view, (q or "").strip(), int(maxn or 25))
+def _gm_key(view, q, maxn): return "%s|%s|%s|%s" % (_g_acct(), view, (q or "").strip(), int(maxn or 25))  # account-scoped: two accounts must not share a cache entry
 def gmail_list(view="inbox", q="", maxn=25, fresh=False, page_token=""):
     """Cached, background-synced, outage-resilient Gmail list. fresh=True forces a live pull ('Refresh now').
     page_token set = a paged 'load more' -> always live (never cached; appended client-side)."""
@@ -1233,7 +1278,7 @@ def gmail_labels():
         out.append({"id": l.get("id"), "name": l.get("name"),
                     "unread": l.get("messagesUnread", 0), "total": l.get("messagesTotal", 0)})
     out.sort(key=lambda x: (x["name"].lower()))
-    return {"labels": out, "email": _GOOGLE_TOK.get("email")}
+    return {"labels": out, "email": _g_acct()}
 
 def _gmail_attachments(payload):
     # Flat list of REAL, downloadable attachments (filename + size + attachmentId). Skips inline body parts AND
@@ -1330,7 +1375,7 @@ def gmail_thread(tid):
     except Exception: pass
     subj = msgs[0]["subject"] if msgs else "(no subject)"
     return {"id": tid, "subject": subj, "messages": msgs, "count": len(msgs),
-            "drafts": drafts, "email": _GOOGLE_TOK.get("email")}
+            "drafts": drafts, "email": _g_acct()}
 
 # plain-text fallback derived from the HTML body
 def _html_to_text(h):
@@ -1475,7 +1520,7 @@ def calendar_events(days=7, tmin=None, tmax=None):
                                    "status": a.get("responseStatus", "")}
                                   for a in e.get("attendees", [])][:50]})
     return {"events": evs, "tmin": tmin, "tmax": tmax, "days": int(days or 7),
-            "tz": _GOOGLE_TOK.get("tz") or "", "email": _GOOGLE_TOK.get("email")}
+            "tz": _gtok().get("tz") or "", "email": _g_acct()}
 
 def calendar_get(eid):
     """A single event by id (the drag-to-session resolver needs details for an event not in the loaded window)."""
@@ -1571,7 +1616,7 @@ def calendar_rsvp(eid, response, send_updates="none"):
     if not eid: return {"error": "missing event id"}
     cur = _g_api("GET", CAL_BASE + "/" + eid)
     if isinstance(cur, dict) and "error" in cur: return cur
-    me = _GOOGLE_TOK.get("email")
+    me = _g_acct()
     atts = cur.get("attendees", [])
     found = False
     for a in atts:
@@ -1644,7 +1689,7 @@ def drive_list(q="", maxn=300, parent="", kind="", starred="", order=""):
     fs = [_drive_row(f) for f in r.get("files", [])]
     return {"files": fs, "q": q, "parent": parent,
             "crumbs": _drive_crumbs(parent) if parent else [],
-            "email": _GOOGLE_TOK.get("email")}
+            "email": _g_acct()}
 
 def drive_get(fid):
     f = _g_api("GET", DRIVE_BASE + "/" + fid, params={"fields": DRIVE_FIELDS})
@@ -5890,10 +5935,20 @@ def vault_import_env(scrub=False):
                 except Exception: pass
     except Exception: pass
     if toks:
-        if "google_tokens" in _vault_load(): skipped.append("google_tokens")
+        # MULTI-ACCOUNT: MERGE (additive), never skip -- a newly-minted 2nd account's token must join the
+        # existing {account: token} dict, not be dropped because the key already exists (CCR gap 3a).
+        existing = {}
+        try:
+            _ev = _vault_local("google_tokens")
+            if _ev: existing = json.loads(_ev) or {}
+        except Exception: existing = {}
+        if not isinstance(existing, dict): existing = {}
+        merged = dict(existing); merged.update(toks)   # file tokens win (a re-mint is authoritative)
+        if merged == existing:
+            skipped.append("google_tokens")            # nothing new to add
         else:
-            val = json.dumps(toks); r = vault_set("google_tokens", val, label="google_tokens", scope=["*"])
-            if r.get("ok") and _vault_local("google_tokens") == val: imported.append("google_tokens")
+            val = json.dumps(merged); r = vault_set("google_tokens", val, label="google_tokens", scope=["*"])
+            if r.get("ok") and _vault_local("google_tokens") == val: imported.append("google_tokens"); _G_ACCTS_MEMO["at"] = 0
             else: failed.append("google_tokens")
         if scrub and "google_tokens" not in failed:
             for fn in list(toks):
@@ -13026,7 +13081,7 @@ def _gmail_counterparty_headers(tid):
     i.e. the person we would REPLY TO. Critical for Smart Reply: if you replied last, the newest message is
     YOURS, and replying to it would address yourself. Falls back to the latest message, or (if the whole
     thread is yours) the address you last wrote TO."""
-    me = (_GOOGLE_TOK.get("email") or "").lower()
+    me = (_g_acct() or "").lower()
     t = _g_api("GET", GMAIL_BASE + "/threads/" + tid,
                params={"format": "metadata", "metadataHeaders": ["From", "To", "Cc", "Subject"]})
     msgs = (t.get("messages") if isinstance(t, dict) else None) or []
@@ -13066,7 +13121,7 @@ def mail_folders_overview():
                     "domains": len(fe.get("domains", [])), "emails": len(fe.get("emails", [])),
                     "keywords": len(fe.get("keywords", [])), "pinned": len(fe.get("pinnedThreads", [])),
                     "linked": len(meta), "query": _folder_query(f["rel"], d)})
-    return {"folders": out, "count": len(out), "global": d["global"], "email": _GOOGLE_TOK.get("email")}
+    return {"folders": out, "count": len(out), "global": d["global"], "email": _g_acct()}
 
 def mail_folder_view(rel, maxn=25):
     """Per-folder correspondence = a COMPILED query through gmail_list (read-safe metadata). Merge pinned
@@ -13874,12 +13929,12 @@ def _claude_json(prompt, timeout=180):
 def _owner_email():
     """The connected Google account's address -- reliable (falls back to the Gmail profile API if the cached
     token email isn't populated yet). Used for display; the profile is keyed per-NODE, not per-email."""
-    e = (_GOOGLE_TOK.get("email") or "").strip()
+    e = (_g_acct() or "").strip()
     if e: return e
     try:
         r = _g_api("GET", GMAIL_BASE + "/profile")
         if isinstance(r, dict) and r.get("emailAddress"):
-            _GOOGLE_TOK["email"] = r["emailAddress"]; return r["emailAddress"]
+            _gtok()["email"] = r["emailAddress"]; return r["emailAddress"]
     except Exception: pass
     return ""
 
@@ -14161,7 +14216,7 @@ def flex_bundle(tid):
     except Exception: pass
     sender = h.get("from", "")
     return {"tid": tid, "rel": rel, "folder": (top["name"] if top else None),
-            "headers": h, "sender": sender, "me": (_GOOGLE_TOK.get("email") or ""), "domains": domains,
+            "headers": h, "sender": sender, "me": (_g_acct() or ""), "domains": domains,
             "correspondence": corr, "calendar": cal, "drive": drive,
             "calls": calls, "pipeline": pipe}, None
 
@@ -14272,7 +14327,7 @@ def flex_context(tid, rel_override=None, sources=None, recipients_override=None,
     if err: return {"ok": False, "error": err}
     if rel_override:                       # operator picked a specific client/project/tool
         b["rel"] = rel_override; b["folder"] = rel_override.rstrip("/").split("/")[-1]
-    me = (_GOOGLE_TOK.get("email") or "").lower()
+    me = (_g_acct() or "").lower()
     def _is_me(addr): return bool(me) and (me in (addr or "").lower())
     inbound_body = ""; subject = (b.get("headers") or {}).get("subject", "")
     in_reply_to = ""; references = ""; reply_to = b.get("sender", ""); recipients = []
@@ -16769,6 +16824,8 @@ class H(BaseHTTPRequestHandler):
         if "wsvnc" in (self.path or ""):   # catch EVERY vnc attempt, incl a mangled path that never reaches the route
             _vnc_log("do_GET SAW wsvnc: raw=%r u.path=%r matches-route=%s upgrade-hdr=%r" % (self.path, u.path, (u.path == "/wsvnc"), self.headers.get("Upgrade")))
         if not self._auth_gate(u.path): return
+        if u.path.startswith("/api/google/"):    # MULTI-ACCOUNT: act as the requested account for this request (thread-local)
+            _G_REQ.acct = (q.get("account") or [None])[0] or None
         if u.path == "/api/vnc-debug":     # read the remote-desktop trace (also at STATE_DIR/_vnc_debug.log)
             try: _t = "".join(open(_VNC_DEBUG_LOG).readlines()[-250:])
             except Exception: _t = "(no vnc debug log yet)"
@@ -17099,10 +17156,10 @@ class H(BaseHTTPRequestHandler):
                 "email": v.get("email"), "google": google_configured()}))
         if u.path == "/api/google/calendar":
             _cd=q.get("days",["7"])[0]; _tn=(q.get("tmin",[""])[0] or None); _tx=(q.get("tmax",[""])[0] or None); _cf=(q.get("fresh",[""])[0] in ("1","true"))
-            return self._s(200, json.dumps(_g_cached("cal|%s|%s|%s"%(_cd,_tn,_tx), lambda: calendar_events(_cd,_tn,_tx), fresh=_cf)))
+            return self._s(200, json.dumps(_g_cached("cal|%s|%s|%s|%s"%(_g_acct(),_cd,_tn,_tx), lambda: calendar_events(_cd,_tn,_tx), fresh=_cf)))
         if u.path == "/api/google/drive":
             _dq=q.get("q",[""])[0]; _dm=q.get("max",["300"])[0]; _dp=q.get("parent",[""])[0]; _dk=q.get("kind",[""])[0]; _ds=q.get("starred",[""])[0]; _do=q.get("order",[""])[0]; _df=(q.get("fresh",[""])[0] in ("1","true"))
-            return self._s(200, json.dumps(_g_cached("drv|%s|%s|%s|%s|%s|%s"%(_dq,_dm,_dp,_dk,_ds,_do), lambda: drive_list(_dq,_dm,_dp,_dk,_ds,_do), fresh=_df)))
+            return self._s(200, json.dumps(_g_cached("drv|%s|%s|%s|%s|%s|%s|%s"%(_g_acct(),_dq,_dm,_dp,_dk,_ds,_do), lambda: drive_list(_dq,_dm,_dp,_dk,_ds,_do), fresh=_df)))
         if u.path == "/api/google/drive-get":
             return self._s(200, json.dumps(drive_get(q.get("id", [""])[0])))
         if u.path == "/api/google/drive-content":
@@ -17214,6 +17271,8 @@ class H(BaseHTTPRequestHandler):
             res = studio_upload_stream(self.rfile, clen, _q("filename"), _q("mime"))
             return self._s(200 if res.get("ok") else (413 if res.get("toobig") else 400), json.dumps(res))
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or "{}")
+        if u.path.startswith("/api/google/"):    # MULTI-ACCOUNT: act as the requested account for this POST (thread-local)
+            _G_REQ.acct = body.get("account") or None
         if u.path == "/api/login":
             if AUTH_TOKEN and hmac.compare_digest((body.get("token", "") or ""), AUTH_TOKEN):
                 self.send_response(200); self.send_header("Content-Type", "application/json")
@@ -19801,6 +19860,8 @@ body.ss-tut-on #sessbar{z-index:9995!important;box-shadow:0 -6px 40px 8px rgba(v
 /* --- rail (saved lanes) --- */
 .gm-rail{background:#0c0c12;border-right:1px solid var(--line);display:flex;flex-direction:column;overflow-y:auto;padding:10px 8px}
 .gm-rail .gm-acct{font-size:11px;color:var(--dim);font-weight:700;letter-spacing:.4px;padding:4px 8px 9px;margin-bottom:7px;border-bottom:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 0 auto}
+.gm-rail .gm-acctsel{width:100%;box-sizing:border-box;font-size:12px;font-weight:700;color:var(--near,#e8e8ef);background:var(--inp,rgba(0,0,0,.22));border:1px solid var(--line);border-radius:8px;padding:6px 8px;margin-bottom:8px;cursor:pointer;flex:0 0 auto}
+.gm-rail .gm-acctsel:hover{border-color:var(--accent)}
 .gm-rail .gm-lbltog{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
 .gm-rail .gm-lbltog:hover{color:var(--mut)}
 .gm-rail .gm-lbltog .gm-lblchev{font-size:9px;width:10px;display:inline-block}
@@ -22746,6 +22807,8 @@ window.Shell=(function(){
 
 // ---- state ----
 var GM = {
+  acct: '',                // MULTI-ACCOUNT: the active Google account (threaded on every /api/google/* call)
+  accounts: [],            // all configured accounts on this node (drives the rail switcher)
   labelsOpen: false,       // rail Labels section collapsed by default (many labels)
   lane: 'inbox',           // active saved-lane key
   q: '',                   // current Gmail query (lane query + chips + text)
@@ -22800,6 +22863,7 @@ function cwMobile(){return window.matchMedia('(max-width:760px)').matches;}
 async function loadGmail(){
   var g=document.getElementById('grid');
   if(!(window.CC&&window.CC.google)){ g.innerHTML=gErr({error:'Google Workspace not configured on this node.'}); return; }
+  await gmLoadAccounts();   // MULTI-ACCOUNT: know the account list before the rail renders (so the switcher shows)
   g.innerHTML='<div class="gm-app" id="gmApp">'
     +gmRailHTML()
     +gmListShell()
@@ -22873,6 +22937,7 @@ function gmAttURL(mid,a,dl){
     +'&att='+encodeURIComponent(a.attachmentId)
     +'&name='+encodeURIComponent(a.filename||'attachment')
     +'&mime='+encodeURIComponent(a.mime||'')
+    +gmAcctQ()
     +(dl?'&dl=1':'');
 }
 function gmAttStrip(m){
@@ -22939,7 +23004,11 @@ function gmRailHTML(){
     }).join('');
   var lblOpen=!!GM.labelsOpen;
   return '<aside class="gm-rail" id="gmRail">'
-    +'<div class="gm-acct">'+e2(GM.email||'')+'</div>'
+    +(GM.accounts&&GM.accounts.length>1
+       ? '<select class="gm-acctsel" title="Switch Google account" onchange="gmSwitchAccount(this.value)">'
+         +GM.accounts.map(function(a){return '<option value="'+esc(a)+'"'+((a===(GM.acct||GM.email))?' selected':'')+'>'+e2(a)+'</option>';}).join('')
+         +'</select>'
+       : '<div class="gm-acct">'+e2(GM.email||GM.acct||'')+'</div>')
     +sys
     +(ulArr.length?'<div class="gm-sec gm-lbltog" onclick="gmToggleLabels()"><span class="gm-lblchev" id="gmLblChev">'+(lblOpen?'▾':'▸')+'</span> Labels <span class="gm-lblct">'+ulArr.length+'</span></div>'
         +'<div id="gmLabelWrap" style="display:'+(lblOpen?'block':'none')+'">'+userLabels+'</div>':'')
@@ -22975,8 +23044,20 @@ function gmReadEmpty(){
 }
 
 // ---- list fetch + render ----
+function gmAcctQ(){ return GM.acct ? ('&account='+encodeURIComponent(GM.acct)) : ''; }
+async function gmLoadAccounts(){
+  try{ var s=await(await fetch('/api/google/status'+(GM.acct?'?account='+encodeURIComponent(GM.acct):''))).json();
+    GM.accounts=s.accounts||[]; if(!GM.acct) GM.acct=s.account||GM.accounts[0]||''; GM.email=GM.acct||GM.email;
+  }catch(e){}
+}
+function gmSwitchAccount(a){
+  if(!a||a===GM.acct) return;
+  GM.acct=a; GM.email=a; GM.labels=[]; GM.msgs=[]; GM._lastQ=''; GM._seen={};
+  var rail=document.getElementById('gmRail'); if(rail) rail.outerHTML=gmRailHTML();
+  gmFetchLabels(); gmFetchList(true,true);
+}
 async function gmFetchLabels(){
-  try{ var r=await(await fetch('/api/google/gmail-labels')).json();
+  try{ var r=await(await fetch('/api/google/gmail-labels'+(GM.acct?'?account='+encodeURIComponent(GM.acct):''))).json();
     if(r&&!r.error){ GM.labels=r.labels||[]; GM.email=r.email||GM.email;
       var rail=document.getElementById('gmRail'); if(rail) rail.outerHTML=gmRailHTML(); }
   }catch(e){}
@@ -23002,7 +23083,7 @@ async function gmFetchList(reset,forceFresh){
   var title=lane?lane.n:(GM.lane.indexOf('lbl:')===0?'Label':'Mail');
   var t=document.getElementById('gmLaneTitle'); if(t) t.textContent=title;
   var r;
-  try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q)+'&max=50'+(forceFresh?'&fresh=1':''))).json(); }
+  try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q)+'&max=50'+(forceFresh?'&fresh=1':'')+gmAcctQ())).json(); }
   catch(e){ if(rows && !(GM.msgs&&GM.msgs.length)) rows.innerHTML=gErr({error:'network'}); GM._stale=true; gmSyncBadge(); return; }
   if(r.error){ if(rows && !(GM.msgs&&GM.msgs.length)) rows.innerHTML=gErr(r); GM._stale=true; gmSyncBadge(); return; }
   GM.email=r.email||GM.email;
@@ -23026,7 +23107,7 @@ async function gmLoadMore(){
   if(GM._loadingMore || !GM.nextPage) return;
   GM._loadingMore=true;
   try{
-    var r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q||'')+'&max=50&page='+encodeURIComponent(GM.nextPage))).json();
+    var r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q||'')+'&max=50&page='+encodeURIComponent(GM.nextPage)+gmAcctQ())).json();
     if(r && !r.error){ gmCollapseInto(r.messages); GM.nextPage=r.nextPage||""; gmRenderRows(); }
   }catch(e){}
   GM._loadingMore=false;
@@ -23076,7 +23157,7 @@ async function gmOpen(i){
   var app=document.getElementById('gmApp'); if(app) app.classList.add('gm-reading');   // mobile: slide the full-screen reader in immediately (inert on desktop)
   var read=document.getElementById('gmRead'); if(read) read.innerHTML='<div class="gm-empty"><div class="gm-big">⏳</div><div>Opening…</div></div>';
   var r;
-  try{ r=await(await fetch('/api/google/gmail-thread?id='+encodeURIComponent(m.threadId||m.id))).json(); }
+  try{ r=await(await fetch('/api/google/gmail-thread?id='+encodeURIComponent(m.threadId||m.id)+gmAcctQ())).json(); }
   catch(e){ if(read) read.innerHTML=gErr({error:'network'}); return; }
   if(r.error){ if(read) read.innerHTML=gErr(r); return; }
   GM.thread=r; GM.expandThread=false;   // long threads start with the middle folded
@@ -23798,6 +23879,7 @@ async function gmFetchBadge(){ if(window.gmailBadgePoll) try{ gmailBadgePoll(); 
 
 // ---- POST helper ----
 async function gmPost(url,payload){
+  if(GM.acct && payload && payload.account===undefined) payload=Object.assign({account:GM.acct},payload);   // multi-account: act as the switched account
   try{ return await(await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json(); }
   catch(e){ return {error:'network'}; }
 }
@@ -27333,7 +27415,7 @@ function paintLensHelp(l){
 // ---- Gmail auto-refresh: pull new mail without yanking the list while you're reading ----
 async function gmAutoRefresh(){
   if(LENS!=='gmail' || !document.getElementById('gmApp')) return;
-  var r; try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q||gmLaneQuery())+'&max=50')).json(); }catch(e){ GM._stale=true; gmSyncBadge(); return; }
+  var r; try{ r=await(await fetch('/api/google/gmail?view=inbox&q='+encodeURIComponent(GM.q||gmLaneQuery())+'&max=50'+gmAcctQ())).json(); }catch(e){ GM._stale=true; gmSyncBadge(); return; }
   if(!r || r.error){ GM._stale=true; gmSyncBadge(); return; }
   GM._synced=r._synced; GM._stale=!!r._stale; gmSyncBadge();   // keep the "synced Xs ago / offline" badge honest on auto-refresh
   var seen={}, list=[];
