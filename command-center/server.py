@@ -4754,7 +4754,7 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
     # BASE (this command-center dir) on PATH so the cc-* CLIs (cc-secure/cc-note/cc-handoff/cc-task/cc-hold) resolve
     # as BARE commands inside every session -- without it onboarding/agents report them "not reachable" and can't
     # auto-vault secrets or file learnings (the briefs invoke them unqualified).
-    cl = 'export PATH=' + _shlex.quote(BASE) + ':"$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions' + _mdl + ' ' + CC_TITLE_FLAG + CC_MCP_FLAG
+    cl = 'export PATH=' + _shlex.quote(BASE) + ':"$HOME/.local/bin:/opt/homebrew/bin:$PATH"; ' + _CC_ENVP + 'claude --dangerously-skip-permissions' + _mdl + ' ' + CC_MCP_FLAG + ' ' + CC_TITLE_FLAG
     if target == "studio":
         try: wd = projpath(rel) if rel else (comp_dir(cid) if cid else PROJECT)
         except Exception: wd = PROJECT
@@ -5364,7 +5364,7 @@ def agent_open(slug):
     sess = "agt-" + slug
     if sh([TMUX, "has-session", "-t", sess])[0] == 0:
         return {"ok": True, "term": "/term?name=" + sess, "note": "resumed"}
-    cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG
+    cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_MCP_FLAG + ' ' + CC_TITLE_FLAG
           + ((' --settings ' + _shlex.quote(_ensure_policy_settings()) + ' ') if POLICY_ON else ' ')   # policy engine (graft G1): OPT-IN only
           + ' '
           "'You are the %s agent. Read CLAUDE.md in this folder -- it is your charter (your job, tools, and "
@@ -5493,6 +5493,11 @@ MCP_JSON = os.path.join(DEPLOY_ROOT, ".mcp.json")             # gitignored MCP s
 # are available as native tools regardless of the session's cwd (Claude Code otherwise only auto-loads
 # .mcp.json when cwd==DEPLOY_ROOT). Empty (no flag) when there is no .mcp.json to load.
 CC_MCP_FLAG = ((" --mcp-config " + _shlex.quote(MCP_JSON)) if os.path.isfile(MCP_JSON) else "")
+# ORDER MATTERS: in every launch string put CC_MCP_FLAG *before* CC_TITLE_FLAG (and before any positional
+# prompt). `claude --mcp-config` is GREEDY (nargs='+') -- if a positional prompt immediately follows it, claude
+# swallows the prompt as a second config path ("MCP config file not found: <the prompt>") and EXITS instantly,
+# so the session opens and dies. `--append-system-prompt` (CC_TITLE_FLAG) takes exactly one value, so keeping it
+# between --mcp-config and the prompt makes --mcp-config stop cleanly. (Bit the google-workspace ext setup, v0.99.201.)
 
 # ==== EXTENSION AUTHORIZATION -- only OFFICIAL (MC-signed) or operator-APPROVED CUSTOM extensions may run ======
 # The guarantee: a tenant/appliance can NEVER load an extension we didn't ship (or the operator didn't explicitly
@@ -7012,7 +7017,7 @@ def extension_setup(eid):
     sess = "ext-" + eid
     if sh([TMUX, "has-session", "-t", sess])[0] == 0:
         return {"ok": True, "term": "/term?name=" + sess, "note": "resumed"}
-    cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' '
+    cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_MCP_FLAG + ' ' + CC_TITLE_FLAG + ' '
           "'You are the SETUP GUIDE for the %s ClaudeFather extension. Read SETUP.md in this folder -- it is "
           "your script. Walk me through setup ONE step at a time, wait at each step, help me create any "
           "accounts/API keys, store secrets ONLY in the gitignored deployment env (never echo or commit "
@@ -7574,7 +7579,7 @@ def skill_open(scope, slug):
     if not base or not os.path.isdir(d): return {"ok": False, "error": "no such skill"}
     sess = "skill-" + re.sub(r"[^a-z0-9]+", "-", (PROJECT_NAME + "-" + slug).lower()).strip("-")
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' '
+        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_MCP_FLAG + ' ' + CC_TITLE_FLAG + ' '
               "'You are authoring the Agent Skill in this folder (SKILL.md). Read it, then help me write/improve "
               "it per the best practices in the ClaudeFather docs/MEMORY_SKILLS_AGENTS.md (esp: the description "
               "is the trigger; keep it lean; lock side-effect skills to manual). One-line status, then stand by.'")
@@ -7809,7 +7814,7 @@ def team_run(slug):
     try: os.makedirs(TEAM_RUNS_DIR, exist_ok=True)
     except Exception: pass
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' '
+        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_MCP_FLAG + ' ' + CC_TITLE_FLAG + ' '
               "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
     return {"ok": True, "slug": real, "name": t.get("name") or real, "session": sess,
@@ -7899,7 +7904,7 @@ def team_session(members, assignment=""):
     )).strip().replace("'", "")   # single-quote-free: the brief is wrapped in '...' in the shell launcher
     sess = ("team-" + re.sub(r"[^a-z0-9]+", "-", (PROJECT_NAME + "-" + "-".join(p["slug"] for p in picked)).lower()).strip("-"))[:60]
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' ' + "'" + brief + "'")
+        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_MCP_FLAG + ' ' + CC_TITLE_FLAG + ' ' + "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
         def _trust():
             for _ in range(10):
@@ -8210,7 +8215,7 @@ def audit_run(block, slug):
     try: os.makedirs(AUDIT_RUNS_DIR, exist_ok=True)
     except Exception: pass
     if sh([TMUX, "has-session", "-t", sess])[0] != 0:
-        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' '
+        cl = (_CC_PATH + _CC_ENVP + 'claude --dangerously-skip-permissions ' + CC_MCP_FLAG + ' ' + CC_TITLE_FLAG + ' '
               "'" + brief + "'")
         sh([TMUX, "new-session", "-d", "-s", sess, "-c", PROJECT, cl])
     return {"ok": True, "block": block, "name": real, "session": sess,
@@ -14653,7 +14658,7 @@ def task_launch(tid):
     brief += " Do NOT send anything externally without asking me first."
     name = _uniq_session("hp-task-" + (re.sub(r"[^A-Za-z0-9]+", "-", t.get("title", ""))[:24].strip("-").lower() or "task"))
     cl = (_CC_PATH + _CC_ENVP
-          + 'claude --dangerously-skip-permissions ' + CC_TITLE_FLAG + CC_MCP_FLAG + ' ' + _shlex.quote(brief))
+          + 'claude --dangerously-skip-permissions ' + CC_MCP_FLAG + ' ' + CC_TITLE_FLAG + ' ' + _shlex.quote(brief))
     if sh([TMUX, "new-session", "-d", "-s", name, "-c", wd, cl])[0] != 0:
         return {"ok": False, "error": "could not start session"}
     task_update(tid, status="doing", session=name)

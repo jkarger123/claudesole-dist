@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.201 -- 2026-07-12  (fix: session launch dies instantly when the node has an MCP config)
+- **On a node with a live `.mcp.json` (e.g. the wired Google Workspace MCP), launching a session that carries a
+  prompt -- an extension SETUP session, an agent/Ralph launch with a brief -- opened and IMMEDIATELY closed.**
+  `claude --mcp-config` is greedy (nargs='+'): when the positional prompt came right after it, claude swallowed
+  the prompt as a second config file (`MCP config file not found: <the prompt text>`) and exited on the spot, so
+  the tmux session died at birth. This is why "Set up Google Workspace" kept flashing open and vanishing.
+- **Fix:** in every launch string, put `--mcp-config` (CC_MCP_FLAG) *before* `--append-system-prompt`
+  (CC_TITLE_FLAG). `--append-system-prompt` takes exactly one value, so it cleanly separates `--mcp-config` from
+  the positional prompt. Applied to all 8 launch sites (chief, agent, Ralph, extension setup, resume, ...), with
+  a guard comment at the CC_MCP_FLAG definition so it can't be reordered back. Verified live: the google-workspace
+  setup session now launches and stays alive with the setup guide loaded.
+
 ## 0.99.200 -- 2026-07-11  (fix: co-located nodes -- stray deliverables/notifications no longer sink to the default node)
 - **On a box that runs several ClaudeFather instances (they SHARE the `command-center/` dir + the cc-* CLIs on
   PATH), any cc-* command run from a bare shell -- no `CC_CONFIG` in the env (an admin shell, a `!`-prefix
