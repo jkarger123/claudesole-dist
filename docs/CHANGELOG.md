@@ -3,6 +3,24 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.203 -- 2026-07-16  (edge-mcp: Windows browser-attach hosts -- an always-on Windows box can host a real Chrome)
+- **A Windows machine can now be a browser edge host** (not just macOS/Unix), so an always-on Windows box
+  (e.g. a shop build box) can drive the user's REAL logged-in Chrome over the mesh. CCR ccr-1784223446960;
+  built + proven end-to-end on an always-on Win10 host (full MCP handshake + tool enumeration). All changes
+  are guarded by `host.platform=="windows"`; the macOS/POSIX path is untouched (regression-checked).
+- **`extensions/edge-mcp/runtime/edge_registry.py`:** `host_run` ships PowerShell to Windows hosts via
+  `powershell -EncodedCommand` (base64 of UTF-16LE) -- the only quoting-proof way across ssh->cmd.exe->
+  PowerShell; `build_transport_cmd` uses cmd.exe quoting instead of POSIX (`win_cmdline`). Helpers
+  `is_windows_host`, `ps_encoded_arg`.
+- **`extensions/edge-mcp/runtime/edge_recipes.py` (BrowserAttach):** Windows `pre_launch` launches Chrome via
+  a run-once SCHEDULED TASK created by the ssh user, so Chrome opens on the logged-on user's INTERACTIVE
+  Session 1 desktop (a plain ssh-launched Chrome lands in the hidden Session 0). Windows `resolve_launch` drops
+  the POSIX `env PATH=` prefix; new `config.node_dir` knob prepends a (portable) Node dir to PATH -- required
+  because pointing npx at a newer node isn't enough (the MCP package's shim re-resolves `node`). A Node >= 20.19
+  preflight fails LOUD (`NODE_TOO_OLD <ver>`) instead of a cryptic npm error.
+- SETUP.md gains a "Windows browser hosts" section (visible-desktop scheduled-task behavior; Node >= 20.19 /
+  `node_dir`; user must be logged in).
+
 ## 0.99.202 -- 2026-07-13  (Google Workspace: first-class MULTI-ACCOUNT -- server core + Gmail switcher)
 - **A node can now hold MULTIPLE Google accounts and switch between them, config-driven** (CCR
   ccr-1783914617047, increments I-partial + II + IV-core). Each node still has its own workspace (per-install

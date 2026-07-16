@@ -36,6 +36,21 @@ Node if missing, checks Chrome, and registers the browser server. Then `edge-mcp
 (isolated debug profile) on the user's machine; the user logs in once and that becomes the session. Revoke any
 time from the lens or `edge-mcp revoke <server>`. Only read on for the manual / non-browser (plugin-app) path.
 
+## Windows browser hosts (e.g. an always-on shop build box)
+A Windows machine works as a browser edge host too (proven on an always-on Win10 box). Two Windows facts the
+`browser-attach` recipe already handles, so you rarely think about them -- but know them:
+- **Visible on the user's real screen.** A command over Windows OpenSSH lands in Session 0 (a hidden desktop);
+  a Chrome launched there would be invisible. The recipe instead launches Chrome via a **run-once scheduled
+  task** created by the ssh user, so it opens on that user's **interactive desktop (Session 1)** -- the person
+  at the machine actually sees the agent driving Chrome. **The user must be logged in** at the console (an
+  always-on host set to auto-login is ideal).
+- **Node >= 20.19 required** (chrome-devtools-mcp / playwright need it). Pre-launch checks this and fails LOUD
+  with the actual version if it's too old. If you can't upgrade the system Node (no admin), drop a **portable
+  Node** zip in a space-free dir and set the server's `config.node_dir` to it -- the recipe prepends it to PATH
+  so both npx and the MCP package resolve to it. No admin needed.
+Everything else is identical to a macOS host: durable per-profile logins under `%USERPROFILE%\.edge-mcp\profiles`,
+idempotent start (a live port is never disturbed), same transparency proxy.
+
 ## Setup steps (manual / advanced -- plugin-app servers, custom launches)
 On CLAUDEFATHER (one command does mint-key + vault-store + host-register + prints the user's snippet):
 1. Enable SSH on the user's machine ONE time:

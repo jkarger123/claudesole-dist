@@ -1,0 +1,22 @@
+{
+  "id": "media-contact-sync",
+  "name": "Media Contact Sync",
+  "category": "integration",
+  "version": "0.1.0",
+  "icon": "M",
+  "summary": "Keeps ONE shared media-contact list current and clean, automatically. Reads affiliate managers' own Gmail (read-only), harvests contacts from out-of-office replies + signatures, dedups against the shared list, and adds new people or fills gaps on existing ones -- never duplicates, never overwrites.",
+  "description": "A multi-tenant contact-hygiene tool for affiliate/PR/media teams. Several managers each connect their OWN Gmail read-only; the tool mines new + updated contacts (out-of-office backup names, email signatures; thread participants in v2), NORMALIZES them, and DEDUPS against one shared media list (an Airtable base). It either adds a net-new row or fills the gaps on an existing contact -- and flags any uncertain match for a human. Runs daily + on-demand. Merge policy (locked): same email = same person (fill blanks, never duplicate); same name at the same publisher with a missing/different email = probably same person (fill the gap but flag it); GOLDEN RULE = only ADD or FILL BLANKS, never overwrite. The engine (extract -> normalize -> dedup) is pure + tested; Gmail and Airtable are thin adapters around it. Built as a packageable extension so any agency installs it, connects its managers, and points it at its own base.",
+  "requires_extensions": ["google-workspace", "airtable"],
+  "config": {
+    "manager_accounts": {"type": "list", "label": "The Google accounts (managers) whose Gmail to harvest, read-only", "default": []},
+    "airtable_base": {"type": "string", "label": "The Airtable base ID that holds the shared master contact list", "default": ""},
+    "airtable_table": {"type": "string", "label": "The table name for contacts", "default": "Contacts"},
+    "schedule": {"type": "string", "label": "How often to run (daily | hourly | manual)", "default": "daily"},
+    "sources": {"type": "list", "label": "Where to harvest from", "default": ["ooo", "signature"]}
+  },
+  "setup_doc": "SETUP.md",
+  "setup_agent": true,
+  "agent_doc": "AGENT.md",
+  "default_category": "Integrations",
+  "status": "in-development"
+}

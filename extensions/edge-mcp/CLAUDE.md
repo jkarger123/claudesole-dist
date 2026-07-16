@@ -1,5 +1,28 @@
 # Edge MCP Host
 
+<!-- CC:NOTES append-only; agents file learnings that belong to THIS module here -->
+## Learnings (filed by agents; append-only)
+- DONE (2026-07-16, CCR ccr-1784223446960): Windows browser-attach host support -- BUILT + proven end-to-end
+  on the always-on Win10 box **t480** (full MCP `initialize` handshake through the real proxy transport).
+  Code (all guarded by `host.platform=="windows"`; macOS/POSIX path untouched):
+  - `runtime/edge_registry.py`: `host_run` ships PowerShell to Windows hosts via `powershell -EncodedCommand`
+    (base64 of UTF-16LE) -- the ONLY quoting-proof way across ssh->cmd.exe->PowerShell (helper `ps_encoded_arg`,
+    `is_windows_host`). `build_transport_cmd` uses `win_cmdline` (cmd.exe quoting) instead of POSIX `shlex.quote`.
+  - `runtime/edge_recipes.py` BrowserAttach: Windows `pre_launch` (`_pre_launch_windows` + `_WIN_BROWSER_PS`)
+    launches Chrome via a **run-once scheduled task** created+run by the ssh user -> Chrome opens on the
+    logged-on user's **interactive Session 1 desktop** (a plain ssh-launched Chrome lands in hidden Session 0).
+    Launcher `.cmd` uses `start ""` so cmd returns and the task self-deletes without killing Chrome. Windows
+    `resolve_launch` drops the POSIX `env PATH=` prefix.
+  KEY GOTCHAS proven: (1) Windows OpenSSH default shell = cmd.exe, so `bash -lc` breaks -> base64 PowerShell.
+  (2) session isolation: ssh = Session 0 (invisible); scheduled task by the logged-on user = Session 1 (visible);
+  user MUST be logged in. (3) Node >= 20.19 required (chrome-devtools-mcp); pointing npx at a newer node is NOT
+  enough -- must PREPEND the node dir to PATH (the pkg shim re-resolves `node`). New knob `config.node_dir`
+  (space-free path) does this; `pre_launch` node preflight fails LOUD with `NODE_TOO_OLD <ver>`.
+  t480 state: portable Node v22.23.1 dropped at `C:\Users\CBK\.edge-mcp\node` (no admin). NOT yet registered as
+  a real edge host (vault key + `add-host`) -- that's the next step if we want t480 permanently live. Fleet ship
+  (sign + converge) still gated. SETUP.md has a "Windows browser hosts" section.
+<!-- /CC:NOTES -->
+
 Core `integration` extension that runs MCP servers which must live on a user's OWN computer (GUI apps like
 Adobe InDesign, local files, devices) and drives them over the Tailscale mesh -- no remote desktop -- wrapped
 in a transparency proxy that logs every tool call + latency.

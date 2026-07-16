@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "dec4e6a2aa1fe5df15a59424c156b5b80e20349da8ced79fe7c2df338679eb0a",
+      "claudesole.manifest.json": "4e01b3db86445c5437208f933c06e0701b5030efcfcbabb48c827144654e9067",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/campaign_runner.py": "0a385adb090626c76c1f3baf4a1ed944cd0a80983ef752686e471003a012e339",
       "command-center/cc-advise": "e449156a34ddcb9068fc1c89223a2d3f8574b6dba15f2e3d3fe748bf2f49a70f",
@@ -111,8 +111,8 @@
       "extensions/edge-mcp/extension.json": "d4832b37572e69fdedc5e692ecd0ada31964eb23b720270d47f4333c84ab14c3",
       "extensions/edge-mcp/runtime/edge_launch.py": "95e1614de86d5cccd5d1ed4b2bb385196a9d4822388fc315db9ae14493fbd6d3",
       "extensions/edge-mcp/runtime/edge_mcpd.py": "5b33370820137147644651dd324daea1bba9ad60ea00ec21129958984566ee07",
-      "extensions/edge-mcp/runtime/edge_recipes.py": "5efe00aaa47d5c717ca5697e58e6092ebd7f478b7f3d97bbd25990d5bdff5c3a",
-      "extensions/edge-mcp/runtime/edge_registry.py": "3440fde2ba27a65ced74a6639b615a9f896733b21c7f95f7f7d76c7f40109789",
+      "extensions/edge-mcp/runtime/edge_recipes.py": "3f0c1cb0fc94a2c1e43b672d9fbab7f824018940a408931465f69b6e2b3d6a8f",
+      "extensions/edge-mcp/runtime/edge_registry.py": "b9798b9cd9d1650bab32466edc5d1460548f2adfe449d01e237b515019a73b4f",
       "extensions/edge-mcp/runtime/edge_setup.py": "e27fecd935dbc6e4dc84472cc30bbacb5f6042b9be29f2a8ec7a9fab488bdaf3",
       "extensions/edge-mcp/runtime/idx.py": "237d411f359f86ff95eb81ef63f4bfb98cc184985241d5f23b5818d6374401fc",
       "extensions/edge-mcp/runtime/mcp_proxy_log.py": "d33e9150caaa93d2283ef8fa19681f120740e5d22eae9db38f3e20cd1fd82a48",
@@ -135,6 +135,9 @@
       "extensions/incident-commander/payload/tools/run.py": "1b550eaaa7d29b687a470d0ea7d5d4d71152c2070ee5f64cfada8143f054419a",
       "extensions/linear/extension.json": "2b7b17ba176b2be671c55f4e1f761bb5584a65e415fee96ae72715eb963fa580",
       "extensions/linear/mcp.json": "1bafbf3a3d5c75212904f8b8722471efe0da3aeef7bdc9cccca267ae4af79538",
+      "extensions/media-contact-sync/bin/contact_engine.py": "e2aad48bd036e79873e934b601cb4eefaff62bbbe80b369092f001e46612848f",
+      "extensions/media-contact-sync/bin/test_contacts.py": "eca00b2efbcc1a15d016dcd6fe05ce1301ba6c4e4b3470cd0e2360b840c30281",
+      "extensions/media-contact-sync/extension.json": "7285294a14a73a66ef059265755f3d9c6a0121db5a4666c005a66e2109fdc4bf",
       "extensions/morning-brief/extension.json": "8a459267c1cd7a688234c6c3f8c81f6f4e98e6da74f07b9a7968cd58ffdfcdb3",
       "extensions/notion/extension.json": "4b26f8ee2472c8785dfb4c987a3f4ec788284c97348e73db5906ab8550ce87f0",
       "extensions/notion/mcp.json": "3d8ee07c66704a042f855761ee87a6e440b436f9f41ba7df583208326c82d99b",
@@ -168,9 +171,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1783920937,
+    "generated": 1784226765,
     "v": 1,
-    "version": "0.99.202"
+    "version": "0.99.203"
   },
-  "sig": "ZdzGWpPry6Kmm2Q/m1vW7Z6kuuESONH5jOvPpZOygeV+Ma8W3Lgq6L7/q5+0Luk+CvH7McGsPs2ZiEfKW+kuDQ=="
+  "sig": "xEKu5aqF4/Ft/dxN5J98OhfdTlDvnXQC1AuxwQDU7Unq2HDdGPHBQCykeAj3YEUgNP+TW2Zngw3ix3pG7poHAw=="
 }

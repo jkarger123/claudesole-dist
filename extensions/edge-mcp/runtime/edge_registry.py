@@ -12,7 +12,7 @@ Everything is wrapped in mcp_proxy_log.py so every edge call is transparent. Cre
 `resolve_key` -- a `vault:KEY` ref materializes the private key to a 0600 temp file (server-side wiring), or a
 direct filesystem path is used as-is (works today).
 """
-import os, sys, json, shlex, socket, tempfile, subprocess
+import os, sys, json, shlex, socket, tempfile, subprocess, base64
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROXY = os.path.join(HERE, "mcp_proxy_log.py")
@@ -174,15 +174,40 @@ def host_reachable(host, timeout=3):
         return False
 
 
+def is_windows_host(host):
+    """A remote edge host whose OpenSSH login shell is cmd.exe / PowerShell, not a POSIX shell.
+    Recipes + transport must emit PowerShell (not bash) and use scheduled tasks for visible GUI launch."""
+    return (host or {}).get("platform") == "windows"
+
+
+def ps_encoded_arg(script):
+    """Wrap a PowerShell script as a single `powershell -EncodedCommand` arg (base64 of UTF-16LE).
+    Quoting-proof: the base64 blob carries no shell-special chars, so it survives the ssh -> cmd.exe ->
+    PowerShell layers intact (the only reliable way we found to ship a script to a Windows OpenSSH host)."""
+    b = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand %s" % b
+
+
+def win_cmdline(argv):
+    """Join an argv into one cmd.exe command line, double-quoting args that contain whitespace.
+    Used to ship a Windows MCP-server launch (e.g. npx.cmd ...) over ssh into cmd.exe."""
+    return " ".join(('"%s"' % a if (" " in a or "\t" in a) else a) for a in argv)
+
+
 def host_run(reg, host, remote_cmd, timeout=40):
-    """Run a shell command ON an edge host (ssh, or locally for node-local). Returns (rc, stdout, stderr).
-    Used by recipes for pre-launch steps (e.g. ensure the user's browser/app is up)."""
+    """Run a command ON an edge host (ssh, or locally for node-local). Returns (rc, stdout, stderr).
+    Used by recipes for pre-launch steps (e.g. ensure the user's browser/app is up). For a Windows host,
+    `remote_cmd` must be a PowerShell script (recipes emit PowerShell there); it is shipped base64-encoded."""
     if is_local_host(host):
         argv = ["bash", "-lc", remote_cmd]
     else:
         kp = resolve_key(host.get("key_ref"))
-        argv = ["ssh", "-i", kp, "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-                "%s@%s" % (host.get("ssh_user"), host.get("addr")), "bash -lc %s" % shlex.quote(remote_cmd)]
+        target = "%s@%s" % (host.get("ssh_user"), host.get("addr"))
+        base = ["ssh", "-i", kp, "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", target]
+        if is_windows_host(host):
+            argv = base + [ps_encoded_arg(remote_cmd)]
+        else:
+            argv = base + ["bash -lc %s" % shlex.quote(remote_cmd)]
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout, r.stderr
@@ -210,7 +235,8 @@ def build_transport_cmd(reg, server, logdir, key_path=None):
         kp = key_path or resolve_key(host.get("key_ref"))
         if not kp:
             raise RuntimeError("host %r has no key_ref for ssh" % host.get("id"))
-        remote = " ".join(shlex.quote(a) for a in inner)   # one command string for the remote shell
+        # one command string for the remote shell: cmd.exe quoting on Windows, POSIX quoting elsewhere
+        remote = win_cmdline(inner) if is_windows_host(host) else " ".join(shlex.quote(a) for a in inner)
         transport = ["ssh", "-i", kp, "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
                      "-o", "ServerAliveInterval=15", "%s@%s" % (host.get("ssh_user"), host.get("addr")),
                      remote]

@@ -7,6 +7,7 @@
 - `google-workspace/` -- >> Resume here: read _handoffs/20260713-0401__google-workspace.md first -- it is the latest handoff.
 - `granola/` -- Turn Granola call transcripts into REVIEWED updates to the agency tree: a dated note in the matched
 - `incident-commander/payload/` -- I am the Incident Commander for this ClaudeFather. Scoped agent-tool: my own dir, this charter, tools/,
+- `media-contact-sync/` -- Keeps ONE shared media-contact list current + clean, automatically. Affiliate managers each connect their OWN
 - `morning-brief/` -- Turn the operator's own data into a short spoken brief of their day, ready before they start and played in
 - `skimlinks-merchant-sync/payload/` -- I am the Skimlinks sync tool. I keep a tenant's full Skimlinks affiliate-merchant catalog mirrored into their
 <!-- /CC:CHILDREN -->

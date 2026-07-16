@@ -47,6 +47,46 @@ def _plat(host, val):
 DURABLE_PROFILE = "$HOME/.edge-mcp/profiles/%s"
 LEGACY_PROFILE = "$HOME/.cache/edge-mcp/chrome-%s"   # old (evictable) location -> auto-migrated on next cold start
 
+# Windows pre-launch (see BrowserAttach._pre_launch_windows). Ships base64-encoded via host_run. The run-once
+# scheduled task is how a Session-0 ssh command puts a VISIBLE Chrome on the logged-on user's interactive
+# desktop (Session 1). The launcher .cmd uses `start ""` so cmd returns at once (Chrome detaches, the task
+# completes, and we can delete it). Prints ALREADY_UP / STARTED / FAILED as its final line.
+_WIN_BROWSER_PS = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
+$PORT = %(port)d
+$CHROME = '%(chrome)s'
+$NODEDIR = '%(node_dir)s'
+%(prof_expr)s
+# node preflight: the MCP server (chrome-devtools-mcp / playwright) needs Node >= 20.19. Fail LOUD here
+# with the actual version rather than letting npx emit a cryptic 'does not support Node vX' error later.
+if ($NODEDIR -ne '') { $NODE = Join-Path $NODEDIR 'node.exe' } else { $NODE = 'node' }
+$nv = ''
+try { $nv = (& $NODE --version) } catch {}
+if ($nv -match '^v(\d+)\.(\d+)\.(\d+)') {
+  $okNode = ([int]$Matches[1] -gt 20) -or ([int]$Matches[1] -eq 20 -and [int]$Matches[2] -ge 19)
+} else { $okNode = $false }
+if (-not $okNode) { Write-Output "NODE_TOO_OLD $nv"; exit 1 }
+$verUrl = "http://127.0.0.1:$PORT/json/version"
+try { $r = Invoke-WebRequest -UseBasicParsing -Uri $verUrl -TimeoutSec 3; if ($r.StatusCode -eq 200) { Write-Output 'ALREADY_UP'; exit 0 } } catch {}
+$base = Join-Path $env:USERPROFILE '.edge-mcp'
+New-Item -ItemType Directory -Force -Path $base | Out-Null
+New-Item -ItemType Directory -Force -Path $PROF | Out-Null
+$cmdPath = Join-Path $base ("launch-chrome-$PORT.cmd")
+$body = @('@echo off', ('start "" "' + $CHROME + '" --remote-debugging-port=' + $PORT + ' --user-data-dir="' + $PROF + '" --no-first-run --no-default-browser-check%(headless)s'))
+Set-Content -Path $cmdPath -Value $body -Encoding ASCII
+$tn = "edgemcp_browser_$PORT"
+schtasks /create /tn $tn /tr "`"$cmdPath`"" /sc ONCE /st 23:59 /f | Out-Null
+schtasks /run /tn $tn | Out-Null
+$ok = $false
+for ($i = 0; $i -lt 30; $i++) {
+  try { $r = Invoke-WebRequest -UseBasicParsing -Uri $verUrl -TimeoutSec 2; if ($r.StatusCode -eq 200) { $ok = $true; break } } catch {}
+  Start-Sleep -Milliseconds 500
+}
+schtasks /delete /tn $tn /f | Out-Null
+if ($ok) { Write-Output 'STARTED'; exit 0 } else { Write-Output 'FAILED'; exit 1 }
+"""
+
 
 def browser_profile(server):
     """Durable, persistent profile path for a browser-attach server (where the remembered logins live).
@@ -70,6 +110,11 @@ class BrowserAttach:
         "chrome_bin": {"macos": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
                        "windows": "C:/Program Files/Google/Chrome/Application/chrome.exe"},
         "npx_bin": {"macos": "/opt/homebrew/bin/npx", "windows": "npx.cmd"},
+        "node_dir": None,                   # Windows only: a node dir to PREPEND to PATH (npx alone isn't
+                                            # enough -- the MCP package's shim re-resolves `node` from PATH).
+                                            # None -> use system node (must be >= 20.19; pre_launch enforces).
+                                            # Set to a portable node dir (space-free path) if the system node
+                                            # is too old and you can't upgrade it (no admin needed).
     }
     warm_probe = None                       # no plugin handshake; MCP initialize == ready
 
@@ -80,6 +125,20 @@ class BrowserAttach:
         port = c["debug_port"]
         url = "http://127.0.0.1:%s" % port
         npx = _plat(host, c["npx_bin"])
+        if host.get("platform") == "windows":
+            # Windows: node/npm/npx.cmd are on the system PATH for a non-interactive ssh (verified via
+            # `where node`), so no env-PATH prefix and no POSIX `#!/usr/bin/env node` shebang problem.
+            pkg = (["-y", "@playwright/mcp@latest", "--cdp-endpoint", url] if c["mcp"] == "playwright"
+                   else ["-y", "chrome-devtools-mcp@latest", "--browserUrl", url])
+            node_dir = _plat(host, c.get("node_dir"))
+            if node_dir:
+                # A pinned (e.g. portable) node: PREPEND its dir to PATH so BOTH npx AND the MCP package's
+                # own `node` shim resolve to it. cmd.exe wrapper; node_dir must be a space-free path so no
+                # nested quoting is needed (documented on the config knob). Proven live against t480.
+                nd = node_dir.rstrip("\\/")
+                inner = "set PATH=%s;%%PATH%% && %s\\npx.cmd %s" % (nd, nd, " ".join(pkg))
+                return ["cmd", "/c", inner]
+            return [npx] + pkg
         # Run the MCP server over ssh with an EXPLICIT absolute PATH (env PATH=...), not the host's login-shell
         # PATH. npx's `#!/usr/bin/env node` shebang otherwise fails with "env: node: No such file or directory"
         # on a non-interactive ssh where Homebrew's shellenv was never sourced. Fixed superset, no $PATH needed.
@@ -96,6 +155,8 @@ class BrowserAttach:
         """Ensure Chrome is up on the host with the remote-debugging port, using the DURABLE profile so logins
         persist. Idempotent: if the port already answers we don't touch it (never migrate a live profile); else
         we migrate any legacy ~/.cache profile to the durable home once, then launch."""
+        if host.get("platform") == "windows":
+            return BrowserAttach._pre_launch_windows(reg, host, server)
         c = _cfg(server, BrowserAttach.default_config)
         port = int(c["debug_port"])
         chrome = _plat(host, c["chrome_bin"])
@@ -119,6 +180,43 @@ class BrowserAttach:
         state = (out or "").strip().splitlines()[-1] if out.strip() else "FAILED"
         return {"ok": rc == 0 and state in ("ALREADY_UP", "STARTED"), "state": state,
                 "port": port, "err": (err or "")[:200]}
+
+    @staticmethod
+    def _pre_launch_windows(reg, host, server):
+        """Windows variant of pre_launch. A Windows OpenSSH host lands us in Session 0 (non-interactive) --
+        a Chrome launched there is invisible to the logged-in user. To put a VISIBLE Chrome on the user's
+        interactive desktop we go through a run-once SCHEDULED TASK: created + triggered by the ssh user
+        (who is the logged-on user), it runs in that user's interactive session (Session 1) with no stored
+        password. R.host_run ships this PowerShell base64-encoded (quoting-proof). Idempotent: if the port
+        already answers we don't touch it. Durable profile under %USERPROFILE%\\.edge-mcp\\profiles so logins
+        persist across sessions. (proven on t480: visible Chrome in Session 1 + debug port live.)"""
+        c = _cfg(server, BrowserAttach.default_config)
+        port = int(c["debug_port"])
+        chrome = _plat(host, c["chrome_bin"])
+        headless = " --headless=new" if c.get("headless") else ""
+        # profile: explicit user_data_dir wins; else a durable per-name dir under the user's home
+        cfg = server.get("config") or {}
+        if cfg.get("user_data_dir"):
+            prof_expr = "$PROF = '%s'" % cfg["user_data_dir"].replace("'", "''")
+        else:
+            name = cfg.get("profile_name") or ("chrome-%s" % port)
+            prof_expr = "$PROF = Join-Path $env:USERPROFILE '.edge-mcp\\profiles\\%s'" % name
+        node_dir = _plat(host, c.get("node_dir")) or ""
+        ps = _WIN_BROWSER_PS % {
+            "port": port, "chrome": chrome.replace("'", "''"),
+            "prof_expr": prof_expr, "headless": headless,
+            "node_dir": node_dir.replace("'", "''"),
+        }
+        rc, out, err = R.host_run(reg, host, ps, timeout=45)
+        lines = [l for l in (out or "").strip().splitlines() if l.strip()]
+        state = lines[-1].strip() if lines else "FAILED"
+        ok = rc == 0 and state in ("ALREADY_UP", "STARTED")
+        detail = state
+        if state.startswith("NODE_TOO_OLD"):
+            detail = ("%s -- need Node >= 20.19; upgrade the host's node or set this server's "
+                      "config.node_dir to a newer (portable) node dir" % state)
+        return {"ok": ok, "state": state, "port": port,
+                "err": (detail if not ok else (err or ""))[:220]}
 
     setup_steps = (
         "browser-attach: drive the user's REAL Chrome. Setup:\n"
