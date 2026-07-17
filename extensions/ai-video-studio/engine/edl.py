@@ -179,11 +179,19 @@ def render(project, out, progress_cb=None, proxy=False):
     aclip = next((c for c in _tracks(project, "audio") if srcs.get(c.get("source"), {}).get("path")), None)
     if aclip:
         mp = srcs[aclip["source"]]["path"]
-        af = ("[1:a]atrim=%.3f:%.3f,asetpts=PTS-STARTPTS,adelay=%d|%d,aresample=48000,"
+        # Honor the audio clip as a real, trimmable, positionable clip: atrim [in..out] of the source, then adelay
+        # it to `start` on the output timeline, then apad -> the audio is effectively infinite so `-shortest` clamps
+        # the OUTPUT to the (finite) VIDEO length regardless of where/how long the trimmed audio is (silence fills
+        # any gap before/after). Back-compat: a full-length clip (in=0,out~=dur,start=0) renders identically to before.
+        a_in = max(0.0, float(aclip.get("in", 0)))
+        a_out = float(aclip.get("out", a_in + vlen))
+        if a_out <= a_in:                                  # guard a degenerate/missing out -> cover the video
+            a_out = a_in + vlen
+        a_start_ms = int(max(0.0, float(aclip.get("start", 0))) * 1000)
+        adelay = ("adelay=%d|%d," % (a_start_ms, a_start_ms)) if a_start_ms > 0 else ""
+        af = ("[1:a]atrim=%.3f:%.3f,asetpts=PTS-STARTPTS,%sapad,aresample=48000,"
               "aformat=channel_layouts=stereo,volume=%.2f[a]"
-              % (float(aclip.get("in", 0)), float(aclip.get("in", 0)) + vlen,
-                 int(float(aclip.get("start", 0)) * 1000), int(float(aclip.get("start", 0)) * 1000),
-                 float(aclip.get("volume", 1.0))))
+              % (a_in, a_out, adelay, float(aclip.get("volume", 1.0))))
         ac._run([FFMPEG, "-y", "-i", body, "-i", mp, "-filter_complex", af, "-map", "0:v", "-map", "[a]",
                  "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-shortest", out])
     else:

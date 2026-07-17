@@ -18386,6 +18386,13 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
 .cblock .cdel{position:absolute;top:2px;right:2px;z-index:8;width:18px;height:18px;line-height:16px;text-align:center;border-radius:5px;background:rgba(0,0,0,.55);color:#fff;font-size:14px;cursor:pointer}
 .cblock .cdel:hover{background:var(--fxbig)}
 .cblock .he{position:absolute;left:3px;top:2px;font-size:9px;background:var(--accent);color:#fff;border-radius:3px;padding:0 3px}
+.ablock{position:absolute;top:0;height:100%;background:rgba(91,140,255,.16);border:1.5px solid #5b8cff;border-radius:6px;overflow:hidden;cursor:grab;touch-action:none;z-index:2}
+.ablock:active{cursor:grabbing}
+.ablock .alab{position:absolute;left:5px;top:2px;font-size:9px;color:#cfe0ff;text-shadow:0 1px 2px #000;pointer-events:none}
+.ablock .h{position:absolute;top:0;width:14px;height:100%;z-index:6;cursor:ew-resize;touch-action:none}
+.ablock .h.l{left:0} .ablock .h.r{right:0}
+.ablock .h:after{content:'';position:absolute;top:34%;height:32%;width:3px;background:#fff;border-radius:2px;left:5px;box-shadow:0 0 3px #000}
+.snapline{position:absolute;top:0;width:2px;height:100%;background:var(--go,#2eb56b);z-index:9;pointer-events:none;box-shadow:0 0 6px var(--go,#2eb56b)}
 .fxpin{position:absolute;top:0;width:12px;height:100%;margin-left:-6px;cursor:pointer}
 .fxpin i{display:block;width:2px;height:100%;margin:0 auto;background:var(--fx)}
 .fxpin.big i{width:3px;background:var(--fxbig)}
@@ -18487,6 +18494,19 @@ a.dl{color:var(--accent);text-decoration:none;font-weight:600}
       <div><label style="display:block">Quality</label><div class="seg" id="egQual"><button data-v="fast" class="on">Fast</button><button data-v="best">Best</button></div></div>
     </div>
     <button id="egGo" class="btn" style="width:100%;margin-top:11px">&#10024; Generate &amp; add to timeline</button>
+  </div>
+  <div class="card" id="audioPanel" style="display:none;margin-bottom:10px">
+    <h2>&#127925; Add audio</h2>
+    <div class="muted" style="margin:0 0 8px">Add a music/voice track. It drops on the <b>music lane</b> where you can drag it to move and trim the ends &mdash; it snaps to your clips.</div>
+    <button id="aUpBtn" class="btn" style="width:100%">&#128241; Upload from this device (phone or computer)</button>
+    <div class="muted" style="text-align:center;margin:9px 0">&mdash; or &mdash;</div>
+    <label>Paste a YouTube link (or any track URL)</label>
+    <input id="aUrl" type="text" placeholder="https://www.youtube.com/watch?v=...">
+    <div class="row" style="margin-top:8px"><div style="flex:1;min-width:150px">
+      <label>Section (optional, mm:ss-mm:ss)</label><input id="aSec" type="text" placeholder="3:11-3:25">
+    </div></div>
+    <button id="aGo" class="btn" style="width:100%;margin-top:10px">Add from link</button>
+    <div class="muted" id="aStatus" style="min-height:15px;margin-top:6px"></div>
   </div>
   <div id="pvwrap" style="position:relative;text-align:center">
     <canvas id="pvcanvas" width="405" height="720" style="width:auto;max-width:100%;max-height:52vh;border-radius:12px;background:#000"></canvas>
@@ -18684,9 +18704,20 @@ function ttrack(){var t=proj.tracks.find(function(t){return t.kind==='text';});i
 function otrack(){var t=proj.tracks.find(function(t){return t.kind==='overlay';});if(!t){t={id:'ov1',kind:'overlay',clips:[]};proj.tracks.push(t);}return t;}
 var PIP_POS=[{x:0.05,y:0.05,n:'TL'},{x:0.57,y:0.05,n:'TR'},{x:0.05,y:0.62,n:'BL'},{x:0.57,y:0.62,n:'BR'},{x:0.3,y:0.33,n:'center'}];
 function clen(c){return Math.max(0.05,(c.out-c['in'])/(c.speed||1));}
-function reflow(){var t=vtrack(),p=0;t.clips.forEach(function(c){c.start=Math.round(p*1000)/1000;p+=clen(c);});proj.duration=Math.round(p*100)/100;var a=atrack();if(a&&a.clips[0]){a.clips[0].out=proj.duration;}dirty=true;}
+function reflow(){var t=vtrack(),p=0;t.clips.forEach(function(c){c.start=Math.round(p*1000)/1000;p+=clen(c);});proj.duration=Math.round(p*100)/100;
+  var a=atrack();if(a&&a.clips[0]&&!a.clips[0]._user){   // auto-cover the video UNTIL the user drags/trims the audio, then leave it alone
+    var srcd=(proj.sources[a.clips[0].source]||{}).dur||proj.duration;a.clips[0]['in']=a.clips[0]['in']||0;a.clips[0].start=0;a.clips[0].out=Math.min(srcd,proj.duration);}
+  dirty=true;}
 function beats(){return (proj.music&&proj.music.beats)||[];}
 function snapBeat(t){var bs=beats();if(!bs.length)return t;var best=bs[0];bs.forEach(function(b){if(Math.abs(b-t)<Math.abs(best-t))best=b;});return Math.abs(best-t)<0.28?best:Math.round(t*100)/100;}
+function audioClip(){var a=atrack();return a&&a.clips&&a.clips[0];}
+function alen(a){return Math.max(0.05,(a.out-a['in']));}
+function timelineExtent(){var d=proj?(proj.duration||1):1;var a=audioClip();if(a)d=Math.max(d,a.start+alen(a));return d;}
+// magnetic snap: every video clip's START + END, plus 0 and the video end -- the classic "line it up perfectly" feel
+function snapTargets(){var t=[0,+(proj.duration||0).toFixed(3)];vtrack().clips.forEach(function(c){t.push(+c.start.toFixed(3));t.push(+(c.start+clen(c)).toFixed(3));});return t;}
+window._snapAt=null;
+function snapEdge(t){var best=t,bd=9/zoom;snapTargets().forEach(function(x){var d=Math.abs(x-t);if(d<bd){bd=d;best=x;}});window._snapAt=(best!==t)?best:null;return best;}
+function snapMove(start,len){var s=snapEdge(start);if(s!==start)return Math.max(0,s);var e=snapEdge(start+len);if(e!==start+len){window._snapAt=e;return Math.max(0,e-len);}window._snapAt=null;return start;}
 
 function sdrag(e,onMove,onEnd){if(e.preventDefault)e.preventDefault();if(e.stopPropagation)e.stopPropagation();
   var sx=(e.touches?e.touches[0]:e).clientX;
@@ -18720,9 +18751,16 @@ function scrubPreview(){var cv=$('pvcanvas');if(!cv||!proj)return;var g=cv.getCo
   if(v.readyState>=2&&Math.abs(v.currentTime-srcT)<0.05){done();}else{try{v.currentTime=srcT;}catch(e){}v.onseeked=function(){v.onseeked=null;if(!_playing)done();};}}
 var _playing=false,_raf=null,_t0=0,_pStart=0,_activeIdx=-1;
 function stopPlay(){_playing=false;if(_raf)cancelAnimationFrame(_raf);for(var s in _svid){try{_svid[s].pause();}catch(e){}}var m=musicEl();if(m){try{m.pause();}catch(e){}}var pb=$('ePlay');if(pb)pb.innerHTML='&#9654; Play';}
+// keep the preview music in sync with the (draggable/trimmed) audio clip: play source time in+(t-start) only while
+// the playhead is within [start, start+len]; respect the clip volume; only reseek on real drift (smooth playback).
+function syncMusic(t){var m=musicEl();if(!m)return;var a=audioClip();if(!a){try{if(!m.paused)m.pause();}catch(e){}return;}
+  try{m.volume=Math.max(0,Math.min(1,a.volume==null?1:a.volume));}catch(e){}
+  var inSpan=(t>=a.start-0.02&&t<a.start+alen(a));
+  if(inSpan){var src=Math.max(0,a['in']+(t-a.start));if(Math.abs(m.currentTime-src)>0.25){try{m.currentTime=src;}catch(e){}}if(m.paused&&_playing){try{m.play();}catch(e){}}}
+  else{try{if(!m.paused)m.pause();}catch(e){}}}
 function startPlay(){if(!proj)return;showLive();stopPlay();_playing=true;$('ePlay').innerHTML='&#10073;&#10073; Pause';
   _t0=(window._phT||0)>=(proj.duration||0)?0:(window._phT||0);_pStart=performance.now();_activeIdx=-1;
-  var m=musicEl();if(m){try{m.currentTime=_t0;m.play();}catch(e){}}
+  syncMusic(_t0);
   playLoop();}
 // PLAY the active clip's <video> NATIVELY (smooth) + draw its current frame each rAF; SEEK only at clip boundaries
 // (per-frame seeking is what made it stutter to black). Clock-driven playhead; playbackRate=speed keeps slow-mo synced.
@@ -18731,6 +18769,7 @@ function playLoop(){
   var t=_t0+(performance.now()-_pStart)/1000;
   if(t>=(proj.duration||0)){window._phT=proj.duration||0;stopPlay();scrubPreview();return;}
   window._phT=t;$('ph').style.left=(t*zoom)+'px';var pt=$('ePvT');if(pt)pt.textContent=t.toFixed(2)+'s';
+  syncMusic(t);
   var cv=$('pvcanvas');if(cv){var g=cv.getContext('2d'),cw=cv.width,ch=cv.height,clips=vtrack().clips,ci=-1;
     for(var i=0;i<clips.length;i++){if(t>=clips[i].start&&t<clips[i].start+clen(clips[i])){ci=i;break;}}
     g.fillStyle='#000';g.fillRect(0,0,cw,ch);
@@ -18741,7 +18780,7 @@ function playLoop(){
   _raf=requestAnimationFrame(playLoop);}
 function playToggle(){if(_playing)stopPlay();else startPlay();}
 function renderTL(){
-  if(!proj)return;var dur=proj.duration||1,W=Math.max(320,dur*zoom);
+  if(!proj)return;var dur=timelineExtent(),W=Math.max(320,dur*zoom);
   $('tl').style.width=W+'px';
   // ruler + beats
   var rc=$('rcanvas'),dpr=window.devicePixelRatio||1;rc.width=W*dpr;rc.height=26*dpr;rc.style.width=W+'px';rc.style.height='26px';
@@ -18793,6 +18832,33 @@ function renderTL(){
     b.addEventListener('pointerdown',function(ev){var o=oc.start,moved=false;
       sdrag(ev,function(dx){if(Math.abs(dx*zoom)>3)moved=true;oc.start=Math.max(0,+(o+dx).toFixed(2));renderTL();},
         function(){if(!moved)ovMenu(i);else dirty=true;});});to.appendChild(b);});
+  // audio clip -- a real draggable + trimmable block on the music lane, magnet-snapping to video clip edges
+  var tm=$('trkM');tm.querySelectorAll('.ablock,.snapline').forEach(function(e){e.remove();});
+  var ac0=audioClip();
+  if(ac0){var al=alen(ac0);
+    var ab=document.createElement('div');ab.className='ablock';
+    ab.style.left=(ac0.start*zoom)+'px';ab.style.width=Math.max(10,al*zoom)+'px';
+    ab.title='Drag to move · drag the ends to trim · snaps to the video clips';
+    ab.innerHTML='<span class="alab">&#9834; '+al.toFixed(1)+'s</span>';
+    var hL=document.createElement('div');hL.className='h l';var hR=document.createElement('div');hR.className='h r';
+    // move the whole clip (change start); snap either edge to a video-clip boundary
+    ab.addEventListener('pointerdown',function(ev){if((ev.target.className||'').indexOf('h ')>=0||ev.target.className==='h l'||ev.target.className==='h r')return;
+      var o=ac0.start;stopPlay();showLive();
+      sdrag(ev,function(dx){var ns=Math.max(0,+(o+dx).toFixed(3));ns=snapMove(ns,alen(ac0));ac0.start=ns;ac0._user=true;renderTL();},
+        function(){window._snapAt=null;dirty=true;renderTL();});});
+    // trim IN (left edge moves; content anchored on the right); snap the left edge to a video boundary
+    hL.addEventListener('pointerdown',function(ev){ev.stopPropagation();var oi=ac0['in'],os=ac0.start;stopPlay();showLive();
+      sdrag(ev,function(dx){var d=dx,ni=Math.max(0,Math.min(ac0.out-0.1,+(oi+d).toFixed(3))),nsx=Math.max(0,os+(ni-oi));
+        var sn=snapEdge(nsx);if(sn!==nsx){ni=Math.max(0,Math.min(ac0.out-0.1,oi+(sn-os)));nsx=Math.max(0,sn);}
+        ac0['in']=ni;ac0.start=nsx;ac0._user=true;renderTL();},function(){window._snapAt=null;dirty=true;renderTL();});});
+    // trim OUT (right edge moves); snap the right edge to a video boundary; can extend up to the source length
+    hR.addEventListener('pointerdown',function(ev){ev.stopPropagation();var srcd=(proj.sources[ac0.source]||{}).dur||ac0.out,oo=ac0.out;stopPlay();showLive();
+      sdrag(ev,function(dx){var no=Math.max(ac0['in']+0.1,Math.min(srcd,+(oo+dx).toFixed(3)));var redge=ac0.start+(no-ac0['in']);
+        var sn=snapEdge(redge);if(sn!==redge){no=Math.max(ac0['in']+0.1,Math.min(srcd,ac0['in']+(sn-ac0.start)));}
+        ac0.out=no;ac0._user=true;renderTL();},function(){window._snapAt=null;dirty=true;renderTL();});});
+    ab.appendChild(hL);ab.appendChild(hR);tm.appendChild(ab);
+    if(window._snapAt!=null){var sl=document.createElement('div');sl.className='snapline';sl.style.left=(window._snapAt*zoom)+'px';tm.appendChild(sl);}
+  }
   $('ph').style.left=((window._phT||0)*zoom)+'px';
   drawWave(W);
 }
@@ -18814,11 +18880,13 @@ $('eClipFile').onchange=function(){var fs=Array.prototype.slice.call(this.files)
       reflow();showLive();renderTL();scrubPreview();$('eStatus').textContent='Clip added ✓';dirty=true;
     }).catch(function(){$('eStatus').textContent='Add error';});
   }).catch(function(){$('eStatus').textContent='Upload error';});});};
-$('eAddAudio').onclick=function(){var url=prompt('Audio: paste a YouTube link or track URL (leave blank to upload a file):','');
-  if(url===null)return;if(!url){$('eAudioFile').click();return;}
-  var sec=prompt('Use just a section? (mm:ss-mm:ss, or blank for the whole track):','')||'';addAudioSource(url,sec);};
+$('eAddAudio').onclick=function(){var p=$('audioPanel');p.style.display=(p.style.display==='none'||!p.style.display)?'block':'none';if(p.style.display==='block'){$('genPanel').style.display='none';$('beatcutPanel').style.display='none';}};
+$('aUpBtn').onclick=function(){$('eAudioFile').click();};
+$('aGo').onclick=function(){var url=($('aUrl').value||'').trim();if(!url){$('aStatus').textContent='Paste a link, or use Upload above.';return;}
+  $('audioPanel').style.display='none';addAudioSource(url,($('aSec').value||'').trim());};
 $('eAudioFile').onchange=function(){var f=this.files[0];this.value='';if(!f)return;
   if(!checkSize(f))return;
+  $('audioPanel').style.display='none';
   $('eStatus').textContent='Uploading '+f.name+'...';
   upload(f,'filename='+encodeURIComponent(f.name)+'&mime='+encodeURIComponent(f.type||'audio/mpeg')).then(function(r){
     if(r&&r.ok)addAudioSource(r.path,'');else $('eStatus').textContent='Upload failed';});};
@@ -18828,19 +18896,23 @@ function addAudioSource(src,sec){$('eStatus').textContent='Adding audio...';
 function checkAudio(id){fetch('/api/studio/job?id='+id).then(function(r){return r.json();}).then(function(j){
   $('eStatus').textContent='Audio '+(j.msg||'')+' '+(j.pct||0)+'%';
   if(j.state==='done'){stopPoll();var a=j.audio||{};proj.sources.music={kind:'audio',path:a.path,dur:a.dur,wave:a.wave||[]};
-    atrack().clips=[{source:'music','in':0,out:proj.duration||a.dur||0,start:0,volume:1}];
-    window._mus=null;dirty=true;drawWave();renderTL();scrubPreview();$('eStatus').textContent='Audio added ✓ (drag the music lane volume in Export)';}
+    var cov=Math.min(a.dur||proj.duration||0,proj.duration||a.dur||0)||(a.dur||0);   // cover the video by default; trimmable/draggable after
+    atrack().clips=[{source:'music','in':0,out:cov,start:0,volume:1}];
+    window._mus=null;dirty=true;drawWave();renderTL();scrubPreview();$('eStatus').textContent='Audio added ✓ — drag it on the music lane to move, drag the ends to trim (it snaps to your clips)';}
   else if(j.state==='error'){stopPoll();$('eStatus').textContent='Audio failed: '+(j.error||'?');}
 }).catch(function(){});}
 $('ruler').addEventListener('pointerdown',function(ev){var r=$('rcanvas').getBoundingClientRect();stopPlay();showLive();
   function set(x){window._phT=Math.max(0,Math.min(proj?proj.duration:0,(x-r.left)/zoom));$('ph').style.left=(window._phT*zoom)+'px';if(window.scrubPreview)scrubPreview();}
   set((ev.touches?ev.touches[0]:ev).clientX);sdrag(ev,function(dx,x){set(x);});});
 
-function drawWave(W){var a0=proj&&atrack()&&atrack().clips[0];var src=a0&&proj.sources[a0.source];var wave=src&&src.wave||[];
-  var dur=proj.duration||1;W=W||Math.max(320,dur*zoom);var wc=$('wcanvas'),dpr=window.devicePixelRatio||1;
+function drawWave(W){var a0=audioClip();var src=a0&&proj.sources[a0.source];var wave=(src&&src.wave)||[];
+  var dur=timelineExtent();W=W||Math.max(320,dur*zoom);var wc=$('wcanvas'),dpr=window.devicePixelRatio||1;
   wc.width=W*dpr;wc.height=34*dpr;wc.style.width=W+'px';wc.style.height='34px';var g=wc.getContext('2d');g.scale(dpr,dpr);g.clearRect(0,0,W,34);
-  if(!wave.length)return;g.fillStyle='rgba(91,140,255,.4)';var n=wave.length;
-  for(var x=0;x<W;x++){var idx=Math.floor(x/W*n),v=wave[idx]||0,h=v*30;g.fillRect(x,17-h/2,1,h);}}
+  if(!a0||!wave.length)return;var n=wave.length,srcd=(src.dur||1);
+  // draw only the TRIMMED portion, positioned at the clip's start (so the waveform tracks the draggable block)
+  var x0=Math.round(a0.start*zoom),x1=Math.round((a0.start+alen(a0))*zoom),span=Math.max(1,x1-x0);
+  g.fillStyle='rgba(91,140,255,.45)';
+  for(var x=Math.max(0,x0);x<x1&&x<W;x++){var srcT=a0['in']+((x-x0)/span)*(a0.out-a0['in']);var idx=Math.floor(srcT/srcd*n),v=wave[idx]||0,h=v*30;g.fillRect(x,17-h/2,1,h);}}
 
 function selectClip(i){sel=i;renderTL();renderInsp();}
 function delClip(i){var t=vtrack().clips;if(i<0||i>=t.length)return;t.splice(i,1);if(sel===i){sel=-1;$('insp').style.display='none';}else if(sel>i){sel--;}reflow();renderTL();scrubPreview();toast('Clip deleted',1200);dirty=true;}

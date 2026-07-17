@@ -3,6 +3,7 @@
 <!-- CC:NOTES append-only; agents file learnings that belong to THIS module here -->
 ## Learnings (filed by agents; append-only)
 - Video Studio feature fully mapped in mediastudio/CLAUDE.md: engine=extensions/ai-video-studio/engine (9 modules studio/beats/autocut/edl/project/music/capcut/providers/generate); backend+10.8k-line STUDIO_PAGE SPA live in command-center/server.py (~L16115 backend, ~L17242 routes, ~L18319 page); analytical beat-cutter (no generative model, works on real footage/kids); shared PROJECT JSON is the currency; state on SSD (_studio, _studio_media); bins auto-install to bin/.
+- Video Studio LANDSCAPE shipped v0.99.204 (2026-07-17): engine was portrait-hardcoded — the real trap was _impact_fx/apply_flashes cropping to 1080:1920, so a landscape canvas got re-cropped back. Fix: autocut.canvas_for(aspect,clips) + w,h threaded through build/build_project/_impact_fx/apply_flashes/project.emit+manual/studio.py --aspect; edl.render passes canvas into FX. UI Shape toggle auto-detects from clip dims (in-browser), aspect flows via /api/studio/{render,build-project,new-manual}. RULE: any canvas-varying ffmpeg effect must take w,h, never hardcode dims. NOTE this session: server.p
 <!-- /CC:NOTES -->
 
 This folder is the **working scope** for the ClaudeFather **Video Studio** feature. It holds no code — the
@@ -50,7 +51,9 @@ works on **real family footage incl. children** with no policy block. Runs entir
   renders directly; `build_project()` emits the shared PROJECT JSON. `apply_flashes()` = pixel-precise impacts.
 - **`edl.py`** — the **renderer**: compiles one PROJECT JSON (single source of truth) -> MP4. Tracks:
   `video` (trim/speed/color/fit cover|contain), `overlay` (PiP), `text` (drawtext titles), `effects`
-  (impact flashes + zoom punches), `audio` (music trim/delay/mux). `--proxy` = fast 480p preview.
+  (impact flashes + zoom punches), `audio` (a REAL clip: `atrim in:out` + `adelay start` + **`apad`** so a
+  trimmed/offset track never truncates the video — `-shortest` clamps to video length, silence fills gaps;
+  v0.99.205). `--proxy` = fast 480p preview.
 - **`project.py`** — the timeline data layer + media cache: `emit` (auto-build a SAVED editable project +
   filmstrip sprites + waveform JSON), `manual` (clips full-length, no beat-cut), `resolve`/`addclip`/`thumbs`.
 - **`music.py`** — resolve a song: local file OR YouTube/URL (yt-dlp `-x` mp3, range-fetch fast path + robust
@@ -72,6 +75,16 @@ One document is written by auto-build (`build_project`), READ/edited by the time
 and mapped by the CapCut exporter. All times = **seconds on the OUTPUT timeline**. `speed` is a FACTOR:
 `<1` = slow-mo (output longer). Shape: `{canvas:{w,h,fps}, duration, sources:{id:{kind,path}}, tracks:[video,
 overlay, effects, text, audio]}`. See `edl.py` header + `AGENT.md` for the full schema.
+
+## Orientation — landscape OR portrait (v0.99.204)
+The `canvas` drives the output shape: **portrait 9:16 = 1080x1920**, **landscape 16:9 = 1920x1080**. The whole
+engine is canvas-agnostic: `autocut.canvas_for(aspect, clips)` resolves `16:9`|`9:16`|`auto`; `build`/
+`build_project`/`_impact_fx`/`apply_flashes`/`project.emit`/`project.manual`/`studio.py --aspect` all take the
+canvas, and `edl.render` passes it into the FX pass. **The gotcha that made it portrait-only:** the impact
+flash/shake FX (`_impact_fx`, `apply_flashes`) hard-cropped to `1080:1920`, so a landscape canvas got re-cropped
+back to portrait — any new canvas-varying effect MUST take `w,h`, never hard-code dims. UI: the builder **Shape**
+toggle auto-detects from the imported clips' dimensions (in-browser), always overridable; `aspect` flows through
+`/api/studio/{render,build-project,new-manual}`. Default is `auto` (CLI/agent) / portrait fallback on a tie.
 
 ## Server plumbing / state (per-deployment, gitignored, on the SSD)
 - `_studio/projects/<pid>.json` (editable EDLs), `_studio/cache/<pid>/` (filmstrips, music, proxies),

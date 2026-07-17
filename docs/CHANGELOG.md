@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.205 -- 2026-07-17  (Video Studio: audio is a real clip -- drag, trim, magnet-snap to your clips + device upload)
+- **The music/voice track is now a first-class clip you can DRAG and TRIM** on the music lane, exactly like a
+  video clip: grab the body to move it (change where it starts on the timeline), grab either end to trim in/out.
+  Before, the audio was locked full-length at 0:00 with only a static waveform.
+- **Magnetic snapping:** while you drag or trim the audio, its edges snap to every video clip's start/end (and to
+  0:00 and the video end) when they get close -- the "it clearly wants to line up, so lock it" feel every NLE has.
+  A green snap-line shows the lock point. Far from an edge, it stays free (no forced grid).
+- **"+ Audio" now offers device upload, not just YouTube.** The button opens a panel with **Upload from this
+  device (phone or computer)** *and* the YouTube/URL + section field. (It was a bare prompt that only took a link.)
+- **Renderer honors the audio clip's in/out/start** (`edl.py`): `atrim` the trimmed window, `adelay` it to its
+  start, then `apad` so a short/offset track never truncates the video (`-shortest` clamps to the video length;
+  silence fills any gap). Live preview seeks the music to `in+(t-start)` only inside the clip span + respects its
+  volume. Back-compat: a full-length track (in=0, out=dur, start=0) renders exactly as before.
+- Verified end-to-end: an in=2 out=5 start=1.5 audio clip over an 8s video -> 8s output with the 3s track placed at
+  1.5s (video not truncated); dashboard drag/trim/snap + the upload panel verified headless (zero JS errors).
+
 ## 0.99.204 -- 2026-07-17  (Video Studio: LANDSCAPE videos -- 16:9 output, auto-detected from your clips)
 - **Studio can now make LANDSCAPE (16:9, 1920x1080) videos, not just portrait.** Before, every build was forced
   to portrait 9:16 -- the Shape toggle existed only on the AI-generate card, and the auto-build / manual-import /
