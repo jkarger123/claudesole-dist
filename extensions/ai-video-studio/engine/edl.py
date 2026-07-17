@@ -167,7 +167,7 @@ def render(project, out, progress_cb=None, proxy=False):
                for e in _tracks(project, "effects") if e.get("type", "impact") == "impact"]
     if flashes and not proxy:
         fxd = os.path.join(work, "fx.mp4")
-        ac.apply_flashes(body, fxd, flashes)
+        ac.apply_flashes(body, fxd, flashes, w, h)
         if ac._dur(fxd) > 0.04: body = fxd
     zooms = [e for e in _tracks(project, "effects") if e.get("type") == "zoom"]
     if zooms and not proxy:

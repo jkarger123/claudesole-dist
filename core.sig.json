@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "4e01b3db86445c5437208f933c06e0701b5030efcfcbabb48c827144654e9067",
+      "claudesole.manifest.json": "b76cf4072a8cb7eec530c823543d1b41c1f291c2266c1be88573f7bfe07b161f",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/campaign_runner.py": "0a385adb090626c76c1f3baf4a1ed944cd0a80983ef752686e471003a012e339",
       "command-center/cc-advise": "e449156a34ddcb9068fc1c89223a2d3f8574b6dba15f2e3d3fe748bf2f49a70f",
@@ -70,7 +70,7 @@
       "command-center/residue_lint.py": "0b1c757909a27470095d5ea8b48641a9e9e0248ec1729f3598596f2129fd1d6f",
       "command-center/rollback_guard.py": "603ae76f8f854b46e0dd152a123e11cc85c760a8c82e7865ab5eeaf75b2ac800",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "b34c07c7104ba8e88513b345d262d31beb1b31c461456d65877166ecc94ede9e",
+      "command-center/server.py": "a720c2a3fe7ff7a133ef2b1701f388726420c16ac64118b92bd36925f4742099",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/static/phosphor/fill.css": "555980683a582c1910a954648b4ae38f58d76e797f02bfdc2c5e817901e6d4fc",
       "command-center/static/phosphor/light.css": "f2e59699faaeee27da9edb86dd18f5ed3bd5113db3e4e388fdd23afcaf308865",
@@ -84,15 +84,15 @@
       "desktop/release/mac/ClaudeFather Desktop.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/vk_swiftshader_icd.json": "d717d915e31e7c27948b80b36ab34e2d897888114c5c7d0af835f93eb53e58f5",
       "desktop/renderer/index.html": "4388a1500d1af1d671f2343d4cff40d986d23b9ba05b0f591846d4c1daf38ab4",
       "desktop/renderer/styles.css": "4c0fda41b169be2434d5273ee70cfa2a6d298498a92db64a6cf40e4cf2102b1d",
-      "extensions/ai-video-studio/engine/autocut.py": "7a881ed00cb845346301a87062486dd748464086d3cf12d2e81b80be91fd4e27",
+      "extensions/ai-video-studio/engine/autocut.py": "5e86adf1bc7c6afb9e469950ba1358fb7fd6daef34b189a2946572994f6a77a0",
       "extensions/ai-video-studio/engine/beats.py": "785f199a5259666f1caaff311073ae556b31784a9d74deaafb290167153d4c98",
       "extensions/ai-video-studio/engine/capcut.py": "7209eb9f6c85d496d8a1660dfe665470d81c0829d07998778f5168b3f516585a",
-      "extensions/ai-video-studio/engine/edl.py": "02697779b0507a3041076a08ac652a343247b0aed7ec9b17d0f5a9598a56f4a9",
+      "extensions/ai-video-studio/engine/edl.py": "4611bd511873535824c3366f0c963647e578382f4e43b625b478a7ce4342e8c8",
       "extensions/ai-video-studio/engine/generate.py": "216041823d6300453c9781cc25e7c50689ecdc15fcb0ea636b904cbd52ed4040",
       "extensions/ai-video-studio/engine/music.py": "7c084444eda1f236f0b7abd970602c5e7b0353423b0454111ff897fc0a898303",
-      "extensions/ai-video-studio/engine/project.py": "5d4a2bbc4b7acf125fbbcade1cfc97867fddb6a560d5c11f63d136d872b148ad",
+      "extensions/ai-video-studio/engine/project.py": "69e1b7c60bd528754230597b911f66ab6a77c619d946e3843c628f38c5a8f91d",
       "extensions/ai-video-studio/engine/providers.py": "6ab7e6c74eb14eb04b8cc52eb5e76fbe5d9d30a9a24236133ef71a0ca3e5139b",
-      "extensions/ai-video-studio/engine/studio.py": "cee7df024c3ed68aebbeeb97e439e6685c7f84056178d74f2bcbc16f6cf30bd5",
+      "extensions/ai-video-studio/engine/studio.py": "f90fb107d09d329d0ddd21e38c744f138a2e8436ee37faeab10e6c22d8c5f51a",
       "extensions/ai-video-studio/engine/timecode.py": "6810b74cb4dda491dbf20695d7d14a1f50cc9a642b213f675bceb44acaf18f8a",
       "extensions/ai-video-studio/extension.json": "15dcf80661e9cb99734d61fa20375723758e641bb355a99b573df82cc0a39bb2",
       "extensions/airtable/extension.json": "9a2a44c283c72dde6a1ae250582223d7d4516d113be764420bc7c692267a05c7",
@@ -171,9 +171,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1784226765,
+    "generated": 1784315614,
     "v": 1,
-    "version": "0.99.203"
+    "version": "0.99.204"
   },
-  "sig": "xEKu5aqF4/Ft/dxN5J98OhfdTlDvnXQC1AuxwQDU7Unq2HDdGPHBQCykeAj3YEUgNP+TW2Zngw3ix3pG7poHAw=="
+  "sig": "Kx+W+Z8z8R4NctVvXQTpondkYT/SdLC4vfIQ+zxTvzZ90XlZTFdVfY5dQIvbvbgswjllDggbF8F7Z8cOSzpkDA=="
 }

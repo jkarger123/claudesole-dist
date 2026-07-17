@@ -32,4 +32,4 @@ It runs on a bundled static **ffmpeg** (no system install, no API key). It decod
 ## Best practices
 - Shoot/keep clips a few seconds longer than you need; Studio trims to the beat.
 - For a clean beat lock, pick a song with an obvious pulse and use a `section` at the drop.
-- Vertical (9:16) is the default canvas — great for Reels/TikTok/Shorts.
+- **Shape (landscape or portrait):** Studio auto-detects the orientation from the clips you add (landscape 16:9 vs portrait 9:16) and sets the **Shape** toggle for you — tap it to override. Portrait is great for Reels/TikTok/Shorts; landscape for YouTube/TV.

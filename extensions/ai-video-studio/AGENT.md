@@ -10,10 +10,12 @@ Engine lives in `extensions/ai-video-studio/engine/`:
 
     cd extensions/ai-video-studio/engine
     python3 studio.py --music "<song file OR YouTube/track URL>" [--section 3:11-3:25] --pace punchy \
-        --out /abs/path/out.mp4  clip1.mov clip2.mov photo.jpg ...
+        [--aspect auto|16:9|9:16] --out /abs/path/out.mp4  clip1.mov clip2.mov photo.jpg ...
 
 - `--music`: a local audio file OR a YouTube/http URL (audio auto-extracted; `--section mm:ss-mm:ss` = just that slice).
 - `--pace`: `frantic` | `punchy` | `cinematic` (how many beats per cut).
+- `--aspect`: `16:9` (landscape 1920x1080) | `9:16` (portrait 1080x1920) | `auto` (default -- picks the shape by
+  VOTING on the clips' own dimensions: landscape if more clips are wider than tall, else portrait).
 - positional args: absolute paths to the user's clips (**images work too** — held ~5s each).
 - It beat-detects the song, motion-detects the clips, cuts every cut onto a beat, slow-mos the finisher, and prints
   JSON `{ok, output, duration}`. The MP4 at `--out` is the deliverable — write it into a module `deliverables/`

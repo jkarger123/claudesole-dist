@@ -63,12 +63,14 @@ def waveform(audio, buckets=500):
         return []
 
 
-def emit(out_json, cache_dir, music_source, clips, section=None, pace="punchy", shot_plan=None):
-    """Build a SAVED project + its media cache. Returns {ok, project} (also writes out_json)."""
+def emit(out_json, cache_dir, music_source, clips, section=None, pace="punchy", shot_plan=None, aspect=None):
+    """Build a SAVED project + its media cache. Returns {ok, project} (also writes out_json).
+    aspect: '16:9'|'9:16'|'auto'/None -> the output canvas (auto = pick from the clips' own orientation)."""
     m = musicmod.get_music(music_source, section=section)
     if not m.get("ok"): return {"ok": False, "stage": "music", "error": m.get("error")}
     bpc = {"frantic": 1, "punchy": 2, "cinematic": 4}.get(pace, 2)
-    r = ac.build_project(clips, m["path"], beats_per_cut=bpc, shot_plan=shot_plan)
+    cw, ch = ac.canvas_for(aspect, clips)
+    r = ac.build_project(clips, m["path"], beats_per_cut=bpc, shot_plan=shot_plan, w=cw, h=ch)
     if not r.get("ok"): return r
     proj = r["project"]
     os.makedirs(cache_dir, exist_ok=True)
@@ -117,9 +119,11 @@ def _probe_source(cache_dir, path):
     return sid, s
 
 
-def manual(out_json, cache_dir, clips, music_source=None, section=None):
-    """MANUAL project: lay each clip on the timeline at FULL length in order (no beat-cutting). Optional music."""
+def manual(out_json, cache_dir, clips, music_source=None, section=None, aspect=None):
+    """MANUAL project: lay each clip on the timeline at FULL length in order (no beat-cutting). Optional music.
+    aspect: '16:9'|'9:16'|'auto'/None -> the output canvas (auto = pick from the clips' own orientation)."""
     os.makedirs(cache_dir, exist_ok=True)
+    cw, ch = ac.canvas_for(aspect, [c for c in clips if os.path.exists(c)])
     sources, sidmap, vclips, pos = {}, {}, [], 0.0
     for c in clips:
         if not os.path.exists(c): continue
@@ -144,7 +148,7 @@ def manual(out_json, cache_dir, clips, music_source=None, section=None):
                            "out": round(pos, 2), "start": 0.0, "volume": 1.0}]})
     if "music" not in sources:
         tracks.append({"id": "a1", "kind": "audio", "clips": []})
-    project = {"version": 1, "canvas": {"w": ac.W, "h": ac.H, "fps": ac.FPS}, "duration": round(pos, 2),
+    project = {"version": 1, "canvas": {"w": cw, "h": ch, "fps": ac.FPS}, "duration": round(pos, 2),
                "mode": "manual", "sources": sources, "tracks": tracks, "music": music}
     with open(out_json, "w") as f: json.dump(project, f, indent=2)
     return {"ok": True, "project": project, "path": out_json}
@@ -174,13 +178,14 @@ def add_clip(cache_dir, path):
 if __name__ == "__main__":
     a = sys.argv[1:]
     if a and a[0] == "manual":
-        out_json, cache_dir = a[1], a[2]; rest = a[3:]; music = section = None; clips = []
+        out_json, cache_dir = a[1], a[2]; rest = a[3:]; music = section = aspect = None; clips = []
         i = 0
         while i < len(rest):
             if rest[i] == "--music": music = rest[i + 1]; i += 2
             elif rest[i] == "--section": section = rest[i + 1]; i += 2
+            elif rest[i] == "--aspect": aspect = rest[i + 1]; i += 2
             else: clips.append(rest[i]); i += 1
-        print(json.dumps(manual(out_json, cache_dir, clips, music_source=music, section=section)))
+        print(json.dumps(manual(out_json, cache_dir, clips, music_source=music, section=section, aspect=aspect)))
     elif a and a[0] == "resolve":
         sec = a[3] if len(a) > 3 else None
         print(json.dumps(resolve_audio(a[1], a[2], section=sec)))
@@ -191,15 +196,16 @@ if __name__ == "__main__":
         print(json.dumps(filmstrip(a[1], a[2], n)))
     elif a and a[0] == "emit":
         out_json, cache_dir, music = a[1], a[2], a[3]
-        rest = a[4:]; section = pace = plan = None; clips = []
+        rest = a[4:]; section = pace = plan = aspect = None; clips = []
         i = 0
         while i < len(rest):
             if rest[i] == "--section": section = rest[i + 1]; i += 2
             elif rest[i] == "--pace": pace = rest[i + 1]; i += 2
             elif rest[i] == "--plan": plan = rest[i + 1]; i += 2
+            elif rest[i] == "--aspect": aspect = rest[i + 1]; i += 2
             else: clips.append(rest[i]); i += 1
         sp = json.load(open(plan)) if plan and os.path.exists(plan) else None
-        print(json.dumps(emit(out_json, cache_dir, music, clips, section=section, pace=(pace or "punchy"), shot_plan=sp)))
+        print(json.dumps(emit(out_json, cache_dir, music, clips, section=section, pace=(pace or "punchy"), shot_plan=sp, aspect=aspect)))
     else:
         print("usage: project.py emit <out.json> <cache_dir> <music> [--section S] [--pace P] clips... | thumbs <src> <dest> [n]")
         sys.exit(1)

@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.204 -- 2026-07-17  (Video Studio: LANDSCAPE videos -- 16:9 output, auto-detected from your clips)
+- **Studio can now make LANDSCAPE (16:9, 1920x1080) videos, not just portrait.** Before, every build was forced
+  to portrait 9:16 -- the Shape toggle existed only on the AI-generate card, and the auto-build / manual-import /
+  render paths ignored it (the canvas + the impact-flash/shake FX were hard-coded to 1080x1920, so even a landscape
+  canvas got re-cropped back to portrait).
+- **Auto-detects the shape from your media:** when you add clips, Studio reads their native dimensions in-browser
+  and sets the **Shape** toggle for you (landscape if more clips are wider than tall, else portrait) -- always
+  overridable with one tap. A tie/unclear leaves the choice to you.
+- **Engine is now canvas-agnostic.** `autocut` (`build`/`build_project`), the impact FX (`_impact_fx`,
+  `apply_flashes` -- the real bug: they hard-cropped to 1080x1920), `project.py` (`emit`/`manual`), and the
+  one-shot `studio.py` CLI all take a canvas. `edl.render` passes the canvas into the FX pass. New
+  `autocut.canvas_for(aspect, clips)` resolves `16:9`|`9:16`|`auto` (auto = vote by the clips' dimensions).
+- **Agent/CLI:** `studio.py --aspect auto|16:9|9:16` (default `auto`); server routes `/api/studio/{render,
+  build-project,new-manual}` accept an `aspect` field. Verified end-to-end: 16:9 -> real 1920x1080 with FX intact,
+  9:16 -> 1080x1920, auto picks correctly; dashboard Shape toggle verified in a headless browser (zero JS errors).
+
 ## 0.99.203 -- 2026-07-16  (edge-mcp: Windows browser-attach hosts -- an always-on Windows box can host a real Chrome)
 - **A Windows machine can now be a browser edge host** (not just macOS/Unix), so an always-on Windows box
   (e.g. a shop build box) can drive the user's REAL logged-in Chrome over the mesh. CCR ccr-1784223446960;

@@ -21,8 +21,10 @@ import beats as beatmod
 BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))), "bin")
 FFMPEG = os.path.join(BIN, "ffmpeg") if os.path.exists(os.path.join(BIN, "ffmpeg")) else "ffmpeg"
 FFPROBE = os.path.join(BIN, "ffprobe") if os.path.exists(os.path.join(BIN, "ffprobe")) else "ffprobe"
-W, H, FPS = 1080, 1920, 30
-NF = "scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1,fps=%d" % (W, H, W, H, FPS)
+W, H, FPS = 1080, 1920, 30                                  # DEFAULT canvas = portrait 9:16 (backward-compatible)
+def _nf(w, h):                                              # fill-and-crop normalize filter for a w x h canvas
+    return "scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1,fps=%d" % (w, h, w, h, FPS)
+NF = _nf(W, H)                                              # kept for any external import; engine now uses _nf(w,h)
 
 
 def _run(args): return subprocess.run(args, capture_output=True, text=True)
@@ -30,6 +32,32 @@ def _dur(path):
     r = _run([FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path])
     try: return float(r.stdout.strip())
     except Exception: return 0.0
+
+
+def _dims(path):
+    r = _run([FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+              "-of", "csv=p=0", path])
+    try:
+        w, h = r.stdout.strip().split(",")[:2]; return int(w), int(h)
+    except Exception:
+        return 0, 0
+
+
+def canvas_for(aspect, clips=None):
+    """Resolve the output canvas (w, h) from an aspect choice.
+      '16:9'/'landscape' -> 1920x1080 ; '9:16'/'portrait' -> 1080x1920.
+      'auto'/None/'' -> VOTE by the source clips' own dimensions (landscape if more clips are wider than tall);
+      a tie or unknown falls back to portrait (the app's Reels/TikTok default)."""
+    a = (aspect or "auto").strip().lower()
+    if a in ("16:9", "169", "landscape", "wide"): return 1920, 1080
+    if a in ("9:16", "916", "portrait", "tall"): return 1080, 1920
+    land = port = 0
+    for c in (clips or []):
+        w, h = _dims(c)
+        if w and h:
+            if w > h: land += 1
+            elif h > w: port += 1
+    return (1920, 1080) if land > port else (1080, 1920)
 
 
 def motion_peaks(clip, topn=4, min_gap=2.5):
@@ -61,10 +89,10 @@ def motion_peaks(clip, topn=4, min_gap=2.5):
     return picks
 
 
-def _seg(clip, start, out_len, dest, slow=1.0):
-    """Cut [start .. start+out_len] (money moment at the START), normalized, optional slow-mo via setpts."""
+def _seg(clip, start, out_len, dest, slow=1.0, w=W, h=H):
+    """Cut [start .. start+out_len] (money moment at the START), normalized to the w x h canvas, optional slow-mo."""
     src_len = out_len / slow if slow != 1.0 else out_len
-    vf = "%s,%s" % (("setpts=%.3f*PTS" % slow) if slow != 1.0 else "setpts=PTS", NF)
+    vf = "%s,%s" % (("setpts=%.3f*PTS" % slow) if slow != 1.0 else "setpts=PTS", _nf(w, h))
     _run([FFMPEG, "-y", "-ss", "%.3f" % max(0, start), "-i", clip, "-t", "%.3f" % src_len, "-an",
           "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-r", str(FPS), dest])
 
@@ -110,24 +138,25 @@ def _precise_impact(clip, t0, half=0.5):
     return best_t
 
 
-def _impact_fx(path, big=True, at=0.0):
+def _impact_fx(path, big=True, at=0.0, w=W, h=H):
     """Bake a DRAMATIC pro-wrestling IMPACT hit, timed to `at` (the detected land frame within the segment):
       - a HARD full-white FLASH (2-3 frames of pure white) + a bright afterglow that decays,
       - a big screen SHAKE (~0.45s, strong amplitude) starting on the hit.
-    Pure ffmpeg. `big=False` = a lighter version for non-finisher landings."""
+    Pure ffmpeg, canvas-agnostic (works for portrait OR landscape). `big=False` = a lighter non-finisher landing."""
     amp = 28 if big else 18                                 # shake amplitude (px)
     flash = 0.10 if big else 0.06                           # hard full-white duration (s)
     glow = 0.9 if big else 0.6                              # afterglow brightness
-    over = 1240 if big else 1200                            # overscan width (bigger = more shake room)
+    over_w = (w + 160) if big else (w + 120)                # overscan width (bigger = more shake room)
+    over_h = int(round(over_w * h / w))                     # keep the canvas aspect while overscanning
     a = max(0.0, float(at))
     tmp = path + ".fx.mp4"
     vf = (
-        "scale=%d:%d," % (over, int(over * 1920 / 1080)) +  # overscan for shake headroom
-        "crop=1080:1920:"                                   # STATIC output dims (only x/y offsets vary -> valid)
-        "x='(iw-1080)/2 + if(between(t,%.3f,%.3f), %d*sin((t-%.3f)*66)*max(0,1-(t-%.3f)/0.45), 0)':"
-        % (a, a + 0.45, amp, a, a) +
-        "y='(ih-1920)/2 + if(between(t,%.3f,%.3f), %d*sin((t-%.3f)*84)*max(0,1-(t-%.3f)/0.45), 0)',"
-        % (a, a + 0.45, amp, a, a) +
+        "scale=%d:%d," % (over_w, over_h) +                 # overscan for shake headroom (canvas aspect kept)
+        "crop=%d:%d:" % (w, h) +                            # STATIC output dims (only x/y offsets vary -> valid)
+        "x='(iw-%d)/2 + if(between(t,%.3f,%.3f), %d*sin((t-%.3f)*66)*max(0,1-(t-%.3f)/0.45), 0)':"
+        % (w, a, a + 0.45, amp, a, a) +
+        "y='(ih-%d)/2 + if(between(t,%.3f,%.3f), %d*sin((t-%.3f)*84)*max(0,1-(t-%.3f)/0.45), 0)',"
+        % (h, a, a + 0.45, amp, a, a) +
         "drawbox=x=0:y=0:w=iw:h=ih:color=white@1:t=fill:enable='between(t,%.3f,%.3f)'," % (a, a + flash) +
         "eq=brightness='if(gte(t,%.3f), max(0,%.2f-5*(t-%.3f)), 0)':eval=frame" % (a, glow, a)
     )
@@ -136,14 +165,15 @@ def _impact_fx(path, big=True, at=0.0):
     if os.path.exists(tmp) and _dur(tmp) > 0.05: os.replace(tmp, path)
 
 
-def apply_flashes(video, out, flashes):
+def apply_flashes(video, out, flashes, w=W, h=H):
     """Apply the impact FX (white flash + shake + afterglow) at EXACT OUTPUT timestamps on the finished cut. The
-    user reads the land times off the timecoded edit and gives them here -> pixel-precise, full control. `flashes`
-    = [{"t": output_seconds, "big": bool}, ...]."""
+    user reads the land times off the timecoded edit and gives them here -> pixel-precise, full control. Canvas
+    dims (w,h) default portrait but MUST match the video for a landscape edit. `flashes` = [{"t": s, "big": bool}]."""
     if not flashes:
         if video != out: _run([FFMPEG, "-y", "-i", video, "-c", "copy", out])
         return {"ok": True, "out": out, "n": 0}
-    over = 1240
+    over_w = w + 160
+    over_h = int(round(over_w * h / w))
     xt, yt, fen, gl = [], [], [], []
     for fl in flashes:
         T = float(fl["t"]); big = bool(fl.get("big"))
@@ -152,13 +182,13 @@ def apply_flashes(video, out, flashes):
         yt.append("if(between(t,%.3f,%.3f),%d*sin((t-%.3f)*84)*max(0,1-(t-%.3f)/0.45),0)" % (T, T + 0.45, amp, T, T))
         fen.append("between(t,%.3f,%.3f)" % (T, T + fdur))
         gl.append("if(gte(t,%.3f),max(0,%.2f-5*(t-%.3f)),0)" % (T, glow, T))
-    xexpr = "(iw-1080)/2 + " + " + ".join(xt)
-    yexpr = "(ih-1920)/2 + " + " + ".join(yt)
+    xexpr = "(iw-%d)/2 + " % w + " + ".join(xt)
+    yexpr = "(ih-%d)/2 + " % h + " + ".join(yt)
     gexpr = gl[0]
     for g in gl[1:]: gexpr = "max(%s,%s)" % (gexpr, g)
-    vf = ("scale=%d:%d,crop=1080:1920:x='%s':y='%s',"
+    vf = ("scale=%d:%d,crop=%d:%d:x='%s':y='%s',"
           "drawbox=x=0:y=0:w=iw:h=ih:color=white@1:t=fill:enable='gt(%s,0)',"
-          "eq=brightness='%s':eval=frame") % (over, int(over * 1920 / 1080), xexpr, yexpr, "+".join(fen), gexpr)
+          "eq=brightness='%s':eval=frame") % (over_w, over_h, w, h, xexpr, yexpr, "+".join(fen), gexpr)
     dst = out if out != video else out + ".fx.mp4"        # never read+write the SAME file with ffmpeg
     r = _run([FFMPEG, "-y", "-i", video, "-vf", vf, "-c:v", "libx264", "-preset", "veryfast",
               "-pix_fmt", "yuv420p", "-c:a", "copy", dst])
@@ -168,7 +198,7 @@ def apply_flashes(video, out, flashes):
             "error": None if ok else (r.stderr or "")[-200:]}
 
 
-def build_project(clips, music, beats_per_cut=1, shot_plan=None, lead=0.25, hero_speed=0.417):
+def build_project(clips, music, beats_per_cut=1, shot_plan=None, lead=0.25, hero_speed=0.417, w=W, h=H):
     """AUTO-BUILD: beat-detect + motion-detect + sequence -> emit the shared PROJECT JSON (the source of truth the
     manual timeline + edl.render + the CapCut exporter all consume). Same logic as build() but produces an EDL
     instead of rendering. speed FACTOR convention: <1 = slow-mo (hero ~0.417 = 2.4x slower)."""
@@ -233,7 +263,7 @@ def build_project(clips, music, beats_per_cut=1, shot_plan=None, lead=0.25, hero
         out_pos += slot_len
     if not vclips: return {"ok": False, "error": "no clips built"}
     sources["music"] = {"kind": "audio", "path": music}
-    project = {"version": 1, "canvas": {"w": W, "h": H, "fps": FPS}, "duration": round(out_pos, 2), "mode": mode,
+    project = {"version": 1, "canvas": {"w": w, "h": h, "fps": FPS}, "duration": round(out_pos, 2), "mode": mode,
                "sources": sources,
                "tracks": [{"id": "v1", "kind": "video", "clips": vclips},
                           {"id": "fx1", "kind": "effects", "clips": fxclips},
@@ -245,7 +275,7 @@ def build_project(clips, music, beats_per_cut=1, shot_plan=None, lead=0.25, hero
     return {"ok": True, "project": project}
 
 
-def build(clips, music, out, clips_only=False, max_secs=None, beats_per_cut=1, shot_plan=None, effects=True):
+def build(clips, music, out, clips_only=False, max_secs=None, beats_per_cut=1, shot_plan=None, effects=True, w=W, h=H):
     b = beatmod.analyze(music)
     if not b.get("ok"): return {"ok": False, "error": "beat detect: " + b.get("error", "?")}
     grid = [x["t"] for x in b["beats"]]
@@ -309,9 +339,9 @@ def build(clips, music, out, clips_only=False, max_secs=None, beats_per_cut=1, s
             start = max(0.0, float(shot["t"]) - 0.15)
             fx_at = 0.0
         dest = os.path.join(work, "s%03d.mp4" % len(segs))
-        _seg(shot["clip"], start, slot_len, dest, slow=slow)
+        _seg(shot["clip"], start, slot_len, dest, slow=slow, w=w, h=h)
         if effects and is_impact and _dur(dest) > 0.05:   # flash fires ON the land
-            _impact_fx(dest, big=is_hero, at=fx_at)
+            _impact_fx(dest, big=is_hero, at=fx_at, w=w, h=h)
         if _dur(dest) > 0.05:
             segs.append(dest); plan.append({"beat": round(grid[a], 2), "clip": os.path.basename(shot["clip"]),
                                             "at": round(float(shot["t"]), 1), "len": round(slot_len, 2),

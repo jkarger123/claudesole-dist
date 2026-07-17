@@ -18,7 +18,8 @@ PACE = {"frantic": 1, "punchy": 2, "cinematic": 4}
 
 
 def make(clips, music_source, out, section=None, pace="punchy", clips_only=False, max_secs=None,
-         mode="deterministic", plan_file=None, effects=True, timecode=False, flash_at=None, big_flash_at=None):
+         mode="deterministic", plan_file=None, effects=True, timecode=False, flash_at=None, big_flash_at=None,
+         aspect=None):
     """mode='deterministic' -> the engine's motion-energy auto-select (fast, free, no AI usage).
        mode='ai'            -> use a vision-model/Claude-authored shot plan (moments chosen by MEANING). Pass the
                                plan as a JSON list of {clip, t, hero?, slow?} via plan_file (or shot_plan= in code)."""
@@ -32,13 +33,15 @@ def make(clips, music_source, out, section=None, pace="punchy", clips_only=False
         shot_plan = json.load(open(plan_file))
     # if the user is giving exact OUTPUT flash times, turn OFF the auto per-segment flash and apply theirs instead
     operator_flash = bool(flash_at or big_flash_at)
+    cw, ch = autocutmod.canvas_for(aspect, clips)          # '16:9'|'9:16'|auto (auto = vote by the clips)
     res = autocutmod.build(clips, m["path"], out, clips_only=clips_only, max_secs=max_secs,
                            beats_per_cut=PACE.get(pace, 2), shot_plan=shot_plan,
-                           effects=(effects and not operator_flash))
+                           effects=(effects and not operator_flash), w=cw, h=ch)
     if not res.get("ok"): return res
+    res["canvas"] = {"w": cw, "h": ch}
     if operator_flash:
         flashes = [{"t": t, "big": False} for t in (flash_at or [])] + [{"t": t, "big": True} for t in (big_flash_at or [])]
-        res["flashes"] = autocutmod.apply_flashes(out, out, flashes)
+        res["flashes"] = autocutmod.apply_flashes(out, out, flashes, cw, ch)
     if timecode:                                            # burn a running timer onto the FINAL cut for calibration
         tc = out.replace(".mp4", "_TC.mp4"); timecodemod.stamp(out, tc); res["timecoded"] = tc
     res["music_source"] = m.get("source")
@@ -51,6 +54,7 @@ if __name__ == "__main__":
     ap.add_argument("--section", default=None, help="slice of a long song, e.g. 30-55")
     ap.add_argument("--out", required=True)
     ap.add_argument("--pace", default="punchy", choices=list(PACE))
+    ap.add_argument("--aspect", default="auto", help="16:9 (landscape) | 9:16 (portrait) | auto (pick from the clips)")
     ap.add_argument("--mode", default="deterministic", choices=["deterministic", "ai"],
                     help="deterministic = motion-energy (free); ai = a vision-model/Claude shot plan (--plan)")
     ap.add_argument("--plan", default=None, help="AI shot plan JSON: [{clip,t,hero?,slow?}, ...]")
@@ -66,4 +70,5 @@ if __name__ == "__main__":
     bfa = [float(x) for x in a.big_flash_at.split(",") if x.strip()]
     print(json.dumps(make(a.clips, a.music, a.out, section=a.section, pace=a.pace, mode=a.mode,
                           plan_file=a.plan, clips_only=a.clips_only, max_secs=a.max_secs,
-                          effects=not a.no_fx, timecode=a.timecode, flash_at=fa, big_flash_at=bfa), indent=2))
+                          effects=not a.no_fx, timecode=a.timecode, flash_at=fa, big_flash_at=bfa,
+                          aspect=a.aspect), indent=2))
