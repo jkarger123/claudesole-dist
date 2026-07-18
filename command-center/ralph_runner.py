@@ -267,6 +267,23 @@ def on_sigint(sig, frame):
     except Exception: pass
 signal.signal(signal.SIGINT, on_sigint)
 
+def _sleep_interruptible(secs):
+    """Sleep up to `secs`, but bail early the moment a halt/pause is requested -- so a backoff never blocks a stop."""
+    end = time.time() + secs
+    while time.time() < end:
+        if control_state() != "run": return
+        time.sleep(min(3, max(0.1, end - time.time())))
+
+def _reap_live():
+    """Tear down the ralph-<name>-live viewer tab when the runner exits, so a DEAD loop doesn't LOOK alive (the
+    lingering -live pane misled diagnosis for hours). (CCR ccr-1784357840269 D4)"""
+    try:
+        import shutil as _sh
+        if not os.environ.get("TMUX"): return
+        tmux = _sh.which("tmux") or "/opt/homebrew/bin/tmux"
+        subprocess.run([tmux, "kill-session", "-t", "=ralph-%s-live" % NAME], capture_output=True, timeout=8)
+    except Exception: pass
+
 # ---- one iteration -----------------------------------------------------------
 def _pane_summary(raw):
     """The runner's OWN pane stays clean -- just the end-of-iteration blurb (as it was before the live tab existed).
@@ -335,22 +352,41 @@ def run_iteration(n):
             if cs == "pause": stop["why"] = "pause"; proc.terminate(); return
             time.sleep(2)
     t = threading.Thread(target=watch, daemon=True); t.start()
+    last_result = {}; limit_hit = False
     for line in proc.stdout:
         raw = line.rstrip("\n")
         if not raw: continue
         if _lf:                                   # feed the live tab (ralph_live.py renders this stream)
             try: _lf.write(raw + "\n"); _lf.flush()
             except Exception: pass
+        _low = raw.lower()                         # transient usage/rate-limit signal anywhere in the stream (D3)
+        if ("session limit" in _low or "usage limit" in _low or "rate_limit" in _low or "rate limit" in _low
+                or "resets " in _low or "overloaded_error" in _low):
+            limit_hit = True
+        try:
+            _ev = json.loads(raw)
+            if isinstance(_ev, dict) and _ev.get("type") == "result": last_result = _ev
+        except Exception: pass
         s = _pane_summary(raw)                     # keep the runner pane a COMPACT control+activity view
         if s: log("  " + s)
     try:
         if _lf: _lf.close()
     except Exception: pass
     proc.wait(); INTERRUPTED["proc"] = None
+    # bank the spend/turns even when the iteration fails -- never report zero cost for real work done (D2)
+    _cost = last_result.get("total_cost_usd"); _turns = last_result.get("num_turns")
+    if _cost is not None or _turns is not None:
+        try: set_status(last_cost=_cost, last_turns=_turns, last_iter_end=time.time())
+        except Exception: pass
     if stop["why"] == "timeout":
         log("  ITERATION TIMED OUT (%ds) -- killed." % TIMEOUT); return "timeout"
     if stop["why"] == "halt":  return "halt"
     if stop["why"] == "pause": log("  iteration interrupted (pause requested)."); return "pause"
+    _sub = str(last_result.get("subtype") or "")
+    if limit_hit:                                  # transient -> caller backs off + retries; NEVER terminal (D3)
+        log("  usage/rate limit detected this iteration."); return "limit"
+    if last_result.get("is_error") and _sub != "error_max_turns":
+        log("  iteration error: %s" % (_sub or "error")); return "error"
     return "ok"
 
 # ---- the live-view sibling tab ----------------------------------------------
@@ -378,12 +414,14 @@ def main():
     log("  =  RALPH LOOP -- %s" % NAME)
     log("  =  cwd=%s  max_iters=%s  timeout=%ds" % (CWD, MAX_ITERS or "inf", TIMEOUT))
     log("  ========================================================")
-    # clear any stale pause from a previous run; honor an explicit halt
-    try:
-        if os.path.exists(lp("pause")): os.remove(lp("pause"))
-    except Exception: pass
+    # clear stale control markers from a PRIOR run so a fresh launch ALWAYS starts clean. A leftover `halt`
+    # (from a previous halt/kill) otherwise makes main() exit instantly below -> a halted loop was UNRECOVERABLE
+    # by any launch path that doesn't itself clear it (cc-ralph / direct / agent starts). (CCR ccr-1784357840269 D1)
+    for _ctl in ("pause", "halt"):
+        try: os.remove(lp(_ctl))
+        except Exception: pass
     set_status(state="running", started=time.time())
-    n = START; t0 = time.time(); stall = 0
+    n = START; t0 = time.time(); stall = 0; err_streak = 0
     while True:
         if os.path.exists(lp("halt")):
             log("  HALT requested -- stopping."); set_status(state="halted"); break
@@ -401,6 +439,18 @@ def main():
         res = run_iteration(n)
         if res == "halt":
             log("  HALT during iteration -- stopping."); set_status(state="halted"); break
+        if res == "limit":                          # transient usage/rate limit -> back off + RETRY same iteration (D3)
+            wait_s = int(CFG.get("limit_backoff_s", 900))
+            log("  usage limit -- backing off %ds then retrying (the window is otherwise burned banking nothing)." % wait_s)
+            set_status(state="throttled", current="usage limit -- waiting to retry"); _sleep_interruptible(wait_s); continue
+        if res == "error":                          # real mid-iteration error -> record, brief backoff, retry (bounded) (D2)
+            err_streak += 1
+            if err_streak >= int(CFG.get("error_limit", 6)):
+                log("  %d consecutive errors -- pausing for attention." % err_streak)
+                set_status(state="paused", current="repeated iteration errors"); open(lp("pause"), "w").close(); continue
+            log("  iteration errored (streak %d) -- brief backoff, retry." % err_streak)
+            set_status(state="running", current="iteration errored -- retrying"); _sleep_interruptible(min(60 * err_streak, 300)); continue
+        err_streak = 0
         if res == "blocked":
             log("  BLOCKED -- pausing for attention."); open(lp("pause"), "w").close(); continue
         # optional verifier (can un-check items)
@@ -438,6 +488,7 @@ def main():
         time.sleep(3)
     log("")
     log("  total: %.2f hr / %d iterations" % ((time.time() - t0) / 3600.0, n - START))
+    _reap_live()   # runner is exiting -> tear down the live viewer so the loop doesn't keep LOOKING alive (D4)
 
 if __name__ == "__main__":
     main()

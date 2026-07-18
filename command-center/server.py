@@ -2332,7 +2332,9 @@ def mesh_reply(to, text):
     _ensure_mesh_worker()
     return {"ok": True, "queued": mid}
 
-_DELIVER_LOCKS = {}
+_DELIVER_QUEUES = {}          # session -> {"q":[texts], "worker":Thread|None}
+_DELIVER_GUARD = threading.Lock()
+_DELIVER_MAX_Q = 200          # per-session backlog cap; beyond this, drop OLDEST (the Comms inbox is the durable backstop)
 
 def _session_compacting(name):
     """True while a graceful auto-compact is DRIVING this session's input box (compact lock state 'running').
@@ -2351,24 +2353,48 @@ def _mesh_deliver(session, text):
     which would both hide it from the Stop hook AND risk mixing the operator's output into the peer reply).
     Per-session serialized so concurrent deliveries arrive in order. Returns at once; the Comms inbox is the
     durable backstop if the chief never frees. This is the 'queues, then goes through when free' guarantee."""
-    lock = _DELIVER_LOCKS.setdefault(session, threading.Lock())
-    def _do():
-        with lock:
-            for _ in range(1800):   # up to ~30 min, polling ~1s
-                if sh([TMUX, "has-session", "-t", session])[0] != 0:
-                    return
-                if _session_compacting(session):   # a graceful auto-compact owns the box -> wait it out, don't inject
-                    time.sleep(1); continue
-                low = sh([TMUX, "capture-pane", "-t", session, "-p"])[1].lower()
-                if "how is claude doing" in low or "rate this session" in low:   # rating modal eats keys
-                    sh([TMUX, "send-keys", "-t", session, "0"]); time.sleep(0.6); continue
-                if "esc to interrupt" in low:    # chief is mid-turn -> wait for it to free
-                    time.sleep(1); continue
-                sh([TMUX, "send-keys", "-t", session, "-l", text]); time.sleep(0.4)
-                sh([TMUX, "send-keys", "-t", session, "Enter"])
-                return
-    threading.Thread(target=_do, daemon=True).start()
+    # QUEUE, don't thread-per-message: one worker per session drains a bounded FIFO. A busy chief used to make
+    # every delivery spawn a thread that blocked up to 30 min on the per-session lock, so pings to a continuously-
+    # busy chief (e.g. one supervising many Ralph loops) piled up unboundedly -> threads 200->400 -> vitals CRITICAL
+    # -> self-heal restart, on a loop. Now N pending messages = ONE worker thread, not N.
+    with _DELIVER_GUARD:
+        st = _DELIVER_QUEUES.setdefault(session, {"q": [], "worker": None})
+        st["q"].append(text)
+        if len(st["q"]) > _DELIVER_MAX_Q:
+            st["q"] = st["q"][-_DELIVER_MAX_Q:]   # keep newest; the inbox backstops the dropped ones
+        if st["worker"] is None or not st["worker"].is_alive():
+            st["worker"] = threading.Thread(target=_deliver_worker, args=(session,), daemon=True, name="deliver:" + session[:24])
+            st["worker"].start()
     return True
+
+def _deliver_worker(session):
+    """Single per-session drainer. Delivers queued messages IN ORDER; for each, waits (bounded ~30 min) for the
+    chief to be idle at a prompt, then types it. Session gone -> drop the backlog. Queue empty -> exit (a new
+    _mesh_deliver restarts a worker). One thread per active target session, never one per message."""
+    while True:
+        with _DELIVER_GUARD:
+            st = _DELIVER_QUEUES.get(session)
+            if not st or not st["q"]:
+                if st: st["worker"] = None
+                return
+            text = st["q"].pop(0)
+        for _ in range(1800):   # up to ~30 min for THIS message, polling ~1s
+            if sh([TMUX, "has-session", "-t", session])[0] != 0:   # session gone -> drop it + the rest
+                with _DELIVER_GUARD:
+                    st = _DELIVER_QUEUES.get(session)
+                    if st: st["q"] = []; st["worker"] = None
+                return
+            if _session_compacting(session):   # a graceful auto-compact owns the box -> wait it out, don't inject
+                time.sleep(1); continue
+            low = sh([TMUX, "capture-pane", "-t", session, "-p"])[1].lower()
+            if "how is claude doing" in low or "rate this session" in low:   # rating modal eats keys
+                sh([TMUX, "send-keys", "-t", session, "0"]); time.sleep(0.6); continue
+            if "esc to interrupt" in low:    # chief is mid-turn -> wait for it to free
+                time.sleep(1); continue
+            sh([TMUX, "send-keys", "-t", session, "-l", text]); time.sleep(0.4)
+            sh([TMUX, "send-keys", "-t", session, "Enter"])
+            break   # delivered -> loop back for the next queued message
+        # if it never freed in ~30 min, this message is dropped (stale; the Comms inbox is the durable backstop)
 
 # ---- shell / ssh / tmux ------------------------------------------------------
 def sh(cmd, timeout=15):
@@ -9477,13 +9503,25 @@ def ralph_notify(body):
     cfg = _rjson(os.path.join(d, "loop.json")); ns = _loop_notify_target(cfg)
     if not ns: return {"ok": True, "note": "no notify target"}
     if sh([TMUX, "has-session", "-t", ns])[0] != 0: return {"ok": False, "error": "notify_session gone"}
+    # ROUTING (CCR ccr-1784357840269 D5): iteration pings go ONLY to the session that actually STARTED the loop
+    # (loop.json.notify_session). When that's unset, the cwd-fallback resolves to the project CHIEF -- so
+    # per-iteration pings were spamming the Chief-of-Staff for loops it never launched (and it began acting as if
+    # it owned them). Suppress those. A COMPLETION ping still reaches the chief as a one-time FYI.
+    _explicit = bool((cfg.get("notify_session") or "").strip()) and ns == (cfg.get("notify_session") or "").strip()
+    _lstate = _rjson(os.path.join(d, "status.json")).get("state")
+    if kind == "iteration":
+        if not _explicit:
+            return {"ok": True, "note": "no explicit starter -- iteration ping suppressed (was spamming the project chief)"}
+        if _lstate in ("halted", "stopped", "stalled", "done") or not _ralive(name):   # stale/late ping (D6)
+            return {"ok": True, "note": "loop not running -- stale iteration ping dropped"}
+    _own = "you started this loop" if _explicit else "routed to you as this project's chief"
     nm = _rname(name); cwd = cfg.get("cwd", "")
     if kind == "iteration":
         it = body.get("iter"); ct = body.get("checked_this", 0)
         done = body.get("done", 0); total = body.get("total", 0); nxt = (body.get("next") or "").strip()
         msg = ("[Ralph loop '%s' finished iteration %s: checked %d new item(s) this pass (%s/%s done)%s. It is STILL "
-               "running -- this is a progress ping (you started it). No action needed unless it's going off track.]" %
-               (nm, it, ct, done, total, (" -- next: " + nxt[:120]) if nxt else ""))
+               "running -- this is a progress ping (%s). No action needed unless it's going off track.]" %
+               (nm, it, ct, done, total, (" -- next: " + nxt[:120]) if nxt else "", _own))
         _mesh_deliver(ns, msg)
         return {"ok": True, "notified": ns, "kind": "iteration", "iter": it}
     if kind == "advisor_review":   # a cross-vendor Third-party review fired at this loop's completion (opt-in)
@@ -9503,8 +9541,8 @@ def ralph_notify(body):
     prog = 0
     try: prog = len(re.findall(r"(?m)^\s*[-*]\s*\[", open(os.path.join(d, "progress.md")).read()))
     except Exception: pass
-    msg = ("[Ralph loop '%s' has FINISHED -- all %d checklist item(s) complete%s. You started this loop, so you are "
-           "being notified. Review its output / progress.md if you need it, then carry on.]" % (nm, prog, (" (it ran in %s)" % cwd) if cwd else ""))
+    msg = ("[Ralph loop '%s' has FINISHED -- all %d checklist item(s) complete%s. You're being notified (%s). "
+           "Review its output / progress.md if you need it, then carry on.]" % (nm, prog, (" (it ran in %s)" % cwd) if cwd else "", _own))
     _mesh_deliver(ns, msg)
     try: open(mark, "w").close()
     except Exception: pass
@@ -9514,10 +9552,18 @@ def ralph_control(name, action):
     d = _rdir(name)
     if not d: return {"ok": False, "error": "no such loop"}
     n = _rname(name)
+    if action in ("halt", "kill"):   # forensic log -- the CCR could not answer "what issued the 23:18 halt" (unlogged)
+        try:
+            with open(os.path.join(STATE_DIR, "_ralph_control.log"), "a") as _f:
+                _f.write("%s  %-4s  %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), action, n))
+        except Exception: pass
     if action == "pause":  open(os.path.join(d, "pause"), "w").close()
     elif action == "resume":
-        try: os.remove(os.path.join(d, "pause"))
-        except Exception: pass
+        for _ctl in ("pause", "halt"):                                        # resume must clear BOTH -- a stale halt
+            try: os.remove(os.path.join(d, _ctl))                             # otherwise left the loop unrecoverable
+            except Exception: pass                                            # via the API (CCR ccr-1784357840269 D1)
+        if not _ralive(name):                                                 # halted/dead -> removing a marker can't
+            return ralph_launch(name)                                         # resume a non-running loop; relaunch it
     elif action == "halt":  open(os.path.join(d, "halt"), "w").close()        # graceful: stops after iteration
     elif action == "kill":                                                    # immediate
         open(os.path.join(d, "halt"), "w").close()
@@ -17862,47 +17908,105 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(onboard_start(body.get("rel", "") or "", body.get("mode", "adopt"), body.get("name", ""), body.get("model")), default=str))
         return self._s(404, "{}")
 
-TERM_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude session</title>
+TERM_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude session</title><script>(function(){try{var t=localStorage.getItem('cc_theme');if(t){if(t==='auto')t=matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t);}}catch(e){}})();</script>
 <link rel="stylesheet" href="/static/xterm.css">
-<style>html,body{margin:0;height:100%;background:#0a0a0f;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}button,input,select,textarea{font-family:inherit}#wrap{display:flex;flex-direction:column;height:100vh;height:100dvh;width:100vw}#t{flex:1;min-height:0;padding:4px}
+<style>:root{
+  /* surfaces (back-to-front). --bg-warm = the gold-tinted near-black used behind accent contexts */
+  --bg:#0a0a0f;--bg2:#12121a;--bg-warm:#15120a;--card:#1a1a24;--card2:#22222e;--el1:#16161f;--el2:#1f1f2b;--el3:#262633;
+  /* text */
+  --ink:#ffffff;--mut:#a0a0b0;--dim:#606070;--near:#f2f3f7;
+  /* lines */
+  --line:#2a2a3a;--hair:rgba(255,255,255,.06);--hair2:rgba(255,255,255,.10);
+  /* brand / accent */
+  --accent:#c9a227;--accent-rgb:201,162,39;--accent-light:#e8c547;--accent-light-rgb:232,197,71;--accent-dark:#9a7a1a;--accent2:#7a1220;--accent2-light:#a01828;
+  --grad:linear-gradient(135deg,#d6b23c,#c9a227);--glow:0 10px 28px rgba(0,0,0,.5);
+  /* status (semantic). Canonical value = the one dominant on-screen; +rgb for alpha tints (rgba(var(--x-rgb),a)) */
+  --ok:#3fb950;--ok-rgb:63,185,80;--warn:#d29922;--warn-rgb:210,153,34;--err:#f85149;--err-rgb:248,81,73;--info:#58a6ff;--info-rgb:88,166,255;--blue:var(--info);
+  /* accent-derived (theme-independent: recompute per-theme via --accent-rgb) */
+  --acc:var(--accent);--acc-rgb:var(--accent-rgb);
+  --tint:rgba(var(--accent-rgb),.10);--tint2:rgba(var(--accent-rgb),.16);--ring:0 0 0 2px rgba(var(--accent-rgb),.55);
+  /* z-stack (theme-independent) */
+  --z-pop:55;--z-cmdk:120;--z-ql:130;--z-toast:140;
+}
+[data-theme="light"]{
+  --bg:#ffffff;--bg2:#f4f5f7;--bg-warm:#faf6ec;--card:#ffffff;--card2:#f0f1f4;--el1:#f7f8fa;--el2:#eef0f3;--el3:#ffffff;
+  --ink:#14141a;--near:#1c1c26;--mut:#4d5563;--dim:#6a7180;
+  --line:#e2e4ea;--hair:rgba(0,0,0,.06);--hair2:rgba(0,0,0,.10);
+  --accent:#a8811a;--accent-rgb:168,129,26;--accent-light:#c9a227;--accent-light-rgb:201,162,39;--accent-dark:#8a6a12;--accent2:#7a1220;--accent2-light:#a01828;
+  --grad:linear-gradient(135deg,#c9a227,#a8811a);--glow:0 2px 8px rgba(0,0,0,.10);
+  --ok:#1a7f37;--ok-rgb:26,127,55;--warn:#9a6700;--warn-rgb:154,103,0;--err:#cf222e;--err-rgb:207,34,46;--info:#0969da;--info-rgb:9,105,218;
+}
+[data-theme="high-contrast"]{
+  --bg:#000000;--bg2:#0a0a0a;--bg-warm:#0a0800;--card:#101010;--card2:#181818;--el1:#0d0d0d;--el2:#1a1a1a;--el3:#202020;
+  --ink:#ffffff;--near:#ffffff;--mut:#d0d0d8;--dim:#a8a8b4;
+  --line:#5a5a6a;--hair:rgba(255,255,255,.18);--hair2:rgba(255,255,255,.28);
+  --accent:#ffd23f;--accent-rgb:255,210,63;--accent-light:#ffe27a;--accent-light-rgb:255,226,122;--accent-dark:#e0b020;--accent2:#ff4d6a;--accent2-light:#ff6d85;
+  --grad:linear-gradient(135deg,#ffe27a,#ffd23f);--glow:0 0 0 1px rgba(255,255,255,.3);
+  --ok:#3fff6a;--ok-rgb:63,255,106;--warn:#ffc21a;--warn-rgb:255,194,26;--err:#ff5a52;--err-rgb:255,90,82;--info:#79c0ff;--info-rgb:121,192,255;
+}
+[data-theme="slate"]{
+  --bg:#0f1216;--bg2:#151a20;--bg-warm:#16181c;--card:#1a2028;--card2:#222a34;--el1:#171d24;--el2:#202832;--el3:#28323e;
+  --ink:#eef2f6;--near:#f4f7fa;--mut:#9aa7b4;--dim:#64707c;
+  --line:#2c353f;--hair:rgba(255,255,255,.05);--hair2:rgba(255,255,255,.09);
+  --accent:#c2ab6e;--accent-rgb:194,171,110;--accent-light:#d9c48a;--accent-light-rgb:217,196,138;--accent-dark:#93803f;--accent2:#f472b6;--accent2-light:#f9a8d4;
+  --grad:linear-gradient(135deg,#d9c48a,#c2ab6e);--glow:0 8px 24px rgba(0,0,0,.45);
+  --ok:#56d364;--ok-rgb:86,211,100;--warn:#e3b341;--warn-rgb:227,179,65;--err:#f47067;--err-rgb:244,112,103;--info:#6cb6ff;--info-rgb:108,182,255;
+}
+[data-theme="midnight"]{
+  --bg:#070912;--bg2:#0c1020;--bg-warm:#0c0c18;--card:#12172b;--card2:#1a2140;--el1:#0f1426;--el2:#1a2140;--el3:#232c52;
+  --ink:#eef1ff;--near:#f5f6ff;--mut:#97a0c8;--dim:#5a6392;
+  --line:#262e52;--hair:rgba(255,255,255,.05);--hair2:rgba(255,255,255,.09);
+  --accent:#d4af37;--accent-rgb:212,175,55;--accent-light:#f0d05a;--accent-light-rgb:240,208,90;--accent-dark:#a3831f;--accent2:#8b5cf6;--accent2-light:#a78bfa;
+  --grad:linear-gradient(135deg,#f0d05a,#d4af37);--glow:0 10px 30px rgba(0,0,0,.55);
+  --ok:#3fb950;--ok-rgb:63,185,80;--warn:#d29922;--warn-rgb:210,153,34;--err:#f85149;--err-rgb:248,81,73;--info:#7aa2ff;--info-rgb:122,162,255;
+}
+[data-theme="paper"]{
+  --bg:#f6f1e7;--bg2:#efe8d9;--bg-warm:#f0e6d0;--card:#fdfaf3;--card2:#f2ebdc;--el1:#f8f3e9;--el2:#efe7d6;--el3:#fffdf7;
+  --ink:#2b2417;--near:#33291a;--mut:#5f5443;--dim:#7c6f5a;
+  --line:#e0d6c2;--hair:rgba(60,40,10,.07);--hair2:rgba(60,40,10,.12);
+  --accent:#a8811a;--accent-rgb:168,129,26;--accent-light:#c9a227;--accent-light-rgb:201,162,39;--accent-dark:#7a5e12;--accent2:#8a2c1b;--accent2-light:#a8402c;
+  --grad:linear-gradient(135deg,#c9a227,#a8811a);--glow:0 2px 10px rgba(80,60,20,.12);
+  --ok:#4a7a1e;--ok-rgb:74,122,30;--warn:#9a6700;--warn-rgb:154,103,0;--err:#b3341f;--err-rgb:179,52,31;--info:#1b68b0;--info-rgb:27,104,176;
+}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}button,input,select,textarea{font-family:inherit}#wrap{display:flex;flex-direction:column;height:100vh;height:100dvh;width:100vw}#t{flex:1;min-height:0;padding:4px}
 #t,#t *{touch-action:none}
 body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;user-select:text}
-#bar{position:fixed;top:0;right:0;z-index:9;background:#1a1a24;color:#a0a0b0;font:12px -apple-system,sans-serif;padding:4px 10px;border:1px solid #2a2a3a;border-radius:0 0 0 8px}
-#bar a{color:#e8c547;text-decoration:none;margin-left:10px}
-#bar button{background:#22222e;color:#fff;border:1px solid #2a2a3a;border-radius:6px;padding:3px 9px;margin-left:10px;cursor:pointer;font:inherit}
+#bar{position:fixed;top:0;right:0;z-index:9;background:var(--card);color:var(--mut);font:12px -apple-system,sans-serif;padding:4px 10px;border:1px solid var(--line);border-radius:0 0 0 8px}
+#bar a{color:var(--accent-light);text-decoration:none;margin-left:10px}
+#bar button{background:var(--card2);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:3px 9px;margin-left:10px;cursor:pointer;font:inherit}
 #mdlbtn{font-weight:700}
-.mdlmenu-t{position:fixed;z-index:90;width:214px;background:#1c1c26;border:1px solid #2a2a3a;border-radius:11px;box-shadow:0 12px 34px rgba(0,0,0,.6);padding:5px}
-.mdlmenu-t .mh{font:700 10px/1 -apple-system,sans-serif;text-transform:uppercase;letter-spacing:.6px;color:#8a8a99;padding:6px 8px 5px}
-.mdlmenu-t button{display:flex;align-items:center;gap:9px;width:100%;text-align:left;background:transparent;color:#fff;border:0;border-radius:8px;padding:9px;margin:0;font:600 13px -apple-system,sans-serif;cursor:pointer}
+.mdlmenu-t{position:fixed;z-index:90;width:214px;background:var(--card);border:1px solid var(--line);border-radius:11px;box-shadow:0 12px 34px rgba(0,0,0,.6);padding:5px}
+.mdlmenu-t .mh{font:700 10px/1 -apple-system,sans-serif;text-transform:uppercase;letter-spacing:.6px;color:var(--mut);padding:6px 8px 5px}
+.mdlmenu-t button{display:flex;align-items:center;gap:9px;width:100%;text-align:left;background:transparent;color:var(--ink);border:0;border-radius:8px;padding:9px;margin:0;font:600 13px -apple-system,sans-serif;cursor:pointer}
 .mdlmenu-t button:hover{background:rgba(var(--accent-light-rgb),.14)}
 .mdlmenu-t button .d{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
 .mdlmenu-t button .l{flex:1}
-.mdlmenu-t button .ck{color:#e8c547;font-weight:800}
+.mdlmenu-t button .ck{color:var(--accent-light);font-weight:800}
 #cpbtn{display:none}                     /* copy panel is a touch-only affordance; desktop uses native drag-select + Ctrl+C (Claude Code in classic TUI mode -> the terminal owns the mouse) */
 @media(pointer:coarse){#cpbtn{display:inline-block}}
-#live{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;z-index:11;display:none;background:#e8c547;color:#15120a;font:700 12px -apple-system,sans-serif;border:0;border-radius:18px;padding:8px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);cursor:pointer}
+#live{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;z-index:11;display:none;background:var(--accent-light);color:var(--bg-warm);font:700 12px -apple-system,sans-serif;border:0;border-radius:18px;padding:8px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);cursor:pointer}
 #live.show{display:block}
-#selcopy{position:fixed;right:14px;bottom:14px;z-index:12;display:none;background:#e8c547;color:#15120a;font:700 12px -apple-system,sans-serif;border:0;border-radius:18px;padding:8px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);cursor:pointer}
+#selcopy{position:fixed;right:14px;bottom:14px;z-index:12;display:none;background:var(--accent-light);color:var(--bg-warm);font:700 12px -apple-system,sans-serif;border:0;border-radius:18px;padding:8px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);cursor:pointer}
 #selcopy.show{display:block}
 #selov{position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:6;display:none}
 #selov i{position:absolute;background:rgba(120,170,255,.32);border-radius:1px}
 @keyframes spin{to{transform:rotate(360deg)}}
-#cliptoast{position:fixed;left:50%;transform:translateX(-50%);top:14px;z-index:30;display:none;background:#e8c547;color:#15120a;border:0;font:700 12.5px -apple-system,sans-serif;border-radius:18px;padding:9px 18px;box-shadow:0 8px 24px rgba(0,0,0,.55)}
+#cliptoast{position:fixed;left:50%;transform:translateX(-50%);top:14px;z-index:30;display:none;background:var(--accent-light);color:var(--bg-warm);border:0;font:700 12.5px -apple-system,sans-serif;border-radius:18px;padding:9px 18px;box-shadow:0 8px 24px rgba(0,0,0,.55)}
 #cliptoast.show{display:block;animation:ctpop .18s ease}
 @keyframes ctpop{from{opacity:0;transform:translateX(-50%) translateY(-6px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
-#copyov{position:fixed;inset:0;z-index:25;background:#0a0a0f;display:none;flex-direction:column}
+#copyov{position:fixed;inset:0;z-index:25;background:var(--bg);display:none;flex-direction:column}
 #copyov.show{display:flex}
-#copybar{display:flex;align-items:center;gap:10px;padding:9px 12px;background:#1a1a24;border-bottom:1px solid #2a2a3a;color:#a0a0b0;font:12px -apple-system,sans-serif;flex:0 0 auto}
-#copybar button{background:#22222e;color:#fff;border:1px solid #2a2a3a;border-radius:6px;padding:6px 12px;cursor:pointer;font:inherit}
-#copybody{flex:1;overflow:auto;-webkit-overflow-scrolling:touch;margin:0;padding:10px 12px 50px;font:12px/1.5 ui-monospace,Menlo,monospace;color:#d8d8e6;white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text;touch-action:auto}
+#copybar{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--card);border-bottom:1px solid var(--line);color:var(--mut);font:12px -apple-system,sans-serif;flex:0 0 auto}
+#copybar button{background:var(--card2);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 12px;cursor:pointer;font:inherit}
+#copybody{flex:1;overflow:auto;-webkit-overflow-scrolling:touch;margin:0;padding:10px 12px 50px;font:12px/1.5 ui-monospace,Menlo,monospace;color:var(--near);white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text;touch-action:auto}
 /* on-screen key bar: iPhone keyboards have no arrow keys, so Claude's option menus are unanswerable -- these send the real key sequences. Touch devices only. */
-#keybar{display:none;gap:3px;padding:5px;background:#15151c;border-top:1px solid #2a2a3a;flex:0 0 auto}
-#compose{display:none;gap:6px;padding:5px 5px calc(5px + env(safe-area-inset-bottom));background:#12121a;border-top:1px solid #2a2a3a;align-items:center;flex:0 0 auto}
+#keybar{display:none;gap:3px;padding:5px;background:var(--bg2);border-top:1px solid var(--line);flex:0 0 auto}
+#compose{display:none;gap:6px;padding:5px 5px calc(5px + env(safe-area-inset-bottom));background:var(--bg2);border-top:1px solid var(--line);align-items:center;flex:0 0 auto}
 @media(pointer:coarse){#keybar,#compose{display:flex}#live{bottom:132px}#selcopy{bottom:132px}}
-#keybar button{flex:1;min-width:0;background:#22222e;color:#fff;border:1px solid #3a3a4a;border-radius:8px;padding:11px 0;font:15px -apple-system,sans-serif;cursor:pointer}
-#keybar button:active{background:#34344a}
-#compose input{flex:1;min-width:0;background:#0a0a0f;color:#fff;border:1px solid #3a3a4a;border-radius:9px;padding:11px;font:16px -apple-system,sans-serif}
-#compose button{background:#2a3a2a;color:#fff;border:1px solid #3a5a3a;border-radius:9px;padding:11px 16px;font:15px -apple-system,sans-serif;cursor:pointer;white-space:nowrap}
+#keybar button{flex:1;min-width:0;background:var(--card2);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:11px 0;font:15px -apple-system,sans-serif;cursor:pointer}
+#keybar button:active{background:var(--el2)}
+#compose input{flex:1;min-width:0;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:11px;font:16px -apple-system,sans-serif}
+#compose button{background:rgba(var(--ok-rgb),.18);color:var(--ink);border:1px solid rgba(var(--ok-rgb),.4);border-radius:9px;padding:11px 16px;font:15px -apple-system,sans-serif;cursor:pointer;white-space:nowrap}
 /* MOBILE TOP BAR (#bar) redesign: a compact corner pill -- session name + the 3 most-used actions
    (copy, file, more) on ONE non-wrapping row -- with secondary + destructive actions (scroll/select,
    font, compact, end, KILL) tucked into a tap-to-open overflow menu. Mobile-only; desktop renders the
@@ -17913,24 +18017,24 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 .fontgrp{display:contents}               /* desktop: A- [13] A+ flow inline exactly as before */
 @media(pointer:coarse){
   #bar{top:env(safe-area-inset-top);right:env(safe-area-inset-right);left:auto;display:flex;align-items:center;gap:6px;max-width:calc(100vw - 10px);padding:5px 8px;border-radius:0 0 0 14px;box-shadow:0 4px 16px rgba(0,0,0,.45)}
-  #bar>#st{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:#c8c8d6}
+  #bar>#st{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--near)}
   #bar>button{margin-left:0;min-width:44px;min-height:44px;display:inline-flex;align-items:center;justify-content:center;padding:0 10px;font-size:15px;line-height:1}
   #more{display:inline-flex;font-size:20px}
-  #moremenu{position:absolute;top:calc(100% + 6px);right:6px;display:none;flex-direction:column;gap:4px;min-width:188px;background:#16161f;border:1px solid #2a2a3a;border-radius:12px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.6)}
+  #moremenu{position:absolute;top:calc(100% + 6px);right:6px;display:none;flex-direction:column;gap:4px;min-width:188px;background:#16161f;border:1px solid var(--line);border-radius:12px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.6)}
   #moremenu.open{display:flex}
   #moremenu button,#moremenu a{margin-left:0;width:100%;box-sizing:border-box;justify-content:flex-start;text-align:left;min-height:44px;display:flex;align-items:center;border-radius:8px;font-size:15px;padding:0 12px}
-  #moremenu a{color:#e8c547;background:#22222e;border:1px solid #2a2a3a;text-decoration:none}
+  #moremenu a{color:var(--accent-light);background:var(--card2);border:1px solid var(--line);text-decoration:none}
   .fontgrp{display:flex;align-items:center;gap:8px;min-height:44px;padding:0 6px}
   .fontgrp button{flex:1;min-width:44px;min-height:38px;margin-left:0;justify-content:center;text-align:center}
-  #moremenu .danger{margin-top:4px;border-top:2px solid #3a2230;color:#f85149;background:#241317}
+  #moremenu .danger{margin-top:4px;border-top:2px solid #3a2230;color:var(--err);background:#241317}
 }
 #tdlg{position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(8,8,12,.74);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
-#tdlg .tdlg-box{background:#1a1a24;border:1px solid #2a2a3a;border-radius:14px;padding:20px 22px;width:min(420px,94vw);box-shadow:0 18px 50px rgba(0,0,0,.6);position:relative;overflow:hidden}
-#tdlg .tdlg-box:before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:linear-gradient(135deg,#d6b23c,#c9a227)}
-#tdlg .tdlg-msg{color:#fff;font-size:13.5px;line-height:1.6;white-space:pre-line}
+#tdlg .tdlg-box{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;width:min(420px,94vw);box-shadow:0 18px 50px rgba(0,0,0,.6);position:relative;overflow:hidden}
+#tdlg .tdlg-box:before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:linear-gradient(135deg,var(--accent-light),var(--accent))}
+#tdlg .tdlg-msg{color:var(--ink);font-size:13.5px;line-height:1.6;white-space:pre-line}
 #tdlg .tdlg-btns{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
-#tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid #2a2a3a;background:#22222e;color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px;font-family:inherit}
-#tdlg .tdlg-b.go{background:linear-gradient(135deg,#d6b23c,#c9a227);color:#15120a;border:none;font-weight:700}
+#tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid var(--line);background:var(--card2);color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px;font-family:inherit}
+#tdlg .tdlg-b.go{background:linear-gradient(135deg,var(--accent-light),var(--accent));color:var(--bg-warm);border:none;font-weight:700}
 </style></head><body>
 <div id="bar"><span id="st">connecting...</span><button id="mdlbtn" onclick="mdlPickTerm(event)" title="the model this session runs -- click to change">Model</button><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button onclick="termAdvise()" title="Third-party review: an independent external GPT (a different AI vendor) reviews this session's recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." style="color:#58a6ff">&#128309; review</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button id="actog" onclick="toggleAutoCopy()" title="Auto-copy: when ON, whatever you have selected is copied to your clipboard the moment you release the mouse (no Ctrl+C needed). Needs a secure origin (https/localhost); on plain http a one-tap Copy chip is used instead.">&#9113; auto-copy</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button id="anbtn" onclick="toggleAn()" title="Auto-nudge: auto-send your keep-going message to this session every time it stops at a turn-end, until you turn it off (you are the brake)" style="color:#8a8a99">Auto-nudge</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
 <button id="live" onclick="toLive()">&#8595; jump to live</button><button id="selcopy" onclick="doSelCopy()">&#10697; Copy selection</button><div id="cliptoast"></div>
@@ -17983,8 +18087,13 @@ document.addEventListener('click',function(e){var m=document.getElementById('mor
   if(e.target&&e.target.closest&&e.target.closest('.fontgrp'))return;     // A-/A+ are tapped repeatedly -> keep open
   m.classList.remove('open');},true);                                       // any other tap (menu item OR terminal) closes
 let FS=parseFloat(localStorage.getItem('hpcc_fontsize'))||13; if(!(FS>=8&&FS<=28))FS=13;
-const term=new Terminal({fontSize:FS,cursorBlink:true,scrollback:20000,theme:{background:'#0a0a0f',foreground:'#ffffff'}});
+// --- terminal theme follows the dashboard theme (client-side render only; dark/godfather = the ORIGINAL, unchanged) ---
+function themeToXterm(id){var M={light:{background:'#181a20',foreground:'#dfe3ea',cursor:'#e8c547',cursorAccent:'#181a20',selectionBackground:'rgba(232,197,71,.22)'},paper:{background:'#1d1810',foreground:'#e8dfcb',cursor:'#e8c547',cursorAccent:'#1d1810',selectionBackground:'rgba(232,197,71,.22)'},'high-contrast':{background:'#060606',foreground:'#ffffff',cursor:'#ffd23f',cursorAccent:'#060606',selectionBackground:'rgba(255,255,255,.30)',black:'#000000',red:'#ff5a52',green:'#3fff6a',yellow:'#ffd23f',blue:'#79c0ff',magenta:'#d2a8ff',cyan:'#56d4dd',white:'#e6e6ee',brightBlack:'#b8b8c4',brightRed:'#ff7b72',brightGreen:'#56ff7f',brightYellow:'#ffe066',brightBlue:'#a5d6ff',brightMagenta:'#e2c5ff',brightCyan:'#79e0e8',brightWhite:'#ffffff'},slate:{background:'#0a0d12',foreground:'#cdd6e0',cursor:'#c2ab6e',cursorAccent:'#0a0d12',selectionBackground:'rgba(194,171,110,.22)',black:'#1a2028',red:'#f47067',green:'#56d364',yellow:'#e3b341',blue:'#6cb6ff',magenta:'#dcbdfb',cyan:'#76e3ea',white:'#9aa7b4',brightBlack:'#64707c',brightRed:'#ff8f83',brightGreen:'#6bd977',brightYellow:'#eac55f',brightBlue:'#88bfff',brightMagenta:'#e5ccff',brightCyan:'#8ff0f6',brightWhite:'#eef2f6'},midnight:{background:'#05060e',foreground:'#dfe4ff',cursor:'#d4af37',cursorAccent:'#05060e',selectionBackground:'rgba(212,175,55,.22)',black:'#12172b',red:'#ff7b72',green:'#56d364',yellow:'#e3b341',blue:'#88b4ff',magenta:'#c4b5fd',cyan:'#79e0e8',white:'#97a0c8',brightBlack:'#5a6392',brightRed:'#ffa198',brightGreen:'#7ee787',brightYellow:'#f0d05a',brightBlue:'#a5c8ff',brightMagenta:'#d2c4ff',brightCyan:'#9ff0f6',brightWhite:'#eef1ff'}};return M[id]||{background:'#0a0a0f',foreground:'#ffffff'};}
+function curThemeId(){var t=null;try{t=localStorage.getItem('cc_theme');}catch(e){}if(!t)t=document.documentElement.getAttribute('data-theme')||'dark';if(t==='auto'){try{t=matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';}catch(e){t='dark';}}return t;}
+function applyTermTheme(term){try{document.documentElement.setAttribute('data-theme',curThemeId());var x=themeToXterm(curThemeId());if(term&&term.options){term.options.theme=x;}else if(term&&term.setOption){term.setOption('theme',x);}var b=x.background;if(document.body)document.body.style.background=b;}catch(e){}}
+const term=new Terminal({fontSize:FS,cursorBlink:true,scrollback:20000,theme:themeToXterm(curThemeId())});
 const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(document.getElementById('t'));fit.fit();
+applyTermTheme(term);window.addEventListener('storage',function(e){if(e.key==='cc_theme')applyTermTheme(term);});
 (function(){var l=document.getElementById('fsz');if(l)l.textContent=FS;})();
 // Live, persistent terminal font size (shared across every /term view via localStorage).
 function setFont(d){FS=Math.max(8,Math.min(28,Math.round((FS+d)*2)/2));
@@ -19123,8 +19232,13 @@ async function saveTab(){
 async function ract(a){await fetch('/api/ralph-control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:NAME,action:a})});setTimeout(()=>location.reload(),700);}
 async function launch(){await fetch('/api/ralph-launch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:NAME})});setTimeout(()=>location.reload(),1500);}
 function connectTerm(){
-  const term=new Terminal({fontSize:12.5,cursorBlink:true,scrollback:20000,theme:{background:'#0a0a0f',foreground:'#ffffff'}});
+  // --- terminal theme follows the dashboard theme (client-side render only; dark/godfather = the ORIGINAL, unchanged) ---
+  function themeToXterm(id){var M={light:{background:'#181a20',foreground:'#dfe3ea',cursor:'#e8c547',cursorAccent:'#181a20',selectionBackground:'rgba(232,197,71,.22)'},paper:{background:'#1d1810',foreground:'#e8dfcb',cursor:'#e8c547',cursorAccent:'#1d1810',selectionBackground:'rgba(232,197,71,.22)'},'high-contrast':{background:'#060606',foreground:'#ffffff',cursor:'#ffd23f',cursorAccent:'#060606',selectionBackground:'rgba(255,255,255,.30)',black:'#000000',red:'#ff5a52',green:'#3fff6a',yellow:'#ffd23f',blue:'#79c0ff',magenta:'#d2a8ff',cyan:'#56d4dd',white:'#e6e6ee',brightBlack:'#b8b8c4',brightRed:'#ff7b72',brightGreen:'#56ff7f',brightYellow:'#ffe066',brightBlue:'#a5d6ff',brightMagenta:'#e2c5ff',brightCyan:'#79e0e8',brightWhite:'#ffffff'},slate:{background:'#0a0d12',foreground:'#cdd6e0',cursor:'#c2ab6e',cursorAccent:'#0a0d12',selectionBackground:'rgba(194,171,110,.22)',black:'#1a2028',red:'#f47067',green:'#56d364',yellow:'#e3b341',blue:'#6cb6ff',magenta:'#dcbdfb',cyan:'#76e3ea',white:'#9aa7b4',brightBlack:'#64707c',brightRed:'#ff8f83',brightGreen:'#6bd977',brightYellow:'#eac55f',brightBlue:'#88bfff',brightMagenta:'#e5ccff',brightCyan:'#8ff0f6',brightWhite:'#eef2f6'},midnight:{background:'#05060e',foreground:'#dfe4ff',cursor:'#d4af37',cursorAccent:'#05060e',selectionBackground:'rgba(212,175,55,.22)',black:'#12172b',red:'#ff7b72',green:'#56d364',yellow:'#e3b341',blue:'#88b4ff',magenta:'#c4b5fd',cyan:'#79e0e8',white:'#97a0c8',brightBlack:'#5a6392',brightRed:'#ffa198',brightGreen:'#7ee787',brightYellow:'#f0d05a',brightBlue:'#a5c8ff',brightMagenta:'#d2c4ff',brightCyan:'#9ff0f6',brightWhite:'#eef1ff'}};return M[id]||{background:'#0a0a0f',foreground:'#ffffff'};}
+  function curThemeId(){var t=null;try{t=localStorage.getItem('cc_theme');}catch(e){}if(!t)t=document.documentElement.getAttribute('data-theme')||'dark';if(t==='auto'){try{t=matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';}catch(e){t='dark';}}return t;}
+  function applyTermTheme(term){try{document.documentElement.setAttribute('data-theme',curThemeId());var x=themeToXterm(curThemeId());if(term&&term.options){term.options.theme=x;}else if(term&&term.setOption){term.setOption('theme',x);}var b=x.background;if(document.body)document.body.style.background=b;}catch(e){}}
+  const term=new Terminal({fontSize:12.5,cursorBlink:true,scrollback:20000,theme:themeToXterm(curThemeId())});
   const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(document.getElementById('term'));fit.fit();
+  applyTermTheme(term);window.addEventListener('storage',function(e){if(e.key==='cc_theme')applyTermTheme(term);});
   let ws=null,rReconn=0,rTimer=null;
   const RWSURL=(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws?name=ralph-'+encodeURIComponent(NAME);
   function sr(){try{ws.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}));}catch(e){}}
@@ -19193,7 +19307,7 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
    (equal specificity, later source order). :root remains the Dark default + fallback for any unknown theme. */
 [data-theme="light"]{
   --bg:#ffffff;--bg2:#f4f5f7;--bg-warm:#faf6ec;--card:#ffffff;--card2:#f0f1f4;--el1:#f7f8fa;--el2:#eef0f3;--el3:#ffffff;
-  --ink:#14141a;--near:#1c1c26;--mut:#5a6270;--dim:#8a90a0;
+  --ink:#14141a;--near:#1c1c26;--mut:#4d5563;--dim:#6a7180;
   --line:#e2e4ea;--hair:rgba(0,0,0,.06);--hair2:rgba(0,0,0,.10);
   --accent:#a8811a;--accent-rgb:168,129,26;--accent-light:#c9a227;--accent-light-rgb:201,162,39;--accent-dark:#8a6a12;--accent2:#7a1220;--accent2-light:#a01828;
   --grad:linear-gradient(135deg,#c9a227,#a8811a);--glow:0 2px 8px rgba(0,0,0,.10);
@@ -19225,7 +19339,7 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 }
 [data-theme="paper"]{
   --bg:#f6f1e7;--bg2:#efe8d9;--bg-warm:#f0e6d0;--card:#fdfaf3;--card2:#f2ebdc;--el1:#f8f3e9;--el2:#efe7d6;--el3:#fffdf7;
-  --ink:#2b2417;--near:#33291a;--mut:#6f6350;--dim:#9a8c74;
+  --ink:#2b2417;--near:#33291a;--mut:#5f5443;--dim:#7c6f5a;
   --line:#e0d6c2;--hair:rgba(60,40,10,.07);--hair2:rgba(60,40,10,.12);
   --accent:#a8811a;--accent-rgb:168,129,26;--accent-light:#c9a227;--accent-light-rgb:201,162,39;--accent-dark:#7a5e12;--accent2:#8a2c1b;--accent2-light:#a8402c;
   --grad:linear-gradient(135deg,#c9a227,#a8811a);--glow:0 2px 10px rgba(80,60,20,.12);
@@ -19242,6 +19356,10 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .brand .cfmark{height:36px;width:auto;flex:0 0 auto;filter:drop-shadow(0 0 11px rgba(var(--accent-rgb),.5))}
 .brand .bword{display:flex;flex-direction:column;line-height:1.08;font-family:'Cinzel Decorative',"Copperplate","Copperplate Gothic Bold","Didot",Georgia,serif;font-weight:700;font-size:16.5px;letter-spacing:.4px;background:linear-gradient(92deg,#f7df85,#e8c547 45%,#b8862a 72%,#f0d05f);background-size:200% auto;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent}
 .brand .bword small{font-family:-apple-system,BlinkMacSystemFont,sans-serif;-webkit-text-fill-color:initial;color:var(--accent);font-weight:700;font-size:9px;letter-spacing:3px;margin-top:4px;opacity:.85;border-top:1px solid rgba(var(--accent-rgb),.28);padding-top:4px;width:max-content}
+/* brand legibility on light themes: the pale-gold mark + light-gold foil wordmark wash out on white -> badge the mark on a dark tile, darken the foil, strengthen the subtitle. Dark themes keep the original lockup. */
+[data-theme="light"] .brand .cfmark,[data-theme="paper"] .brand .cfmark{background:#17171f;border-radius:9px;padding:3px 6px;box-shadow:0 1px 3px rgba(0,0,0,.22)}
+[data-theme="light"] .brand .bword,[data-theme="paper"] .brand .bword{background:linear-gradient(92deg,#7a5e12,#a8811a 45%,#5e4a10 72%,#8a6a12);-webkit-background-clip:text;background-clip:text}
+[data-theme="light"] .brand .bword small,[data-theme="paper"] .brand .bword small{color:var(--accent-dark);opacity:1;border-top-color:rgba(var(--accent-rgb),.5)}
 @keyframes brandsheen{to{background-position:200% center}}
 .lens{display:flex;flex-direction:column;gap:3px;flex:1;overflow-y:auto;margin:0}
 .lens button{display:flex;align-items:center;gap:11px;background:transparent;color:var(--mut);border:1px solid transparent;padding:10px 11px;border-radius:10px;cursor:pointer;font-weight:600;font-size:13.5px;text-align:left;width:100%}

@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "f25cc247b67d15b63f10ecf6d48811e1191f7693e99a0fa7333c07230a354957",
+      "claudesole.manifest.json": "2b093f91c3e9df03d338a95edf50a7091614e65827abcacc4dd2c6931bf08631",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/campaign_runner.py": "0a385adb090626c76c1f3baf4a1ed944cd0a80983ef752686e471003a012e339",
       "command-center/cc-advise": "e449156a34ddcb9068fc1c89223a2d3f8574b6dba15f2e3d3fe748bf2f49a70f",
@@ -66,11 +66,11 @@
       "command-center/policy_hook.py": "33bcbbdf940faeb4c0a51e5d47680c022f29aebd0451ad05c700713b927de188",
       "command-center/preship.py": "330d9c9922b06b30ed17f07ecfcc8157d55a87c957d801dadf6587819afffa0e",
       "command-center/ralph_live.py": "91acfe6f45ada18364dd3fde74fd777d6ed83a6ef1b7673030dc2faef4d92878",
-      "command-center/ralph_runner.py": "3bf82dd5dbd673be1a1d04d980300d8b78fdc32d92f409a8477cb02e3d1d4ef5",
+      "command-center/ralph_runner.py": "4b2b0c719596a638647900c9d2c896870132d52e134b8a4c2e8dde9456a56cb8",
       "command-center/residue_lint.py": "0b1c757909a27470095d5ea8b48641a9e9e0248ec1729f3598596f2129fd1d6f",
       "command-center/rollback_guard.py": "603ae76f8f854b46e0dd152a123e11cc85c760a8c82e7865ab5eeaf75b2ac800",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "04db8b85c5300c724eb8055cbfbb6971988cb9a8395c4ae195af5d26c26824a7",
+      "command-center/server.py": "d98d69f4c3b29572df5806b16c6be9ac53ce15a7a8cf4a7f3efd62c9f4bfd58f",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/static/phosphor/fill.css": "555980683a582c1910a954648b4ae38f58d76e797f02bfdc2c5e817901e6d4fc",
       "command-center/static/phosphor/light.css": "f2e59699faaeee27da9edb86dd18f5ed3bd5113db3e4e388fdd23afcaf308865",
@@ -171,9 +171,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1784330359,
+    "generated": 1784359793,
     "v": 1,
-    "version": "0.99.205"
+    "version": "0.99.206"
   },
-  "sig": "yXwOf3Cx6C+/5f3ABxZplNiip4OJFUREDgInOZ87ihHZarrvGQEYxwt04ReM5VtCoh853hWcjxFqLmREbWKRAg=="
+  "sig": "QayjTbLUGa323UJDLSxuxIzCYexy2w0YPOQk/5ijCuNCerbQGFe+X2yyJ6YJwqvhpXI8zFx/6WxgfCT5EYIUBA=="
 }

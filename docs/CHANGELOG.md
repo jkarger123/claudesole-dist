@@ -3,6 +3,25 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.206 -- 2026-07-18  (Dashboard themes + non-blackout terminals · mesh-delivery leak fix · Ralph loop recovery)
+- **Dashboard THEMES.** Pick how the dashboard looks in Settings -> Appearance: **Dark** (the original, unchanged),
+  **Light**, **High-Contrast**, **Slate**, **Midnight**, **Paper**. Choice is per-operator (saved in your browser),
+  with **Auto = follow your system**, and applies instantly (no restart, no flash). An admin can set the node-wide
+  default. Built on a semantic design-token vocabulary; ~520 hardcoded colors were swept onto tokens so every
+  surface themes (Dark stays byte-identical). Custom themes still ride the `theme` extension category.
+- **Terminals follow the theme -- legibly.** On light themes the embedded terminals render as a **dark console**
+  (Claude Code colors itself for a dark background, so a light terminal was grey-on-grey), and the `/term` header
+  bar + the brand lockup are themed + legible on light backgrounds. Dark is untouched.
+- **Fix: mesh-delivery thread leak.** `_mesh_deliver` spawned one thread per message, each blocking up to 30 min on
+  a busy chief -- so a chief supervising many Ralph loops accumulated threads (200 -> 400) until vitals went
+  CRITICAL and self-healed, on a loop. Now ONE worker per session drains a bounded queue: N messages = 1 thread.
+- **Fix: Ralph loops (CCR ccr-1784357840269).** Halted/killed loops were **unrecoverable** via the API (a sticky
+  `halt` marker `resume` never cleared) -- now `resume` clears it + relaunches, and the runner clears a stale halt
+  at startup (recoverable from ANY launch path). Transient usage/rate limits now **back off + retry** instead of
+  burning the window and dying. Iteration pings go **only to the session that started the loop** (they were
+  spamming the project chief); stale/late pings are dropped; the `-live` viewer is reaped on exit so dead loops
+  don't look alive; spend/turns are recorded even on a failed iteration; halt/kill are now logged.
+
 ## 0.99.205 -- 2026-07-17  (Video Studio: audio is a real clip -- drag, trim, magnet-snap to your clips + device upload)
 - **The music/voice track is now a first-class clip you can DRAG and TRIM** on the music lane, exactly like a
   video clip: grab the body to move it (change where it starts on the timeline), grab either end to trim in/out.
