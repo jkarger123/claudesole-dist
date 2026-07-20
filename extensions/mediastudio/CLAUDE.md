@@ -1,5 +1,9 @@
 # mediastudio — the Video Studio feature (working scope + full map)
 
+<!-- LATEST-HANDOFF -->
+**>> Resume here:** read `_handoffs/20260718-1531__mediastudio.md` first -- it is the latest handoff.
+<!-- /LATEST-HANDOFF -->
+
 <!-- CC:NOTES append-only; agents file learnings that belong to THIS module here -->
 ## Learnings (filed by agents; append-only)
 - Video Studio feature fully mapped in mediastudio/CLAUDE.md: engine=extensions/ai-video-studio/engine (9 modules studio/beats/autocut/edl/project/music/capcut/providers/generate); backend+10.8k-line STUDIO_PAGE SPA live in command-center/server.py (~L16115 backend, ~L17242 routes, ~L18319 page); analytical beat-cutter (no generative model, works on real footage/kids); shared PROJECT JSON is the currency; state on SSD (_studio, _studio_media); bins auto-install to bin/.

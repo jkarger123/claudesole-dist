@@ -1,7 +1,7 @@
 # Edge MCP Host
 
 <!-- LATEST-HANDOFF -->
-**>> Resume here:** read `_handoffs/20260717-1511__edge-mcp.md` first -- it is the latest handoff.
+**>> Resume here:** read `_handoffs/20260720-0309__edge-mcp.md` first -- it is the latest handoff.
 <!-- /LATEST-HANDOFF -->
 
 <!-- CC:NOTES append-only; agents file learnings that belong to THIS module here -->

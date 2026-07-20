@@ -216,7 +216,7 @@ def render_page():
     except Exception: _lenses = None
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
-        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "protectedSessions": CC.get("protected_sessions") or [], "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "frontdesk_landing": CC.get("frontdesk_landing", True), "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "models": CC_MODELS, "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(), "backupTiers": CC.get("backup_tiers") or [],
+        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "protectedSessions": CC.get("protected_sessions") or [], "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "frontdesk_landing": CC.get("frontdesk_landing", True), "frontdoorLanding": CC.get("frontdoor_landing", True), "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "models": CC_MODELS, "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(), "backupTiers": CC.get("backup_tiers") or [],
         "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md"]})   # tenant desk docs come from cc.config; neutral default
     return (PAGE
             .replace("<title>ClaudeFather ", "<title>%s " % BRAND)
@@ -4809,11 +4809,13 @@ _NEW_FOLDER_BRIEF = (
     "becomes the folder's one-line description in the New-session picker and Projects lens. Add more sections "
     "below as useful. Then give me a one-line status and stand by.")
 
-def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=None):
+def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=None, agents_json=None):
     """Create a tmux session ON THE STUDIO. studio target runs Claude locally in the pillar dir;
        windows target wraps `ssh -t <alias> claude` so it's still a persistent, browser-attachable Studio session.
        extra_sys = an extra SYSTEM-level block appended to the launch context (used by the warm-transfer desk to
-       inject the handoff packet so the agent rides in already knowing where the prior conversation left off)."""
+       inject the handoff packet so the agent rides in already knowing where the prior conversation left off).
+       agents_json = a Claude Code `--agents '{...}'` inline-subagent JSON blob (the Front Door 'team roster' drops
+       chosen agents onto a folder -> they ride in as real, delegatable subagents; no `.claude/agents` files written)."""
     name = _uniq_session("hp-" + (re.sub(r"[^A-Za-z0-9_-]", "-", name)[:36].strip("-") or "session"))
     machines = {m["id"]: m for m in load(MACHINES, {"machines": []}).get("machines", [])}
     m = machines.get(target)
@@ -4838,6 +4840,7 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
         sysctx = _launch_sys_context(subj)
         if extra_sys: sysctx = (sysctx + "\n\n" + extra_sys) if sysctx else extra_sys
         cl2 = cl + (" --append-system-prompt " + _shlex.quote(sysctx) if sysctx else "")
+        if agents_json: cl2 = cl2 + " --agents " + _shlex.quote(agents_json)   # inline subagent defs (Front Door team roster)
         # if launching into a folder with NO CLAUDE.md, brief the agent to create one (purpose + the one-line
         # description our system previews) -> the system LEARNS this launch point. (Guarded by rel; root has one.)
         # SEED = a first-turn prompt passed as claude's positional arg, so it RUNS reliably once the session boots
@@ -7534,6 +7537,7 @@ def agents_list():
                              "overall": rep.get("overall", "unknown"),
                              "counts": rep.get("counts", {}), "ts": rep.get("ts", 0),
                              "summary": rep.get("summary", rep.get("note", "")),
+                             "desc": _agent_charter_job(n),   # the charter's '## My job' = the model-facing SPECIALTY (roster label + suggestion match)
                              "has_run": os.path.isfile(os.path.join(AGENTS_DIR, n, "tools", "run.py"))})
     except Exception: pass
     return {"slugs": out, "agents": rich}
@@ -8007,6 +8011,210 @@ def _agent_charter_job(slug):
         return ""
     m = re.search(r"^##\s+My job\s*\n+(.+?)(?:\n#|\Z)", text, re.M | re.S)
     return re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
+
+def _agent_charter_full(slug):
+    """The agent-tool's whole CLAUDE.md charter -- becomes the subagent's system prompt when it's fielded."""
+    try:
+        t = open(os.path.join(AGENTS_DIR, slug, "CLAUDE.md"), encoding="utf-8", errors="replace").read()
+    except Exception:
+        return ""
+    return t.strip()[:6000]
+
+def _agent_brief(slug, cap=650):
+    """A CONCISE subagent system prompt distilled from the charter -- NOT the whole ~6k charter. The full
+    `--agents` JSON must stay small: `tmux new-session` caps the launch command near 16KB, and inlining fat
+    charters for a multi-agent roster blew past it (the session then silently fails to spawn)."""
+    job = _agent_charter_job(slug)
+    p = "You are the %s specialist. %s" % (_agent_title(slug), job or ("Handle %s work for this project." % slug))
+    return re.sub(r"\s+", " ", p).strip()[:cap]
+
+def _agents_flag_json(slugs):
+    """Build the Claude Code `--agents` inline-subagent JSON from chosen agent-tools: each slug -> {description,
+    prompt}. CONCISE by design (see _agent_brief -- the tmux command has a ~16KB ceiling). So a launched session
+    can delegate to them by EXACT name (Agent subagent_type=<slug>) with no `.claude/agents` files written."""
+    d = {}
+    for s in slugs:
+        d[s] = {"description": (_agent_charter_job(s) or ("The %s specialist." % s))[:300],
+                "prompt": _agent_brief(s)}
+    return json.dumps(d)
+
+def module_launch_agents(body):
+    """THE TEAM ROSTER launch: field one or more agents into a folder. 1 agent -> the session IS that specialist
+    (persona in the system prompt). 2+ -> a CAPTAIN session that delegates to them as real subagents (via --agents).
+    Mirrors team_session's proven brief, but folder-scoped through launch(rel=...) so it inherits the whole payload
+    cascade + trust-prompt handling. This is where context engineering (the payload) meets agentic engineering."""
+    rel = (body.get("rel") or "").strip()
+    known = {a["slug"] for a in agents_list().get("agents", [])}
+    slugs = [s for s in (body.get("agents") or []) if isinstance(s, str) and s in known][:6]
+    if not slugs:
+        return {"ok": False, "error": "field at least one agent"}
+    seed = (body.get("seed") or "").strip() or None
+    mode = (body.get("mode") or "team").strip().lower()   # "team" = captain delegates; "board" = board-meeting deliberation
+    leaf = (rel.split("/")[-1] if rel else "root") or "root"
+    if len(slugs) == 1:
+        s = slugs[0]; charter = _agent_charter_full(s) or _agent_charter_job(s)
+        extra = re.sub(r"\s+", " ", (
+            "You are the %s specialist, now working IN this folder (%s). This is YOUR session -- adopt the role "
+            "fully. YOUR CHARTER: %s" % (s, rel or "(project root)", charter[:2500]))).strip()
+        agents_json = None
+    else:
+        names = ", ".join(slugs)
+        roster = " ".join("MEMBER %s: %s." % (s, (_agent_charter_job(s) or "specialist")[:160]) for s in slugs)
+        if mode == "board":
+            protocol = (body.get("protocol") or "adaptive").strip().lower()
+            devil = bool(body.get("devil"))
+            step3 = {
+                "roundtable": "(3) Do NOT loop -- this is a single-round roundtable: once everyone has spoken once, go straight to synthesis.",
+                "deliberation": "(3) Run a FULL deliberation: after round one, drive 2-3 more cross-examination rounds where members respond to each other's sharpest disagreements before you decide.",
+            }.get(protocol,
+                "(3) Where members truly conflict, run another round -- put the specific tension back to the relevant members ('Security raised X -- Cost, does that change your position?') -- for as many rounds as the disagreement stays live (usually 1-2).")
+            devil_line = ("Before any recommendation stands, put the emerging consensus to the DEVIL'S ADVOCATE (Agent "
+                          "subagent_type=devils-advocate) and require the board to ANSWER its strongest objections. " if devil else "")
+            extra = re.sub(r"\s+", " ", (
+                "You are the CHAIR of a BOARD MEETING convened IN this folder (%s). The board: %s. MEMBERS -- %s "
+                "Each is a DISTINCT specialist with their OWN motivations; the POINT is to see ONE agenda through every "
+                "viewpoint and reconcile the TENSIONS. RUN THE MEETING on the AGENDA I give you in my first message: "
+                "(1) open it and put the agenda to EACH member via the Agent tool (Agent subagent_type=<name>) IN "
+                "PARALLEL, asking each to weigh in strictly FROM THEIR ROLE'S viewpoint, motivations and concerns -- NOT "
+                "a neutral take; (2) read every perspective, then state the real AGREEMENTS and genuine DISAGREEMENTS "
+                "out loud; %s %s(4) SYNTHESIZE a clear RECOMMENDATION with the key trade-offs each member surfaced and "
+                "any recorded DISSENT. Narrate who is speaking so it reads like a real boardroom. THEN STOP: present the "
+                "recommendation and ASK me whether to have the board CARRY IT OUT -- do NOT execute until I say go; if I "
+                "approve, assign each member their part and run it." % (rel or "(project root)", names, roster, step3, devil_line))).strip()
+            aj = json.loads(_agents_flag_json(slugs))
+            if devil:
+                aj["devils-advocate"] = {
+                    "description": "The board's appointed contrarian -- argues the strongest case AGAINST the emerging consensus.",
+                    "prompt": ("You are the DEVIL'S ADVOCATE on this board. Your ONLY job is to argue the STRONGEST "
+                               "possible case AGAINST whatever recommendation the board is converging on: surface the "
+                               "failure modes, the disconfirming evidence, the second-order risks, and the strongest "
+                               "version of the opposing position. Be rigorous and specific -- not contrarian for its own "
+                               "sake. Do NOT hedge or agree; your value is the objection the room is too aligned to see.")}
+            agents_json = json.dumps(aj)
+        else:
+            extra = re.sub(r"\s+", " ", (
+                "You are the CAPTAIN of an agent team working IN this folder (%s). Your roster: %s. ROSTER -- %s "
+                "Delegate real work to teammates with the Agent tool using each EXACT type name (Agent subagent_type="
+                "<name>); run independent pieces in PARALLEL where you can, then synthesize into ONE result. Pick the "
+                "right teammate for each part; handle trivial bits yourself." % (rel or "(project root)", names, roster))).strip()
+            agents_json = _agents_flag_json(slugs)
+    nm = (leaf + "-" + slugs[0]) if len(slugs) == 1 else (leaf + ("-board" if mode == "board" else "-team"))
+    r = launch("studio", nm, rel=rel, extra_sys=extra, agents_json=agents_json, seed=seed)
+    if r.get("ok"): r["agents"] = slugs
+    return r
+
+# ---- CONTEXT PAYLOAD INSPECTOR: show the user the EXACT things a launch injects, layer by layer, and let them
+# open (and edit the CLAUDE.md ones) so "what the model gets" is fully transparent + editable. Truthful: only
+# what actually enters a launched session's context (Claude Code base prompt + CLAUDE.md cascade + our injected
+# --append-system-prompt brief + --agents defs + --mcp-config tools + skills metadata). --------------------------
+def _mcp_summary():
+    servers = []
+    try:
+        if os.path.isfile(MCP_JSON):
+            servers = sorted((json.load(open(MCP_JSON)).get("mcpServers") or {}).keys())
+    except Exception: pass
+    return {"servers": servers, "tok": len(servers) * 400}   # rough: each server's tool schemas ~hundreds of tokens
+
+def _cascade_rels(rel):
+    """The CLAUDE.md-bearing chain root->rel (exactly what Claude Code auto-loads up the tree)."""
+    parts = (rel or "").split("/") if rel else []
+    out = []
+    for r in ([""] + ["/".join(parts[:i + 1]) for i in range(len(parts))]):
+        ab = projpath(r) if r else PROJECT
+        if os.path.isfile(os.path.join(ab, "CLAUDE.md")): out.append((r, ab))
+    return out
+
+def launch_preview(rel, agents=None):
+    """The full, TRUTHFUL layer list a launch at `rel` would inject -- with real ≈token weights so the user sees
+    everything the model receives (not just the CLAUDE.md cascade). Content is fetched lazily via layer_content."""
+    subject = os.path.basename((rel or "").rstrip("/")) or ""
+    L = [{"id": "harness", "kind": "fixed", "title": "Claude Code system prompt", "tok": 0, "editable": False,
+          "hint": "Claude Code's own built-in instructions + tool definitions. Fixed by the harness; shown for completeness, not editable."}]
+    um = os.path.join(os.path.expanduser("~"), ".claude", "CLAUDE.md")
+    if os.path.isfile(um):
+        L.append({"id": "user-mem", "kind": "claude_md", "title": "~/.claude/CLAUDE.md · your global memory", "rel": "~user",
+                  "tok": int(os.path.getsize(um) / 4), "editable": True, "hint": "Machine-wide memory, loaded into every session."})
+    for r, ab in _cascade_rels(rel):
+        nm = os.path.basename(ab) or (PROJECT_NAME or "root")
+        L.append({"id": "md:" + r, "kind": "claude_md", "title": nm + " · CLAUDE.md", "rel": r, "tok": _cmd_tokens(ab),
+                  "editable": True, "hint": ("This folder's own brief" if r == (rel or "") else "Inherited from an ancestor folder")})
+    try: sysb = _launch_sys_context(subject)
+    except Exception: sysb = ""
+    if sysb:
+        L.append({"id": "sysbrief", "kind": "gen", "title": "ClaudeFather launch brief (scope context)", "tok": int(len(sysb) / 4),
+                  "editable": False, "hint": "Injected via --append-system-prompt: file-placement rules, locked-core awareness, and a 'what we already know about this scope' brief (recent emails/calendar/decisions + fresh Scout items)."})
+    mcp = _mcp_summary()
+    if mcp["servers"]:
+        L.append({"id": "mcp", "kind": "gen", "title": "Connected tools (MCP) · %d server%s" % (len(mcp["servers"]), "" if len(mcp["servers"]) == 1 else "s"),
+                  "tok": mcp["tok"], "editable": False, "hint": "External tool servers wired in via --mcp-config; their tool schemas enter the model's context."})
+    sk = skills_list().get("skills", [])
+    if sk:
+        L.append({"id": "skills", "kind": "gen", "title": "Available skills · %d" % len(sk),
+                  "tok": int(sum(len(s.get("description", "")) for s in sk) / 4), "editable": False,
+                  "hint": "Skills the session can invoke; names+descriptions load up front, full instructions load on use."})
+    slugs = [s for s in (agents or []) if s]
+    if slugs:
+        aj = _agents_flag_json(slugs)
+        L.append({"id": "agents", "kind": "gen", "title": "Agent team definitions · %d" % len(slugs), "tok": int(len(aj) / 4),
+                  "editable": False, "hint": "The subagent personas your lineup rides in with (Claude Code --agents)."})
+    return {"ok": True, "rel": rel, "subject": subject, "layers": L, "total_tok": sum(x["tok"] for x in L)}
+
+def layer_content(rel, layer, agents=None):
+    """The EXACT text of one context layer (lazy). CLAUDE.md layers are editable; generated layers are read-only."""
+    subject = os.path.basename((rel or "").rstrip("/")) or ""
+    if layer == "harness":
+        return {"ok": True, "title": "Claude Code system prompt", "editable": False,
+                "content": "This is Claude Code's OWN built-in system prompt: the tool definitions (Read / Write / Bash / …), "
+                "behavioral rules, and environment details every session starts with. It is fixed by the Claude Code harness "
+                "and is not exposed or editable from here (typically a few thousand tokens)."}
+    if layer == "user-mem":
+        p = os.path.join(os.path.expanduser("~"), ".claude", "CLAUDE.md")
+        return {"ok": True, "title": "~/.claude/CLAUDE.md", "editable": True, "rel": "~user",
+                "content": (_read(p) if os.path.isfile(p) else "")}
+    if layer.startswith("md:"):
+        r = layer[3:]
+        try: ab = projpath(r) if r else PROJECT
+        except Exception: return {"ok": False, "error": "bad path"}
+        p = os.path.join(ab, "CLAUDE.md")
+        return {"ok": True, "title": (os.path.basename(ab) or "root") + " · CLAUDE.md", "editable": True, "rel": r,
+                "content": (_read(p) if os.path.isfile(p) else "")}
+    if layer == "sysbrief":
+        try: c = _launch_sys_context(subject)
+        except Exception: c = ""
+        return {"ok": True, "title": "ClaudeFather launch brief (--append-system-prompt)", "editable": False,
+                "content": c or "(nothing extra for this scope)"}
+    if layer == "mcp":
+        m = _mcp_summary()
+        body = "\n".join("• " + s for s in m["servers"]) or "(none configured)"
+        return {"ok": True, "title": "Connected tools (MCP)", "editable": False,
+                "content": "These MCP servers are wired into every session here (--mcp-config); each exposes tools whose "
+                "schemas the model receives:\n\n" + body + "\n\n(Tool schemas are discovered at runtime; token cost is approximate.)"}
+    if layer == "skills":
+        sk = skills_list().get("skills", [])
+        return {"ok": True, "title": "Available skills", "editable": False,
+                "content": "\n".join("• %s — %s" % (s.get("name", "?"), re.sub(r"\s+", " ", (s.get("description") or ""))[:160]) for s in sk) or "(none)"}
+    if layer == "agents":
+        slugs = [s for s in (agents or []) if s]
+        try: aj = json.dumps(json.loads(_agents_flag_json(slugs)), indent=2)
+        except Exception: aj = _agents_flag_json(slugs)
+        return {"ok": True, "title": "Agent team definitions (--agents)", "editable": False, "content": aj}
+    return {"ok": False, "error": "unknown layer"}
+
+def module_md_save(rel, content):
+    """Write a CLAUDE.md the user edited in the context inspector. rel='~user' -> the global ~/.claude/CLAUDE.md.
+    Managed CC:* blocks are auto-regenerated later; editing the hand-authored prose is the intent."""
+    if not isinstance(content, str) or len(content) > 300000:
+        return {"ok": False, "error": "content missing or too large"}
+    if rel == "~user":
+        ab = os.path.join(os.path.expanduser("~"), ".claude"); os.makedirs(ab, exist_ok=True)
+    else:
+        try: ab = projpath(rel) if rel else PROJECT
+        except Exception: return {"ok": False, "error": "bad path"}
+        if not os.path.isdir(ab): return {"ok": False, "error": "no such folder"}
+    p = os.path.join(ab, "CLAUDE.md")
+    try: _atomic_write(p, content)
+    except Exception as e: return {"ok": False, "error": str(e)[:140]}
+    return {"ok": True, "rel": rel, "tok": int(len(content) / 4)}
 
 def _roster_cell(s, n=92):
     """One markdown-table cell: collapse whitespace, neutralize pipes, truncate, never empty."""
@@ -10394,9 +10602,18 @@ def regen_treemap(force=False):
     try: _set_region(cm, TREE_B, TREE_E, treemap_text())
     except Exception: pass
 
+def _cmd_tokens(absdir):
+    """≈ token weight of this folder's CLAUDE.md -- the brief that auto-loads into a session launched here.
+    os.path.getsize is cheap (no read); bytes/4 is a fine token estimate for the tree's context heatmap."""
+    try:
+        p = os.path.join(absdir, "CLAUDE.md")
+        return int(os.path.getsize(p) / 4) if os.path.isfile(p) else 0
+    except Exception:
+        return 0
+
 def module_tree(rel="", depth=0):
     absdir = projpath(rel) if rel else PROJECT
-    node = {"name": (os.path.basename(absdir) or PROJECT_NAME or "project"), "rel": rel, "children": []}
+    node = {"name": (os.path.basename(absdir) or PROJECT_NAME or "project"), "rel": rel, "children": [], "tok": _cmd_tokens(absdir)}
     if depth < 7:
         for k in child_modules(absdir):
             sub = module_tree(k["rel"], depth + 1)
@@ -10421,6 +10638,16 @@ def _annotate_recency(node, convos):
     for ch in node.get("children", []):
         _annotate_recency(ch, convos)
     node["children"].sort(key=lambda x: (-(x.get("last_convo") or 0), (x.get("name") or "").lower()))
+    return node
+
+def _annotate_payload(node, base=0):
+    """Cumulative context an agent LOADS when launched at each node = the sum of the CLAUDE.md cascade from
+    the project root down to that node (Claude Code auto-loads every ancestor CLAUDE.md at launch). So `cum`
+    is what a launch there actually pays, and descending one level only ever ADDS this node's own `tok`."""
+    cum = base + int(node.get("tok") or 0)
+    node["cum"] = cum
+    for ch in node.get("children", []):
+        _annotate_payload(ch, cum)
     return node
 
 def module_note(rel, text):
@@ -10549,6 +10776,123 @@ def module_files(rel):
     COLD (aged off to the SSD archive -> still listed/openable). Non-iCloud: a plain git-backed subdir.
     PROJECT-scoped; each record carries `tier` so the UI can show where the file lives."""
     return _deliv_listing(rel)
+
+# ---- Per-project BRAND (logo + accent color) for the Projects "family tree" view -------------------------
+# The tree draws each project as a card with a crest. The crest DEFAULT is an auto monogram drawn client-side
+# from the folder name (initials + a name-hashed color) -- no storage needed. This backend only holds the
+# OVERRIDES: an uploaded brand logo (a client's real logo) and/or a chosen accent color. Store is node-local:
+# a small JSON index keyed by module rel + the logo image files under a dedicated dir. Bounded + purpose-built
+# (image types only, size-capped, and served ONLY out of the logo dir) so it can never leak an arbitrary path.
+PROJECT_META = os.path.join(STATE_DIR, "_project_meta.json")
+PROJECT_LOGO_DIR = os.path.join(STATE_DIR, "_project_logos")
+_LOGO_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/webp": ".webp",
+             "image/gif": ".gif", "image/svg+xml": ".svg"}
+_LOGO_OK_EXT = (".png", ".jpg", ".webp", ".gif", ".svg")
+_LOGO_MAX = 3 * 1024 * 1024   # 3 MB -- plenty for a logo; bounds the store + the upload request
+
+def _pmeta_load():
+    try:
+        with open(PROJECT_META) as f: return json.load(f) or {}
+    except Exception: return {}
+
+def _pmeta_save(d):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = PROJECT_META + ".tmp"
+        with open(tmp, "w") as f: json.dump(d, f, indent=2)
+        os.replace(tmp, PROJECT_META); return True
+    except Exception: return False
+
+def _logo_slug(rel):
+    """A filesystem-safe, collision-free key from the WHOLE rel (not just the basename), so two same-named
+    modules in different branches never share one logo file."""
+    return slug(rel) or "root"
+
+def _logo_path_for(rel):
+    """Abs path of the stored logo for this rel across the allowed exts, or None. Only ever points INSIDE the
+    logo dir -- the serving route relies on this to stay bounded."""
+    s = _logo_slug(rel)
+    for ext in _LOGO_OK_EXT:
+        p = os.path.join(PROJECT_LOGO_DIR, s + ext)
+        if os.path.isfile(p): return p
+    return None
+
+def project_brands():
+    """All recorded per-project brand overrides -> {rel: {color?, logo?:true, v:mtime}}. The monogram default
+    needs no record, so only overridden projects appear. Cheap: one small JSON + a stat of present logos."""
+    meta = _pmeta_load(); out = {}
+    for rel, rec in (meta.items() if isinstance(meta, dict) else []):
+        r = {}
+        if isinstance(rec, dict) and rec.get("color"): r["color"] = rec["color"]
+        lp = _logo_path_for(rel)
+        if lp:
+            r["logo"] = True
+            try: r["v"] = int(os.path.getmtime(lp))
+            except Exception: r["v"] = 0
+        if r: out[rel] = r
+    return out
+
+def _valid_rel(rel):
+    try: projpath(rel or ""); return True
+    except Exception: return False
+
+def project_brand_set(rel, color=None, filename=None, mime=None, b64data=None):
+    """Set a project's brand: an accent color (#rrggbb, or "" to clear) and/or an uploaded logo image."""
+    if not _valid_rel(rel): return {"ok": False, "error": "bad project"}
+    meta = _pmeta_load()
+    rec = meta.get(rel) if isinstance(meta.get(rel), dict) else {}
+    if color is not None:
+        c = str(color).strip()
+        if c == "": rec.pop("color", None)
+        elif re.match(r"^#[0-9a-fA-F]{6}$", c): rec["color"] = c.lower()
+        else: return {"ok": False, "error": "color must be #rrggbb"}
+    out = {"ok": True, "rel": rel}
+    if b64data:
+        ext = _LOGO_EXT.get((mime or "").lower().split(";")[0].strip())
+        if not ext:
+            fe = os.path.splitext(filename or "")[1].lower()
+            fe = ".jpg" if fe == ".jpeg" else fe
+            ext = fe if fe in _LOGO_OK_EXT else None
+        if not ext: return {"ok": False, "error": "logo must be PNG / JPG / WEBP / GIF / SVG"}
+        try: raw = base64.b64decode((b64data or "").split(",")[-1])
+        except Exception: return {"ok": False, "error": "could not decode image"}
+        if not raw: return {"ok": False, "error": "empty image"}
+        if len(raw) > _LOGO_MAX: return {"ok": False, "error": "logo exceeds 3 MB"}
+        try:
+            os.makedirs(PROJECT_LOGO_DIR, exist_ok=True)
+            s = _logo_slug(rel)
+            for old in _LOGO_OK_EXT:                                  # never keep two exts for one project
+                op = os.path.join(PROJECT_LOGO_DIR, s + old)
+                if old != ext and os.path.isfile(op):
+                    try: os.remove(op)
+                    except Exception: pass
+            with open(os.path.join(PROJECT_LOGO_DIR, s + ext), "wb") as f: f.write(raw)
+            out["logo"] = True
+        except Exception as e: return {"ok": False, "error": str(e)[:120]}
+    meta[rel] = rec
+    _pmeta_save(meta)
+    lp = _logo_path_for(rel)
+    out["color"] = rec.get("color")
+    out["logo_v"] = int(os.path.getmtime(lp)) if lp else 0
+    return out
+
+def project_brand_clear(rel, what="all"):
+    """Revert a project to its auto monogram: remove the uploaded logo and/or the color override."""
+    if not _valid_rel(rel): return {"ok": False, "error": "bad project"}
+    meta = _pmeta_load()
+    if what in ("all", "logo"):
+        s = _logo_slug(rel)
+        for ext in _LOGO_OK_EXT:
+            p = os.path.join(PROJECT_LOGO_DIR, s + ext)
+            if os.path.isfile(p):
+                try: os.remove(p)
+                except Exception: pass
+    rec = meta.get(rel)
+    if isinstance(rec, dict) and what in ("all", "color"): rec.pop("color", None)
+    if what == "all" or not (isinstance(rec, dict) and rec): meta.pop(rel, None)
+    else: meta[rel] = rec
+    _pmeta_save(meta)
+    return {"ok": True, "rel": rel}
 
 # ---- Agency integration: interpret the tree as Clients/Partners/Pipeline/Tools (vs Product's Modules).
 # Convention + config over the same folder/CLAUDE.md substrate; modeled from the AFP tree, generalized. ----
@@ -11717,8 +12061,19 @@ def route(text, exclude=None):
         nmt = _toks(c["name"])                              # split folder name on _/- too: read_write -> {read,write}
         name_hit = bool(nmt) and nmt.issubset(toks)        # every part of the folder name appears in the topic
         ctoks = _toks(c["name"] + " " + c["summary"])
-        score = (0.6 if name_hit else 0.0) + min(0.4, len(toks & ctoks) * 0.1)
-        if score > 0: scored.append((round(min(1.0, score), 2), c))
+        overlap = min(0.4, len(toks & ctoks) * 0.1)        # shared whole-word keywords with the name + one-liner
+        # SUBSTRING / PARTIAL matching -- a query term that LIVES INSIDE a folder name counts. This is the miss
+        # that made 'studio' fail to find 'mediastudio' (exact-token matching only) and wrongly ghost a new
+        # folder. General + structure-only; no folder name is special-cased.
+        leaf = (c["name"].split("/")[-1] or "").lower(); partial = 0.0
+        for qt in toks:
+            if len(qt) < 3: continue
+            if qt == leaf: partial = max(partial, 0.85)                                     # the query IS the folder name
+            elif qt in leaf or leaf in qt: partial = max(partial, 0.6)                      # 'studio' in 'mediastudio'
+            elif any((qt in nt or nt in qt) for nt in nmt): partial = max(partial, 0.5)     # any name token overlaps
+            elif any((qt in st or st in qt) for st in ctoks): partial = max(partial, 0.28)  # lives in the one-liner
+        score = min(1.0, (0.6 if name_hit else 0.0) + overlap + partial)
+        if score > 0: scored.append((round(score, 2), c))
     scored.sort(key=lambda x: x[0], reverse=True)
     top = scored[:5]; best = top[0] if top else None; conf = best[0] if best else 0.0
     llm_used = False
@@ -11739,8 +12094,14 @@ def route(text, exclude=None):
             conf = min(conf, 0.2)        # the model says nothing fits -> trust the new-home path
     needs_new = conf < 0.35; parent = None
     if needs_new:
-        shallow = [(s, c) for s, c in scored if (c["rel"] in PILLARS or "/" not in c["rel"])]
-        parent = (shallow[0][1]["rel"] if shallow else "")
+        # a genuinely-new project lands NEXT TO the closest existing thing (under its parent) -- never dumped at
+        # root just because the lexical pass came up empty. Structure-derived; no folder name is special-cased.
+        if scored:
+            br = scored[0][1]["rel"]
+            parent = (br.rsplit("/", 1)[0] if "/" in br else br)   # the match's parent, or the area itself if top-level
+        else:
+            shallow = [c for c in _scope_candidates() if ("/" not in c["rel"]) or c["rel"] in PILLARS]
+            parent = (shallow[0]["rel"] if shallow else "")
     return {"ok": True, "query": (text or "").strip(), "llm": llm_used,
             "destination": (None if needs_new else {"rel": best[1]["rel"], "name": best[1]["name"],
                             "summary": best[1]["summary"], "confidence": conf}),
@@ -17144,9 +17505,30 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/campaign": return self._s(200, json.dumps(campaign_detail((q.get("name") or [""])[0])))
         if u.path == "/api/module-tree":
             regen_treemap()   # debounced -- picks up modules an agent/person added directly on the filesystem
-            return self._s(200, json.dumps(_annotate_recency(module_tree(""), past_conversations("studio"))))
+            return self._s(200, json.dumps(_annotate_payload(_annotate_recency(module_tree(""), past_conversations("studio")))))
         if u.path == "/api/module-convos": return self._s(200, json.dumps(module_convos(q.get("rel", [""])[0])))
         if u.path == "/api/module-files": return self._s(200, json.dumps(module_files(q.get("rel", [""])[0])))
+        if u.path == "/api/launch-preview":
+            _ag = [s for s in (q.get("agents", [""])[0] or "").split(",") if s]
+            return self._s(200, json.dumps(launch_preview(q.get("rel", [""])[0], _ag)))
+        if u.path == "/api/layer-content":
+            _ag = [s for s in (q.get("agents", [""])[0] or "").split(",") if s]
+            return self._s(200, json.dumps(layer_content(q.get("rel", [""])[0], q.get("layer", [""])[0], _ag)))
+        if u.path == "/api/project-brands": return self._s(200, json.dumps(project_brands()))
+        if u.path == "/api/project-logo":
+            # serve a project's uploaded brand logo. BOUNDED: _logo_path_for only ever returns a file inside
+            # PROJECT_LOGO_DIR (slug-keyed), so no filename from the client can escape that dir.
+            lp = _logo_path_for(q.get("rel", [""])[0])
+            if not lp: return self._s(404, "no logo")
+            try:
+                with open(lp, "rb") as _lf: b = _lf.read()
+            except Exception: return self._s(404, "no logo")
+            import mimetypes
+            ct = mimetypes.guess_type(lp)[0] or "application/octet-stream"
+            self.send_response(200); self.send_header("Content-Type", ct)
+            self.send_header("Content-Length", str(len(b)))
+            self.send_header("Cache-Control", "max-age=60")
+            self.end_headers(); self.wfile.write(b); return
         if u.path == "/api/files":        return self._s(200, json.dumps(all_deliverables()))
         if u.path == "/api/browse":       return self._s(200, json.dumps(browse_dir(q.get("rel", [""])[0])))
         if u.path == "/api/launch-tree":  return self._s(200, json.dumps(launch_tree()))
@@ -17488,7 +17870,11 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/campaign-intercept": return self._s(200, json.dumps(campaign_intercept(body.get("name", ""), body.get("action", ""), body.get("directive"))))
         if u.path == "/api/campaign-notify":    return self._s(200, json.dumps(campaign_notify(body)))
         if u.path == "/api/module-launch": return self._s(200, json.dumps(launch("studio", body.get("name") or (body.get("rel","").split("/")[-1] or "session"), rel=body.get("rel",""))))
+        if u.path == "/api/module-launch-agents": return self._s(200, json.dumps(module_launch_agents(body)))
+        if u.path == "/api/module-md-save": return self._s(200, json.dumps(module_md_save(body.get("rel", ""), body.get("content", ""))))
         if u.path == "/api/module-note":   return self._s(200, json.dumps(module_note(body.get("rel",""), body.get("text",""))))
+        if u.path == "/api/project-brand": return self._s(200, json.dumps(project_brand_set(body.get("rel",""), body.get("color"), body.get("filename"), body.get("mime"), body.get("data"))))
+        if u.path == "/api/project-brand-clear": return self._s(200, json.dumps(project_brand_clear(body.get("rel",""), body.get("what","all"))))
         if u.path == "/api/module-add":    return self._s(200, json.dumps(module_add(body.get("parent",""), body.get("name",""), body.get("summary",""), bool(body.get("adopt")))))
         if u.path == "/api/frontdesk":         # THE FRONT DESK: place a goal into the right scope (Phase 1.3)
             return self._s(200, json.dumps(front_desk(body)))
@@ -19848,6 +20234,164 @@ textarea{width:100%;min-height:240px;font-family:ui-monospace,Menlo,Monaco,monos
 .sess.ralphiter{padding-left:14px}.sess.ralphiter .lbl{font-size:12px}
 .modstack{grid-column:1/-1;display:flex;flex-direction:column;gap:14px;min-width:0}
 .modgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:14px;align-items:start}
+/* ---- Projects "family tree" (ancestry) view: top-down org chart + crests + pan/zoom ------------------ */
+.projbar{grid-column:1/-1;display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:2px}
+.projseg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--card)}
+.projseg button{border:none;background:transparent;color:var(--mut);padding:7px 15px;font-size:12.5px;font-weight:700;cursor:pointer}
+.projseg button.on{background:var(--grad);color:var(--bg-warm)}
+.famwrap{grid-column:1/-1;position:relative;height:calc(100vh - 452px);min-height:360px;border:1px solid var(--line);border-radius:16px;overflow:hidden;cursor:grab;background:radial-gradient(circle at 1px 1px,var(--hair2) 1px,transparent 0) 0 0/24px 24px,var(--bg2);box-shadow:inset 0 0 70px rgba(0,0,0,.20)}
+.famwrap.grabbing{cursor:grabbing}
+.famstage{position:absolute;top:0;left:0;transform-origin:0 0;padding:40px;will-change:transform}
+/* org-chart connectors (classic pure-CSS recipe, rounded corners = gentle lineage curves) */
+ul.famtree,ul.famtree ul{list-style:none;margin:0;padding:22px 0 0;position:relative;display:flex;justify-content:center}
+ul.famtree{padding-top:0}
+ul.famtree li{display:flex;flex-direction:column;align-items:center;position:relative;padding:22px 11px 0}
+ul.famtree li::before,ul.famtree li::after{content:'';position:absolute;top:0;right:50%;border-top:2px solid var(--line);width:50%;height:22px}
+ul.famtree li::after{right:auto;left:50%;border-left:2px solid var(--line)}
+ul.famtree li:only-child::before,ul.famtree li:only-child::after{display:none}
+ul.famtree li:only-child{padding-top:22px}
+ul.famtree>li{padding-top:0}
+ul.famtree>li::before,ul.famtree>li::after{display:none}
+ul.famtree li:first-child::before,ul.famtree li:last-child::after{border:0 none}
+ul.famtree li:last-child::before{border-right:2px solid var(--line);border-radius:0 8px 0 0}
+ul.famtree li:first-child::after{border-radius:8px 0 0 0}
+ul.famtree ul::before{content:'';position:absolute;top:0;left:50%;border-left:2px solid var(--line);width:0;height:22px}
+.famnode{position:relative;display:flex;flex-direction:column;align-items:center;gap:7px;width:170px;padding:13px 12px 12px;border:1px solid var(--line);border-radius:15px;background:var(--card);box-shadow:var(--glow);cursor:pointer;transition:border-color .12s,transform .12s,box-shadow .12s}
+.famnode:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:0 9px 28px rgba(0,0,0,.30)}
+.famnode::after{content:'';position:absolute;inset:0;border-radius:15px;pointer-events:none;z-index:-1;box-shadow:0 0 0 1px rgba(var(--accent-rgb),calc(var(--wt,0)*.5)),0 0 22px rgba(var(--accent-rgb),calc(var(--wt,0)*.5));transition:box-shadow .25s}
+.famnode.root{width:206px;border-color:var(--accent);background:var(--bg-warm)}
+.famnode.recent{box-shadow:0 0 0 1px var(--accent),var(--glow)}
+@keyframes famflash{0%{box-shadow:0 0 0 0 rgba(var(--accent-rgb),0)}25%{box-shadow:0 0 0 5px rgba(var(--accent-rgb),.55)}100%{box-shadow:0 0 0 0 rgba(var(--accent-rgb),0)}}
+.famnode.flash{animation:famflash 1.5s ease-out 2}
+.famcrest{width:80px;height:80px;border-radius:17px;display:flex;align-items:center;justify-content:center;overflow:hidden;box-shadow:inset 0 0 0 1px var(--hair2);flex:none}
+.famcrest img{width:100%;height:100%;object-fit:cover;display:block}
+.famcrest .mono{font-family:'Cinzel Decorative','Georgia',serif;font-weight:700;font-size:31px;color:#fff;letter-spacing:1px;text-shadow:0 1px 4px rgba(0,0,0,.38)}
+.famname{font-size:13.5px;font-weight:700;color:var(--near);line-height:1.15;word-break:break-word;max-width:100%}
+.fammeta{font-size:10.5px;color:var(--mut);display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:center}
+.famsub{font-size:10.5px;color:var(--dim);line-height:1.25;max-width:100%;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.famchip{font-size:9.5px;font-weight:800;color:var(--bg-warm);background:var(--grad);border-radius:20px;padding:1px 7px}
+.famwt{display:flex;align-items:center;gap:6px;width:100%;max-width:132px}
+.famwtbar{flex:1;height:5px;border-radius:99px;background:var(--card2);overflow:hidden;box-shadow:inset 0 0 0 1px var(--hair2)}
+.famwtbar>i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,rgba(var(--accent-rgb),.5),var(--accent))}
+.famwtn{font-size:9.5px;font-family:ui-monospace,Menlo,monospace;color:var(--mut);font-variant-numeric:tabular-nums;white-space:nowrap}
+.famacts{display:flex;gap:5px;position:absolute;top:9px;right:9px;opacity:0;transition:opacity .12s}
+.famnode:hover .famacts{opacity:1}
+.famacts button{width:26px;height:26px;border-radius:8px;border:1px solid var(--line);background:var(--card2);color:var(--ink);font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+.famacts button:hover{border-color:var(--accent);color:var(--accent)}
+.fampip{position:absolute;bottom:-12px;left:50%;transform:translateX(-50%);width:23px;height:23px;border-radius:50%;background:var(--card2);border:1px solid var(--line);color:var(--mut);font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2;line-height:1}
+.fampip:hover{border-color:var(--accent);color:var(--accent)}
+.famtool{position:absolute;top:12px;right:12px;z-index:5;display:flex;gap:8px;align-items:flex-start}
+.famzoom{display:flex;gap:4px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:4px;box-shadow:var(--glow)}
+.famzoom button{width:28px;height:28px;border:none;background:transparent;color:var(--ink);font-size:15px;font-weight:700;cursor:pointer;border-radius:7px;line-height:1}
+.famzoom button:hover{background:var(--el2)}
+.famhint{position:absolute;left:12px;bottom:12px;z-index:5;font-size:11px;color:var(--dim);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:5px 10px;pointer-events:none;opacity:.9}
+.famsheet{max-width:700px}
+.famsheet .fshead{display:flex;gap:14px;align-items:center}
+.fscrest{width:66px;height:66px;border-radius:15px;overflow:hidden;flex:none;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px var(--hair2)}
+.fscrest img{width:100%;height:100%;object-fit:cover}
+.fscrest .mono{font-family:'Cinzel Decorative','Georgia',serif;font-weight:700;font-size:26px;color:#fff}
+.famcols{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+.famscroll{max-height:28vh;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:5px;background:var(--bg2)}
+.famrow{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border-radius:7px;font-size:12px;color:var(--ink)}
+.famrow:hover{background:var(--el2)}
+.fampay{margin-top:14px;border:1px solid var(--line);border-radius:12px;padding:11px 13px;background:var(--bg2)}
+.fampaylist{display:flex;flex-direction:column;gap:3px;margin-top:8px}
+.fampayrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 9px;border-radius:7px;background:var(--card2);font-size:12px;color:var(--ink)}
+.fampayrow.here{background:rgba(var(--accent-rgb),.12);box-shadow:inset 0 0 0 1px rgba(var(--accent-rgb),.4)}
+.fampayrow.here b{color:var(--accent)}
+.fampayrow.brief{opacity:.7;font-style:italic}
+.fampayrow .lname{font-weight:600;color:var(--ink)}
+.fampayrow .famwtn{font-size:11px}
+.fampaylist .fampayrow[onclick]{cursor:pointer}
+.fampaylist .fampayrow[onclick]:hover{background:var(--el2);border:1px solid rgba(var(--accent-rgb),.35)}
+.fampayrow.note{opacity:.6;font-style:italic;background:transparent;cursor:default}
+.fampayrow.pay-fixed{opacity:.72}
+.payedit{font-size:8.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--accent);background:rgba(var(--accent-rgb),.15);border-radius:5px;padding:1px 5px;margin-left:8px;vertical-align:middle}
+.payinspect{max-width:760px}
+.payview{max-height:56vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.5;background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:13px;color:var(--ink);margin:0}
+.payedit-ta{width:100%;height:54vh;font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.5;white-space:pre;overflow:auto;resize:vertical}
+/* ---- Team roster BENCH + Team Sheet (the agentic-engineering surface, paired with the payload heatmap) ---- */
+.bench{grid-column:1/-1;margin-top:10px;border:1px solid var(--line);border-radius:14px;background:var(--card);box-shadow:var(--glow);padding:10px 13px}
+.benchhead{display:flex;align-items:center;gap:12px;margin-bottom:9px}
+.benchttl{font-size:12.5px;font-weight:800;letter-spacing:.02em;color:var(--near);white-space:nowrap}
+.lineupchip{flex:1;min-width:0;font-size:11.5px;color:var(--mut);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.lineupchip b{color:var(--accent)}
+.benchscroll{width:26px;height:26px;flex:none;border:1px solid var(--line);background:var(--card2);color:var(--mut);border-radius:8px;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center;padding:0}
+.benchscroll:hover{border-color:var(--accent);color:var(--accent)}
+.benchrow{display:flex;gap:8px;overflow-x:auto;overflow-y:hidden;padding:2px 1px 8px;scrollbar-width:thin;scrollbar-color:var(--accent) transparent}
+.benchrow::-webkit-scrollbar{height:9px}
+.benchrow::-webkit-scrollbar-track{background:var(--card2);border-radius:9px}
+.benchrow::-webkit-scrollbar-thumb{background:var(--line);border-radius:9px}
+.benchrow::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+.benchempty{font-size:12px;color:var(--dim);font-style:italic;padding:6px 2px}
+.agcard{flex:0 0 auto;display:flex;align-items:center;gap:8px;min-width:154px;max-width:196px;padding:6px 10px 6px 6px;border:1px solid var(--line);border-radius:11px;background:var(--card2);cursor:grab;user-select:none;position:relative;transition:border-color .12s,box-shadow .12s,transform .12s}
+.agcard:hover{border-color:var(--accent);transform:translateY(-1px)}
+.agcard.on{border-color:var(--accent);box-shadow:0 0 0 2px rgba(var(--accent-rgb),.42)}
+.agcard.sug{border-color:var(--accent);box-shadow:0 0 16px rgba(var(--accent-rgb),.45)}
+.agcrest{width:33px;height:33px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex:none;box-shadow:inset 0 0 0 1px var(--hair2)}
+.agcrest .mono{font-family:'Cinzel Decorative','Georgia',serif;font-weight:700;font-size:13px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.35)}
+.agmeta{min-width:0}
+.agname{font-size:12px;font-weight:700;color:var(--near);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px}
+.agrole{font-size:9.5px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px}
+.agnum{position:absolute;top:-6px;right:-6px;width:19px;height:19px;border-radius:50%;background:var(--grad);color:var(--bg-warm);font-size:10px;font-weight:800;display:flex;align-items:center;justify-content:center}
+.agproxy{position:fixed;z-index:130;width:44px;height:44px;border-radius:11px;background:var(--card2);border:1.5px solid var(--accent);display:flex;align-items:center;justify-content:center;pointer-events:none;transform:translate(-50%,-50%);box-shadow:0 12px 30px rgba(0,0,0,.42)}
+.agproxy .mono{font-family:'Cinzel Decorative','Georgia',serif;font-weight:700;font-size:16px;color:var(--accent)}
+.teamsheet{max-width:720px}
+.tshead{display:flex;align-items:center;gap:12px;margin-bottom:4px}
+.tscols{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:10px}
+@media(max-width:640px){.tscols{grid-template-columns:1fr}}
+.tscol{border:1px solid var(--line);border-radius:12px;padding:11px 12px;background:var(--bg2)}
+.tslineup{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.tscard{display:flex;align-items:center;gap:9px;padding:7px 9px;border:1px solid var(--line);border-radius:10px;background:var(--card2);position:relative}
+.tscard.cap{border-color:var(--accent);box-shadow:inset 0 0 0 1px rgba(var(--accent-rgb),.4)}
+.tscrest{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex:none;box-shadow:inset 0 0 0 1px var(--hair2)}
+.tscrest .mono{font-family:'Cinzel Decorative','Georgia',serif;font-weight:700;font-size:13px;color:#fff}
+.tscard .agrole{font-size:10px;color:var(--accent);text-transform:uppercase;letter-spacing:.04em}
+.tsx{margin-left:auto;width:22px;height:22px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--mut);cursor:pointer;font-size:13px;flex:none}
+.tsx:hover{border-color:var(--accent);color:var(--accent)}
+.tssug{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.sugchip{font-size:11.5px;padding:5px 10px;border-radius:8px;border:1px dashed var(--accent);background:rgba(var(--accent-rgb),.07);color:var(--accent);cursor:pointer}
+.sugchip:hover{background:rgba(var(--accent-rgb),.16)}
+.tsfoot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;flex-wrap:wrap}
+.tsmode{margin-top:14px}
+.tsmodeseg{display:inline-flex;background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:3px;gap:2px}
+.tsmodeseg button{font:inherit;font-size:12.5px;border:0;background:transparent;color:var(--mut);padding:6px 14px;border-radius:7px;cursor:pointer}
+.tsmodeseg button.on{background:var(--card);color:var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.14)}
+.tsagenda{width:100%;margin-top:9px;min-height:66px;font-size:13px;line-height:1.45;resize:vertical}
+.tsopt{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:11px}
+.tsoptlab{font-family:var(--mono,ui-monospace);font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--mut)}
+.tsprotochip{font-size:12px;padding:5px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card2);color:var(--mut);cursor:pointer}
+.tsprotochip:hover{border-color:var(--accent);color:var(--ink)}
+.tsprotochip.on{border-color:var(--accent);color:var(--accent);background:rgba(var(--accent-rgb),.1)}
+.tsdevil{display:flex;align-items:center;gap:8px;margin-top:11px;font-size:12.5px;color:var(--ink);cursor:pointer;flex-wrap:wrap}
+.tsdevil input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+.tsdevlab{font-weight:700}
+.tsdevil .sub{font-weight:400}
+.tscard.devil{border-style:dashed;border-color:rgba(var(--accent-rgb),.55);background:rgba(var(--accent-rgb),.05)}
+.tscard.devil .agrole{color:var(--mut)}
+@media(max-width:640px){.famcols{grid-template-columns:1fr}.famwrap{height:calc(100vh - 470px)}.famnode{width:150px}.famcrest{width:66px;height:66px}.fdoorin{font-size:14px;padding:12px 14px}}
+/* ---- THE FRONT DOOR: type-to-locate bar + spatial placement (ghost + drag) over the tree ------------- */
+.fdoor{grid-column:1/-1;max-width:840px;width:100%;margin:0 auto 4px}
+.fdoorbar{display:flex;gap:10px;align-items:center}
+.fdoorin{flex:1;min-width:0;padding:14px 17px;font-size:15.5px;border-radius:13px;border:1px solid var(--line);background:var(--card);color:var(--ink);outline:none;box-shadow:var(--glow)}
+.fdoorin:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--ring)}
+.fdoorin::placeholder{color:var(--dim)}
+.fdoorchip{min-height:19px;margin:9px 4px 0;font-size:12.5px;color:var(--mut);text-align:center}
+.fdoorchip b{color:var(--accent)}
+.famnode.ghost{border:1.5px dashed var(--accent);background:rgba(var(--accent-rgb),.06);cursor:grab}
+.famnode.ghost .famcrest{background:repeating-linear-gradient(135deg,rgba(var(--accent-rgb),.24),rgba(var(--accent-rgb),.24) 7px,rgba(var(--accent-rgb),.10) 7px,rgba(var(--accent-rgb),.10) 14px);box-shadow:inset 0 0 0 1px var(--accent)}
+.famnode.ghost .famcrest .mono{color:var(--accent);text-shadow:none}
+.famnode.drophover{border-color:var(--accent);box-shadow:0 0 0 3px rgba(var(--accent-rgb),.5)}
+.famnode.aim{border-color:var(--accent);box-shadow:0 0 0 3px rgba(var(--accent-rgb),.45),var(--glow)}
+.fdoorproxy{position:fixed;z-index:120;width:54px;height:54px;border-radius:13px;pointer-events:none;display:flex;align-items:center;justify-content:center;box-shadow:0 12px 32px rgba(0,0,0,.42);opacity:.94;transform:translate(-50%,-50%);border:1.5px dashed var(--accent)}
+.fdoorproxy .mono{font-family:'Cinzel Decorative','Georgia',serif;font-weight:700;font-size:21px}
+.fdoact{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);z-index:6;display:flex;gap:9px;align-items:center;background:var(--card);border:1px solid var(--accent);border-radius:14px;padding:10px 14px;box-shadow:0 12px 36px rgba(0,0,0,.42);max-width:94%;flex-wrap:wrap;justify-content:center}
+.fdoact .fdtxt{font-size:12.5px;color:var(--ink)}
+.fdoact .fdtxt b{color:var(--accent)}
+.fdoact .fdwhy{font-size:11px;color:var(--dim);width:100%;text-align:center}
+.fdalt{display:inline-flex;gap:5px;flex-wrap:wrap;align-items:center;font-size:11px;color:var(--dim)}
+.fdalt button{font-size:10.5px;padding:3px 9px;border-radius:20px;border:1px solid var(--line);background:var(--card2);color:var(--mut);cursor:pointer}
+.fdalt button:hover{border-color:var(--accent);color:var(--accent)}
 .mini{font-size:11px;padding:6px 10px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}.mini.go{background:var(--grad);color:var(--bg-warm);border:none;font-weight:700}
 code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 6px;color:var(--accent-light);font-size:11.5px;word-break:break-all;overflow-wrap:anywhere;display:inline-block;max-width:100%;vertical-align:bottom}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--card2);border:1px solid var(--accent);color:var(--ink);padding:12px 18px;border-radius:11px;display:none;z-index:90;max-width:90vw;box-shadow:var(--glow)}
@@ -21127,7 +21671,7 @@ function render(){
   const q=document.getElementById("search").value.toLowerCase();let h="";
   if(LENS=="pillars")h=D.components.filter(c=>!q||(c.name+c.summary).toLowerCase().includes(q)).map(compCard).join("");
   else if(LENS=="routines")h=(D.routines||[]).filter(r=>!q||(r.name+r.desc).toLowerCase().includes(q)).map(rouCard).join("")||empty("No routines yet.");
-  else if(LENS=="modules"){loadModules();return;}
+  else if(LENS=="modules"){if(MODVIEW=='list'){loadModules();}else{loadFamTree();}return;}
   else if(LENS=="files"){loadFiles();return;}
   else if(LENS=="gmail"){loadGmail();return;}
   else if(LENS=="calendar"){loadCalendar();return;}
@@ -21217,6 +21761,13 @@ function ralphToggle(){return '<div style="display:flex;gap:6px;margin-bottom:10
   +'<button class="mini'+(RALPHVIEW=="previous"?" go":"")+'" onclick="RALPHVIEW=\'previous\';loadRalph()">Previous loops</button></div>';}
 function fmtDur(s){s=Math.floor(s||0);if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';if(s<86400)return (s/3600).toFixed(1)+'h';return (s/86400).toFixed(1)+'d';}
 let MODREL="", MODTREE=null, MODCONVOS=[], MODCONVOMAP={};
+// Projects lens view: 'tree' (ancestry family tree, default) | 'list' (classic folder drill). Per-device.
+let MODVIEW=(function(){try{return localStorage.getItem('cc_projview')||'tree';}catch(e){return 'tree';}})();
+let PROJBRANDS={}, FAMZOOM=1, FAMX=0, FAMY=0, FAMOPEN={}, _famDrag=null;
+// THE FRONT DOOR: type a goal -> /api/route decides the home -> the tree pans to it (existing) or ghosts a
+// new one (drag to re-home) -> confirm launches a briefed session there. FDOOR holds the live placement state.
+var FDOOR={query:"",route:null,target:null,ghost:null}, _fdoorT=null, _fdoorProxy=null, _fdoorHover=null, _fdoorActing=false;
+function setProjView(v){MODVIEW=v;try{localStorage.setItem('cc_projview',v);}catch(e){}render();}
 function modFind(n,rel){if(n.rel===rel)return n;for(const c of (n.children||[])){const r=modFind(c,rel);if(r)return r;}return null;}
 async function loadModules(rel){
   if(rel!==undefined&&rel!==null)MODREL=rel;syncHash(true);
@@ -21276,6 +21827,372 @@ async function loadModules(rel){
   // conversations card with the sub-tool cards (was causing the cards to overlap a long convo list)
   document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
 }
+// ===== Projects FAMILY-TREE view (ancestry): top-down org chart of the module tree, each project a crest
+// card, click to drill in, launch from a node, brand with a logo/color. Same data + endpoints as the List
+// view (module-tree / module-convos / module-files / module-launch); this is the visual face. =====
+function famHash(s){s=String(s||"");let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;}
+function famColor(seed){var h=famHash(seed)%360,h2=(h+24)%360;return {a:"hsl("+h+",52%,49%)",b:"hsl("+h2+",57%,37%)"};}
+function famShade(hex,amt){try{var n=parseInt(String(hex).slice(1),16),r=(n>>16)&255,g=(n>>8)&255,b=n&255;var cl=function(x){return Math.max(0,Math.min(255,x+amt));};return "rgb("+cl(r)+","+cl(g)+","+cl(b)+")";}catch(e){return hex;}}
+function famInitials(name){var n=String(name||"").split("/")[0].replace(/[_\-]+/g," ").replace(/([a-z0-9])([A-Z])/g,"$1 $2").trim();
+  var p=n.split(/\s+/).filter(Boolean);var s=p.length>=2?(p[0][0]+p[1][0]):((p[0]||"?").slice(0,2));return s.toUpperCase();}
+function famCrest(node,brand,cls){var rel=node.rel||"";
+  if(brand&&brand.logo)return '<div class="'+cls+'"><img src="/api/project-logo?rel='+encodeURIComponent(rel)+'&v='+(brand.v||0)+'" alt=""></div>';
+  var bg;if(brand&&brand.color){bg="linear-gradient(145deg,"+famShade(brand.color,20)+","+famShade(brand.color,-26)+")";}
+  else{var c=famColor(rel||node.name);bg="linear-gradient(145deg,"+c.a+","+c.b+")";}
+  return '<div class="'+cls+'" style="background:'+bg+'"><span class="mono">'+esc(famInitials(node.name))+'</span></div>';}
+function famIsOpen(node,depth){if(!(node&&node.children&&node.children.length))return false;var v=FAMOPEN[node.rel||""];if(v===true)return true;if(v===false)return false;return depth<1;}
+function famGhostCard(){var g=FDOOR.ghost||{name:"new-project"};
+  return '<div class="famnode ghost" data-rel="__ghost__" onmousedown="fdoorGhostDown(event)" ontouchstart="fdoorGhostDown(event)" title="Drag me onto any project to place it there">'
+    +'<div class="famcrest"><span class="mono">'+esc(famInitials(g.name))+'</span></div>'
+    +'<div class="famname">'+esc(g.name)+'</div>'
+    +'<div class="fammeta"><span class="famchip" style="background:var(--card2);color:var(--accent)">new</span></div>'
+    +'<div class="famsub">drag to move &middot; or confirm below</div></div>';}
+function famGhostLi(){return '<li>'+famGhostCard()+'</li>';}
+// ---- context PAYLOAD heatmap: every card shows its own CLAUDE.md weight (bar + glow); tooltip + drill
+// sheet show the cumulative cascade (root->here) an agent LOADS when launched from that folder. ---------
+var FAMMAXW=1;
+function kfmt(n){n=Math.round(n||0);return n>=1000?((n/1000).toFixed(n>=9500?0:1)).replace(/\.0$/,'')+'k':String(n);}
+function famComputeMax(n){var m=n.tok||0;(n.children||[]).forEach(function(c){var cm=famComputeMax(c);if(cm>m)m=cm;});return m;}
+function famWeight(node){var t=node.tok||0;var frac=FAMMAXW?Math.min(1,t/FAMMAXW):0;var w=Math.max(6,Math.round(frac*100));var cum=node.cum||t;
+  return '<div class="famwt" title="This folder’s CLAUDE.md ≈'+kfmt(t)+' tokens · launching here loads ≈'+kfmt(cum)+' (root→here)"><div class="famwtbar"><i style="width:'+w+'%"></i></div><span class="famwtn">≈'+kfmt(t)+'</span></div>';}
+function famAncestry(rel){var out=[modFind(MODTREE,"")||MODTREE];if(rel){var parts=rel.split("/"),acc="";for(var i=0;i<parts.length;i++){acc=acc?acc+"/"+parts[i]:parts[i];var nx=modFind(MODTREE,acc);if(nx)out.push(nx);}}return out;}
+// ===== THE TEAM ROSTER: a bench of the agents you build (Agents lens). Click cards to build a LINEUP; drag a
+// card (or the lineup) onto a folder -> a Team Sheet shows the context package + who's playing -> launch a
+// folder-scoped session with them. 1 agent = that specialist's persona; 2+ = a captain that delegates. This is
+// where the context payload (what they KNOW) meets the agent roster (WHO works) on one canvas. ================
+var AGENTS=[],LINEUP=[],_agDown=null,_agProxy=null,_agHover=null,_agDragged=false,_famFocusRel=null,_TSREL=null,_TSLINE=[],_TSMODE="team",_TSAGENDA="",_TSPROTO="adaptive",_TSDEVIL=false;
+function agCrest(a,cls){var c=famColor(a.slug||a.title||"agent");return '<div class="'+(cls||"agcrest")+'" style="background:linear-gradient(145deg,'+c.a+','+c.b+')"><span class="mono">'+esc(famInitials(a.title||a.slug))+'</span></div>';}
+function agName(slug){var a=AGENTS.find(function(x){return x.slug===slug;});return a?(a.title||a.slug):slug;}
+function _agToks(s){var out=[],seen={};(String(s||"").toLowerCase().match(/[a-z0-9]{3,}/g)||[]).forEach(function(t){if(!seen[t]){seen[t]=1;out.push(t);}});return out;}
+function agSuggest(rel){var node=modFind(MODTREE,rel)||{};var ft=_agToks((node.name||"")+" "+(node.summary||node.title||""));
+  var sc=AGENTS.map(function(a){var at=_agToks((a.title||a.slug)+" "+(a.desc||a.summary||""));var ov=0;at.forEach(function(t){if(ft.indexOf(t)>=0)ov++;});return {slug:a.slug,s:ov};});
+  sc.sort(function(x,y){return y.s-x.s;});return sc.filter(function(x){return x.s>0;}).map(function(x){return x.slug;});}
+async function loadBench(){try{var r=await(await fetch("/api/agents")).json();AGENTS=(r&&r.agents)||[];}catch(e){AGENTS=[];}renderBench();
+  var row=document.getElementById("benchrow");
+  if(row&&!row._ww){row._ww=1;row.onwheel=function(e){if(Math.abs(e.deltaY)>Math.abs(e.deltaX)){row.scrollLeft+=e.deltaY;e.preventDefault();}};}}
+function benchScroll(d){var r=document.getElementById("benchrow");if(r)r.scrollBy({left:d*300,behavior:"smooth"});}
+function agToggle(slug){var i=LINEUP.indexOf(slug);if(i>=0)LINEUP.splice(i,1);else LINEUP.push(slug);renderBench();}
+function agClearLineup(){LINEUP=[];renderBench();}
+function renderBench(){var el=document.getElementById("benchrow");if(!el)return;
+  if(!AGENTS.length)el.innerHTML='<span class="benchempty">No agents yet &mdash; build one in the Agents lens, then field it here.</span>';
+  else el.innerHTML=AGENTS.map(function(a){var on=LINEUP.indexOf(a.slug)>=0;
+    return '<div class="agcard'+(on?" on":"")+'" data-slug="'+esc(a.slug)+'" title="'+esc(a.desc||a.summary||a.title||a.slug)+'" onmousedown="agDown(event,\''+esc(a.slug)+'\')" ontouchstart="agDown(event,\''+esc(a.slug)+'\')">'
+      +agCrest(a)+'<div class="agmeta"><div class="agname">'+esc(a.title||a.slug)+'</div><div class="agrole">'+esc((a.desc||a.summary||"").slice(0,46))+'</div></div>'
+      +(on?'<div class="agnum">'+(LINEUP.indexOf(a.slug)+1)+'</div>':'')+'</div>';}).join("");
+  var chip=document.getElementById("lineupchip");
+  if(chip)chip.innerHTML=LINEUP.length?('<b>Lineup ('+LINEUP.length+')</b> '+esc(LINEUP.map(agName).join(", "))+' <button class="mini" onmousedown="event.stopPropagation()" onclick="famFieldLineup()">Field on a folder&hellip;</button> <button class="mini" onclick="agClearLineup()">clear</button>'):'<span class="sub">Click agents to build a lineup, or drag one straight onto a folder.</span>';}
+function agHint(rel){var sug=rel?agSuggest(rel).slice(0,4):[];var row=document.getElementById("benchrow");if(!row)return;
+  row.querySelectorAll(".agcard").forEach(function(c){c.classList.toggle("sug",sug.indexOf(c.getAttribute("data-slug"))>=0);});}
+function _agDragSet(){var s=_agDown&&_agDown.slug;if(s&&LINEUP.indexOf(s)>=0&&LINEUP.length)return LINEUP.slice();return s?[s]:LINEUP.slice();}
+function agDown(e,slug){var t=e.touches?e.touches[0]:e;_agDown={slug:slug,x:t.clientX,y:t.clientY};_agDragged=false;
+  window.addEventListener("mousemove",_agMove);window.addEventListener("mouseup",_agUp);
+  window.addEventListener("touchmove",_agMove,{passive:false});window.addEventListener("touchend",_agUp);}
+function _agMove(e){if(!_agDown)return;var t=e.touches?e.touches[0]:e;
+  if(!_agDragged){if(Math.abs(t.clientX-_agDown.x)+Math.abs(t.clientY-_agDown.y)<6)return;_agDragged=true;
+    var set=_agDragSet();_agProxy=document.createElement("div");_agProxy.className="agproxy";
+    _agProxy.innerHTML=set.length>1?('<span class="mono">'+set.length+'</span>'):('<span class="mono">'+esc(famInitials(agName(set[0])))+'</span>');
+    document.body.appendChild(_agProxy);}
+  if(e.cancelable)e.preventDefault();
+  if(_agProxy){_agProxy.style.left=t.clientX+"px";_agProxy.style.top=t.clientY+"px";}
+  var el=document.elementFromPoint(t.clientX,t.clientY);var node=el&&el.closest?el.closest("#famstage .famnode[data-rel]"):null;
+  if(node&&node.classList.contains("ghost"))node=null;
+  if(_agHover&&_agHover!==node)_agHover.classList.remove("drophover");
+  if(node){node.classList.add("drophover");_agHover=node;}else _agHover=null;}
+function _agUp(){window.removeEventListener("mousemove",_agMove);window.removeEventListener("mouseup",_agUp);
+  window.removeEventListener("touchmove",_agMove);window.removeEventListener("touchend",_agUp);
+  var set=_agDragSet(),node=_agHover,slug=_agDown&&_agDown.slug,wasDrag=_agDragged;
+  if(_agProxy){_agProxy.remove();_agProxy=null;}if(_agHover){_agHover.classList.remove("drophover");_agHover=null;}
+  _agDown=null;_agDragged=false;
+  if(wasDrag&&node){var rel=node.getAttribute("data-rel");if(rel!=="__ghost__")famTeamSheet(rel,set);}
+  else if(!wasDrag&&slug)agToggle(slug);}
+function famFieldLineup(){if(_famFocusRel!=null)famTeamSheet(_famFocusRel,LINEUP.slice());else toast("Open a folder (or drag the lineup onto one) to field your team.",4000);}
+function famTeamSheet(rel,slugs){var node=modFind(MODTREE,rel)||{name:((rel||"").split("/").pop()||"root"),rel:rel};
+  slugs=(slugs||[]).filter(function(s){return AGENTS.some(function(a){return a.slug===s;});});
+  _TSREL=rel;_TSLINE=slugs.slice();
+  var solo=slugs.length===1,board=(_TSMODE==="board"&&slugs.length>=2);
+  var lineHTML=slugs.length?slugs.map(function(s,i){var a=AGENTS.find(function(x){return x.slug===s;})||{slug:s,title:s};var role=solo?"plays solo":(board?(i===0?"chair":"board member"):(i===0?"captain":"delegate"));
+    return '<div class="tscard'+(i===0&&!solo?" cap":"")+'">'+agCrest(a,"tscrest")+'<div class="agmeta"><div class="agname">'+esc(a.title||s)+'</div><div class="agrole">'+role+'</div></div><button class="tsx" title="bench this agent" onclick="tsDrop(\''+esc(s)+'\')">&times;</button></div>';}).join(""):'<div class="meta sub" style="padding:6px 2px">Empty &mdash; add from the suggestions below or the bench.</div>';
+  if(board&&_TSDEVIL)lineHTML+='<div class="tscard devil">'+agCrest({slug:"devils-advocate",title:"Devil Advocate"},"tscrest")+'<div class="agmeta"><div class="agname">Devil&#39;s Advocate</div><div class="agrole">appointed &middot; argues against</div></div></div>';
+  var sug=agSuggest(rel).filter(function(s){return slugs.indexOf(s)<0;}).slice(0,4);
+  var sugHTML=sug.length?('<div class="cc-sec" style="margin-top:12px">Suggested starters</div><div class="tssug">'+sug.map(function(s){return '<button class="sugchip" title="add to lineup" onclick="tsAdd(\''+esc(s)+'\')">+ '+esc(agName(s))+'</button>';}).join("")+'</div>'):'';
+  var kind=solo?('Solo &mdash; <b>'+esc(agName(slugs[0]))+'</b> runs this session as your specialist'):board?('Board meeting &mdash; <b>'+esc(agName(slugs[0]))+'</b> chairs; '+slugs.length+' members deliberate on one agenda, then recommend'):(slugs.length>1?('Team &mdash; <b>'+esc(agName(slugs[0]))+'</b> captains, delegates to '+(slugs.length-1)+' teammate'+(slugs.length>2?"s":"")):'Add at least one agent to field');
+  var _protos=[["adaptive","Adaptive","As many rounds as the disagreement needs"],["roundtable","Roundtable","One pass, then synthesize — fast"],["deliberation","Deliberation","Multi-round debate before deciding"]];
+  var _protoChips=_protos.map(function(pp){return '<button class="tsprotochip'+(_TSPROTO===pp[0]?" on":"")+'" title="'+esc(pp[2])+'" onclick="tsProto(\''+esc(pp[0])+'\')">'+esc(pp[1])+'</button>';}).join("");
+  var modeUI=(slugs.length>=2)?('<div class="tsmode"><div class="tsmodeseg"><button class="'+(!board?"on":"")+'" onclick="tsMode(\'team\')" title="One lead divides the work among the team">Delegate</button><button class="'+(board?"on":"")+'" onclick="tsMode(\'board\')" title="All members deliberate on ONE question, each from their own viewpoint">Board meeting</button></div>'
+    +(board?('<div class="tsopt"><span class="tsoptlab">Protocol</span>'+_protoChips+'</div>'
+      +'<label class="tsdevil"><input type="checkbox" '+(_TSDEVIL?"checked":"")+' onchange="tsDevil()"><span class="tsdevlab">Devil&#39;s advocate</span><span class="sub">&mdash; appoint a contrarian to argue against the emerging consensus</span></label>'
+      +'<textarea id="tsAgenda" class="cc-in tsagenda" placeholder="What&#39;s on the agenda? The one question the whole board deliberates &mdash; e.g. ship the v2 rewrite now, or harden v1 first?" oninput="_TSAGENDA=this.value">'+esc(_TSAGENDA||"")+'</textarea>'
+      +'<div class="meta sub" style="margin-top:5px">Each member weighs in from their role&#39;s viewpoint; the chair names the tensions, reconciles them into a recommendation, then asks before executing.</div>'):'')+'</div>'):'';
+  var html='<div class="teamsheet"><div class="tshead"><div><h3 style="margin:0">&#9873; Team Sheet &mdash; '+esc(node.name||"root")+'</h3><div class="meta sub"><code>'+esc(rel||"/")+'</code></div></div></div>'
+    +'<div class="tscols"><div class="tscol" id="tsPayPanel"><div class="meta sub">Loading context package…</div></div>'
+    +'<div class="tscol"><div class="cc-sec">Your lineup <span class="cc-n">'+slugs.length+'</span></div><div class="tslineup">'+lineHTML+'</div>'+sugHTML+'</div></div>'
+    +modeUI
+    +'<div class="tsfoot"><span class="meta">'+kind+'</span><div class="btns"><button class="btn go" onclick="teamKickoff()"'+(slugs.length?"":" disabled")+'>&#9654; '+(board?"Convene the board":"Launch with this team")+'</button></div></div></div>';
+  showM(html);payloadPanel(rel,slugs,"tsPayPanel");}
+function tsMode(m){_TSMODE=m;famTeamSheet(_TSREL,_TSLINE);}
+function tsProto(p){_TSPROTO=p;famTeamSheet(_TSREL,_TSLINE);}
+function tsDevil(){_TSDEVIL=!_TSDEVIL;famTeamSheet(_TSREL,_TSLINE);}
+function tsAdd(slug){if(_TSLINE.indexOf(slug)<0)_TSLINE.push(slug);famTeamSheet(_TSREL,_TSLINE);}
+function tsDrop(slug){_TSLINE=_TSLINE.filter(function(s){return s!==slug;});famTeamSheet(_TSREL,_TSLINE);}
+async function teamKickoff(){var rel=_TSREL,slugs=_TSLINE.slice();if(!slugs.length){toast("Add at least one agent");return;}
+  var board=(_TSMODE==="board"&&slugs.length>=2),seed=null;
+  if(board){seed=((document.getElementById("tsAgenda")||{}).value||_TSAGENDA||"").trim();if(!seed){toast("Add an agenda for the board to deliberate");return;}}
+  busyOn((board?"Convening the board in ":("Fielding "+(slugs.length>1?slugs.length+" agents":agName(slugs[0]))+" in "))+((rel||"").split("/").pop()||"root")+" &mdash; briefing&hellip;");
+  var r;try{r=await(await fetch("/api/module-launch-agents",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rel:rel,agents:slugs,mode:_TSMODE,seed:seed,protocol:_TSPROTO,devil:_TSDEVIL})})).json();}catch(e){r=null;}
+  busyOff();
+  if(r&&r.ok&&r.session){closeM();LINEUP=[];renderBench();toast((board?"Board convened":((slugs.length>1?"Team":agName(slugs[0]))+" fielded"))+" in "+(rel||"root")+" &mdash; opening",3400);gotoLens("sessions");setTimeout(function(){try{openInSessions(r.session);}catch(e){}},350);}
+  else toast((r&&r.error)||"Couldn't field the team",4500);}
+// ---- CONTEXT PAYLOAD INSPECTOR: render the FULL layer list a launch injects (fetched from /api/launch-preview),
+// each layer click-to-open its EXACT text (CLAUDE.md layers editable + Save). So "what the model gets" is visible. --
+var _PAYBACK=null;
+async function payloadPanel(rel,agentsArr,elId){var el=document.getElementById(elId);if(!el)return;_PAYBACK={rel:rel,ag:(agentsArr||[])};
+  var ag=(agentsArr&&agentsArr.length)?agentsArr.join(","):"";var qs="/api/launch-preview?rel="+encodeURIComponent(rel||"");if(ag)qs+="&agents="+encodeURIComponent(ag);
+  var d;try{d=await(await fetch(qs)).json();}catch(e){el.innerHTML='<div class="meta sub">Couldn\'t load the context package.</div>';return;}
+  var rows=(d.layers||[]).map(function(L){var edit=L.editable?'<span class="payedit">edit</span>':'';
+    return '<div class="fampayrow pay-'+esc(L.kind)+((L.rel!=null&&L.rel===rel)?' here':'')+'" title="'+esc(L.hint||"")+'" onclick="payInspect(\''+esc(rel||"")+'\',\''+esc(L.id)+'\',\''+esc(ag)+'\')"><span class="lname">'+esc(L.title)+edit+'</span><span class="famwtn">'+(L.tok?('&#8776;'+kfmt(L.tok)):'&middot;')+'</span></div>';}).join("");
+  rows+='<div class="fampayrow note"><span class="lname">&#65291; your goal &mdash; the first message you send</span><span class="famwtn">&middot;</span></div>';
+  rows+='<div class="fampayrow note"><span class="lname">&#65291; prior transcript &mdash; only when you resume/fork a chat</span><span class="famwtn">&middot;</span></div>';
+  el.innerHTML='<div class="cc-sec">Context package on launch <span class="cc-n">&#8776;'+kfmt(d.total_tok||0)+' tok</span></div><div class="fampaylist">'+rows+'</div><div class="meta sub" style="margin-top:7px">Click any layer to see the <b>exact</b> text the model receives &mdash; CLAUDE.md layers are editable.</div>';}
+function payBack(){if(_PAYBACK){if(_PAYBACK.ag&&_PAYBACK.ag.length)famTeamSheet(_PAYBACK.rel,_PAYBACK.ag.slice());else famOpen(_PAYBACK.rel);}else closeM();}
+async function payInspect(rel,layer,agStr){var qs="/api/layer-content?rel="+encodeURIComponent(rel||"")+"&layer="+encodeURIComponent(layer);if(agStr)qs+="&agents="+encodeURIComponent(agStr);
+  var d;try{d=await(await fetch(qs)).json();}catch(e){d=null;}
+  if(!d||!d.ok){toast("Couldn't load that layer");return;}
+  var body;
+  if(d.editable){body='<textarea id="payEdit" class="cc-in payedit-ta" spellcheck="false">'+esc(d.content||"")+'</textarea>'
+    +'<div class="btns" style="margin-top:10px"><button class="btn" onclick="payBack()">&#8249; Back</button><button class="btn go" onclick="payLayerSave(\''+esc(d.rel!=null?d.rel:(rel||""))+'\')">Save</button></div>';}
+  else{body='<pre class="payview">'+esc(d.content||"(empty)")+'</pre><div class="btns" style="margin-top:10px"><button class="btn" onclick="payBack()">&#8249; Back</button></div>';}
+  showM('<div class="payinspect"><h3 style="margin:0 0 3px">'+esc(d.title||"Layer")+'</h3><div class="meta sub" style="margin-bottom:9px">'+(d.editable?'This file loads verbatim into every session started here. Edit &amp; Save to change what future launches get.':'Read-only &mdash; generated fresh at launch.')+'</div>'+body+'</div>');}
+async function payLayerSave(rel){var ta=document.getElementById("payEdit");if(!ta)return;
+  var r;try{r=await(await fetch("/api/module-md-save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rel:rel,content:ta.value})})).json();}catch(e){r=null;}
+  if(r&&r.ok){toast("Saved — future launches here get this (≈"+kfmt(r.tok)+" tok)",3200);try{famReloadTree();}catch(e){}payBack();}
+  else toast("Save failed: "+((r||{}).error||"?"),4500);}
+function famNode(node,depth){var rel=node.rel||"",brand=PROJBRANDS[rel],kids=node.children||[],open=famIsOpen(node,depth);
+  var recent=node.last_convo&&((Date.now()/1000-node.last_convo)<86400*3);
+  var isGhostP=FDOOR.ghost&&FDOOR.ghost.parent===rel;if(isGhostP)open=true;
+  var cls="famnode"+(depth===0?" root":"")+(recent?" recent":"")+((FDOOR.target===rel&&rel!=="")?" aim":"");
+  var acts='<div class="famacts"><button title="Launch a session in this project" onclick="event.stopPropagation();famLaunch(\''+esc(rel)+'\')">&#9654;</button>'
+    +'<button title="Add a sub-project under this one" onclick="event.stopPropagation();famAddChild(\''+esc(rel)+'\')">+</button>'
+    +'<button title="Brand this project (logo / color)" onclick="event.stopPropagation();famBrand(\''+esc(rel)+'\')">&#9998;</button></div>';
+  var meta='<div class="fammeta">'+(kids.length?'<span class="famchip">'+kids.length+'</span>':'')+(node.last_convo?'<span title="last activity here">&#128172; '+tago(node.last_convo)+'</span>':'')+'</div>';
+  var sm=node.summary||node.title||"";var sub=sm?'<div class="famsub" title="'+esc(sm)+'">'+esc(sm)+'</div>':'';
+  var pip=kids.length?'<div class="fampip" title="'+(open?"Collapse":("Expand "+kids.length))+'" onclick="event.stopPropagation();famToggle(\''+esc(rel)+'\','+(open?1:0)+')">'+(open?"−":"+")+'</div>':'';
+  var _wfrac=FAMMAXW?Math.min(1,(node.tok||0)/FAMMAXW):0;
+  var card='<div class="'+cls+'" data-rel="'+esc(rel)+'" style="--wt:'+_wfrac.toFixed(3)+'" onmouseenter="agHint(\''+esc(rel)+'\')" onmouseleave="agHint(\'\')" onclick="famOpen(\''+esc(rel)+'\')">'+acts+famCrest(node,brand,"famcrest")+'<div class="famname">'+esc(node.name||"project")+'</div>'+meta+sub+famWeight(node)+pip+'</div>';
+  var inner="";
+  if(kids.length&&open)inner+=kids.map(function(k){return famNode(k,depth+1);}).join("");
+  if(isGhostP)inner+=famGhostLi();
+  return '<li>'+card+(inner?('<ul>'+inner+'</ul>'):'')+'</li>';}
+function famToggle(rel,wasOpen){FAMOPEN[rel]=wasOpen?false:true;famRerender();}
+function famRerender(){var st=document.getElementById("famstage");if(st&&MODTREE){FAMMAXW=famComputeMax(MODTREE)||1;st.innerHTML='<ul class="famtree">'+famNode(MODTREE,0)+'</ul>';}}
+async function loadFamTree(){
+  var _prev=document.getElementById("fdoorIn");if(_prev&&_prev.value&&!FDOOR.query)FDOOR.query=_prev.value;   // survive a re-render mid-type
+  try{MODTREE=await(await fetch("/api/module-tree")).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load projects.");return;}
+  try{PROJBRANDS=await(await fetch("/api/project-brands")).json();}catch(e){PROJBRANDS={};}
+  FAMMAXW=famComputeMax(MODTREE)||1;
+  var fdoor='<div class="fdoor"><div class="fdoorbar">'
+    +'<input id="fdoorIn" class="fdoorin" autocomplete="off" spellcheck="false" placeholder="What do you want to work on? (I\'ll find the right place — nothing happens until you choose)">'
+    +'<button class="btn" id="fdoorGo" onclick="fdoorSubmit()" title="Show me where this goes (does not create or open anything)">Find it</button></div>'
+    +'<div class="fdoorchip" id="fdoorChip"></div></div>';
+  var bar='<div class="projbar"><div class="projseg"><button class="on">Tree</button><button onclick="setProjView(\'list\')">List</button></div>'
+    +'<div class="meta sub" style="margin-left:auto">Drag to pan &middot; scroll to zoom &middot; the bar on each card = that folder&#39;s context weight (open a card for the full launch package)</div></div>';
+  var canvas='<div class="famwrap" id="famwrap"><div class="famstage" id="famstage"><ul class="famtree">'+famNode(MODTREE,0)+'</ul></div>'
+    +'<div class="famtool"><div class="famzoom"><button title="Zoom out" onclick="famZoom(-1)">&#8722;</button><button title="Fit to view" onclick="famFit()">&#10530;</button><button title="Zoom in" onclick="famZoom(1)">+</button></div></div>'
+    +'<div class="famhint">Drag to pan &middot; scroll to zoom</div></div>';
+  var bench='<div class="bench" id="bench"><div class="benchhead"><span class="benchttl">&#9873; Team roster</span><span class="lineupchip" id="lineupchip"></span><button class="benchscroll" onclick="benchScroll(-1)" title="Scroll roster left">&#9664;</button><button class="benchscroll" onclick="benchScroll(1)" title="Scroll roster right">&#9654;</button><button class="mini" onclick="gotoLens(\'agents\')" title="Build a new agent in the Agents lens">+ build agent</button></div><div class="benchrow" id="benchrow"><span class="benchempty">Loading your agents&hellip;</span></div></div>';
+  document.getElementById("grid").innerHTML='<div class="modstack">'+fdoor+bar+canvas+bench+'</div>';
+  famBind();setTimeout(famFit,60);loadBench();
+  var fi=document.getElementById("fdoorIn");
+  if(fi){fi.addEventListener("input",function(){clearTimeout(_fdoorT);_fdoorT=setTimeout(fdoorRoute,380);});
+    fi.addEventListener("keydown",function(e){if(e.key==="Enter"){e.preventDefault();fdoorSubmit();}});
+    if(FDOOR.query){fi.value=FDOOR.query;setTimeout(function(){fdoorRoute();},120);}else setTimeout(function(){try{fi.focus();}catch(e){}},80);}
+}
+function famBind(){var w=document.getElementById("famwrap");if(!w)return;
+  var hit=function(t){return t&&t.closest&&t.closest(".famnode,.famzoom,.fampip,.famacts,button,a");};
+  w.onmousedown=function(e){if(hit(e.target))return;_famDrag={x:e.clientX-FAMX,y:e.clientY-FAMY};w.classList.add("grabbing");e.preventDefault();};
+  window.removeEventListener("mousemove",famMove);window.addEventListener("mousemove",famMove);
+  window.removeEventListener("mouseup",famUp);window.addEventListener("mouseup",famUp);
+  w.onwheel=function(e){e.preventDefault();var r=w.getBoundingClientRect();famZoomAt(e.deltaY<0?1.12:1/1.12,e.clientX-r.left,e.clientY-r.top);};
+  w.ontouchstart=function(e){if(e.touches.length!=1||hit(e.touches[0].target))return;var t=e.touches[0];_famDrag={x:t.clientX-FAMX,y:t.clientY-FAMY};};
+  w.ontouchmove=function(e){if(!_famDrag||e.touches.length!=1)return;var t=e.touches[0];FAMX=t.clientX-_famDrag.x;FAMY=t.clientY-_famDrag.y;famApply();e.preventDefault();};
+  w.ontouchend=function(){_famDrag=null;};}
+function famMove(e){if(!_famDrag)return;FAMX=e.clientX-_famDrag.x;FAMY=e.clientY-_famDrag.y;famApply();}
+function famUp(){if(_famDrag){_famDrag=null;var w=document.getElementById("famwrap");if(w)w.classList.remove("grabbing");}}
+function famApply(smooth){var st=document.getElementById("famstage");if(!st)return;st.style.transition=smooth?"transform .45s cubic-bezier(.22,.61,.36,1)":"none";st.style.transform="translate("+FAMX+"px,"+FAMY+"px) scale("+FAMZOOM+")";}
+function famZoom(d){var w=document.getElementById("famwrap");if(!w)return;var r=w.getBoundingClientRect();famZoomAt(d>0?1.15:1/1.15,r.width/2,r.height/2);}
+function famZoomAt(f,mx,my){var nz=Math.max(0.25,Math.min(2.4,FAMZOOM*f));f=nz/FAMZOOM;FAMX=mx-(mx-FAMX)*f;FAMY=my-(my-FAMY)*f;FAMZOOM=nz;famApply();}
+function famFit(){try{var w=document.getElementById("famwrap"),st=document.getElementById("famstage");if(!w||!st)return;
+  st.style.transform="none";var tw=st.offsetWidth,th=st.offsetHeight,vw=w.clientWidth,vh=w.clientHeight;
+  var z=Math.min((vw-24)/tw,(vh-24)/th,1);z=Math.max(0.28,z);FAMZOOM=z;FAMX=Math.max(12,(vw-tw*z)/2);
+  // anchor the root near the TOP (not vertical-center) so expanding a branch grows DOWN into the visible canvas
+  FAMY=Math.max(16,Math.min((vh-th*z)/2,vh*0.10));famApply();}catch(e){}}
+function famLaunch(rel){modLaunch(rel);}
+async function famOpen(rel){_famFocusRel=rel;var node=modFind(MODTREE,rel)||MODTREE,brand=PROJBRANDS[rel];
+  var convos=[],files=[];
+  try{convos=await(await fetch("/api/module-convos?rel="+encodeURIComponent(rel))).json();}catch(e){}
+  try{files=await(await fetch("/api/module-files?rel="+encodeURIComponent(rel))).json();}catch(e){}
+  var cn=0,conv="";
+  (convos||[]).forEach(function(c){if(c.ralph){cn+=c.count;conv+='<div class="famrow"><span>&#128257; '+esc(c.ralph)+' <span class="sub">&middot; '+c.count+' iters</span></span></div>';}
+    else{cn++;MODCONVOMAP[c.id]=c;conv+='<div class="famrow"><span class="lbl" title="'+esc(c.label||"")+'">'+esc((c.label||"(no opening message)").slice(0,54))+'</span><button class="mini go" onclick="closeM();modResumeId(\''+esc(c.id)+'\',false)">&#9654; resume</button></div>';}});
+  if(!cn)conv='<div class="meta" style="padding:9px">No conversations here yet.</div>';
+  var fil=(files||[]).map(function(f){return '<div class="famrow"><a href="'+fileOpenHref(f)+'" target="_blank" rel="noopener" style="color:inherit;font-weight:600">&#128196; '+esc(f.name)+'</a><span class="sub">'+fmtBytes(f.size)+'</span></div>';}).join("")||'<div class="meta" style="padding:9px">No deliverables here yet.</div>';
+  var sm=node.summary||node.title||"";
+  var pay='<div id="fdPayPanel" class="fampay"><div class="meta sub">Loading context package…</div></div>';
+  var html='<div class="famsheet"><div class="fshead">'+famCrest(node,brand,"fscrest")
+    +'<div style="min-width:0"><h3 style="margin:0">'+esc(node.name||"project")+'</h3><div class="meta sub"><code>'+esc(rel||"/")+'</code></div>'
+    +(sm?'<div class="meta" style="margin-top:3px">'+esc(sm)+'</div>':'')+'</div></div>'
+    +'<div class="btns" style="margin-top:12px">'
+    +'<button class="btn go" onclick="closeM();famLaunch(\''+esc(rel)+'\')">&#9654; Launch session here</button>'
+    +'<button class="btn" onclick="closeM();setProjView(\'list\');loadModules(\''+esc(rel)+'\')">Open full folder view</button>'
+    +'<button class="btn" onclick="closeM();famTeamSheet(\''+esc(rel)+'\',(LINEUP.length?LINEUP.slice():agSuggest(\''+esc(rel)+'\').slice(0,2)))">&#9873; Field a team</button>'
+    +'<button class="btn" onclick="famBrand(\''+esc(rel)+'\')">Brand</button></div>'+pay
+    +'<div class="famcols"><div><div class="cc-sec">Conversations here'+(cn?' <span class="cc-n">'+cn+'</span>':'')+'</div><div class="famscroll">'+conv+'</div></div>'
+    +'<div><div class="cc-sec">Files made here'+(files.length?' <span class="cc-n">'+files.length+'</span>':'')+'</div><div class="famscroll">'+fil+'</div></div></div></div>';
+  showM(html);payloadPanel(rel,null,"fdPayPanel");}
+async function famApplyBrand(rel,body){var r;try{r=await(await fetch("/api/project-brand",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();}catch(e){r=null;}
+  if(!(r&&r.ok)){toast("Failed: "+((r||{}).error||"?"),5000);return null;}
+  try{PROJBRANDS=await(await fetch("/api/project-brands")).json();}catch(e){}famRerender();return r;}
+async function famPickColor(rel,hex){var r=await famApplyBrand(rel,{rel:rel,color:hex});if(r){toast("Color set");famBrand(rel);}}
+function famUploadLogo(rel,input){var f=input.files&&input.files[0];if(!f)return;
+  if(f.size>3*1024*1024){toast("Logo must be under 3 MB",4000);return;}
+  toast("Uploading logo…");var rd=new FileReader();rd.onload=async function(){var r=await famApplyBrand(rel,{rel:rel,filename:f.name,mime:f.type||"",data:rd.result});if(r){toast("Logo set");famBrand(rel);}};rd.readAsDataURL(f);}
+async function famClearBrand(rel,what){var r;try{r=await(await fetch("/api/project-brand-clear",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rel:rel,what:what})})).json();}catch(e){r=null;}
+  if(r&&r.ok){try{PROJBRANDS=await(await fetch("/api/project-brands")).json();}catch(e){}famRerender();toast("Reverted to auto");famBrand(rel);}else toast("Failed",4000);}
+function famBrand(rel){var node=modFind(MODTREE,rel)||{rel:rel,name:(rel.split("/").pop()||"project")},brand=PROJBRANDS[rel]||{};
+  var sw=["#c9a227","#4cae4f","#4a90d9","#9b6dd6","#e0669a","#e08a3c","#3bb0b8","#d85a52","#7a8899"];
+  var swh=sw.map(function(c){return '<button title="'+c+'" onclick="famPickColor(\''+esc(rel)+'\',\''+c+'\')" style="width:30px;height:30px;border-radius:9px;border:1px solid var(--line);background:'+c+';cursor:pointer;padding:0"></button>';}).join("");
+  var html='<div style="max-width:460px"><h3 style="margin:0 0 4px">Brand: '+esc(node.name||"project")+'</h3>'
+    +'<div class="meta sub" style="margin-bottom:12px">Give this project a real logo (a client\'s brand) or a color for its auto monogram. It shows on the tree and in the folder view.</div>'
+    +'<div class="cc-sec">Logo</div><div style="display:flex;flex-direction:row;align-items:center;gap:12px;margin:7px 0 14px">'+famCrest(node,brand,"fscrest")
+    +'<div><input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" class="cc-in" onchange="famUploadLogo(\''+esc(rel)+'\',this)">'
+    +(brand.logo?'<div style="margin-top:7px"><button class="mini danger" onclick="famClearBrand(\''+esc(rel)+'\',\'logo\')">remove logo</button></div>':'')+'</div></div>'
+    +'<div class="cc-sec">Monogram color</div><div style="display:flex;flex-direction:row;flex-wrap:wrap;gap:7px;align-items:center;margin:7px 0 6px">'+swh
+    +'<input type="color" title="custom color" onchange="famPickColor(\''+esc(rel)+'\',this.value)" style="width:34px;height:34px;border:1px solid var(--line);border-radius:9px;background:var(--card);cursor:pointer;padding:2px">'
+    +(brand.color?'<button class="mini" onclick="famClearBrand(\''+esc(rel)+'\',\'color\')">auto</button>':'')+'</div>'
+    +'<div class="btns" style="margin-top:14px"><button class="btn go" onclick="closeM()">Done</button></div></div>';
+  showM(html);}
+async function famReloadTree(){try{MODTREE=await(await fetch("/api/module-tree")).json();}catch(e){}try{PROJBRANDS=await(await fetch("/api/project-brands")).json();}catch(e){}famRerender();}
+function famFlash(rel){var el=document.querySelector('#famstage .famnode[data-rel="'+(rel||"").replace(/"/g,'\\"')+'"]');if(!el)return;el.classList.remove("flash");void el.offsetWidth;el.classList.add("flash");try{el.scrollIntoView({block:"center",inline:"center",behavior:"smooth"});}catch(e){}}
+async function famAddChild(parent){
+  var name=(await promptM("New project / sub-tool folder name (letters, numbers, - _):")||"").trim();if(!name)return;
+  var summary=(await promptM("One line -- what is this project?")||"").trim();
+  await famModCreate(parent,name,summary,false);}
+async function famModCreate(parent,name,summary,adopt){
+  var r;try{r=await(await fetch("/api/module-add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({parent:parent,name:name,summary:summary,adopt:adopt})})).json();}catch(e){r=null;}
+  if(r&&r.needs_confirm){
+    if(await confirmM('A folder named "'+name+'" already exists here ('+r.count+" item"+(r.count==1?"":"s")+(r.hint?" -- "+r.hint:"")+').\n\nDocument this existing folder as a project? Nothing inside it changes -- only a CLAUDE.md is added so it becomes navigable.'))
+      await famModCreate(parent,name,summary,true);
+    return;}
+  if(r&&r.ok){toast(r.adopted?('Adopted "'+name+'" as a project.'):'Project "'+name+'" created.',4000);
+    FAMOPEN[parent]=true;await famReloadTree();famFlash(r.rel);}
+  else toast("Failed: "+((r||{}).error||"?"),5000);}
+// ---- THE FRONT DOOR: type-to-locate over the tree --------------------------------------------------------
+function setAncestorsOpen(rel){FAMOPEN[""]=true;if(!rel)return;var parts=rel.split("/"),acc="";for(var i=0;i<parts.length-1;i++){acc=acc?acc+"/"+parts[i]:parts[i];FAMOPEN[acc]=true;}}
+function famPanToRel(rel){
+  var openRel=(rel==="__ghost__"&&FDOOR.ghost)?FDOOR.ghost.parent:rel;setAncestorsOpen(openRel);famRerender();
+  requestAnimationFrame(function(){requestAnimationFrame(function(){
+    var wrap=document.getElementById("famwrap");if(!wrap)return;
+    var card=document.querySelector('#famstage .famnode[data-rel="'+String(rel).replace(/"/g,'\\"')+'"]');if(!card)return;
+    var wr=wrap.getBoundingClientRect(),cr=card.getBoundingClientRect();
+    FAMX+=(wr.left+wr.width/2)-(cr.left+cr.width/2);
+    FAMY+=(wr.top+wr.height*0.40)-(cr.top+cr.height/2);
+    famApply(true);});});}
+function fdoorSuggestName(q){var stop={the:1,a:1,an:1,for:1,to:1,my:1,our:1,on:1,of:1,and:1,with:1,work:1,working:1,about:1,new:1,i:1,want:1,wanna:1,need:1,help:1,me:1,in:1,at:1,do:1,some:1,stuff:1,thing:1,things:1,lets:1,let:1,build:1,make:1,start:1,get:1,setup:1,set:1,up:1};
+  var w=(q.toLowerCase().match(/[a-z0-9]+/g)||[]).filter(function(x){return x.length>2&&!stop[x];});
+  return (w.slice(0,3).join("-")||"new-project").slice(0,36);}
+async function fdoorRoute(){
+  var fi=document.getElementById("fdoorIn");if(!fi)return;var q=(fi.value||"").trim();FDOOR.query=q;
+  if(q.length<4){fdoorClearAim();return;}
+  var _c=document.getElementById("fdoorChip");if(_c)_c.innerHTML='<span style="opacity:.7">finding your spot&hellip;</span>';
+  var r;try{r=await(await fetch("/api/route?q="+encodeURIComponent(q))).json();}catch(e){if(_c)_c.innerHTML='<span style="opacity:.7">couldn\'t reach the router — try again</span>';return;}
+  if(((document.getElementById("fdoorIn")||{}).value||"").trim()!==q)return;   // a newer keystroke won -> drop stale
+  FDOOR.route=r;var d=r&&r.destination;
+  if(d&&d.rel){FDOOR.ghost=null;FDOOR.target=d.rel;famRerender();famPanToRel(d.rel);}
+  else if(r&&r.needs_new_home){FDOOR.target=null;FDOOR.ghost={parent:r.suggested_parent||"",name:fdoorSuggestName(q),query:q};famRerender();famPanToRel("__ghost__");}
+  else {FDOOR.target=null;FDOOR.ghost=null;famRerender();}
+  fdoorPaint();}
+function fdoorClearAim(){FDOOR.route=null;FDOOR.target=null;FDOOR.ghost=null;var o=document.getElementById("fdoact");if(o)o.remove();var c=document.getElementById("fdoorChip");if(c)c.innerHTML="";famRerender();}
+function fdoorPaint(){
+  var wrap=document.getElementById("famwrap");if(!wrap)return;
+  var old=document.getElementById("fdoact");if(old)old.remove();
+  var chip=document.getElementById("fdoorChip"),r=FDOOR.route;if(!r){if(chip)chip.innerHTML="";return;}
+  if(FDOOR.target){var d=r.destination||{},leaf=FDOOR.target.split("/").pop();
+    if(chip)chip.innerHTML='Found it &rarr; <b>'+esc(FDOOR.target)+'</b> <span style="opacity:.7">('+Math.round((d.confidence||0)*100)+'% match'+(r.llm?', smart':'')+')</span>';
+    var alts=(r.alternatives||[]).filter(function(a){return a.rel&&a.rel!==FDOOR.target;}).slice(0,3);
+    var altH=alts.length?'<span class="fdalt">or:'+alts.map(function(a){return '<button onclick="fdoorAim(\''+esc(a.rel)+'\')" title="'+esc(a.rel)+'">'+esc(a.rel.split("/").pop())+'</button>';}).join("")+'</span>':'';
+    wrap.insertAdjacentHTML("beforeend",'<div class="fdoact" id="fdoact"><span class="fdtxt">Start here: <b>'+esc(leaf)+'</b></span>'
+      +'<button class="mini go" onclick="fdoorStart()">&#9654; Start work here</button>'
+      +'<button class="mini" onclick="fdoorOpen()">Just open it</button>'+altH
+      +'<button class="mini" title="not the right spot? let a concierge place you" onclick="fdoorConcierge()">let a concierge help</button>'
+      +'<div class="fdwhy">Starting here hands the agent this project&#39;s files + past chats as context automatically.</div></div>');
+  } else if(FDOOR.ghost){var g=FDOOR.ghost,r2=FDOOR.route||{};
+    // "did you mean" -- existing near-matches from the router, so you pick an EXISTING folder instead of making a dup
+    var near=(r2.alternatives||[]).filter(function(a){return a.rel;}).slice(0,3);
+    var dym=near.length?'<div class="fdalt" style="width:100%;justify-content:center">Did you mean: '+near.map(function(a){return '<button onclick="fdoorAim(\''+esc(a.rel)+'\')" title="open the existing '+esc(a.rel)+'">'+esc(a.rel.split("/").pop())+'</button>';}).join("")+'</div>':'';
+    // parent chips -- the top-level areas of YOUR tree (+ root), so you choose where a NEW one goes; nothing hardcoded
+    var areas=((MODTREE&&MODTREE.children)||[]).map(function(k){return k.rel;});areas.unshift("");
+    var pchips='<div class="fdalt" style="width:100%;justify-content:center">Put it under: '+areas.slice(0,9).map(function(rel){var on=(g.parent||"")===rel;return '<button onclick="fdoorSetParent(\''+esc(rel)+'\')"'+(on?' style="border-color:var(--accent);color:var(--accent)"':'')+'>'+esc(rel?rel.split("/").pop():"root")+'</button>';}).join("")+'</div>';
+    if(chip)chip.innerHTML=(near.length?'No exact match':'New spot')+' &mdash; open a near one below, or create <b>'+esc(g.name)+'</b> under <b>'+esc(g.parent||"root")+'</b>.';
+    wrap.insertAdjacentHTML("beforeend",'<div class="fdoact" id="fdoact"><span class="fdtxt">New project <b>'+esc(g.name)+'</b> under <b>'+esc(g.parent||"root")+'</b></span>'
+      +'<button class="mini go" onclick="fdoorCreate()">Create &amp; start</button>'
+      +'<button class="mini" onclick="fdoorRename()">rename</button>'
+      +'<button class="mini" title="not sure? let a concierge place you" onclick="fdoorConcierge()">let a concierge help</button>'
+      +dym+pchips
+      +'<div class="fdwhy">Or drag the dashed card onto any project to place it there.</div></div>');
+  } else { if(chip)chip.innerHTML='Not sure where this lives &mdash; <a onclick="fdoorConcierge()" style="color:var(--accent);cursor:pointer">let a concierge help</a>.'; }}
+function fdoorAim(rel){FDOOR.ghost=null;FDOOR.target=rel;famRerender();famPanToRel(rel);fdoorPaint();}
+function fdoorSetParent(rel){if(!FDOOR.ghost)return;FDOOR.ghost.parent=rel;famRerender();famPanToRel("__ghost__");fdoorPaint();}
+// "Find it" + Enter REVEAL where the work goes -- they NEVER create or open anything. Creating/opening is
+// ONLY the explicit labelled buttons (Start work here / Create & start / concierge). So a laggy box + a
+// panicked double-Enter can no longer spawn folders or sessions you never asked for.
+function fdoorSubmit(){clearTimeout(_fdoorT);var fi=document.getElementById("fdoorIn");if(!fi)return;
+  if((fi.value||"").trim().length<4){toast("Type a few words about what you want to work on");return;}
+  var c=document.getElementById("fdoorChip");if(c)c.innerHTML='<span style="opacity:.7">finding your spot&hellip;</span>';
+  fdoorRoute();}
+async function fdoorStart(){var rel=FDOOR.target,q=FDOOR.query;if(!rel||_fdoorActing)return;_fdoorActing=true;   // guard: no double-open
+  busyOn("Opening "+(rel.split("/").pop())+" -- briefing the agent…");
+  var r;try{r=await(await fetch("/api/frontdesk",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:q,rel:rel})})).json();}catch(e){r=null;}
+  busyOff();_fdoorActing=false;
+  if(r&&r.ok&&r.session){toast("Opening in "+(r.placed||rel)+" -- the agent starts already briefed",3200);gotoLens("sessions");setTimeout(function(){try{openInSessions(r.session);}catch(e){}},350);}
+  else toast((r&&r.error)||"Couldn't open that",4000);}
+function fdoorOpen(){if(FDOOR.target)famOpen(FDOOR.target);}
+async function fdoorCreate(){var g=FDOOR.ghost;if(!g||_fdoorActing)return;_fdoorActing=true;   // guard: no double-create
+  busyOn("Creating "+g.name+"…");
+  var r;try{r=await(await fetch("/api/module-add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({parent:g.parent,name:g.name,summary:g.query,adopt:true})})).json();}catch(e){r=null;}
+  if(!(r&&r.ok)){busyOff();_fdoorActing=false;toast("Couldn't create: "+((r||{}).error||"?"),5000);return;}
+  var newRel=r.rel,q=g.query;FDOOR.ghost=null;FDOOR.target=newRel;await famReloadTree();
+  var f;try{f=await(await fetch("/api/frontdesk",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:q,rel:newRel})})).json();}catch(e){f=null;}
+  busyOff();_fdoorActing=false;
+  if(f&&f.ok&&f.session){toast("Created "+newRel+" -- opening a briefed session",3200);gotoLens("sessions");setTimeout(function(){try{openInSessions(f.session);}catch(e){}},350);}
+  else{toast("Created "+newRel,2800);famPanToRel(newRel);fdoorPaint();}}
+async function fdoorRename(){var g=FDOOR.ghost;if(!g)return;var nm=(await promptM("Name for the new project (letters, numbers, - _):",g.name)||"").trim();if(!nm)return;
+  g.name=(nm.replace(/[^A-Za-z0-9_-]/g,"").slice(0,48))||g.name;famRerender();famPanToRel("__ghost__");fdoorPaint();}
+async function fdoorConcierge(){var q=FDOOR.query||((document.getElementById("fdoorIn")||{}).value||"").trim();if(!q){toast("Tell me what you want to work on first");return;}
+  if(_fdoorActing)return;_fdoorActing=true;   // guard: no double-spawn
+  busyOn("Bringing in a concierge to place this…");
+  var r;try{r=await(await fetch("/api/frontdesk",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:q})})).json();}catch(e){r=null;}
+  busyOff();_fdoorActing=false;
+  if(r&&r.ok&&r.session){toast("Bringing in a concierge to place this with you…",3000);gotoLens("sessions");setTimeout(function(){try{openInSessions(r.session);}catch(e){}},350);if(r.concierge&&typeof fdFollow==="function")fdFollow(r.session);}
+  else toast((r&&r.error)||"Couldn't start a concierge",4000);}
+// ghost drag: a proxy follows the cursor; the project under it highlights; drop re-homes the ghost (works
+// under the pan/zoom transform because elementFromPoint uses screen coords).
+function fdoorGhostDown(e){if(!FDOOR.ghost)return;e.preventDefault();e.stopPropagation();
+  var pt=e.touches?e.touches[0]:e;
+  _fdoorProxy=document.createElement("div");_fdoorProxy.className="fdoorproxy";_fdoorProxy.style.background="var(--card2)";
+  _fdoorProxy.innerHTML='<span class="mono" style="color:var(--accent)">'+esc(famInitials(FDOOR.ghost.name))+'</span>';
+  document.body.appendChild(_fdoorProxy);_fdoorMove(pt);
+  window.addEventListener("mousemove",_fdoorDrag);window.addEventListener("mouseup",_fdoorUp);
+  window.addEventListener("touchmove",_fdoorDrag,{passive:false});window.addEventListener("touchend",_fdoorUp);}
+function _fdoorMove(pt){if(_fdoorProxy){_fdoorProxy.style.left=pt.clientX+"px";_fdoorProxy.style.top=pt.clientY+"px";}}
+function _fdoorDrag(e){if(!_fdoorProxy)return;if(e.cancelable)e.preventDefault();var pt=e.touches?e.touches[0]:e;_fdoorMove(pt);
+  var el=document.elementFromPoint(pt.clientX,pt.clientY);var node=el&&el.closest?el.closest('#famstage .famnode[data-rel]'):null;
+  if(node&&node.classList.contains("ghost"))node=null;
+  if(_fdoorHover&&_fdoorHover!==node)_fdoorHover.classList.remove("drophover");
+  if(node){node.classList.add("drophover");_fdoorHover=node;}else if(!node&&_fdoorHover){_fdoorHover=null;}}
+function _fdoorUp(){window.removeEventListener("mousemove",_fdoorDrag);window.removeEventListener("mouseup",_fdoorUp);
+  window.removeEventListener("touchmove",_fdoorDrag);window.removeEventListener("touchend",_fdoorUp);
+  if(_fdoorProxy){_fdoorProxy.remove();_fdoorProxy=null;}
+  var target=_fdoorHover;if(_fdoorHover){_fdoorHover.classList.remove("drophover");_fdoorHover=null;}
+  if(target&&FDOOR.ghost){var rel=target.getAttribute("data-rel");if(rel==="__ghost__")return;FDOOR.ghost.parent=rel;famRerender();famPanToRel("__ghost__");fdoorPaint();toast("Moved -- new project will go under "+(rel.split("/").pop()||"root"));}}
 function toggleRalph(sid){const el=document.getElementById(sid),ar=document.getElementById('ar_'+sid);if(!el)return;
   const open=el.style.display!=='none';el.style.display=open?'none':'';if(ar)ar.textContent=open?'▶':'▼';}
 async function modResumeId(id,fork){const c=MODCONVOMAP[id]; if(!c)return;
@@ -27602,7 +28519,7 @@ var HELP={
   agentlab:{t:'Agent Lab',sub:'Experimental \u2014 run specialist subagents as one-shot functions and parallel panels',h:'<p><span class="badge bdg-amber">Experimental</span> Agent Lab is a workbench for our specialist subagents (code-reviewer, cost-reporter, deploy-checker, incident-scanner, security-auditor, and any others the node exposes). Features here are being worked out; when one proves itself it graduates into core or ships as an extension.</p><p><b>Run a specialist</b> \u2014 pick one agent, type a task, and Run it as a one-shot function; you get the answer plus its cost and duration.</p><p><b>Panel</b> \u2014 select several specialists and give them ONE task; they run in parallel and answers land side by side as each finishes, a quick dynamic mini-workflow.</p><p>Every run uses the node&rsquo;s own subscription login.</p>'},
  pillars:{t:'Pillars',sub:'The major building blocks of your product, each with a status and what is in progress.',h:'<p><b>What:</b> the big pieces your product is made of -- each a card showing its health and the item being worked on right now.</p><p><b>Why:</b> one glance tells you what exists and where the active work is, without digging through folders.</p><p><b>How:</b> click a card to drill into its areas, or use the launch button to start a working session focused on that pillar.</p>'},
  routines:{t:'Routines',sub:'Recurring jobs that run on a schedule -- a nightly report, a weekly cleanup, and so on.',h:'<p><b>What:</b> a routine is a task that runs itself on a schedule (daily, weekly, or on demand) instead of you remembering to trigger it.</p><p><b>Why:</b> the repeatable chores -- a morning digest, a backup, a sync -- happen on their own, and this tab shows when each last ran and whether it worked.</p><p><b>How:</b> hit Run now to fire one immediately, or ask your Chief of Staff: \'set up a routine that emails me a summary every weekday at 8am.\'</p>'},
- modules:{t:'Projects',sub:'Your tools and work, organized as a tidy folder tree you can drill into.',h:'<p><b>What:</b> a browsable map of everything in this workspace -- each folder is a tool, project, or area, with a one-line description of what it is.</p><p><b>Why:</b> it keeps related work together so you and your agents always know where something lives and can pick up past conversations or files for that area.</p><p><b>How:</b> click a card to go deeper, use launch to start a session in that folder, or ask your Chief of Staff: \'make a new module for the Johnson project.\'</p>'},
+ modules:{t:'Projects',sub:'Your projects as a visual family tree (or a folder list) you can drill into and launch from.',h:'<p><b>What:</b> every project/area in this workspace, shown two ways -- a <b>Tree</b> (an ancestry-style map where each project is a branded card connected to its sub-projects) and a <b>List</b> (the classic folder drill). Toggle at the top-left.</p><p><b>Why:</b> the tree gives you the whole shape of your work at a glance -- what lives under what, and which branch you touched most recently -- while keeping related conversations and files together per project.</p><p><b>How:</b> in the tree, drag to pan and scroll to zoom; click a project to open it (its past conversations + delivered files), use the &#9654; button to launch a session there, or the &#9998; button to give it a brand logo or color. Or ask your Chief of Staff: \'make a new project for the Johnson account.\'</p>'},
  files:{t:'Files',sub:'Every file your agents make for you, newest first -- open or download from any device.',h:'<p>Everything your agents make for you, newest first -- open or download from any device, including your phone. Email attachments you <b>Save to</b> a folder land here too.</p>'},
  gmail:{t:'Gmail',sub:'A full email inbox built in -- read, triage, and draft replies without leaving the app.',h:'<p>Keyboard-first triage: <b>j/k</b> move, <b>Enter</b> open, <b>e</b> archive, <b>s</b> star, <b>r</b> reply, <b>c</b> compose, <b>z</b> undo. Saved lanes, a threaded reader, and search are all built in.</p><p><b>Smart reply</b> drafts a response <i>in your voice</i> using everything we know about the sender -- past emails, calls, calendar, files, pipeline -- and stages it as a Gmail <b>draft</b>. It <b>never sends</b>; you review and click Send.</p><p>Attachments preview and download inline, and <b>Save to</b> drops a file straight into a client or project folder. New mail appears on its own.</p>'},
  calendar:{t:'Calendar',sub:'Your calendar -- see your day or week and add events by just typing what you mean.',h:'<p>Day, week, month, or agenda view. <b>Drag</b> the grid to create an event, drag the edges to resize, drag to move. <b>Just type</b> what you mean -- "lunch with Sam thu 1pm" -- and it books it. Click an event to edit, RSVP, or delete (with undo). The gold line is now.</p>'},
@@ -28382,13 +29299,18 @@ function applyPreset(){
   {var _ab=document.querySelector('#lens button[data-l="accounts"]');if(_ab)_ab.style.display=(window.CC&&window.CC.accountWallet)?'':'none';}  // Claude Accounts lens self-hides until the wallet is enabled on this node
   {var _tk=document.querySelector('#lens button[data-l="tasks"]');if(_tk)_tk.style.display='';}  // Tasks is a built-in feature -- always available, outside the preset lens list
   {var _fd=document.querySelector('#lens button[data-l="frontdesk"]');if(_fd)_fd.style.display='';}  // Front Desk: built-in, always available (deep-audit Phase 1.3)
+  {var _md=document.querySelector('#lens button[data-l="modules"]');if(_md)_md.style.display='';}  // Projects (the family-tree Front Door) is a core built-in -- always available
   {var _nt=document.querySelector('#lens button[data-l="notes"]');if(_nt)_nt.style.display='';}  // Messages (operator<->operator) is a built-in -- always available
   {var _nb=document.querySelector('#lens button[data-l="notebook"]');if(_nb)_nb.style.display='';}  // Notes (notebook) is a core built-in -- always available
   {var _hd=document.querySelector('#lens button[data-l="handoffs"]');if(_hd)_hd.style.display='';}  // Transfers (warm-transfer desk) is a built-in -- always available
   {var _bd=document.querySelector('#lens button[data-l="build"]');if(_bd)_bd.style.display=(window.CC&&window.CC.type==='developer')?'':'none';}  // Build lens = developer-type only (custom sandbox)
   if(!(window.CC&&window.CC.role==='org')){var _pb=document.querySelector('#lens button[data-l="portfolio"]');if(_pb)_pb.style.display='none';
     var _pj=document.querySelector('#lens button[data-l="projects"]');if(_pj)_pj.style.display='none';}  // Portfolio + Projects = ClaudeGrandfather (overseer) only
-  LENS=(window.CC&&(CC.role==="org"||CC.frontdesk_landing===false))?L[0]:"frontdesk";   // THE FRONT DESK is the default landing for a PROJECT node (where you route into departments); an OVERSEER (org role, e.g. Mission Control) keeps its Portfolio landing -- it oversees a fleet, not departments. Opt out on a project node with cc.config frontdesk_landing:false
+  // THE FRONT DOOR (the Projects family tree + type-to-locate bar) is the default landing everywhere -- the
+  // one-stop place to start work in the right spot without being an engineer. Opt out with cc.config
+  // frontdoor_landing:false, which falls back to the prior behavior (org->Portfolio, project->Front Desk).
+  if(window.CC&&CC.frontdoorLanding!==false){LENS="modules";MODVIEW="tree";}
+  else LENS=(window.CC&&(CC.role==="org"||CC.frontdesk_landing===false))?L[0]:"frontdesk";
   document.querySelectorAll('#lens button').forEach(function(b){b.classList.toggle('on',b.dataset.l===LENS);});
   var vt=document.getElementById('viewtitle');if(vt)vt.textContent=NAV[LENS]||LENS;}
 applyPreset();   // preset hides project-only lenses on an org instance + lands on the first allowed lens

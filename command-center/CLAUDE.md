@@ -23,6 +23,14 @@
 > ship. Run `python3 command-center/ui_lint.py` (green = ships). New primitive? Add it to the shared CSS +
 > DESIGN_SYSTEM.md so the next feature reuses it — don't inline a one-off.
 
+> **▶ COLORS / THEMES? READ `docs/THEMING.md`.** The dashboard is **multi-theme** (Dark/Light/High-Contrast/
+> Slate/Midnight/Paper) built on a semantic design-token vocabulary (`--bg/--card/--ink/--accent/--ok/…`). A theme
+> is a `[data-theme=<id>]` block; `:root` is the default Dark palette (**byte-identical to before — never change it**)
+> + the fallback. Per-operator choice (localStorage `cc_theme`) + node default (`cc.config theme`) + Auto (OS).
+> Terminals theme too (`themeToXterm` in `TERM_PAGE`/`RALPH_PAGE`): **dark console on light themes** (Claude Code
+> colors for a dark bg). NEVER hardcode a hex outside the theme blocks — it breaks every non-Dark theme. Adding a
+> theme, the cascade, terminal + brand theming, code touch-points: all in `docs/THEMING.md`. Shipped v0.99.206.
+
 <!-- CC:NOTES (preserve this region verbatim across regenerations) -->
 <!-- /CC:NOTES -->
 
@@ -31,6 +39,7 @@
 - `ServerHeath/` -- >> Resume here: read _handoffs/20260704-1405__ServerHeath.md first -- it is the latest handoff.
 - `Usage/` -- >> Resume here: read _handoffs/20260702-1502__Usage.md first -- it is the latest handoff.
 - `autonudge/` -- My job: when a Claude session keeps stopping to ask "want me to keep going?", auto-send a canned push (e.g.
+- `front-door/` -- The visual front door to Claude Code: the Projects lens reimagined as an ancestry-style family tree of every project, fronted by a "what do you want to work on?
 - `update/` -- This folder is the home + documentation of how a ClaudeFather node gets new framework code, reliably,
 - `vault/` -- This folder is the documentation home for ClaudeFather's credential system: the per-install vault, the
 <!-- /CC:CHILDREN -->

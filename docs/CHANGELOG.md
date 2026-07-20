@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.207 -- 2026-07-19  (Front Door: context-payload heatmap + editable context inspector · agent team roster (drag onto a folder) · board meetings)
+The Projects family tree becomes a context-AND-agent engineering surface:
+- **Context-payload heatmap** — every folder crest shows an always-on weight bar + ≈tokens (its own CLAUDE.md) and a heatmap halo (heavy folders glow); the drill-in shows the full "Context package on launch" cascade.
+- **Context inspector** — that panel is now data-driven from the REAL layers a launch injects (Claude Code base prompt · CLAUDE.md cascade · the injected ClaudeFather launch brief · MCP tools · skills · agent defs · goal/transcript notes); click any layer to see its EXACT text, and CLAUDE.md layers are editable + Save.
+- **Agent team roster** — a bench of your Agents-lens agents docked under the tree; drag one (or build a lineup) onto a folder to launch there. 1 agent = that specialist's persona; 2+ = a captain that delegates to them as real subagents (Claude Code `--agents`, no files written). Folders suggest matching "starters."
+- **Board meetings** — a Team Sheet mode where the members deliberate on ONE agenda from their own viewpoints; selectable protocol (Adaptive/Roundtable/Deliberation), an optional Devil's Advocate seat, and a recommend-then-offer-to-execute close.
+
 ## 0.99.206 -- 2026-07-18  (Dashboard themes + non-blackout terminals · mesh-delivery leak fix · Ralph loop recovery)
 - **Dashboard THEMES.** Pick how the dashboard looks in Settings -> Appearance: **Dark** (the original, unchanged),
   **Light**, **High-Contrast**, **Slate**, **Midnight**, **Paper**. Choice is per-operator (saved in your browser),

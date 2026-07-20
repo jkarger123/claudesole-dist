@@ -5,8 +5,9 @@ primitives below — never one-off markup. This is **enforced**: `command-center
 preship gate (`command-center/preship.py`), so a ship that hand-rolls a dialog, color, badge, or chrome emoji
 **fails before it reaches the fleet**. Build with these and you never get re-swept.
 
-> Goal: sleek, modern, enterprise (think Linear / Vercel / Stripe), on a gold-on-dark brand. **Not** cartoony,
-> not overly friendly, no 20 variants of the same thing.
+> Goal: sleek, modern, enterprise (think Linear / Vercel / Stripe). Gold-on-dark is the DEFAULT brand (the **Dark**
+> theme), but the dashboard is **multi-theme** now — build with tokens, never fixed colors (see `docs/THEMING.md`).
+> **Not** cartoony, not overly friendly, no 20 variants of the same thing.
 
 ## The 6 hard rules (the linter fails the ship on these)
 
@@ -15,8 +16,12 @@ preship gate (`command-center/preship.py`), so a ship that hand-rolls a dialog, 
    `await alertM(msg)`. They stack above any open modal, Esc/backdrop-cancel, Enter-confirm. (The embedded
    terminal/Ralph pages have their own self-contained `confirmM` + `#tdlg` for the same reason.)
 2. **No off-palette colors.** Never hardcode GitHub-palette hexes (`#161b22 #238636 #1f6feb #388bfd #21262d`,
-   etc.) in inline `style="..."`. Use design tokens: `var(--bg) --card --card2 --line --ink --mut --dim
-   --accent --accent-rgb --grad --glow --ok --warn --err`. Raw hexes belong only in the central CSS palette.
+   etc.) in inline `style="..."`. Use **design tokens** — surfaces `var(--bg) --bg2 --bg-warm --card --card2 --el1
+   --el2 --el3`, text `--ink --near --mut --dim`, lines `--line --hair --hair2`, accent `--accent(-rgb)
+   --accent-light(-rgb) --accent-dark --grad --glow --tint --ring`, status `--ok --warn --err --info` (+ their
+   `-rgb` for alpha tints). Raw hexes belong ONLY in the theme-definition blocks. **The dashboard is multi-theme**
+   (Dark/Light/High-Contrast/Slate/Midnight/Paper): a token resolves to a *different value per theme*, so a
+   hardcoded hex silently breaks every non-Dark theme. Full system → **`docs/THEMING.md`**.
 3. **No inline-colored badges.** Never `<span class="badge" style="background:#x22;color:#x">`. Use a palette
    class: `<span class="badge bdg-amber">` (bdg-amber/violet/green/ok/red/cyan/blue/blue2/azure/gray/slate/
    gold/lilac/teal/ink/dim/plain). A *runtime-computed* color (`style="background:'+c+'22;color:'+c+'"`) is OK.

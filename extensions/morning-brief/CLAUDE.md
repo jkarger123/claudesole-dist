@@ -1,5 +1,9 @@
 # Morning Brief — scheduled, voice-read daily brief
 
+<!-- LATEST-HANDOFF -->
+**>> Resume here:** read `_handoffs/20260720-0309__morning-brief.md` first -- it is the latest handoff.
+<!-- /LATEST-HANDOFF -->
+
 Turn the operator's own data into a short spoken brief of their day, ready before they start and played in
 their browser. Official extension (`id: morning-brief`, `lens:brief`, category agency).
 

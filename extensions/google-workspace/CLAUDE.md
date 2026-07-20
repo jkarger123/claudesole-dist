@@ -1,7 +1,7 @@
 # Google Workspace extension -- headless OAuth Gmail / Calendar / Drive
 
 <!-- LATEST-HANDOFF -->
-**>> Resume here:** read `_handoffs/20260713-0401__google-workspace.md` first -- it is the latest handoff.
+**>> Resume here:** read `_handoffs/20260719-2212__google-workspace.md` first -- it is the latest handoff.
 <!-- /LATEST-HANDOFF -->
 
 A ClaudeFather **integration extension** (`extension.json` id `google-workspace`). It does two things:
