@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.208 -- 2026-07-20  (Portfolio & Admin-shell fixes · nav fixed-head order)
+Reliability + navigation fixes:
+- **Portfolio "everything is down" fixed** — the overseer's health scrape hit each node's auth-gated `/api/chief` **unauthenticated** (401 → every node read DOWN). Now uses the auth-carrying scraper (`_scrape_auth`), like the fleet-attention rollup. Nodes read their true status again.
+- **Admin shell "click does nothing" fixed** — the session-scope filter hid a node's `admin-` shell whenever its cwd drifted out of the project (a plain shell you `cd` around in). Now scoped by NAME (like `chief-`/`ralph-`/`ext-`), so the Admin button always opens on scoped nodes (the AFP failure).
+- **Nav fixed head** — the top spots are now locked in canonical order regardless of any saved/dragged layout: overseer = Portfolio → Projects → Sessions; node = Projects → Sessions (portfolio auto-hides). `navForceHead` enforces it without mutating a user's saved categories.
+- **Nav de-dup** — the overseer-only platform map lens is now labelled **Platform** (its help already said so), leaving a single "Projects" (the family tree).
+
 ## 0.99.207 -- 2026-07-19  (Front Door: context-payload heatmap + editable context inspector · agent team roster (drag onto a folder) · board meetings)
 The Projects family tree becomes a context-AND-agent engineering surface:
 - **Context-payload heatmap** — every folder crest shows an always-on weight bar + ≈tokens (its own CLAUDE.md) and a heatmap halo (heavy folders glow); the drill-in shows the full "Context package on launch" cascade.

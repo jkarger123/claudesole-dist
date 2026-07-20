@@ -2597,6 +2597,11 @@ def tmux_sessions():
                                                             # -> a scoped node (PROJECT != CC_HOME, e.g. AFP) would
                                                             # otherwise hide it, so the Setup button opened an invisible
                                                             # session and the pane fell back to the existing one.
+            if not mine and nm == _admin_session_name():    # THIS node's canonical Admin shell -- a PLAIN shell you cd
+                mine = True                                 # around in (sudo/bootstrap/etc.), so its cwd routinely leaves
+                                                            # PROJECT. Scope it by NAME, not cwd, or on a scoped node the
+                                                            # Admin button opens an INVISIBLE session (loadSessions drops
+                                                            # the unscoped pane) -- exactly the "click does nothing" bug.
             if SCOPE_SESSIONS and not mine: continue        # a scoped node never shows another project's sessions
             kind = _session_kind(nm)
             lbl = _session_label(nm); node = ""
@@ -8707,8 +8712,8 @@ def portfolio():
     out = []
     for inst in instances_list():
         base = (inst.get("url") or ("http://127.0.0.1:%s" % inst.get("port"))).rstrip("/")
-        chief = _scrape_json(base + "/api/chief")
-        sec = _scrape_json(base + "/api/security") if chief is not None else None
+        chief = _scrape_auth(base + "/api/chief")   # AUTH-carrying: /api/chief + /api/security are auth-gated, so
+        sec = _scrape_auth(base + "/api/security") if chief is not None else None   # an unauthed scrape 401s -> every node reads DOWN
         up = chief is not None
         ov = (sec or {}).get("overall")
         rag = "down" if not up else ("red" if ov == "err" else "amber" if ov == "warn" else "green")
@@ -28676,7 +28681,7 @@ async function treeResume(id,cwd,fork){const _c=CONVOMAP[id]||{};toast((fork?"Fo
   const r=await(await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({machine:"studio",id:id,cwd:cwd,fork:!!fork,label:_c.label||""})})).json();
   if(!r||!r.ok){toast("Failed: "+((r||{}).error||"?"),5000);return;}
   closeInfo();_openTerm(r);}
-const NAV={portfolio:'Portfolio',projects:'Projects',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',build:'Build (custom extensions)',vault:'Credential Vault',agency:'Agency',calls:'Calls',capture:'Capture',comms:'Comms',notes:'Messages',notebook:'Notes',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Accounts / Usage',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Accounts / Usage'};
+const NAV={portfolio:'Portfolio',projects:'Platform',security:'Security',agents:'Agents',skills:'Skills',teams:'Teams',audit:'Description Audit',chief:'Chief of Staff',context:'Context',pillars:'Pillars',modules:'Projects',files:'Files',marketplace:'Marketplace',build:'Build (custom extensions)',vault:'Credential Vault',agency:'Agency',calls:'Calls',capture:'Capture',comms:'Comms',notes:'Messages',notebook:'Notes',ralph:'Ralph Loops',pipeline:'Pipeline Live-View',routines:'Routines',jobs:'Jobs',ideas:'Ideas',ccr:'Change Requests',propose:'Propose Change',settings:'Settings',machines:'Machines',desktop:'Remote Desktop',usage:'Accounts / Usage',backup:'Backup',sessions:'Sessions',history:'History',tree:'Conversation Tree',docs:'Docs',doctor:'Doctor',gmail:'Gmail',calendar:'Calendar',drive:'Drive',accounts:'Accounts / Usage'};
 // ---- Chief of Staff: your office (top-level command + a direct line to me) ----
 function gotoLens(l){const b=document.querySelector('#lens button[data-l="'+l+'"]');if(b)b.click();}
 async function talkChief(){toast("Opening your Chief of Staff…");
@@ -29354,8 +29359,9 @@ function applyNavOrder(){
   var nav=document.getElementById("lens");if(!nav)return;
   var btns=navBtns(),base={},clk=navState().clicks||{};
   btns.forEach(function(b,i){base[b.dataset.l]=i;});   // original DOM order = stable tiebreak
-  btns.map(function(b){return b.dataset.l;}).sort(function(a,b){
-    var d=(clk[b]||0)-(clk[a]||0);return d!==0?d:base[a]-base[b];})
+  var head=navFixedVisible(),hset={};head.forEach(function(l){hset[l]=1;});   // fixed head first, always
+  head.concat(btns.map(function(b){return b.dataset.l;}).filter(function(l){return !hset[l];}).sort(function(a,b){
+    var d=(clk[b]||0)-(clk[a]||0);return d!==0?d:base[a]-base[b];}))
     .forEach(function(l){var b=nav.querySelector('button[data-l="'+l+'"]');if(b)nav.appendChild(b);});
 }
 // ---- tree (custom) helpers
@@ -29375,7 +29381,26 @@ function treeRemoveLens(tree,l){for(var i=tree.length-1;i>=0;i--){var n=tree[i];
 // ---- DEFAULT CATEGORIES: out of the box the nav is grouped into collapsed categories (declutter), seeded once.
 // Users can still drag/rename/add/delete + "flatten" to the old most-used list. Built-ins map here; extension
 // lenses carry their own category (extension.json default_category -> extLenses[].category). "reset" re-seeds this.
-var NAV_PINNED=["portfolio","sessions","chief","comms","notebook","notes","tasks","files","studio"];   // stay top-level (daily drivers)
+// Top-of-nav order (daily drivers, pinned above the categories). The FIRST spots are the canonical jump-off:
+// an OVERSEER lands on the fleet then hops into a node -> Portfolio, Projects, Sessions; a NODE has no Portfolio
+// (auto-hidden), so it starts Projects (pick a place to launch) then Sessions (join a running one).
+var NAV_PINNED=["portfolio","modules","sessions","chief","comms","notebook","notes","tasks","files","studio"];
+// The first spots are FIXED: they ALWAYS render first, in THIS order, at the very top -- no matter what a saved
+// or hand-dragged layout says (that's why a plain NAV_PINNED default change didn't move an existing nav). On a
+// node portfolio auto-hides, so it starts Projects then Sessions. navForceHead pulls them out of wherever the
+// saved tree put them (top-level or inside a category) WITHOUT mutating the stored layout.
+var NAV_FIXED_HEAD=["portfolio","modules","sessions"];
+function navFixedVisible(){return NAV_FIXED_HEAD.filter(function(l){var b=document.querySelector('#lens button[data-l="'+l+'"]');return b&&b.style.display!=="none";});}
+function navForceHead(view){
+  var head=navFixedVisible(),hset={};head.forEach(function(l){hset[l]=1;});
+  var rest=[];
+  (view||[]).forEach(function(n){
+    if(n.t==="tab"){if(!hset[n.l])rest.push(n);}
+    else if(n.t==="grp"){var items=(n.items||[]).filter(function(l){return !hset[l];});if(items.length)rest.push({t:"grp",id:n.id,name:n.name,collapsed:n.collapsed,items:items});}
+    else rest.push(n);
+  });
+  return head.map(function(l){return {t:"tab",l:l};}).concat(rest);
+}
 var NAV_CAT_ORDER=["Google","Workspace","Agency","Team","Integrations","Experimental","System"];
 var NAV_CAT={
   agentlab:"Experimental",
@@ -29475,6 +29500,7 @@ function renderNav(){
         items:x.n.items.slice().sort(function(a,b){var d=sc(b)-sc(a);return d!==0?d:base[a]-base[b];})}:x.n;
     });
   }
+  view=navForceHead(view);   // portfolio/modules/sessions always first, overriding any saved order
   nav.querySelectorAll(".navgroup").forEach(function(x){x.remove();});
   navBtns().forEach(function(b){b.classList.remove("grouped","ghide");b.setAttribute("draggable","true");});
   view.forEach(function(n){
