@@ -1,0 +1,16 @@
+{
+  "id": "skill-builder",
+  "name": "Skill Builder",
+  "category": "skill",
+  "version": "1.0.0",
+  "icon": "SB",
+  "summary": "Build a new Claude Code skill from a plain-language description",
+  "description": "Build a new Claude Code skill from a plain-language description. Use when someone says \"make a skill for X\", \"turn this into a /command\", \"capture this workflow\", \"I keep doing this, automate it\", or when a repeated procedure (see cc-skill scan) should become a reusable /skill. Drafts a well-formed SKILL.md (sharp trigger description, lean body, correct frontmatter, right scope), scaffolds it, and lints it. Installing copies it into ~/.claude/skills so any agent on the node can invoke /skill-builder.",
+  "provides": [
+    "skill:skill-builder"
+  ],
+  "requires": [],
+  "setup_doc": "SETUP.md",
+  "setup_agent": false,
+  "default_category": "Team"
+}

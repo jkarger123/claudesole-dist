@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+"""cc-skill -- author, scope, lint, and promote Claude Code Skills (the real SKILL.md mechanism).
+
+A skill is a folder `<skills-dir>/<name>/SKILL.md`. The folder name is the /command; the `description` is
+the ONLY thing the model sees until the skill is invoked (progressive disclosure), so a weak description
+silently kills discoverability. This CLI operates DIRECTLY on the skill dirs (works with the dashboard down)
+and matches command-center/server.py's skills subsystem exactly.
+
+SCOPES (which dir the SKILL.md lives in -- nothing invented, this is native Claude Code):
+  project   <project>/.claude/skills/<name>/   -- this codebase only (+ `paths:` frontmatter sub-scoping)
+  node      ~/.claude/skills/<name>/           -- every project on THIS node   (DEFAULT for new skills)
+  fleet     a signed category:"skill" extension -> copied to ~/.claude/skills/<id>/ on every node
+
+COMMANDS
+  cc-skill list [--all] [--json]        list skills grouped by scope, with lint flags
+  cc-skill new <name> [--scope node|project] [--desc "WHAT it does + WHEN to use it"]
+  cc-skill show <name>                  print a skill's path + SKILL.md
+  cc-skill scope <name> <node|project>  move a skill between node and project scope (reversible)
+  cc-skill lint [name]                  quality-check one skill (or all) -- the silent discoverability killers
+  cc-skill scan [args...]               mine session transcripts for repeated procedures -> skill candidates
+  cc-skill promote <name>               package a node skill as a fleet skill-extension (then sign+ship at MC)
+  cc-skill rm <name>                    reversible delete (moves to <dir>/_archive/, never rm)
+
+Node-local by default. `promote` is the ONE deliberate step that makes a skill fleet-wide.
+"""
+import argparse, json, os, re, shutil, subprocess, sys, time
+
+HOME = os.path.expanduser("~")
+SELF_DIR = os.path.dirname(os.path.realpath(__file__))
+CC_HOME = os.path.dirname(SELF_DIR)                        # <CC_HOME>/command-center/cc-skill
+USER_SKILLS = os.path.join(HOME, ".claude", "skills")
+
+
+def _project_root():
+    """The node's project root (for project-scoped skills). Uses cc_resolve.py when available; falls back to
+    CC_HOME. Never raises."""
+    try:
+        sys.path.insert(0, SELF_DIR)
+        import cc_resolve  # type: ignore
+        p, err = cc_resolve.resolve_config_path()
+        if p and not err:
+            cfg = json.load(open(p))
+            r = cfg.get("project_root")
+            if r and os.path.isdir(r):
+                return r
+    except Exception:
+        pass
+    return CC_HOME
+
+
+def _skills_dirs():
+    return {"node": USER_SKILLS, "project": os.path.join(_project_root(), ".claude", "skills")}
+
+
+# ---- frontmatter + lint (byte-identical semantics to server.py) --------------------------------------
+def _parse_frontmatter(text):
+    fm = {}
+    if not text.startswith("---"):
+        return fm
+    nl = text.find("\n"); end = text.find("\n---", nl)
+    if nl < 0 or end < 0:
+        return fm
+    lines = text[nl + 1:end].split("\n"); i = 0
+    while i < len(lines):
+        m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", lines[i])
+        if not m:
+            i += 1; continue
+        k, v = m.group(1), m.group(2).strip()
+        if v in (">", "|", ">-", "|-", ">+", "|+"):
+            parts = []; i += 1
+            while i < len(lines) and (lines[i].startswith((" ", "\t")) or lines[i].strip() == ""):
+                if lines[i].strip():
+                    parts.append(lines[i].strip())
+                i += 1
+            fm[k] = " ".join(parts); continue
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        if v.lower() in ("true", "false"):
+            v = (v.lower() == "true")
+        fm[k] = v; i += 1
+    return fm
+
+
+def _body_text(raw):
+    if not raw.startswith("---"):
+        return raw.strip()
+    nl = raw.find("\n"); end = raw.find("\n---", nl)
+    if nl < 0 or end < 0:
+        return ""
+    after = raw[end + 4:]; nl2 = after.find("\n")
+    return (after[nl2 + 1:] if nl2 >= 0 else "").strip()
+
+
+def _lint(fm, raw, slug):
+    flags = []
+    desc = (fm.get("description", "") or "").strip()
+    if not desc:
+        flags.append("no description (the model's ONLY trigger -- skill is invisible)")
+    elif len(desc) < 20:
+        flags.append("thin description (say WHAT it does + WHEN to use it, with keywords)")
+    elif len(desc) > 1400:
+        flags.append("description over budget (~1536 char shared cap -- trim)")
+    fmname = (fm.get("name", "") or "").strip()
+    if fmname and fmname != slug:
+        flags.append("name != dir (the /command is the DIR name; frontmatter name is cosmetic)")
+    if not _body_text(raw):
+        flags.append("no body (all frontmatter, no steps)")
+    return flags
+
+
+def _iter_skills():
+    for scope, base in _skills_dirs().items():
+        try:
+            entries = sorted(os.listdir(base))
+        except Exception:
+            continue
+        for n in entries:
+            if n.startswith((".", "_")):
+                continue
+            sk = os.path.join(base, n, "SKILL.md")
+            if not os.path.isfile(sk):
+                continue
+            try:
+                raw = open(sk, encoding="utf-8", errors="replace").read()
+            except Exception:
+                raw = ""
+            fm = _parse_frontmatter(raw)
+            disable_model = fm.get("disable-model-invocation") is True
+            user_inv = fm.get("user-invocable", True) is not False
+            inv = "manual only" if disable_model else ("auto only" if not user_inv else "auto + /cmd")
+            yield {"slug": n, "scope": scope, "path": sk, "dir": os.path.join(base, n),
+                   "name": fm.get("name") or n, "description": fm.get("description", ""),
+                   "invocation": inv, "lint": _lint(fm, raw, n)}
+
+
+def _clean_name(name):
+    return re.sub(r"[^a-z0-9-]", "", (name or "").lower().replace(" ", "-")).strip("-")[:48]
+
+
+# ---- commands ----------------------------------------------------------------------------------------
+def cmd_list(a):
+    skills = list(_iter_skills())
+    if a.json:
+        print(json.dumps(skills, indent=2)); return 0
+    if not skills:
+        print("No skills found. Create one:  cc-skill new <name> --desc \"...\""); return 0
+    order = {"project": 0, "node": 1}
+    label = {"project": "PROJECT  (this codebase only)", "node": "NODE  (all this node's projects)"}
+    by = {}
+    for s in skills:
+        by.setdefault(s["scope"], []).append(s)
+    for scope in sorted(by, key=lambda s: order.get(s, 9)):
+        print("\n== %s ==" % label.get(scope, scope.upper()))
+        for s in sorted(by[scope], key=lambda x: x["slug"]):
+            warn = ("  ⚠ " + "; ".join(s["lint"])) if s["lint"] else ""
+            print("  /%-24s %-12s %s%s" % (s["slug"], "[" + s["invocation"] + "]",
+                                           (s["description"][:60] or "(no description)"), warn))
+    print("\n%d skill(s). Fleet skills ship as extensions:  cc-skill promote <name>" % len(skills))
+    return 0
+
+
+_STUB = ("---\nname: %s\ndescription: >\n  %s\n---\n\n"
+         "## Steps\n1. ...\n\n## Notes\n"
+         "- Keep SKILL.md lean (< ~500 lines). Put heavy reference in sibling files and link them.\n"
+         "- The description above is what triggers this skill -- say WHAT it does and WHEN to use it.\n"
+         "- Side effects (deploy/push/restart)? add `disable-model-invocation: true` (human-only /cmd).\n")
+
+
+def cmd_new(a):
+    name = _clean_name(a.name)
+    if not name:
+        print("bad name", file=sys.stderr); return 2
+    base = _skills_dirs().get(a.scope)
+    if not base:
+        print("bad scope %r (node|project)" % a.scope, file=sys.stderr); return 2
+    d = os.path.join(base, name)
+    if os.path.isdir(d):
+        print("a skill named %r already exists at %s" % (name, d), file=sys.stderr); return 1
+    os.makedirs(d, exist_ok=True)
+    desc = re.sub(r"\s+", " ", (a.desc or "").strip())[:400] or \
+        ("What %s does and WHEN to use it -- this line is the trigger the model sees." % name)
+    open(os.path.join(d, "SKILL.md"), "w").write(_STUB % (name, desc))
+    print("created %s skill:  %s" % (a.scope, os.path.join(d, "SKILL.md")))
+    print("  edit it, then:  cc-skill lint %s   (and invoke /%s in a session to test)" % (name, name))
+    if not a.desc:
+        print("  ⚠ no --desc given: sharpen the description NOW -- it is the whole discoverability surface.")
+    return 0
+
+
+def _find(name):
+    name = _clean_name(name)
+    hits = [s for s in _iter_skills() if s["slug"] == name]
+    return hits
+
+
+def cmd_show(a):
+    hits = _find(a.name)
+    if not hits:
+        print("no such skill: %s" % a.name, file=sys.stderr); return 1
+    for s in hits:
+        print("# %s  [%s]  %s" % (s["slug"], s["scope"], s["path"]))
+        print(open(s["path"], encoding="utf-8", errors="replace").read())
+    return 0
+
+
+def cmd_scope(a):
+    hits = _find(a.name)
+    if not hits:
+        print("no such skill: %s" % a.name, file=sys.stderr); return 1
+    if a.target not in ("node", "project"):
+        print("target must be node|project", file=sys.stderr); return 2
+    src = hits[0]
+    if src["scope"] == a.target:
+        print("%s is already %s scope" % (src["slug"], a.target)); return 0
+    dest_base = _skills_dirs()[a.target]
+    dest = os.path.join(dest_base, src["slug"])
+    if os.path.isdir(dest):
+        print("a %s skill named %r already exists" % (a.target, src["slug"]), file=sys.stderr); return 1
+    os.makedirs(dest_base, exist_ok=True)
+    shutil.move(src["dir"], dest)
+    print("moved /%s: %s -> %s scope (%s)" % (src["slug"], src["scope"], a.target, dest))
+    return 0
+
+
+def cmd_lint(a):
+    skills = _find(a.name) if a.name else list(_iter_skills())
+    if a.name and not skills:
+        print("no such skill: %s" % a.name, file=sys.stderr); return 1
+    bad = 0
+    for s in skills:
+        if s["lint"]:
+            bad += 1
+            print("⚠ /%s [%s]" % (s["slug"], s["scope"]))
+            for f in s["lint"]:
+                print("    - " + f)
+        else:
+            print("✓ /%s [%s]" % (s["slug"], s["scope"]))
+    print("\n%d clean, %d with issues" % (len(skills) - bad, bad))
+    return 1 if bad else 0
+
+
+def cmd_rm(a):
+    hits = _find(a.name)
+    if not hits:
+        print("no such skill: %s" % a.name, file=sys.stderr); return 1
+    s = hits[0]
+    arch = os.path.join(os.path.dirname(s["dir"]), "_archive")
+    os.makedirs(arch, exist_ok=True)
+    dest = os.path.join(arch, "%s-%s" % (s["slug"], time.strftime("%Y%m%d-%H%M%S")))
+    shutil.move(s["dir"], dest)
+    print("archived /%s -> %s  (reversible; move back to restore)" % (s["slug"], dest))
+    return 0
+
+
+def _run_scan(rest):
+    scan = os.path.join(SELF_DIR, "skill_scan.py")
+    if not os.path.isfile(scan):
+        print("skill_scan.py not found next to cc-skill", file=sys.stderr); return 1
+    return subprocess.call([sys.executable, scan] + rest)
+
+
+def cmd_promote(a):
+    """Package a NODE skill as a fleet skill-extension under extensions/<id>/. This creates the extension
+    files (reversible); signing + shipping is a separate, deliberate Mission Control step (printed at the end)."""
+    hits = [s for s in _find(a.name) if s["scope"] == "node"]
+    if not hits:
+        print("promote needs a NODE-scope skill named %r (cc-skill list to check)" % a.name, file=sys.stderr)
+        return 1
+    s = hits[0]
+    fm = _parse_frontmatter(open(s["path"], encoding="utf-8", errors="replace").read())
+    ext_dir = os.path.join(CC_HOME, "extensions", s["slug"])
+    if os.path.isdir(ext_dir):
+        print("extensions/%s already exists -- edit it directly, don't re-promote" % s["slug"], file=sys.stderr)
+        return 1
+    payload = os.path.join(ext_dir, "payload")
+    os.makedirs(payload, exist_ok=True)
+    # copy the whole skill folder as the payload (SKILL.md + any sibling scripts/refs)
+    for item in os.listdir(s["dir"]):
+        src = os.path.join(s["dir"], item); dst = os.path.join(payload, item)
+        (shutil.copytree if os.path.isdir(src) else shutil.copy2)(src, dst)
+    desc = (fm.get("description", "") or "").strip()
+    summary = (desc.split(".")[0] or desc)[:120]
+    ext = {"id": s["slug"], "name": s["slug"].replace("-", " ").title(), "category": "skill",
+           "version": "1.0.0", "icon": "".join(w[0] for w in s["slug"].split("-")[:2]).upper() or "SK",
+           "summary": summary, "description": desc + " Installing copies it into ~/.claude/skills so any "
+           "agent on the node can invoke /" + s["slug"] + ".",
+           "provides": ["skill:" + s["slug"]], "requires": [], "setup_doc": "SETUP.md",
+           "setup_agent": False, "default_category": "Team"}
+    json.dump(ext, open(os.path.join(ext_dir, "extension.json"), "w"), indent=2)
+    open(os.path.join(ext_dir, "SETUP.md"), "w").write(
+        "# %s\n\nInstall copies `payload/SKILL.md` to `~/.claude/skills/%s/`. No secrets, no setup.\n"
+        "Invoke with `/%s`.\n" % (ext["name"], s["slug"], s["slug"]))
+    print("packaged /%s as a fleet skill-extension:  extensions/%s/" % (s["slug"], s["slug"]))
+    print("\nTO SHIP TO THE FLEET (deliberate, at Mission Control):")
+    print("  1. review extensions/%s/extension.json + payload/SKILL.md" % s["slug"])
+    print("  2. sign it into core.sig.json  (POST /api/core-sign, or the MC signing step)")
+    print("  3. push per docs/MISSION_CONTROL.md  (cc-update / dist mirror -> fleet converges ~30min)")
+    print("  From a TENANT node instead: file a CCR to Mission Control (don't sign locally).")
+    print("\n  the node-local /%s still works as-is; promoting only ADDS the fleet copy." % s["slug"])
+    return 0
+
+
+def main():
+    # `scan` forwards ALL its flags to skill_scan.py -- intercept before argparse (REMAINDER can't hold
+    # leading --options). `cc-skill scan --help` therefore shows skill_scan.py's own help.
+    if len(sys.argv) >= 2 and sys.argv[1] == "scan":
+        return _run_scan(sys.argv[2:])
+
+    ap = argparse.ArgumentParser(prog="cc-skill", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd")
+
+    p = sub.add_parser("list", help="list skills grouped by scope")
+    p.add_argument("--all", action="store_true"); p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_list)
+
+    p = sub.add_parser("new", help="scaffold a new skill (node scope by default)")
+    p.add_argument("name"); p.add_argument("--scope", default="node", choices=["node", "project"])
+    p.add_argument("--desc", default=""); p.set_defaults(fn=cmd_new)
+
+    p = sub.add_parser("show", help="print a skill's SKILL.md"); p.add_argument("name")
+    p.set_defaults(fn=cmd_show)
+
+    p = sub.add_parser("scope", help="move a skill between node and project scope")
+    p.add_argument("name"); p.add_argument("target", choices=["node", "project"])
+    p.set_defaults(fn=cmd_scope)
+
+    p = sub.add_parser("lint", help="quality-check a skill (or all)")
+    p.add_argument("name", nargs="?"); p.set_defaults(fn=cmd_lint)
+
+    sub.add_parser("scan", help="mine transcripts for repeated procedures (see: cc-skill scan --help)")
+
+    p = sub.add_parser("promote", help="package a node skill as a fleet skill-extension")
+    p.add_argument("name"); p.set_defaults(fn=cmd_promote)
+
+    p = sub.add_parser("rm", help="reversible delete (archive)"); p.add_argument("name")
+    p.set_defaults(fn=cmd_rm)
+
+    a = ap.parse_args()
+    if not getattr(a, "cmd", None):
+        ap.print_help(); return 0
+    return a.fn(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

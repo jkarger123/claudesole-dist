@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "6f7a0a033ce6abf2ab69ae590297f880b2a765c48d204766ccbc90d4e71c9f7a",
+      "claudesole.manifest.json": "b1435c490957d168fda7835a26563cd4410d6d222b9a1c9a2fe10493bb26a443",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/campaign_runner.py": "0a385adb090626c76c1f3baf4a1ed944cd0a80983ef752686e471003a012e339",
       "command-center/cc-advise": "e449156a34ddcb9068fc1c89223a2d3f8574b6dba15f2e3d3fe748bf2f49a70f",
@@ -48,6 +48,7 @@
       "command-center/cc-route": "3f47ddc9e517716c1c23430e62c0dcbc268ee0d6dd0052cebafeb87d597d4442",
       "command-center/cc-secure": "c910645a3f8e96f0b168b5d75d4b8e6ca13a949be967638f3aea68b5b8c19cb7",
       "command-center/cc-session-watchdog.py": "6cb591292aa495484964c6a51e26f9ac5cf7d1d411d8c130a63fd4b3e891eccb",
+      "command-center/cc-skill": "1a62eea624301e11b2a5d1a2a9fd753201a2c114a77277e030b0b8b5a1daba63",
       "command-center/cc-stage": "beb2f7e0d41e89e3217970c6a74826c7ac71e9e6ada035688c1391bad79048b1",
       "command-center/cc-task": "a1d39fb0029abbee3d0db0d73600ad982b7b475f731d475bc2df2504fd3acdf3",
       "command-center/cc-vitals": "f174349e969e86a8d730b721438def58a15d55e3aa73f2de3e8a395c94003082",
@@ -64,13 +65,14 @@
       "command-center/notebook.py": "c681d06cef3f433fb5de9965661310828ef059ae8b9cca44a268883ee7f1bdac",
       "command-center/platform_map.json": "3f2d443480867e6e4a76361625cea97e526f9b7b9d0de5a6f671d3f20784a497",
       "command-center/policy_hook.py": "33bcbbdf940faeb4c0a51e5d47680c022f29aebd0451ad05c700713b927de188",
-      "command-center/preship.py": "330d9c9922b06b30ed17f07ecfcc8157d55a87c957d801dadf6587819afffa0e",
+      "command-center/preship.py": "485bf7c63286dcce2e937989431362d813f70d21679d9668f0db8ecdf0d4d58b",
       "command-center/ralph_live.py": "91acfe6f45ada18364dd3fde74fd777d6ed83a6ef1b7673030dc2faef4d92878",
       "command-center/ralph_runner.py": "4b2b0c719596a638647900c9d2c896870132d52e134b8a4c2e8dde9456a56cb8",
       "command-center/residue_lint.py": "0b1c757909a27470095d5ea8b48641a9e9e0248ec1729f3598596f2129fd1d6f",
       "command-center/rollback_guard.py": "603ae76f8f854b46e0dd152a123e11cc85c760a8c82e7865ab5eeaf75b2ac800",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "5e0f845ed026ad242f6a45dea05aa6105879e45bdba234ebdc4b69bcb4e622fe",
+      "command-center/server.py": "32aefc177a51822e7e0b7a6c126a58c14156175b9139aeff84e122f615af2c0e",
+      "command-center/skill_scan.py": "809f29a7c954dc1df44934152ac6054fa1873c8ca92ed04c6cb00b525cfa9b8c",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/static/phosphor/fill.css": "555980683a582c1910a954648b4ae38f58d76e797f02bfdc2c5e817901e6d4fc",
       "command-center/static/phosphor/light.css": "f2e59699faaeee27da9edb86dd18f5ed3bd5113db3e4e388fdd23afcaf308865",
@@ -149,6 +151,7 @@
       "extensions/postgres-supabase/mcp.json": "dcd05dd6405e3aa434aa073609c943005a7dfac63a744b6becb64e0f9b0cba3e",
       "extensions/sentry/extension.json": "9974849a07a14296633b94f0ac86f85b2352437167df9967b1fcb0d344e57b5d",
       "extensions/sentry/mcp.json": "c0ad46cfcfdff9285847507ccb74ad49642e1e04f77dfbc9c65a3c2cd37529dc",
+      "extensions/skill-builder/extension.json": "73bf4117eec73cc5c0af557815e706c4a9a940676a38d29383892cc782591524",
       "extensions/skimlinks-merchant-sync/extension.json": "6b727eec5eb3c2cc37428b807247f77cd360e4a7b72de1ca3baf5e6e3d23b7ea",
       "extensions/skimlinks-merchant-sync/payload/tools/backfill_skimlinks_changes.py": "78fcc686133bd33bbe568e5d02bebfb2b65d1a272ce920dcd25b82e46a630698",
       "extensions/skimlinks-merchant-sync/payload/tools/skimlinks_sync.py": "19736befd2e257fc5a505eac763cc07be3e0fb16595587e156722541869abfcb",
@@ -171,9 +174,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1784594972,
+    "generated": 1784669101,
     "v": 1,
-    "version": "0.99.209"
+    "version": "0.99.210"
   },
-  "sig": "9JyO0+0LVuUw5PLsUNHkpPiFBkcPLVZnxyHVV62+oTWHVjQN0DcJ4LPYe6oV8K+jeObeCI9ywp9Is1eOgWhcDg=="
+  "sig": "BfxMsz+Kk3dcVdLpq/wA9HobkfyizKkikFeK1sMjChK+iw3w7D9wR0wI+SZrrC5INXhtH3ZpkfLbi4znKd9HAw=="
 }

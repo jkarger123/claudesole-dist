@@ -35,7 +35,8 @@ if missing:
 # it (a tmux tab, a subprocess, the break-glass console) runs a NONEXISTENT file on every tenant. This is the same
 # class as the import gap; we found ralph_live.py + cc-lifeline missing this way. Scan the single-arg BASE joins
 # and require each referenced command-center file to be covered by framework_paths.
-_KNOWN_UNSHIPPED = {"deliverables"}        # STUDIO_OUT_DIR: a runtime OUTPUT dir, not a shipped file
+_KNOWN_UNSHIPPED = {"deliverables",        # STUDIO_OUT_DIR: a runtime OUTPUT dir, not a shipped file
+                    "_skill_notify_marker.json"}   # SKILLS: runtime dedup marker (shared across co-located instances), created at runtime, never shipped
                                            # (P2-11 CLOSED: platform_map.json now ships relative-path + is in the manifest)
 _refs = set(re.findall(r'os\.path\.join\(\s*BASE\s*,\s*["\']([^"\'/]+)["\']\s*\)', src))
 def _covered(n):

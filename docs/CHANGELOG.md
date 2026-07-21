@@ -3,6 +3,37 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.210 -- 2026-07-21  (Skill Authoring Platform -- fleet skills system)
+
+The fleet's system for building, scoping, discovering, and distributing Claude Code Skills -- built on the
+REAL SKILL.md mechanism (a skill is a `SKILL.md` folder; the folder name is the /command; the description is
+the trigger). Every node gets:
+- **Per-session skills picker** -- a ✦ chip in each Sessions pane header opens a picker grouped
+  **here / node / fleet** with a live filter; choosing a skill STAGES its `/command` into that pane (no Enter,
+  so you add args + review before running). `skills_list()` now tags each skill `origin` (here/node/fleet) +
+  `disable_model`; `skill_inject()` + `/api/skill-inject`.
+- **Auto-detection** -- `skill_scan.py` mines this node's session transcripts for repeated distinctive-tool
+  procedures ripe to become a skill (dedup by tool-identity, inline-script bodies opaque, >=2 specific actions).
+  A **Suggestions** queue in the Skills lens (Build skill / Dismiss) is kept fresh by the `skill_scan` daemon
+  (self-populating; cc.config `skill_suggestions:{auto,interval_hours,notify}`), with an opt-in operator
+  notification on strong NEW candidates (deduped across co-located instances).
+- **`cc-skill` CLI** -- `list · new · scope · lint · scan · promote · rm` (node-local default; operates directly
+  on the skill dirs, works with the dashboard down).
+- **`/skill-builder`** -- a skill that turns a plain-language description into a well-formed SKILL.md; shipped
+  as a fleet `category:"skill"` extension so every node can author skills.
+- **Distribution** -- `cc-skill promote` / Skills-lens "Promote →" packages a node skill as a signed
+  `category:"skill"` extension that rides `core.sig.json` + `cc-update` to every node.
+- New framework files: `command-center/skill_scan.py`, `command-center/cc-skill`, `extensions/skill-builder/`.
+  Full docs: `docs/SKILLS_PLATFORM.md`; module home: `skill-authoring/`.
+
+## 0.99.210 -- 2026-07-21  (Sessions default to Opus 4.8 1M)
+- **Default model = Opus 4.8 at the 1M context window.** Every launched session (and the Chief of Staff) now
+  runs `claude-opus-4-8[1m]` unless a specific model is requested -- Claude Code's built-in default had
+  drifted to Sonnet, so sessions were silently downgraded. Cheap subagents/concierge/readers still pass their
+  own (unchanged). Config-overridable per node with `cc.config default_model`. Fixed in `launch()` +
+  `chief_open()` (the chief had no `--model` flag at all).
+- Scrubbed 3 tenant-path refs from the `skill-builder` extension's SKILL.md (clean-core).
+
 ## 0.99.209 -- 2026-07-20  (Projects tree root shows the node's name)
 - **Tree root = the node's name.** The top card in the Projects family tree now shows the node's configured brand (its human name) instead of the raw project-folder basename -- so each node reads its own name at the top of its tree, not a filesystem path. Child names are unchanged (their folder names).
 

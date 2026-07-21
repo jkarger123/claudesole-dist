@@ -2885,6 +2885,10 @@ CC_MODELS = CC.get("models") or [
     {"id": "haiku",   "label": "Haiku 4.5",  "short": "Haiku"},
 ]
 _MODEL_IDS = {m["id"] for m in CC_MODELS}
+# Every session defaults to Opus 4.8 at the 1M context window unless a specific model is requested (cheap
+# subagents/concierge/readers pass their own). Claude Code's built-in default drifted to Sonnet, so we force
+# this explicitly. Config-overridable per node with cc.config "default_model".
+DEFAULT_SESSION_MODEL = CC.get("default_model") or "claude-opus-4-8[1m]"
 
 _USAGE_CACHE = {"at": 0.0, "data": None}
 def usage_payload(ttl=20):
@@ -4828,6 +4832,7 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
     # so it must work even on a deployment with no machines registered (the record is a per-deployment
     # preserve-path that fresh installs lack). Only remote targets need a registered machine (for the ssh alias).
     if target != "studio" and not m: return {"ok": False, "error": "unknown target: " + str(target)}
+    if not model: model = DEFAULT_SESSION_MODEL                    # default every session to Opus 4.8 1M unless one was requested
     _mdl = (" --model " + _shlex.quote(model)) if model else ""   # cost tier (e.g. sonnet for cheap onboarding readers)
     # BASE (this command-center dir) on PATH so the cc-* CLIs (cc-secure/cc-note/cc-handoff/cc-task/cc-hold) resolve
     # as BARE commands inside every session -- without it onboarding/agents report them "not reachable" and can't
@@ -5005,8 +5010,8 @@ def chief_open():
         with open(prompt_file, "w") as f: f.write(prompt)
     except Exception: pass
     cl = (_CC_PATH + _CC_ENVP + 'export MESH_CC="http://localhost:%d"; '
-          'claude --dangerously-skip-permissions %s%s --settings %s "$(cat %s)"'
-          % (PORT, CC_TITLE_FLAG, CC_MCP_FLAG, shlex.quote(settings_file), shlex.quote(prompt_file)))
+          'claude --dangerously-skip-permissions --model %s %s%s --settings %s "$(cat %s)"'
+          % (PORT, shlex.quote(DEFAULT_SESSION_MODEL), CC_TITLE_FLAG, CC_MCP_FLAG, shlex.quote(settings_file), shlex.quote(prompt_file)))
     wd = PROJECT if os.path.isdir(PROJECT) else CC_HOME          # SSD-gone fallback: chief stays up, only file ops degrade
     # Persist a launch descriptor so the out-of-process launchd watchdog can revive this chief if THIS server dies.
     try:
@@ -7611,6 +7616,20 @@ def _skill_lint(fm, raw, slug):
         flags.append("no body")
     return flags
 
+def _skill_origin(scope, slug):
+    """here/node/fleet -- the intelligent grouping. A project-scope skill is 'here'; a user-scope skill that
+    came from an installed skill-extension is 'fleet'; any other user-scope skill is 'node'-local."""
+    if scope == "project":
+        return "here"
+    ej = os.path.join(EXT_DIR, slug, "extension.json")
+    if os.path.isfile(ej):
+        try:
+            if (json.load(open(ej)) or {}).get("category") == "skill":
+                return "fleet"
+        except Exception:
+            pass
+    return "node"
+
 def skills_list():
     """Discover skills from the real Claude Code locations (user + this project). The `description` is the
     progressive-disclosure trigger -- it is the only thing the model sees until a skill is invoked."""
@@ -7633,6 +7652,8 @@ def skills_list():
                         "description": fm.get("description", ""),
                         "when_to_use": fm.get("when_to_use", "") or fm.get("when-to-use", ""),
                         "invocation": inv, "allowed_tools": str(fm.get("allowed-tools", "")),
+                        "origin": _skill_origin(scope, n),
+                        "disable_model": disable_model,
                         "lint": _skill_lint(fm, raw, n),
                         "command": "/" + n})
     return {"skills": out, "dirs": {s: d for s, d in _skills_dirs()}}
@@ -7694,6 +7715,163 @@ def skill_delete(scope, slug):
     except Exception as e:
         return {"ok": False, "error": str(e)}
     return {"ok": True, "scope": scope, "name": slug, "archived": dest}
+
+def skill_inject(name, command, run=False):
+    """Type a skill's `/command` into a live session's tmux pane -- the intelligent-dropdown action. STAGED by
+    default (no Enter) so the operator can add arguments + review before running; run=True fires it. Mirrors
+    session_set_model's send mechanism (drop copy-mode first so the keys land at the prompt)."""
+    nm = re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:48]
+    cmd = re.sub(r"[^A-Za-z0-9_-]", "", (command or "").lstrip("/"))[:64]
+    if not nm:
+        return {"ok": False, "error": "no session"}
+    if not cmd:
+        return {"ok": False, "error": "no command"}
+    if sh([TMUX, "has-session", "-t", nm])[0] != 0:
+        return {"ok": False, "error": "session not found"}
+    sh([TMUX, "send-keys", "-t", nm, "-X", "cancel"])           # drop copy-mode so the keys land at the prompt
+    sh([TMUX, "send-keys", "-t", nm, "-l", "/" + cmd + " "])    # literal; trailing space so args can follow
+    if run:
+        sh([TMUX, "send-keys", "-t", nm, "Enter"])
+    return {"ok": True, "session": nm, "command": "/" + cmd, "ran": bool(run)}
+
+# ---- SKILL SUGGESTIONS: surface repeated procedures (skill_scan.py) ripe to become a /skill. The scan runs
+#      as a background subprocess writing a cache; the lens reads the cache + a dismiss list. See skill_scan.py.
+_SKILL_SUGG_CACHE = os.path.join(STATE_DIR, "_skill_suggestions.json")
+_SKILL_SUGG_DISMISS = os.path.join(STATE_DIR, "_skill_suggestions_dismissed.json")
+_SKILL_SUGG_LOCK = os.path.join(STATE_DIR, "_skill_suggestions.scanning")
+
+def _skill_dismissed():
+    try:
+        return set(json.load(open(_SKILL_SUGG_DISMISS)) or [])
+    except Exception:
+        return set()
+
+def skill_suggestions():
+    """Cached candidates from skill_scan.py, minus dismissed ones. scanning=True while a fresh scan is running
+    (a recent lock whose time is newer than the cache), self-clearing once the scan overwrites the cache."""
+    data = {}
+    try:
+        data = json.load(open(_SKILL_SUGG_CACHE)) or {}
+    except Exception:
+        data = {}
+    dismissed = _skill_dismissed()
+    cands = [c for c in (data.get("candidates") or []) if _sugg_key(c) not in dismissed]
+    gen = data.get("generated_at", 0)
+    scanning = False
+    try:
+        if os.path.isfile(_SKILL_SUGG_LOCK):
+            lk = os.path.getmtime(_SKILL_SUGG_LOCK)
+            scanning = (lk > gen) and (time.time() - lk < 240)
+    except Exception:
+        pass
+    return {"candidates": cands, "generated_at": gen, "scanned_sessions": data.get("scanned_sessions", 0),
+            "days": data.get("days"), "scanning": scanning, "ever": bool(data)}
+
+def _sugg_key(c):
+    return "|".join(sorted(c.get("identity") or [])) or (c.get("suggested_slug") or "")
+
+def skill_suggestions_refresh():
+    """Kick a background scan (non-blocking) that overwrites the cache. A 5k-session sweep takes a few seconds;
+    running it inline would stall the dashboard, so it's a detached subprocess + a lock the lens polls on."""
+    script = os.path.join(BASE, "skill_scan.py")
+    if not os.path.isfile(script):
+        return {"ok": False, "error": "skill_scan.py not found"}
+    try:
+        open(_SKILL_SUGG_LOCK, "w").write(str(int(time.time())))
+        subprocess.Popen([sys.executable, script, "--all", "--min-sessions", "4", "--top", "24",
+                          "--out", _SKILL_SUGG_CACHE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "scanning": True}
+
+def skill_suggestion_dismiss(key):
+    key = (key or "").strip()
+    if not key:
+        return {"ok": False, "error": "no key"}
+    d = _skill_dismissed(); d.add(key)
+    try:
+        json.dump(sorted(d), open(_SKILL_SUGG_DISMISS, "w"))
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "dismissed": len(d)}
+
+def _sugg_identities():
+    try:
+        return set(_sugg_key(c) for c in (json.load(open(_SKILL_SUGG_CACHE)) or {}).get("candidates", []))
+    except Exception:
+        return set()
+
+_SKILL_NOTIFY_MARK = os.path.join(BASE, "_skill_notify_marker.json")   # shared across co-located instances (dedup)
+
+def _skill_notify_new(prev_ids):
+    """Fire ONE operator notification for strong NEW candidates (not seen last cycle, not dismissed). Deduped
+    across co-located instances via a shared marker so the fleet never multi-pings the same set."""
+    try:
+        data = json.load(open(_SKILL_SUGG_CACHE)) or {}
+    except Exception:
+        return
+    dismissed = _skill_dismissed()
+    fresh = [c for c in data.get("candidates", [])
+             if _sugg_key(c) not in prev_ids and _sugg_key(c) not in dismissed and (c.get("sessions", 0) >= 8)]
+    if not fresh:
+        return
+    sig = "|".join(sorted(_sugg_key(c) for c in fresh))
+    try:
+        if (json.load(open(_SKILL_NOTIFY_MARK)) or {}).get("sig") == sig:
+            return                                    # a co-located instance already notified this exact set
+    except Exception:
+        pass
+    try:
+        json.dump({"sig": sig, "at": int(time.time())}, open(_SKILL_NOTIFY_MARK, "w"))
+    except Exception:
+        pass
+    top = fresh[:3]
+    lst = ", ".join("/%s (%dx)" % (c.get("suggested_slug"), c.get("sessions", 0)) for c in top)
+    notify_send("%d new skill candidate(s) from repeated work: %s -- open the Skills lens to build them."
+                % (len(fresh), lst))
+
+def _skill_scan_loop():
+    """Keep the skill-suggestions cache fresh so the Skills lens is self-populating, and (opt-in) notify on a
+    strong NEW repeated procedure -- the passive auto-detection channel. cc.config `skill_suggestions`:
+    {auto:true (refresh when stale), interval_hours:24, notify:false}. auto:false disables it entirely."""
+    cfg = CC.get("skill_suggestions")
+    cfg = cfg if isinstance(cfg, dict) else {}
+    if cfg.get("auto") is False:
+        return                                        # one-shot return -> supervisor won't respawn (feature off)
+    interval = max(1, int(cfg.get("interval_hours", 24))) * 3600
+    time.sleep(150)                                   # let boot settle before the first (heavy) scan
+    while True:
+        try:
+            gen = 0
+            try: gen = (json.load(open(_SKILL_SUGG_CACHE)) or {}).get("generated_at", 0)
+            except Exception: gen = 0
+            if time.time() - gen > interval:
+                prev = _sugg_identities()
+                skill_suggestions_refresh()
+                for _ in range(80):                   # wait (bounded) for the detached scan to finish
+                    time.sleep(3)
+                    if not skill_suggestions().get("scanning"):
+                        break
+                if cfg.get("notify"):
+                    _skill_notify_new(prev)
+        except Exception:
+            pass
+        time.sleep(3600)                              # hourly tick; only actually scans when the cache is stale
+
+def skill_promote(slug):
+    """Package a NODE-scope skill as a fleet `category:"skill"` extension (extensions/<slug>/). Reversible file
+    creation only -- signing + shipping to the fleet stays a deliberate Mission Control step (docs/MISSION_CONTROL.md)."""
+    slug = re.sub(r"[^a-z0-9-]", "", (slug or "").lower())
+    if not slug:
+        return {"ok": False, "error": "bad slug"}
+    if os.path.isdir(os.path.join(EXT_DIR, slug)):
+        return {"ok": False, "error": "extensions/%s already exists -- edit it directly, don't re-promote" % slug}
+    cli = os.path.join(BASE, "cc-skill")
+    code, out, err = sh([sys.executable, cli, "promote", slug], timeout=30)
+    ok = (code == 0) and os.path.isdir(os.path.join(EXT_DIR, slug))
+    return {"ok": ok, "slug": slug, "ext_dir": "extensions/" + slug,
+            "output": ((out or "") + (("\n" + err) if err else "")).strip(),
+            "error": (None if ok else "packaging failed (needs a node-scope skill named %r)" % slug)}
 
 _AGENT_RUNPY = '''#!/usr/bin/env python3
 """%s agent -- read-only assessor. Writes reports/latest.json in the common agent-report schema.
@@ -17424,6 +17602,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/agent-report":  return self._s(200, json.dumps(agent_report(q.get("slug", [""])[0])))
         if u.path == "/api/skills":        return self._s(200, json.dumps(skills_list()))
         if u.path == "/api/skill":         return self._s(200, json.dumps(skill_body(q.get("scope", [""])[0], q.get("name", [""])[0])))
+        if u.path == "/api/skill-suggestions": return self._s(200, json.dumps(skill_suggestions()))
         if u.path == "/api/teams":         return self._s(200, json.dumps(teams_list()))
         if u.path == "/api/team":          return self._s(200, json.dumps(team_body(q.get("name", [""])[0])))
         if u.path == "/api/subagents":     return self._s(200, json.dumps(subagents_list()))
@@ -18163,6 +18342,10 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/skill-create":  return self._s(200, json.dumps(skill_create(body.get("scope", "project"), body.get("name", ""), body.get("description", ""))))
         if u.path == "/api/skill-open":    return self._s(200, json.dumps(skill_open(body.get("scope", ""), body.get("name", ""))))
         if u.path == "/api/skill-delete":  return self._s(200, json.dumps(skill_delete(body.get("scope", ""), body.get("name", ""))))
+        if u.path == "/api/skill-inject":  return self._s(200, json.dumps(skill_inject(body.get("name", ""), body.get("command", ""), bool(body.get("run")))))
+        if u.path == "/api/skill-suggestions-refresh": return self._s(200, json.dumps(skill_suggestions_refresh()))
+        if u.path == "/api/skill-suggestion-dismiss":  return self._s(200, json.dumps(skill_suggestion_dismiss(body.get("key", ""))))
+        if u.path == "/api/skill-promote": return self._s(200, json.dumps(skill_promote(body.get("name", "") or body.get("slug", ""))))
         if u.path == "/api/agent-create":  return self._s(200, json.dumps(agent_create(body.get("name", ""), body.get("summary", ""))))
         if u.path == "/api/agent-delete":  return self._s(200, json.dumps(agent_delete(body.get("slug", ""))))
         if u.path == "/api/routine-run":         return self._s(200, json.dumps(routine_run_now(body.get("name", ""))))
@@ -18376,6 +18559,17 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 .mdlmenu-t button .d{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
 .mdlmenu-t button .l{flex:1}
 .mdlmenu-t button .ck{color:var(--accent-light);font-weight:800}
+.skmenu-t{position:fixed;z-index:90;width:342px;max-width:94vw;max-height:72vh;overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 14px 38px rgba(0,0,0,.6);padding:5px}
+.skmenu-t .mh{font:700 10px/1 -apple-system,sans-serif;text-transform:uppercase;letter-spacing:.6px;color:var(--mut);padding:7px 9px 6px}
+.skmenu-t button{display:flex;flex-direction:column;align-items:flex-start;width:100%;text-align:left;background:transparent;color:var(--ink);border:0;border-radius:9px;padding:9px;margin:0;cursor:pointer}
+.skmenu-t button:hover{background:rgba(var(--accent-light-rgb),.14)}
+.skmenu-t button[disabled]{opacity:.5;cursor:default}
+.skmenu-t button[disabled]:hover{background:transparent}
+.skmenu-t .skname{font:700 13px -apple-system,sans-serif;color:var(--ink);display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.skmenu-t .skcmd{font:600 11px ui-monospace,monospace;color:var(--accent-light)}
+.skmenu-t .skscope{font:700 9px -apple-system,sans-serif;text-transform:uppercase;letter-spacing:.4px;color:var(--mut);border:1px solid var(--line);border-radius:20px;padding:1px 6px}
+.skmenu-t .skdesc{font:400 11.5px/1.4 -apple-system,sans-serif;color:var(--mut);margin-top:3px}
+.skmenu-t .skempty{padding:12px;font-size:12px;color:var(--mut);line-height:1.5}
 #cpbtn{display:none}                     /* copy panel is a touch-only affordance; desktop uses native drag-select + Ctrl+C (Claude Code in classic TUI mode -> the terminal owns the mouse) */
 @media(pointer:coarse){#cpbtn{display:inline-block}}
 #live{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;z-index:11;display:none;background:var(--accent-light);color:var(--bg-warm);font:700 12px -apple-system,sans-serif;border:0;border-radius:18px;padding:8px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);cursor:pointer}
@@ -18430,7 +18624,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid var(--line);background:var(--card2);color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px;font-family:inherit}
 #tdlg .tdlg-b.go{background:linear-gradient(135deg,var(--accent-light),var(--accent));color:var(--bg-warm);border:none;font-weight:700}
 </style></head><body>
-<div id="bar"><span id="st">connecting...</span><button id="mdlbtn" onclick="mdlPickTerm(event)" title="the model this session runs -- click to change">Model</button><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button onclick="termAdvise()" title="Third-party review: an independent external GPT (a different AI vendor) reviews this session's recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." style="color:#58a6ff">&#128309; review</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button id="actog" onclick="toggleAutoCopy()" title="Auto-copy: when ON, whatever you have selected is copied to your clipboard the moment you release the mouse (no Ctrl+C needed). Needs a secure origin (https/localhost); on plain http a one-tap Copy chip is used instead.">&#9113; auto-copy</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button id="anbtn" onclick="toggleAn()" title="Auto-nudge: auto-send your keep-going message to this session every time it stops at a turn-end, until you turn it off (you are the brake)" style="color:#8a8a99">Auto-nudge</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
+<div id="bar"><span id="st">connecting...</span><button id="mdlbtn" onclick="mdlPickTerm(event)" title="the model this session runs -- click to change">Model</button><button id="skillsbtn" onclick="skPickTerm(event)" title="Skills: pick a Claude Code skill to run here -- see what each does, then it types the /command in (you review + press Enter)">Skills</button><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button onclick="termAdvise()" title="Third-party review: an independent external GPT (a different AI vendor) reviews this session's recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." style="color:#58a6ff">&#128309; review</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button id="actog" onclick="toggleAutoCopy()" title="Auto-copy: when ON, whatever you have selected is copied to your clipboard the moment you release the mouse (no Ctrl+C needed). Needs a secure origin (https/localhost); on plain http a one-tap Copy chip is used instead.">&#9113; auto-copy</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button id="anbtn" onclick="toggleAn()" title="Auto-nudge: auto-send your keep-going message to this session every time it stops at a turn-end, until you turn it off (you are the brake)" style="color:#8a8a99">Auto-nudge</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
 <button id="live" onclick="toLive()">&#8595; jump to live</button><button id="selcopy" onclick="doSelCopy()">&#10697; Copy selection</button><div id="cliptoast"></div>
 <div id="copyov"><div id="copybar"><b>Selectable text</b><span id="copyst" style="color:#8a8a99">long-press to select, or</span><button onclick="copyAll()">&#10697; copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" style="border-color:#e8c547">&#10005; close</button></div><pre id="copybody"></pre></div>
 <div id="wrap">
@@ -18476,6 +18670,31 @@ function mdlPickTerm(ev){ev.stopPropagation();mdlCloseT();var menu=document.crea
 async function mdlSetTerm(id){mdlCloseT();MDL_CUR_T=(id==='default'?'':id);paintMdlBtn();
   try{var r=await(await fetch('/api/session-model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,model:id})})).json();}catch(e){}
   try{term&&term.focus&&term.focus();}catch(e){}}
+// ---- Skills picker: list the real Claude Code skills (name + what it does) -> clicking TYPES its /command
+// into this terminal (NO Enter -- you review, add args, and press Enter). Mirrors the Model dropdown.
+function skEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function skCloseT(){var m=document.getElementById('skMenuT');if(m)m.remove();document.removeEventListener('click',skCloseT,true);}
+function skRun(cmd){skCloseT();try{sendKey(cmd+' ');}catch(e){}try{term&&term.focus&&term.focus();}catch(e){}}
+async function skPickTerm(ev){ev.stopPropagation();skCloseT();mdlCloseT();
+  var menu=document.createElement('div');menu.id='skMenuT';menu.className='skmenu-t';
+  menu.innerHTML='<div class="mh">Skills &mdash; click to insert its /command (then you press Enter)</div><div class="skwrap" style="padding:10px;color:var(--mut);font-size:12px">loading skills&hellip;</div>';
+  document.body.appendChild(menu);
+  var b=document.getElementById('skillsbtn').getBoundingClientRect();
+  menu.style.left=Math.max(8,Math.min(b.left,window.innerWidth-350))+'px';menu.style.top=(b.bottom+6)+'px';
+  setTimeout(function(){document.addEventListener('click',skCloseT,true);},0);
+  var d;try{d=await(await fetch('/api/skills')).json();}catch(e){d=null;}
+  var w=menu.querySelector('.skwrap');if(!w)return;
+  var sk=(d&&d.skills)||[];
+  if(!sk.length){w.outerHTML='<div class="skempty">No skills found yet.<br>Add one at <code>~/.claude/skills/&lt;name&gt;/SKILL.md</code> (with a <code>name</code> + <code>description</code>), or install a skill extension.</div>';return;}
+  w.outerHTML=sk.map(function(s){
+    var auto=(s.invocation==='auto only');
+    var cmd=(s.command||('/'+s.slug)).replace(/[^A-Za-z0-9_\/-]/g,'');
+    var snm=skEsc(s.name||s.slug), desc=skEsc(s.description||s.when_to_use||'');
+    var tags=(s.scope==='project'?'<span class="skscope">project</span>':'')+(auto?'<span class="skscope">auto-only</span>':'');
+    return '<button '+(auto?'disabled title="the agent invokes this automatically -- it is not a /command"':'onclick="skRun(\''+cmd+'\')" title="insert '+cmd+' into the terminal"')+'>'
+      +'<div class="skname">'+snm+' <span class="skcmd">'+skEsc(cmd)+'</span>'+tags+'</div>'
+      +(desc?'<div class="skdesc">'+desc+'</div>':'')+'</button>';
+  }).join('');}
 document.addEventListener('click',function(e){var m=document.getElementById('moremenu');if(!m||!m.classList.contains('open'))return;
   if(e.target&&e.target.closest&&e.target.closest('#more'))return;        // the toggle button handles itself
   if(e.target&&e.target.closest&&e.target.closest('.fontgrp'))return;     // A-/A+ are tapped repeatedly -> keep open
@@ -22645,6 +22864,48 @@ async function mdlSet(name, id){
   }catch(e){toast('Failed to switch model',4500); delete MDL_OPT[name];}
   // let the transcript catch up, then drop the optimistic flag once the real model matches
   setTimeout(function(){var c=(TOKDATA.sessions||{})[name]; if(c&&c.model&&c.model.toLowerCase()===mdlShort(id).toLowerCase())delete MDL_OPT[name]; if(typeof loadSessions==='function')loadSessions(true);},4000);}
+// ---- Per-session SKILLS chip: run a /skill in THIS session. The picker groups skills by relevance
+//      (this project / this node / fleet) + a live filter, so it feels intelligent. Choosing one STAGES the
+//      /command into the pane (no Enter) so you add args + review before it runs. See skill_scan.py / cc-skill.
+var SKILLS_CACHE=null;
+async function skFetch(force){ if(SKILLS_CACHE&&!force)return SKILLS_CACHE;
+  try{var d=await(await fetch('/api/skills')).json();SKILLS_CACHE=(d&&d.skills)||[];}catch(e){SKILLS_CACHE=[];}
+  return SKILLS_CACHE;}
+function skillChip(name){return '<button class="mini" title="run a skill in this session (stages the /command for you to review + run)" onclick="event.stopPropagation();skPick(event,\''+esc(name)+'\')">✦</button>';}
+function closeSkMenu(e){ if(e&&e.target&&e.target.closest&&e.target.closest('#skMenu'))return;
+  var m=document.getElementById('skMenu');if(m)m.remove();document.removeEventListener('click',closeSkMenu,true);}
+function skFilter(){var q=((document.getElementById('skFilt')||{}).value||'').toLowerCase();
+  document.querySelectorAll('#skMenu .sk-opt').forEach(function(b){b.style.display=(b.getAttribute('data-t').indexOf(q)>=0)?'':'none';});
+  document.querySelectorAll('#skMenu .sk-grp').forEach(function(g){var any=Array.prototype.some.call(g.querySelectorAll('.sk-opt'),function(b){return b.style.display!=='none';});g.style.display=any?'':'none';});}
+async function skPick(ev,name){ ev.stopPropagation(); closeSkMenu();
+  var anchor=ev.target.closest('button'); var r=anchor.getBoundingClientRect();
+  var sk=await skFetch();
+  var groups=[['here','This project'],['node','This node'],['fleet','Fleet']];
+  var body='<div class="mdl-mh">Run a skill in '+esc(name)+'</div>'
+    +'<input id="skFilt" placeholder="filter skills…" oninput="skFilter()" onclick="event.stopPropagation()" autocomplete="off" style="width:calc(100% - 16px);margin:5px 8px 7px;padding:5px 8px;border:1px solid var(--line);border-radius:7px;background:#15151b;color:var(--ink);font-size:12px;outline:none"/>';
+  var shown=0;
+  groups.forEach(function(g){var items=sk.filter(function(s){return (s.origin||s.scope)===g[0];});
+    if(!items.length)return; shown+=items.length;
+    body+='<div class="sk-grp"><div class="mdl-mh" style="opacity:.55;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em">'+esc(g[1])+' · '+items.length+'</div>';
+    items.forEach(function(s){var t=(s.slug+' '+(s.description||'')).toLowerCase().replace(/"/g,'');
+      body+='<button class="mdl-opt sk-opt" data-t="'+esc(t)+'" title="'+esc(s.description||'')+'" onclick="skInject(\''+esc(name)+'\',\''+esc(s.slug)+'\')">'
+        +'<span class="mdl-ol" style="display:flex;flex-direction:column;align-items:flex-start;gap:1px;min-width:0"><b>/'+esc(s.slug)+'</b>'
+        +'<span style="opacity:.6;font-size:10.5px;max-width:210px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc((s.description||'').slice(0,80))+'</span></span>'
+        +(s.disable_model?'<span title="side-effect skill — staged for you to run" style="opacity:.6;margin-left:auto">✋</span>':'')+'</button>';});
+    body+='</div>';});
+  if(!shown)body+='<div class="mdl-opt" style="opacity:.6;justify-content:center">no skills yet — build one in the Skills lens</div>';
+  var menu=document.createElement('div'); menu.className='mdl-menu'; menu.id='skMenu';
+  menu.style.minWidth='250px'; menu.style.maxHeight='360px'; menu.style.overflow='auto';
+  menu.innerHTML=body; document.body.appendChild(menu);
+  var w=250; menu.style.left=Math.max(8,Math.min(r.left,window.innerWidth-w-8))+'px';
+  var top=r.bottom+5; if(top+300>window.innerHeight)top=Math.max(8,r.top-menu.offsetHeight-5); menu.style.top=top+'px';
+  var fi=document.getElementById('skFilt'); if(fi)setTimeout(function(){try{fi.focus();}catch(e){}},30);
+  setTimeout(function(){document.addEventListener('click',closeSkMenu,true);},0);}
+async function skInject(name,slug){ closeSkMenu();
+  try{var r=await(await fetch('/api/skill-inject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,command:slug,run:false})})).json();
+    if(r&&r.ok){openInSessions(name); toast('Staged /'+esc(slug)+' in '+esc(name)+' — add any args, then press Enter to run.',5000);}
+    else toast('Could not stage: '+((r&&r.error)||'error'),4500);
+  }catch(e){toast('Failed to stage the skill',4500);}}
 // Click the 📦 by a session's context % -> a popup of the EXACT payload for THAT session (everything sent each trip).
 async function ctxPkgPopup(name){
   showM('<h3 style="margin:0 0 6px">&#128230; Context package &mdash; '+e2(name)+'</h3><div class="meta sub" style="margin-bottom:10px">Everything sent to this agent on each trip, BEYOND your message. This is the "payload" — what makes a ClaudeFather agent start informed instead of blank.</div><div id="pkgPopOut" class="meta sub">assembling…</div><div style="margin-top:12px;text-align:right"><button class="mini" onclick="closeM()">Close</button></div>');
@@ -27604,14 +27865,16 @@ async function delAgent(slug){if(!await confirmM('Archive agent-tool "'+slug+'"?
 // is the trigger; full body loads only when invoked (progressive disclosure). ----
 async function loadSkills(){document.getElementById("grid").innerHTML=empty("Loading skills…");
   let d={};try{d=await(await fetch('/api/skills')).json();}catch(e){document.getElementById("grid").innerHTML=empty("Couldn't load skills.");return;}
+  let sugg={};try{sugg=await(await fetch('/api/skill-suggestions')).json();}catch(e){sugg={};}
   const sk=d.skills||[],dirs=d.dirs||{};
   let h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Skills</b> <span class="sub">'+sk.length+' skill(s) — on-demand procedures/knowledge Claude pulls in when the description matches. <code>'+esc(dirs.user||'~/.claude/skills')+'</code> (user) + <code>'+esc(dirs.project||'')+'</code> (project)</span>'
-    +'<div style="margin-left:auto"><button class="mini go" onclick="skillNew()">＋ New skill</button></div></div>'
+    +'<div style="margin-left:auto;display:flex;gap:6px"><button class="mini" onclick="skillScan()" title="scan session transcripts for repeated procedures ripe to become a skill">Find candidates</button><button class="mini go" onclick="skillNew()">＋ New skill</button></div></div>'
     +'<div class="meta" style="margin-top:6px">A skill = a folder with <code>SKILL.md</code>. The <b>description</b> is what makes Claude reach for it — say what it does + when to use it. See <code>docs/MEMORY_SKILLS_AGENTS.md</code>.</div></div>';
+  h+=skillSuggHTML(sugg);
   if(!sk.length){h+=empty("No skills yet. Click ＋ New skill to add one (e.g. a deploy or backup ritual you keep re-explaining).");document.getElementById("grid").innerHTML=h;return;}
-  sk.forEach(s=>{const col=s.scope=='user'?'var(--info)':'var(--ok)';
+  sk.forEach(s=>{const og=s.origin||(s.scope=='user'?'node':'here');const col=og=='fleet'?'var(--violet,#a78bfa)':(og=='node'?'var(--info)':'var(--ok)');
     h+='<div class="card" style="cursor:default"><h3><span>'+esc(s.name)+'</span><span style="display:flex;gap:5px">'
-      +'<span class="badge" style="background:'+col+'22;color:'+col+'">'+s.scope+'</span>'
+      +'<span class="badge" style="background:'+col+'22;color:'+col+'" title="'+(og=='fleet'?'shipped fleet-wide as a skill-extension':(og=='node'?'this node, all projects':'this project only'))+'">'+esc(og)+'</span>'
       +'<span class="badge bdg-violet">'+esc(s.invocation)+'</span>'
       +((s.lint&&s.lint.length)?'<span class="badge bdg-red" title="'+esc(s.lint.join(", "))+'">⚠ '+s.lint.length+'</span>':'')+'</h3>'
       +'<div class="sub" style="margin-top:6px">'+e2(s.description||'(no description — Claude can\'t tell when to use this)')+'</div>'
@@ -27620,6 +27883,7 @@ async function loadSkills(){document.getElementById("grid").innerHTML=empty("Loa
       +'<div class="meta" style="margin-top:4px"><code>'+esc(s.command)+'</code>'+(s.allowed_tools&&s.allowed_tools!='None'&&s.allowed_tools!=''?(' · tools: '+esc(s.allowed_tools).slice(0,60)):'')+'</div>'
       +'<div class="btns" style="margin-top:10px"><button class="mini" onclick="skillView(\''+s.scope+'\',\''+esc(s.slug)+'\')">View</button>'
       +'<button class="mini" onclick="skillOpen(\''+s.scope+'\',\''+esc(s.slug)+'\')">Edit</button>'
+      +((og=='node')?('<button class="mini" onclick="skillPromote(\''+esc(s.slug)+'\')" title="package this node skill as a fleet skill-extension (then sign + ship at Mission Control)">Promote →</button>'):'')
       +'<button class="mini" onclick="skillDelete(\''+s.scope+'\',\''+esc(s.slug)+'\')" title="Archive this skill (reversible)">Delete</button></div>'
       +'<div id="skv-'+s.scope+'-'+esc(s.slug)+'" style="margin-top:9px"></div></div>';});
   document.getElementById("grid").innerHTML=h;}
@@ -27640,6 +27904,45 @@ async function skillOpen(scope,name){toast('Opening '+name+' to edit…',3000);
 async function skillDelete(scope,name){if(!await confirmM('Archive skill "'+name+'" ('+scope+')? It moves to _archive/ and is recoverable, but Claude will stop loading it.'))return;
   try{const r=await(await fetch('/api/skill-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scope,name})})).json();
     if(r&&r.ok){toast('Skill archived to '+(r.archived||'_archive')+'.',4000);loadSkills();}else toast('Delete failed: '+((r||{}).error||'?'),5000);}catch(e){toast('Delete failed');}}
+// ---- Skill SUGGESTIONS: repeated procedures (skill_scan.py) ripe to become a /skill. Auto-detection surface. ----
+function skillSuggHTML(g){ g=g||{}; var c=g.candidates||[]; window.SKILL_SUGG=c;
+  if(g.scanning) return '<div class="card" style="cursor:default;grid-column:1/-1"><b>Skill suggestions</b> <span class="sub">scanning session transcripts for repeated procedures… this refreshes automatically.</span></div>';
+  if(!c.length) return '';
+  var h='<div class="card" style="cursor:default;grid-column:1/-1"><div class="modnav"><b>Skill suggestions</b> <span class="sub">'+c.length+' repeated procedure(s) worth capturing as a /skill — mined from '+(g.scanned_sessions||0)+' session(s)'+(g.days?(' · last '+g.days+'d'):'')+'. Things agents keep doing by hand.</span><div style="margin-left:auto"><button class="mini" onclick="skillScan()" title="re-scan transcripts now">↻ Re-scan</button></div></div>';
+  c.forEach(function(x,i){
+    h+='<div style="padding:9px 0;border-top:1px solid var(--line);display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">'
+      +'<div style="flex:1;min-width:230px"><b>/'+esc(x.suggested_slug||'procedure')+'</b> '
+      +'<span class="badge bdg-violet">'+(x.sessions||0)+' sessions</span> '
+      +'<span class="badge" style="opacity:.7" title="'+(x.scope_hint=='project'?'seen in one project → project scope':'seen across projects → node scope')+'">'+esc(x.scope_hint||'node')+'</span>'
+      +'<div class="meta" style="margin-top:4px">tools: <code>'+esc((x.identity||[]).join('  +  '))+'</code></div>'
+      +(x.steps?'<div class="meta" style="margin-top:2px;opacity:.65">seen as: '+esc(x.steps)+'</div>':'')
+      +(x.suggested_description?'<div class="sub" style="margin-top:3px">'+e2(x.suggested_description)+'</div>':'')+'</div>'
+      +'<div class="btns" style="flex:0 0 auto"><button class="mini go" onclick="skillScaffold('+i+')" title="create a SKILL.md from this procedure + open it to author">＋ Build skill</button>'
+      +'<button class="mini" onclick="skillDismiss('+i+')" title="dismiss — don\'t suggest this again">Dismiss</button></div></div>';});
+  return h+'</div>';}
+async function skillScan(){ toast('Scanning session transcripts for repeated procedures…',3500);
+  try{await fetch('/api/skill-suggestions-refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});}catch(e){}
+  try{loadSkills();}catch(e){}
+  var tries=0; var iv=setInterval(async function(){tries++;
+    var g={};try{g=await(await fetch('/api/skill-suggestions')).json();}catch(e){}
+    if((g&&!g.scanning)||tries>40){clearInterval(iv);try{loadSkills();}catch(e){} if(tries>40)toast('Scan is taking a while — check back shortly.',4000);}
+  },1500);}
+async function skillScaffold(i){ var x=(window.SKILL_SUGG||[])[i]; if(!x)return;
+  var name=(await promptM('New skill name (letters/numbers/-):', x.suggested_slug||'')||'').trim(); if(!name)return;
+  var scope=(await promptM("Scope — 'project' (this project only) or 'user' (all your projects):", x.scope_hint=='project'?'project':'user')||'user').trim();
+  var desc=(await promptM('One-line description — WHAT it does + WHEN to use it (the trigger Claude sees):', x.suggested_description||'')||'').trim();
+  var r=await(await fetch('/api/skill-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scope:scope,name:name,description:desc})})).json();
+  if(r&&r.ok){toast('Skill scaffolded from the suggestion — opening it to author.');skillOpen(r.scope,r.name);}else toast('Failed: '+((r||{}).error||'?'),5000);}
+async function skillDismiss(i){ var x=(window.SKILL_SUGG||[])[i]; if(!x)return;
+  var key=(x.identity||[]).slice().sort().join('|');
+  try{await fetch('/api/skill-suggestion-dismiss',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:key})});}catch(e){}
+  toast('Dismissed.'); loadSkills();}
+async function skillPromote(slug){
+  if(!await confirmM('Package /'+slug+' as a FLEET skill-extension?\\n\\nThis creates extensions/'+slug+'/ (reversible). Signing + shipping it to every node is a separate, deliberate Mission Control step — this does NOT ship it to the fleet yet.'))return;
+  toast('Packaging /'+slug+' as a fleet skill-extension…',3000);
+  try{var r=await(await fetch('/api/skill-promote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:slug})})).json();
+    if(r&&r.ok){toast('Packaged → '+(r.ext_dir||('extensions/'+slug))+'. Next: sign + ship at Mission Control (docs/MISSION_CONTROL.md).',7000);loadSkills();}
+    else toast('Promote failed: '+((r||{}).error||'?'),6000);}catch(e){toast('Promote failed');}}
 // ---- Teams lens: rung-4 coordinating rosters (teams/<slug>/TEAM.md). Each team = several agents owning a
 // DISTINCT lens + DISTINCT files who reconcile findings. Reserve for the rare coordinate-with-each-other
 // case (docs/MEMORY_SKILLS_AGENTS.md sec 4). Discovery + view the roster/protocol. ----
@@ -28043,7 +28346,7 @@ function ccWireDropzones(){
     })(ov,name);
   }
 }
-function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)
+function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)+skillChip(x.name)
   +'<span class="stbtns">'
   +'<button class="mini" title="give Claude a file (upload + hand the path to this session)" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
   +'<button class="mini" title="Third-party review — an independent external GPT (a different AI vendor) reviews this session\'s recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." onclick="adviseOpen(\''+esc(x.name)+'\')">🔵</button>'
@@ -28066,7 +28369,7 @@ function renderFocus(s){
   return h;
 }
 // ===== WORKSPACE: split-pane columns. Drag a session up from the dock; resize the splitter; push panes down. =====
-function paneHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)
+function paneHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)+skillChip(x.name)
   +'<span class="stbtns">'
   +'<button class="mini panedown" title="push this session back down to the taskbar" onclick="paneDown(\''+esc(x.name)+'\')">&#11015;</button>'
   +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
@@ -31504,6 +31807,7 @@ if __name__ == "__main__":
     _daemon("tasks_morning", _tasks_morning_loop)        # daily-morning Tasks auto-scan (fresh list each AM)
     _daemon("gmail_sync", _gmail_sync_loop)              # keep recently-viewed Gmail lists warm (cache + outage fallback)
     _daemon("gc_sync", _gc_sync_loop)                    # same for Calendar/Drive (resilient cache)
+    _daemon("skill_scan", _skill_scan_loop)              # SKILLS: keep the skill-suggestions cache fresh (self-populating Suggestions queue) + opt-in notify on new repeated-procedure candidates (cc.config skill_suggestions)
     _daemon("warm_views", _warm_default_views)           # one-shot: boot-warm the UI's default views + prime the OAuth token (non-blocking)
     try: _google_vault_resync()        # heal the re-mint gap: push any fresher token FILE (a re-mint) into the vault the server reads first
     except Exception: pass
