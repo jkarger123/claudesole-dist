@@ -3,6 +3,9 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.209 -- 2026-07-20  (Projects tree root shows the node's name)
+- **Tree root = the node's name.** The top card in the Projects family tree now shows the node's configured brand (its human name) instead of the raw project-folder basename -- so each node reads its own name at the top of its tree, not a filesystem path. Child names are unchanged (their folder names).
+
 ## 0.99.208 -- 2026-07-20  (Portfolio & Admin-shell fixes · nav fixed-head order)
 Reliability + navigation fixes:
 - **Portfolio "everything is down" fixed** — the overseer's health scrape hit each node's auth-gated `/api/chief` **unauthenticated** (401 → every node read DOWN). Now uses the auth-carrying scraper (`_scrape_auth`), like the fleet-attention rollup. Nodes read their true status again.

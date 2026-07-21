@@ -10618,7 +10618,10 @@ def _cmd_tokens(absdir):
 
 def module_tree(rel="", depth=0):
     absdir = projpath(rel) if rel else PROJECT
-    node = {"name": (os.path.basename(absdir) or PROJECT_NAME or "project"), "rel": rel, "children": [], "tok": _cmd_tokens(absdir)}
+    # the ROOT shows the node's HUMAN name (its configured brand) instead of the raw folder basename, so each
+    # node reads its own name atop the tree. Child names come from child_modules below (their folder names).
+    nm = BRAND if not rel else (os.path.basename(absdir) or "project")
+    node = {"name": nm, "rel": rel, "children": [], "tok": _cmd_tokens(absdir)}
     if depth < 7:
         for k in child_modules(absdir):
             sub = module_tree(k["rel"], depth + 1)

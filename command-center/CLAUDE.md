@@ -39,7 +39,7 @@
 - `ServerHeath/` -- >> Resume here: read _handoffs/20260704-1405__ServerHeath.md first -- it is the latest handoff.
 - `Usage/` -- >> Resume here: read _handoffs/20260702-1502__Usage.md first -- it is the latest handoff.
 - `autonudge/` -- My job: when a Claude session keeps stopping to ask "want me to keep going?", auto-send a canned push (e.g.
-- `front-door/` -- The visual front door to Claude Code: the Projects lens reimagined as an ancestry-style family tree of every project, fronted by a "what do you want to work on?
+- `front-door/` -- >> Resume here: read _handoffs/20260720-0541__front-door.md first -- it is the latest handoff.
 - `update/` -- This folder is the home + documentation of how a ClaudeFather node gets new framework code, reliably,
 - `vault/` -- This folder is the documentation home for ClaudeFather's credential system: the per-install vault, the
 <!-- /CC:CHILDREN -->
