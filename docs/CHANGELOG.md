@@ -3,6 +3,23 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.211 -- 2026-07-22  (Skills dropdown in the terminal bar + concierge active-discovery)
+
+Two front-of-house refinements, fleet-wide:
+- **Skills dropdown in the /term session bar.** A **Skills** button next to Model opens a dropdown of this
+  node's skills -- each row shows **name + description + `/command`** -- and choosing one types the `/command`
+  into the terminal **without pressing Enter** (you add args + review before running, matching the
+  no-auto-fire principle). Auto-only skills are shown greyed with an "auto-only" tag; empty state points to
+  `~/.claude/skills/`. (`TERM_PAGE`: `skPickTerm`/`skRun`/`skCloseT`/`skEsc`, `.skmenu-t` CSS,
+  `#skillsbtn` in `#bar`.)
+- **Concierge owns active discovery** (CCR_CONCIERGE_PATTERN_REFINEMENT). The Front-Desk concierge now LEADS
+  the operator through goal -> scope -> new-vs-existing, routes with `cc-route` + placement reasoning (root
+  for infra, nested for feature work, next-to-what-it-resembles), auto-bootstraps a new home + CLAUDE.md when
+  needed, and hands off warm with STRUCTURED context (goal + scope + why-here + first step) instead of the
+  old passive "which folder?". A `concierge:true` flag on `/api/frontdesk` FORCES the concierge (the "let a
+  concierge help" escape hatch used to quietly route first and rarely reach it). (`_FRONTDESK_BRIEF`,
+  `front_desk_open` greet, `front_desk()`; Front Door `fdoorConcierge` passes `concierge:true`.)
+
 ## 0.99.210 -- 2026-07-21  (Skill Authoring Platform -- fleet skills system)
 
 The fleet's system for building, scoping, discovering, and distributing Claude Code Skills -- built on the

@@ -12295,22 +12295,34 @@ def route(text, exclude=None):
             "needs_new_home": needs_new, "suggested_parent": parent}
 
 _FRONTDESK_BRIEF = (
-    "You are the FRONT DESK / concierge for this ClaudeFather node -- an EPHEMERAL triage desk. Your ONLY job is "
-    "to get the operator into the RIGHT scope (folder) for what they're working on, then HAND OFF. You do NOT do "
-    "the work yourself and you do NOT file notes. Rules: (1) Ask AT MOST 2 clarifying questions, then act. "
-    "(2) To find the home run `cc-route \"<their full description>\"` -- it returns the best-matching module, or that "
-    "a NEW home is needed. (3) When you know the scope, run `cc-handoff go --to <rel> --goal \"<goal>\" "
-    "--summary \"<where we are + what you learned>\"` -- this COMPLETES the warm transfer RIGHT NOW: it opens (or "
-    "resumes) that scope carrying the goal + context + pointers so the destination agent is ALREADY BRIEFED "
-    "(nothing gets re-explained), and the operator's screen FOLLOWS you there automatically -- NO click, no "
-    "Transfers tab. Narrate it as you do it ('taking you to mcp/proxy now'). (4) If nothing fits, open a NEW home "
-    "the same way: `cc-handoff go --to new` (creates the dir + a seeded CLAUDE.md, then takes them in). (5) If the "
-    "operator says 'just work here', respect it once and stand down. (6) KNOW "
-    "YOUR LANE: you are the receptionist, NOT the manager. If what they raise is not a specific piece of work but "
-    "something cross-department, structural, or an escalation (a fleet/platform decision, a problem spanning "
-    "departments, something for the owner), that is a CHIEF OF STAFF matter -- point them to their Chief of Staff "
-    "(the Chief session, or `cc-escalate` for a Mission Control matter), don't force it into a department. Be warm, "
-    "fast, and invisible: narrate what you're doing ('taking you to mcp/proxy now') so they always know.")
+    "You are the FRONT DESK / concierge for this ClaudeFather node -- an EPHEMERAL triage desk. You OWN the "
+    "discovery: turn a vague ask ('skills', 'the Johnson thing') into a concrete, routed, agent-ready handoff in "
+    "ONE short exchange. YOU lead the conversation -- the operator should not have to self-summarize or know the "
+    "folder tree. You do NOT do the work yourself and you do NOT file notes; you PLACE them and hand off.\n\n"
+    "THE FLOW -- drive all three steps, don't wait to be told:\n"
+    "(1) GOAL. Lead with WHAT they're trying to accomplish, never 'which folder'. Uncover: the goal (what are "
+    "they building/fixing?), the SCOPE (fleet-wide platform work / just this node / a one-off task), and whether "
+    "it's NEW work or EXTENDS something that already exists. Infer what you can from their words; ask AT MOST 2-3 "
+    "focused questions, then act -- don't interrogate.\n"
+    "(2) HOME. Run `cc-route \"<their full goal in your own words>\"` -- it returns the best-matching module, or "
+    "that a NEW home is needed (with a suggested parent). Reason about placement yourself: cross-cutting "
+    "INFRASTRUCTURE sits at the ROOT (peer to agents/, extensions/); department/feature work NESTS under the "
+    "closest existing area; a new thing goes next to the module it most resembles.\n"
+    "(3) HAND OFF. Run `cc-handoff go --to <rel> --goal \"<the goal>\" --summary \"<goal + scope + WHY it lives "
+    "here + what you learned>\" --next \"<the first concrete step for the agent>\"`. This COMPLETES the warm "
+    "transfer NOW: it opens (or resumes) that scope carrying the full brief so the destination agent is ALREADY "
+    "oriented -- goal, scope, architectural context, next step -- nothing gets re-explained, and the operator's "
+    "screen FOLLOWS automatically (no click, no Transfers tab). For NEW work use `--to new` (or `--to "
+    "<parent>/<new-name>` for a placement you chose) -- it creates the dir + a seeded CLAUDE.md, then takes them "
+    "in; put the module's PURPOSE + how it fits the tree into --summary so the new CLAUDE.md AND the agent both "
+    "start structured, not blank.\n\n"
+    "Always NARRATE as you go ('got it -- this is fleet-wide infra, so I'm standing up skill-authoring/ at the "
+    "root and taking you there now'). Be warm, fast, decisive.\n"
+    "ESCAPE HATCHES: if the operator says 'just work here', respect it once and stand down. And KNOW YOUR LANE -- "
+    "you are the receptionist, not the manager: if the ask is not a specific piece of work but something "
+    "cross-department, structural, or an escalation (a fleet/platform decision, a problem spanning departments, "
+    "something for the owner), that is a CHIEF OF STAFF matter -- point them to the Chief session (or "
+    "`cc-escalate` for a Mission Control matter), don't force it into a department.")
 
 def front_desk_open(text):
     """FRONT DESK speed 2 (deep-audit Phase 1.3): spawn the EPHEMERAL cheap-model concierge to converse + place the
@@ -12320,9 +12332,12 @@ def front_desk_open(text):
     guesses = (["%s -- %s" % (dest["rel"], dest.get("name", ""))] if dest.get("rel") else [])
     for a in (rt.get("alternatives") or [])[:2]:
         if a.get("rel") and a["rel"] != dest.get("rel"): guesses.append(a["rel"])
-    greet = ("Hey -- let's get you to the right place. You're working on: %s. My best guess%s: %s%s. Which is it, "
-             "or tell me more?" % (text, "es" if len(guesses) != 1 else "", "; ".join(guesses) or "(nothing obvious yet)",
-             " -- or somewhere NEW" if rt.get("needs_new_home") else ""))
+    hunch = (("\n\n(My hunch: %s -- but the goal decides where you land.)" % "; ".join(guesses)) if guesses else "")
+    greet = ("Hey -- let's get you set up. You said: %r.\n\nSo I place you right the first time (no re-explaining "
+             "later), quick:\n1) What's the GOAL -- what are you trying to accomplish?\n2) Is it fleet-wide platform "
+             "work, just this node, or a one-off task?\n3) NEW work, or extending something that already exists?%s"
+             "\n\nTell me and I'll route you to the right folder -- or stand up a new home -- and brief an agent to "
+             "take it from there." % (text, hunch))
     r = launch("studio", "concierge " + text[:24], rel=None,
                model=(CC.get("frontdesk_model") or "claude-haiku-4-5-20251001"),
                extra_sys=_FRONTDESK_BRIEF, seed=greet)
@@ -12338,6 +12353,8 @@ def front_desk(body):
     {text} alone -> hand it to the concierge to place. The Start box's Enter action. (deep-audit Phase 1.3)."""
     text = (body.get("text") or "").strip()
     if not text: return {"ok": False, "error": "tell me what you're working on"}
+    if body.get("concierge"):                           # "let a concierge help" -> FORCE the concierge (skip routing);
+        return front_desk_open(text)                    # the escape hatch must reach it even when the router is confident
     if "rel" in body:                                   # operator accepted a routed scope chip
         rel = (body.get("rel") or "").strip() or None
         r = launch("studio", text[:40], rel=rel, seed=text)
@@ -22396,7 +22413,7 @@ async function fdoorRename(){var g=FDOOR.ghost;if(!g)return;var nm=(await prompt
 async function fdoorConcierge(){var q=FDOOR.query||((document.getElementById("fdoorIn")||{}).value||"").trim();if(!q){toast("Tell me what you want to work on first");return;}
   if(_fdoorActing)return;_fdoorActing=true;   // guard: no double-spawn
   busyOn("Bringing in a concierge to place this…");
-  var r;try{r=await(await fetch("/api/frontdesk",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:q})})).json();}catch(e){r=null;}
+  var r;try{r=await(await fetch("/api/frontdesk",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:q,concierge:true})})).json();}catch(e){r=null;}
   busyOff();_fdoorActing=false;
   if(r&&r.ok&&r.session){toast("Bringing in a concierge to place this with you…",3000);gotoLens("sessions");setTimeout(function(){try{openInSessions(r.session);}catch(e){}},350);if(r.concierge&&typeof fdFollow==="function")fdFollow(r.session);}
   else toast((r&&r.error)||"Couldn't start a concierge",4000);}
