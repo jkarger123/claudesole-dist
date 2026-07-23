@@ -3,6 +3,23 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.212 -- 2026-07-23  (Morning Brief stops nagging about already-done things: task reconciliation)
+The Morning Brief kept resurfacing to-dos that were already handled -- most visibly telling the operator to
+"send availability / follow up with X" for a meeting that had already happened. Root cause: the AI task-scan
+re-mints a paraphrased copy of the same ask every day (and the exact-title fingerprint misses paraphrases),
+and nothing ever reconciled a task against the calendar (meeting occurred) or the operator's sent mail (already
+replied). Fixes:
+- **Brief engine (`morning_brief.py`):** calendar-aware SUPPRESSION of "schedule / send-availability / book-a-call
+  with X" tasks whose named person already has a calendar event (past OR booked); a new `sent`-mail source (the
+  strongest "already handled" signal, auto-enabled for existing operators); past-window calendar events tagged
+  `[ALREADY HAPPENED]`; gather-time fuzzy dedup of paraphrased task titles; and a "RECONCILE before you resurface"
+  prompt block making the calendar + sent mail ground truth over stale tasks.
+- **Task engine (`server.py`):** fuzzy dedup in `task_add` for auto-generated tasks (person+object token match,
+  precision-tuned); `tasks_ai_scan` is now handed the open-task list so it won't duplicate and returns a `done[]`
+  it auto-closes from sent-mail evidence; new `tasks_reconcile()` (morning loop + `/api/tasks-reconcile`)
+  calendar-closes moot tasks and expires never-accepted suggestions older than `tasks_stale_days` (default 21);
+  `gmail_list` rows now include `To` (stronger person-matching on sent mail).
+
 ## 0.99.211 -- 2026-07-22  (Skills dropdown in the terminal bar + concierge active-discovery)
 
 Two front-of-house refinements, fleet-wide:

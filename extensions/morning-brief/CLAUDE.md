@@ -1,5 +1,10 @@
 # Morning Brief — scheduled, voice-read daily brief
 
+<!-- CC:NOTES append-only; agents file learnings that belong to THIS module here -->
+## Learnings (filed by agents; append-only)
+- Morning Brief 'never checks back' bug: the ai-scan re-mints a to-do with a reworded title every day while `_task_fp` dedups on the EXACT title, so one ask stacked up 6x and the brief nagged about it daily (e.g. 'follow up with X about your availability' AFTER that meeting had already happened). Root cause: nothing reconciled a task against the calendar (meeting occurred) or sent mail (already replied). FIX (morning_brief.py + server.py): (1) brief-side calendar-aware SUPPRESSION of schedule/send-availability/book-a-call tasks whose named person already has a calendar event (past OR booked); (2) gather-time fuzzy dedup of paraphrased titles (person+object token Jaccard>=0.6 / overlap>=0.72); (3) new `sent` mail source + `[ALREADY HAPPENED]` past-calendar tags + a RECONCILE-before-you-resurface prompt clause; (4) `tasks_reconcile()` calendar-closes moot tasks + expires never-accepted suggestions >21d (morning loop + `/api/tasks-reconcile`); (5) `tasks_ai_scan` is handed the open-task list -> dedups + returns `done[]` to auto-close from sent-mail evidence; (6) `gmail_list` rows now carry `To`. Rule: the calendar + sent mail are ground truth; a task is only a stale suggestion.
+<!-- /CC:NOTES -->
+
 <!-- LATEST-HANDOFF -->
 **>> Resume here:** read `_handoffs/20260720-0309__morning-brief.md` first -- it is the latest handoff.
 <!-- /LATEST-HANDOFF -->

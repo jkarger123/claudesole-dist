@@ -19,6 +19,7 @@ import json, os, re, subprocess, time, urllib.request, urllib.error
 
 _CTX = {}   # injected by server.py: CC, PROJECT, STATE_DIR, sh, secret, + accessors (see init)
 _LAST_TTS_FALLBACK = ""   # why a non-preferred voice provider was used (surfaced in the brief, for debugging)
+_RUN = {}   # per-generate scratch (reset each mb_generate): shared reconciliation data (parsed calendar, suppressed tasks)
 
 
 def init(ctx):
@@ -31,6 +32,11 @@ def _cfg():
     c.setdefault("days", "weekdays"); c.setdefault("horizon_days", 14)
     c.setdefault("length", "short"); c.setdefault("tone", "warm")
     c.setdefault("sources", list(SOURCES.keys()))   # ALL registered sources ON by default (each degrades to [] if its backend isn't set up); future sources auto-included
+    # RECONCILIATION signal: 'sent' mail is what lets the brief tell an item is already handled. Existing operators'
+    # saved source lists predate it, so auto-include it (unless explicitly opted out) rather than nagging about
+    # things they've already replied to. Same one-time convergence any correctness-critical future source can use.
+    if c.get("reconcile_sent", True) and "sent" in SOURCES and "sent" not in (c.get("sources") or []):
+        c["sources"] = list(c.get("sources") or []) + ["sent"]
     # BUSINESS-HOURS awareness (operator): so the brief never counts evenings/weekends/non-working days as elapsed
     # time when judging "overdue"/"unanswered". work_days = which days I actually work; work_hours = my day.
     c.setdefault("work_days", "weekdays"); c.setdefault("work_hours", "9:00am-5:00pm")
@@ -103,20 +109,87 @@ def _fmt_dt(s):
     return dt.strftime("%a %b %-d")
 
 
-@source("calendar", "Calendar")
-def _src_calendar(cfg):
-    ev = _call("calendar_events", cfg.get("horizon_days", 14))
-    out = []
+def _to_epoch(s):
+    """A date string / epoch -> unix seconds (best-effort), else None. Used to decide if an event ALREADY happened."""
+    import datetime as _dt, email.utils as _eu
+    if s is None: return None
+    if isinstance(s, (int, float)): return float(s)
+    raw = str(s).strip()
+    if not raw: return None
+    for parse in (lambda: _dt.datetime.fromisoformat(raw.replace("Z", "+00:00")), lambda: _eu.parsedate_to_datetime(raw)):
+        try: return parse().timestamp()
+        except Exception: pass
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y"):
+        try: return _dt.datetime.strptime(raw[:10], fmt).timestamp()
+        except Exception: continue
+    return None
+
+
+# words that START a task title but are NOT the person ("Send Colin ..." -> the name is Colin, not Send)
+_TASK_VERB_CAPS = {"send", "reply", "respond", "share", "get", "give", "book", "schedule", "confirm", "follow",
+                   "followup", "set", "draft", "review", "ping", "email", "call", "ask", "check", "update", "prep",
+                   "prepare", "finalize", "compile", "track", "reach", "circle", "nudge", "forward", "loop", "close",
+                   "the", "a", "an", "for", "to", "with", "your", "his", "her", "their", "re", "and", "on", "about"}
+# a task whose INTENT is "get a meeting on the books" (schedule / send availability / book a call). If the person it
+# names already has a calendar event (past OR booked), the intent is satisfied -- do NOT keep telling her to do it.
+_MEETING_INTENT = re.compile(
+    r"\bavailabilit|"
+    r"\b(send|share|reply|respond|get back|give|offer)\b.{0,45}\b(time|availab|calendar|slot|schedul)|"
+    r"\b(schedule|book|set ?up|find (a )?time|coordinate|pick a time|get on (the )?(books|calendar))\b.{0,45}"
+    r"\b(call|chat|meeting|connect|sync|time|intro)|"
+    r"\bbook (a|the|an) (call|chat|meeting|intro|time|slot)\b", re.I)
+
+
+def _name_tokens(s):
+    """Lowercased proper-noun-ish name tokens from a task title (>=3 chars, not a leading verb/stopword)."""
+    return set(w.lower() for w in re.findall(r"\b([A-Z][a-z]{2,})\b", s or "") if w.lower() not in _TASK_VERB_CAPS)
+
+
+def _reconcile_events(cfg):
+    """Fetch the calendar ONCE per generate spanning a short PAST window (so the brief can see what ALREADY happened)
+    through the horizon, and return parsed events with {title, when, epoch, past, people}. `people` = the people the
+    meeting is WITH (attendee first-names + email local-parts), for matching a 'schedule/reply to X' task to a real
+    meeting. Cached in _RUN so _src_calendar and _src_tasks share one API call."""
+    if "cal_events" in _RUN: return _RUN["cal_events"]
+    look = int(cfg.get("reconcile_lookback_days", 4)); hor = int(cfg.get("horizon_days", 14))
+    now = time.time()
+    tmin = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - look * 86400))
+    tmax = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + hor * 86400))
+    ev = _call("calendar_events", hor, tmin, tmax)
     if isinstance(ev, dict): ev = ev.get("events") or ev.get("items") or []
-    for e in (ev or [])[:40]:
+    parsed = []
+    for e in (ev or []):
         if not isinstance(e, dict): continue
         st = e.get("start")
         when = ((st.get("dateTime") or st.get("date")) if isinstance(st, dict)
                 else st if isinstance(st, str) else "") or e.get("start_str") or e.get("date") or ""
         title = e.get("summary") or e.get("title") or "(busy)"
-        who = ", ".join(a.get("email", "") for a in (e.get("attendees") or []) if isinstance(a, dict))[:160]
-        out.append({"label": title, "text": ("%s -- %s%s" % (_fmt_dt(when), title, (" (with " + who + ")") if who else "")),
-                    "ts": when, "ref": "calendar"})   # LEAD with the real date -- the model must see WHICH day each event is
+        people = set()
+        for a in (e.get("attendees") or []):
+            if not isinstance(a, dict): continue
+            if a.get("self"): continue                         # skip the owner herself
+            nm = (a.get("name") or "").strip()
+            if nm: people.add(nm.split()[0].lower())           # attendee first name
+            em = (a.get("email") or "").split("@")[0]
+            for tok in re.split(r"[._\-+]", em):               # email local-part tokens (colin.d -> colin, d)
+                if len(tok) >= 3: people.add(tok.lower())
+        ep = _to_epoch(when)
+        parsed.append({"title": title, "when": when, "epoch": ep,
+                       "past": (ep is not None and ep < now - 900), "people": people,
+                       "who": ", ".join(a.get("email", "") for a in (e.get("attendees") or []) if isinstance(a, dict))[:160]})
+    _RUN["cal_events"] = parsed
+    return parsed
+
+
+@source("calendar", "Calendar")
+def _src_calendar(cfg):
+    out = []
+    for e in _reconcile_events(cfg)[:50]:
+        tag = "[ALREADY HAPPENED] " if e["past"] else ""     # so the model NEVER tells her to prep/follow-up on a past meeting
+        who = e["who"]
+        out.append({"label": e["title"],
+                    "text": ("%s%s -- %s%s" % (tag, _fmt_dt(e["when"]), e["title"], (" (with " + who + ")") if who else "")),
+                    "ts": e["when"], "ref": "calendar"})       # LEAD with the real date -- the model must see WHICH day each event is
     return out
 
 
@@ -132,6 +205,24 @@ def _src_gmail(cfg):
         _d = m.get("date") or m.get("ts") or ""
         out.append({"label": subj, "text": "arrived %s -- From %s: %s -- %s" % (_fmt_dt(_d), frm[:60], subj, snip),
                     "ts": _d, "ref": "gmail"})   # LEAD with when it arrived -- so a reply is tied to the right dated event
+    return out
+
+
+@source("sent", "Sent (my replies)")
+def _src_sent(cfg):
+    """My recently SENT mail -- the single strongest 'this is already handled' signal. If the brief only ever reads
+    the inbox, it can't tell that I already replied to Colin / already sent the deck, so it nags me to do things I've
+    done. Handing the model my outbound mail lets it RECONCILE open tasks against what I've actually sent."""
+    r = _call("gmail_list", "sent", "", 15)
+    msgs = (r.get("messages") if isinstance(r, dict) else r) or []
+    out = []
+    for m in msgs[:15]:
+        if not isinstance(m, dict): continue
+        to = m.get("to") or m.get("recipient") or ""; subj = m.get("subject") or "(no subject)"
+        snip = (m.get("snippet") or "")[:200]
+        _d = m.get("date") or m.get("ts") or ""
+        out.append({"label": subj, "text": "I SENT %s -- To %s: %s -- %s" % (_fmt_dt(_d), (to or "")[:60], subj, snip),
+                    "ts": _d, "ref": "sent"})
     return out
 
 
@@ -155,21 +246,59 @@ def _src_drive_comments(cfg):
     return out
 
 
+def _norm_title(s):
+    """Normalized token set of a task title -- for collapsing AI-paraphrased duplicates ('Send Colin your availability'
+    ~ 'Reply to Colin with availability'). Drops the leading verb/stopwords so the PERSON + OBJECT drive the match."""
+    toks = [w for w in re.findall(r"[a-z]+", (s or "").lower()) if len(w) >= 3 and w not in _TASK_VERB_CAPS
+            and w not in ("this", "week", "you", "call", "chat", "time", "them", "some")]
+    return set(toks)
+
+
+def _jaccard(a, b):
+    if not a or not b: return 0.0
+    return len(a & b) / float(len(a | b))
+
+
 @source("tasks", "Tasks")
 def _src_tasks(cfg):
+    """Open tasks, RECONCILED before they reach the brief so it stops nagging about things already handled:
+      1. SUPPRESS a 'schedule/reply-with-availability/book-a-call with X' task when X already has a calendar
+         event (past OR booked) -- the meeting exists, so the ask is moot (this is the Colin-follow-up bug).
+      2. COLLAPSE AI-paraphrased duplicates (the ai-scan re-mints a task per day with a reworded title) so one
+         thread shows once, not six times.
+    The model still does nuanced reconciliation against Sent mail + the calendar via the prompt; this is the
+    high-precision programmatic floor."""
     try:
         d = json.load(open(os.path.join(_CTX.get("STATE_DIR", "."), "_tasks.json")))
     except Exception:
         return []
     items = d.get("tasks") if isinstance(d, dict) else (d or [])
-    out = []
+    cal = _reconcile_events(cfg)
+    suppressed = _RUN.setdefault("suppressed", [])
+    out, seen = [], []                                          # seen = normalized token sets already emitted (dedup)
     for t in (items or []):
         if not isinstance(t, dict): continue
-        if t.get("status") in ("done", "dismissed", "skipped"): continue
+        if t.get("status") in ("done", "dismissed", "skipped", "expired", "auto_closed"): continue
         title = t.get("title") or t.get("text") or ""
         if not title: continue
-        out.append({"label": title[:80], "text": title, "ts": t.get("due") or t.get("ts") or "", "ref": "tasks"})
-    return out[:25]
+        # (1) calendar-aware suppression of "get-a-meeting" tasks whose person already has an event
+        if _MEETING_INTENT.search(title):
+            ppl = _name_tokens(title)
+            if ppl:
+                hit = next((e for e in cal if ppl & e["people"]), None)
+                if hit:
+                    suppressed.append("%s -> meeting '%s' %s %s" % (title[:60], hit["title"][:40],
+                                      "already happened" if hit["past"] else "already booked", _fmt_dt(hit["when"])))
+                    continue
+        # (2) collapse paraphrased duplicates
+        nt = _norm_title(title)
+        if nt and any(_jaccard(nt, s) >= 0.6 for s in seen): continue
+        seen.append(nt)
+        cr = t.get("created")
+        note = (" (noted %s)" % _fmt_dt(cr)) if isinstance(cr, (int, float)) else ""   # neutral date so the model can reconcile against calendar/sent
+        out.append({"label": title[:80], "text": title + note, "ts": t.get("due") or t.get("ts") or "", "ref": "tasks"})
+        if len(out) >= 25: break
+    return out
 
 
 def _from_context(kinds, cfg, ref):
@@ -272,6 +401,18 @@ def _brief_prompt(blocks, cfg, style=""):
             "event's date don't line up, or which occurrence is meant is ambiguous, SAY SO plainly ('heads up: this "
             "looks like it's about the Jul 8 call, but confirm') rather than guessing. Get the day of week and the "
             "date right every time.\n\n"
+            "=== RECONCILE BEFORE YOU RESURFACE ANYTHING (do this silently, then write) ===\n"
+            "Before you tell me to do, follow up on, schedule, or reply to anything, CHECK whether it is already "
+            "handled, using every source below -- especially the Calendar (events marked [ALREADY HAPPENED] are in "
+            "the PAST) and my Sent mail (lines that start 'I SENT'). Rules:\n"
+            "- NEVER tell me to schedule, book, or 'send my availability' for a meeting that already exists on my "
+            "calendar or that [ALREADY HAPPENED] -- that ask is done; at most note the meeting happened.\n"
+            "- If my Sent mail shows I already replied to a person or thread, treat that follow-up as DONE and do "
+            "not raise it.\n"
+            "- A task is a SUGGESTION that may be stale; the calendar and my sent mail are ground truth. When they "
+            "conflict, trust the calendar/sent mail, not the task.\n"
+            "- Only surface a follow-up when there is NO evidence it's handled. If you're unsure, phrase it as a "
+            "soft check ('if you haven't already, ...'), never as a firm 'you still need to'.\n\n"
             "=== MY DATA (grouped by source; newest-ish first) ===\n%s\n=== END DATA ===\n"
             "Now write the brief as plain spoken prose." % (when, tone, length, _work_clause(cfg), when, blocks))
 
@@ -363,6 +504,7 @@ def mb_generate():
     a hang/process-kill shows as a stuck 'running' -- never a phantom 'ok' with yesterday's brief still showing.
     (Silent failure was the root cause of a missed brief: fire-and-forget thread + persist-only-at-end hid it.)"""
     cfg = _cfg()
+    _RUN.clear()                                             # fresh per-generate reconciliation scratch (calendar cache, suppressions)
     st = _load_state()
     # concurrency guard: a slow synthesis + a catch-up sweep (or a manual retry) must not run two at once
     if st.get("last_status") == "running" and (int(time.time()) - int(st.get("last_run", 0) or 0)) < 600:
@@ -396,7 +538,8 @@ def mb_generate():
                  "audio": audio_fn, "voice_provider": prov if audio_fn else None,
                  "voice_note": (None if audio_fn else prov),
                  "voice_fallback": _LAST_TTS_FALLBACK or None,
-                 "src_errors": src_errors or None, "unread": True}   # unread -> the dashboard surfaces it on open
+                 "src_errors": src_errors or None, "unread": True,
+                 "reconciled": (_RUN.get("suppressed") or None)}   # tasks the calendar showed were already handled (kept OUT of the brief)
         st["briefs"].insert(0, brief); st["briefs"] = st["briefs"][:60]
         st["last_status"] = "ok"; st["last_error"] = ""
         _save_state(st)
