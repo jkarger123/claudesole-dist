@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.214 -- 2026-07-23  (Email auth: enroll a node into central vault leasing via superadmin -- no one-off edits)
+
+`vault_url`, `google_keepalive`, `google_keepalive_hours` added to the superadmin `set_config` allowlist
+(`SA_ALLOWED_KEYS`). Enrolling a separate-install node into central vault leasing (so it can receive an
+MC-approved Google account -- the 0.99.213 distribution) is now a repeatable Mission-Control operation
+(`superadmin set_config vault_url=<MC>` + restart), not a manual per-node config edit. Keep-alive cadence
+is likewise fleet-tunable.
+
 ## 0.99.213 -- 2026-07-23  (Email auth, once-and-for-all: never-die keep-alive + fleet-wide account distribution)
 
 A Google account added to the vault now (1) NEVER dies and (2) is usable on every Mission-Control-approved

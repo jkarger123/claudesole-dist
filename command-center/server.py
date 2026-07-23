@@ -474,7 +474,8 @@ SA_SKEW = 300                  # max clock skew (s) tolerated on the issued time
 SA_ALLOWED_KEYS = ("mesh_auth_enforce", "mesh_reply_sla", "subscription_monthly", "pipeline_stale_sec",
                    "deliverables_root", "storage_mode", "account_wallet", "fleet_share", "fleet_view", "side_label",
                    "extension_routine_host", "switch_proof_n", "deliverable_gdoc", "housekeeping_eod",
-                   "housekeeping_eod_hour", "email_archive_mbox", "email_archive_db")
+                   "housekeeping_eod_hour", "email_archive_mbox", "email_archive_db",
+                   "vault_url", "google_keepalive", "google_keepalive_hours")   # vault_url: enroll a node into central vault leasing (Email Auth distribution); keepalive: tune the never-die refresh
 # PERSISTED single-use replay cache (deep-audit #9): nonce -> exp_ts. Kept on disk + pruned so a node RESTART
 # (or a co-located sibling process) can't reopen the replay window for a captured, still-unexpired grant.
 _SA_SEEN_FILE = os.path.join(STATE_DIR, "_sa_nonces.json")
