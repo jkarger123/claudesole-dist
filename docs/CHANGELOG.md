@@ -3,6 +3,28 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.213 -- 2026-07-23  (Email auth, once-and-for-all: never-die keep-alive + fleet-wide account distribution)
+
+A Google account added to the vault now (1) NEVER dies and (2) is usable on every Mission-Control-approved
+node. Full spec: `extensions/google-workspace/EMAIL_AUTH.md`. Engine changes (all fleet-wide, config-driven):
+- **Keep-alive (never dies).** New `_google_keepalive_loop` daemon exercises each locally-held refresh token
+  every `google_keepalive_hours` (default 6, opt-out `google_keepalive=false`) -- well under Google's ~7-day
+  Console-"Testing" idle cliff, so an idle account can't silently expire. One co-located instance runs it
+  (shared `/tmp` lock); remote nodes rely on the authority (same token via lease).
+- **Self-heal + LOUD alert (no silent death).** `_google_access_token` now distinguishes a definitively dead
+  token (`invalid_grant`) from a transient blip: it tries a re-mint pickup / overseer re-lease, and on a real
+  death fires ONE throttled operator alert (phone) + records health, instead of returning None forever. Doctor
+  gained a LIVE per-account liveness probe -> a dead token is RED with the exact `bin/gauth.sh` re-consent fix.
+- **Fleet distribution (available to any approved node).** New mesh-authed `/api/google-lease` returns only the
+  accounts Mission Control has APPROVED for the requesting node; `_google_token_load`/`_google_accounts`/
+  `_vault_materialize_google` now fall through to an overseer lease (RAM-cached, materialized to disk 0600 for
+  the agent MCP) instead of local-only. Add an account once at MC -> every approved node has it.
+- **Per-account approval.** `_google_approvals` (shared vault key `google_approvals`, default `['*']` = every
+  family node) gates the lease AND each node's account view (so even co-located instances honor it).
+  `/api/google-accounts` (per-account health + source + approval) + `/api/google-approve` power a new
+  **Accounts & availability** panel in the Gmail rail (live health dot, keep-alive status, per-account node
+  approval editor).
+
 ## 0.99.212 -- 2026-07-23  (Morning Brief stops nagging about already-done things: task reconciliation)
 The Morning Brief kept resurfacing to-dos that were already handled -- most visibly telling the operator to
 "send availability / follow up with X" for a meeting that had already happened. Root cause: the AI task-scan

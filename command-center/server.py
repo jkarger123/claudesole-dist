@@ -762,18 +762,8 @@ def _google_accounts():
     truth the account switcher + agent MCP wiring read, so nothing is hand-listed."""
     now = time.time()
     if now - _G_ACCTS_MEMO["at"] < 10 and _G_ACCTS_MEMO["v"]: return _G_ACCTS_MEMO["v"]
-    accts = set()
-    try:
-        raw = _vault_local("google_tokens")
-        if raw:
-            t = json.loads(raw)
-            if isinstance(t, dict): accts.update(t)
-    except Exception: pass
-    try:
-        for f in os.listdir(GOOGLE_TOKENS_DIR):
-            if f.endswith(".json") and ".migrated-" not in f: accts.add(f[:-5])
-    except Exception: pass
-    v = sorted(accts); _G_ACCTS_MEMO.update(at=now, v=v); return v
+    v = sorted(_google_tokens_merged().keys())               # approval-filtered local vault UNION overseer lease
+    _G_ACCTS_MEMO.update(at=now, v=v); return v
 
 def _g_acct(acct=None):
     """The account THIS call should act as: explicit arg -> thread override (a route's ?account=) -> cc.config
@@ -818,14 +808,10 @@ def _google_token_load(acct=None):
     file (fallback). The token JSON holds client_id/client_secret/refresh_token. Read-only at runtime (the
     access token is cached in RAM, never written back), so vault-backing it is safe + lossless."""
     acct = _g_acct(acct)
-    raw = _vault_local("google_tokens")                          # ONE vault key: {account: token_dict} (sanitization-safe)
-    if raw:
-        try:
-            toks = json.loads(raw)
-            if isinstance(toks, dict) and toks:
-                a = acct if (acct and acct in toks) else sorted(toks)[0]
-                return (a, toks[a])
-        except Exception: pass
+    toks = _google_tokens_merged()                               # local vault (approval-filtered) UNION overseer lease
+    if toks:
+        a = acct if (acct and acct in toks) else sorted(toks)[0]
+        return (a, toks[a])
     tf = _google_token_file()                                    # legacy file fallback (being retired)
     if tf:
         try: return (os.path.basename(tf)[:-5], json.load(open(tf)))
@@ -849,11 +835,13 @@ def _google_vault_resync():
         raw = _vault_local("google_tokens"); vault = json.loads(raw) if raw else {}
     except Exception: vault = {}
     if not isinstance(vault, dict): vault = {}
+    leased = set(_google_tokens_remote().keys()) if VAULT_URL else set()   # a leased token materialized to disk is NOT a local re-mint
     changed = []
     try: files = [f for f in os.listdir(GOOGLE_TOKENS_DIR) if f.endswith(".json")]
     except Exception: files = []
     for fn in files:
         acct = fn[:-5]
+        if acct in leased: continue                            # never absorb an overseer-leased token into our own vault
         try: fd = json.load(open(os.path.join(GOOGLE_TOKENS_DIR, fn)))
         except Exception: continue
         if not isinstance(fd, dict) or not fd.get("refresh_token"): continue
@@ -867,15 +855,16 @@ def _google_vault_resync():
             return []
     return changed
 
-def _google_access_token(acct=None):
-    """Refresh-token -> short-lived access token, cached until ~90s before expiry. Thread-safe. On a refresh
-    failure it resyncs the vault from any fresher token FILE (a re-mint) and retries once -- so a re-mint takes
-    effect WITHOUT a restart."""
+def _google_access_token(acct=None, force=False):
+    """Refresh-token -> short-lived access token, cached until ~90s before expiry (force=True bypasses the cache,
+    used by the keep-alive to exercise the refresh token). Thread-safe. On failure it self-heals: an authority
+    picks up a fresher re-mint FILE, a remote node re-leases from MC; a DEFINITIVELY dead token (invalid_grant)
+    fires a loud operator alert (never silent). A transient (timeout/5xx) failure returns None quietly."""
     with _GOOGLE_LOCK:
         now = time.time()
         acct = _g_acct(acct)
         m = _gtok(acct)                                          # this account's cache slice
-        if m["access"] and now < m["exp"] - 90:
+        if not force and m["access"] and now < m["exp"] - 90:
             return m["access"]
         acct, d = _google_token_load(acct)
         if not d: return None
@@ -887,12 +876,141 @@ def _google_access_token(acct=None):
                 r = json.loads(urllib.request.urlopen(req, timeout=GOOGLE_TOKEN_TIMEOUT).read())
                 m.update(access=r["access_token"], exp=now + int(r.get("expires_in", 3600)),
                          email=acct, scopes=d.get("scopes", []))
+                _google_mark_ok(acct)
                 return m["access"]
-            except Exception:
-                if attempt == 1 and _google_vault_resync():   # a re-mint's fresh FILE token -> pull into vault, retry once
-                    acct, d = _google_token_load(acct)
-                    if d: continue
-                return None
+            except Exception as e:
+                gerr = ""
+                if isinstance(e, urllib.error.HTTPError):
+                    try: gerr = (json.loads(e.read()) or {}).get("error", "") or ("http_%d" % e.code)
+                    except Exception: gerr = "http_%d" % e.code
+                if attempt == 1:                              # ONE heal attempt, then classify
+                    healed = False
+                    if not VAULT_URL:                         # authority: a fresh re-mint FILE -> vault -> retry
+                        if _google_vault_resync():
+                            acct, d2 = _google_token_load(acct)
+                            if d2: d = d2; healed = True
+                    else:                                     # remote node: re-lease a possibly-fresher token from MC
+                        rem = _google_tokens_remote(force=True)
+                        if rem.get(acct) and rem[acct].get("refresh_token") != d.get("refresh_token"):
+                            d = rem[acct]; healed = True
+                    if healed: continue
+                if gerr == "invalid_grant":                  # definitively dead (revoked/expired) -> LOUD alert, never silent
+                    return _google_dead(acct, gerr)
+                return None                                   # transient (timeout/5xx) -> quiet, health unchanged
+
+# ============ EMAIL AUTH once-and-for-all: fleet distribution + keep-alive + self-heal ============
+# See extensions/google-workspace/EMAIL_AUTH.md. An account added to the vault (1) NEVER dies (a keep-alive
+# daemon exercises its refresh token well under Google's ~7-day testing-mode idle cliff) and (2) is usable on
+# EVERY Mission-Control-approved node (an approval-filtered, mesh-authed lease from the authority's vault).
+_GOOGLE_HEALTH_FILE = os.path.join(STATE_DIR, "_google_health.json")         # {account: {ok,at,reason,since,alerted}} (per-instance; each self-probes)
+_GKEEP_LOCK = "/tmp/cf-google-keepalive.lock"
+_google_remote_cache = {"at": 0, "v": {}}                                    # leased {account: tokendict}, RAM-only
+try: _google_health = json.load(open(_GOOGLE_HEALTH_FILE)) or {}
+except Exception: _google_health = {}
+
+def _google_save_health():
+    try:
+        tmp = _GOOGLE_HEALTH_FILE + ".tmp"; json.dump(_google_health, open(tmp, "w")); os.replace(tmp, _GOOGLE_HEALTH_FILE)
+    except Exception: pass
+def _google_mark_ok(acct):
+    if not acct: return
+    h = _google_health.get(acct) or {}
+    was_ok = h.get("ok")
+    h.update(ok=True, at=int(time.time()), reason="", since=0)
+    if was_ok is False: h["alerted"] = 0                      # recovered -> re-arm the alert
+    _google_health[acct] = h; _google_save_health()
+def _google_dead(acct, err):
+    """A refresh token is definitively dead. Mark unhealthy + fire ONE throttled LOUD operator alert (phone +
+    Doctor red via the health file) naming the account + the one-line fix. Returns None (the caller's failure)."""
+    if not acct: return None
+    now = int(time.time()); h = _google_health.get(acct) or {}
+    if h.get("ok") is not False: h["since"] = now
+    h.update(ok=False, at=now, reason=err or "invalid_grant")
+    fire = (now - int(h.get("alerted") or 0)) > 6 * 3600
+    if fire: h["alerted"] = now
+    _google_health[acct] = h; _google_save_health()
+    if fire:
+        try:
+            notify_send("[ClaudeFather] Google account %s auth FAILED (%s). Its Gmail/Calendar/Drive are DOWN "
+                        "until re-consented. Fix: run extensions/google-workspace/bin/gauth.sh for %s and approve "
+                        "in the browser." % (acct, (err or "invalid_grant")[:60], acct))
+        except Exception: pass
+    return None
+
+def _google_tokens_local_raw():
+    """Accounts whose REAL refresh token is in THIS install's local vault (+ legacy disk files) -- the AUTHORITY
+    view, UNFILTERED by approval. Source of truth for keep-alive + serving leases."""
+    out = {}
+    try:
+        raw = _vault_local("google_tokens")
+        if raw:
+            d = json.loads(raw)
+            if isinstance(d, dict): out.update(d)
+    except Exception: pass
+    try:
+        for f in os.listdir(GOOGLE_TOKENS_DIR):
+            if f.endswith(".json") and ".migrated-" not in f and f != "oauth_states.json" and f[:-5] not in out:
+                try:
+                    j = json.load(open(os.path.join(GOOGLE_TOKENS_DIR, f)))
+                    if isinstance(j, dict) and j.get("refresh_token"): out[f[:-5]] = j   # a real account token, not a control file
+                except Exception: pass
+    except Exception: pass
+    return out
+def _google_approvals():
+    """{account: ['*']|[node,...]}. Stored in the SHARED vault (key 'google_approvals') so every co-located
+    instance + the lease-server agree; {} (=> default '*' for all) if unset or no crypto."""
+    try:
+        raw = _vault_local("google_approvals")
+        d = json.loads(raw) if raw else {}
+        return d if isinstance(d, dict) else {}
+    except Exception: return {}
+def _google_approved_for(acct, node):
+    ap = _google_approvals().get(acct)
+    if not ap: return True                                   # default: available to EVERY family node
+    return ("*" in ap) or (node in ap)
+def _google_approve(acct, nodes):
+    """Operator: set an account's approved-node list (['*'] or a node list) in the shared vault. Enforced in the
+    lease AND in each node's account view (so even co-located instances honor it)."""
+    if not acct: return {"ok": False, "error": "missing account"}
+    nodes = [s.strip() for s in (nodes if isinstance(nodes, list) else str(nodes).split(",")) if s.strip()] or ["*"]
+    ap = _google_approvals(); ap[acct] = nodes
+    r = vault_set("google_approvals", json.dumps(ap), label="google_approvals", scope=["*"])
+    if not r.get("ok"): return {"ok": False, "error": r.get("error") or "vault write failed"}
+    _G_ACCTS_MEMO["at"] = 0; _google_remote_cache["at"] = 0
+    return {"ok": True, "account": acct, "nodes": nodes}
+def google_lease(node, authed=False):
+    """AUTHORITY side of /api/google-lease: return {account: tokendict} for accounts MC has APPROVED for `node`.
+    Requires a verified family/operator caller. Audited via the vault audit trail."""
+    node = re.sub(r"[^A-Za-z0-9_.\-]", "", node or "")[:48]
+    if not authed:
+        _vault_audit("google_lease", "google_tokens", node, "denied:auth"); return {"ok": False, "error": "requires a family mesh token"}
+    raw = _google_tokens_local_raw()
+    out = {a: t for a, t in raw.items() if _google_approved_for(a, node)}
+    _vault_audit("google_lease", "google_tokens", node, "ok:%d/%d" % (len(out), len(raw)))
+    return {"ok": True, "tokens": out, "ttl": VAULT_LEASE_TTL}
+def _google_tokens_remote(force=False):
+    """Node side: lease approved accounts from the upstream MC vault (VAULT_URL). RAM-cached for the lease TTL
+    (never persisted). {} if no upstream configured or nothing approved for us."""
+    if not VAULT_URL: return {}
+    now = time.time()
+    if not force and _google_remote_cache["v"] and now < _google_remote_cache["at"] + min(VAULT_LEASE_TTL, 3600):
+        return _google_remote_cache["v"]
+    try:
+        body = json.dumps({"node": INSTANCE_ID}).encode()
+        req = urllib.request.Request(VAULT_URL + "/api/google-lease", data=body, headers={"Content-Type": "application/json"})
+        if _mesh_out_token(): req.add_header("X-Mesh-Token", _mesh_out_token()); req.add_header("X-Mesh-Node", INSTANCE_ID)
+        with urllib.request.urlopen(req, timeout=8) as r: res = json.loads(r.read().decode())
+        if res.get("ok") and isinstance(res.get("tokens"), dict):
+            _google_remote_cache.update(at=now, v=res["tokens"]); return res["tokens"]
+    except Exception: pass
+    return {} if force else _google_remote_cache["v"]
+def _google_tokens_merged():
+    """The accounts THIS node MAY use: local-vault accounts approved for this node, PLUS any leased from the
+    overseer (already approval-filtered by the authority). Local wins on a key collision."""
+    merged = dict(_google_tokens_remote())
+    for a, t in _google_tokens_local_raw().items():
+        if _google_approved_for(a, INSTANCE_ID): merged[a] = t
+    return merged
 
 # ---- google scope-vs-perms drift (CCR ccr-1782880284369) + portable secret paths (CCR ccr-1782880284334) ----
 def _mcp_google_perms():
@@ -971,6 +1089,30 @@ def google_status(acct=None):
             "canDocs": any("documents" in x for x in s),
             "canForms": any("forms" in x for x in s),
             "remint_needed": bool(gaps), "missing_services": gaps}
+
+def google_accounts_status():
+    """EMAIL AUTH panel data: per-account health + approval + source (never any token material). Live-probes each
+    account's token so the panel reflects real usability, not mere presence."""
+    ap = _google_approvals(); local = set(_google_tokens_local_raw().keys()); leased = set()
+    if VAULT_URL:
+        try: leased = set(_google_tokens_remote().keys())
+        except Exception: leased = set()
+    try: peer_ids = sorted({(p.get("id") or "") for p in (peers() or [])} - {"", INSTANCE_ID})
+    except Exception: peer_ids = []
+    out = []
+    for acct in _google_accounts():
+        h = _google_health.get(acct) or {}
+        with _g_as(acct):
+            live = bool(_google_access_token()); scopes = _gtok().get("scopes") or []
+        out.append({"account": acct, "live": live,
+                    "ok": (live if h.get("ok") is None else bool(h.get("ok"))),
+                    "reason": h.get("reason") or "", "since": int(h.get("since") or 0),
+                    "last_ok": int(h.get("at") or 0), "approved": ap.get(acct) or ["*"],
+                    "source": "local" if acct in local else ("leased" if acct in leased else "file"),
+                    "scopes": len(scopes)})
+    return {"ok": True, "node": INSTANCE_ID, "is_authority": not VAULT_URL, "peers": peer_ids,
+            "keepalive": CC.get("google_keepalive") is not False,
+            "keepalive_hours": float(CC.get("google_keepalive_hours") or 6), "accounts": out}
 
 def _g_api(method, url, params=None, body=None, raw=False, timeout=30, acct=None):
     tok = _google_access_token(acct)
@@ -1124,6 +1266,38 @@ def _gc_sync_loop():
                         with _GC_LOCK: _GC_CACHE[k] = {"data": live, "at": time.time(), "ok": True}
                 except Exception: pass
             _persist_gcache()
+        except Exception:
+            pass
+
+def _google_keepalive_claim(interval):
+    """One co-located instance runs keep-alive per cycle (they share the vault). True if THIS instance should run
+    now, gated by a shared timestamp file (race-tolerant: a double refresh is harmless)."""
+    try:
+        now = time.time()
+        try: last = os.path.getmtime(_GKEEP_LOCK)
+        except Exception: last = 0
+        if now - last < interval * 0.85: return False        # another co-located instance refreshed recently
+        with open(_GKEEP_LOCK, "w") as f: f.write(str(int(now)))
+        return True
+    except Exception: return True
+def _google_keepalive_loop():
+    """NEVER-DIES: periodically exercise every LOCALLY-HELD refresh token (force a token refresh) so Google's
+    idle-expiry clock resets -- a Console 'Testing' token dies after ~7 days idle. Off with cc.config
+    google_keepalive=false. Remote nodes rely on the authority (they share the same refresh token via lease).
+    A dead token fires the loud alert inside _google_access_token."""
+    hours = float(CC.get("google_keepalive_hours") or 6)
+    interval = max(600.0, hours * 3600.0)                    # floor 10 min; default 6h, well under the ~7-day cliff
+    while True:
+        try:
+            time.sleep(min(interval, 3600))                  # tick <=hourly so a fresh token/config is picked up promptly
+            if CC.get("google_keepalive") is False: continue
+            raw = _google_tokens_local_raw()
+            if not raw: continue                             # nothing held here -> the authority keeps it alive
+            if not _google_keepalive_claim(interval): continue
+            for acct in list(raw):
+                try:
+                    with _g_as(acct): _google_access_token(acct, force=True)
+                except Exception: pass
         except Exception:
             pass
 
@@ -1853,7 +2027,7 @@ def _web_manifest():
 # Peer/machine-to-machine ingress: NOT gated by the operator token (that's a human surface). These are
 # peer surface, protected on their own MESH_TOKEN track, so enabling operator auth on a node never severs
 # the mesh (a peer POSTs here with X-Mesh-Token or nothing, never the operator cookie/bearer).
-AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store", "/api/account-windows-store", "/api/vault-lease", "/api/opnote-recv", "/api/agent-msg-recv", "/api/agent-msg-reply", "/api/agent-directory")
+AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store", "/api/account-windows-store", "/api/vault-lease", "/api/google-lease", "/api/opnote-recv", "/api/agent-msg-recv", "/api/agent-msg-reply", "/api/agent-directory")
 
 # Security frame stamped onto EVERY inbound peer message (appended AFTER the literal "[message from X]" so
 # the Stop-hook sender regex still matches). Makes the trust boundary explicit in the message itself -- a
@@ -6020,15 +6194,20 @@ def _vault_materialize_google():
                 os.makedirs(secdir, exist_ok=True)
                 fd = os.open(op, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, oauth.encode()); os.close(fd)
                 out["oauth"] = True
-        toks = _vault_local("google_tokens")
-        if toks:
+        d = _google_tokens_merged()                          # what THIS node may use: local vault + overseer lease
+        if d:
             tdir = os.path.join(secdir, "tokens"); os.makedirs(tdir, exist_ok=True)
-            try: d = json.loads(toks)
-            except Exception: d = {}
-            for acct, tj in (d.items() if isinstance(d, dict) else []):
+            leased = _google_tokens_remote() if VAULT_URL else {}
+            for acct, tj in d.items():
                 tp = os.path.join(tdir, str(acct) + ".json")
-                if not os.path.isfile(tp):
-                    body = tj if isinstance(tj, str) else json.dumps(tj)
+                body = tj if isinstance(tj, str) else json.dumps(tj)
+                write = not os.path.isfile(tp)
+                if not write and acct in leased:             # a leased token re-minted at MC -> refresh the stale disk copy for the MCP
+                    try:
+                        cur = json.load(open(tp)); want = tj if isinstance(tj, dict) else json.loads(tj)
+                        if (cur or {}).get("refresh_token") != (want or {}).get("refresh_token"): write = True
+                    except Exception: write = True
+                if write:
                     fd = os.open(tp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, body.encode()); os.close(fd)
                     out["tokens"].append(str(acct))
     except Exception: pass
@@ -10451,6 +10630,12 @@ def doctor():
     except Exception: pass
     try:                                                       # google-workspace: scope drift + portable secret paths (CCRs 369/334)
         if google_configured():
+            for _acct in _google_accounts():                   # EMAIL AUTH: LIVE token liveness -- a dead refresh token is RED, never silent (the probe also updates health + fires the alert on invalid_grant, so Doctor doubles as a liveness sweep on every instance)
+                with _g_as(_acct): _live = bool(_google_access_token())
+                _h = _google_health.get(_acct) or {}
+                if (not _live) and _h.get("ok") is False:
+                    _when = time.strftime("%Y-%m-%d %H:%M", time.localtime(_h.get("since") or _h.get("at") or time.time()))
+                    issues.append({"sev": "err", "path": "google", "msg": "google account %s auth is DOWN (%s) since %s -- its Gmail/Calendar/Drive are unavailable. Re-consent: run extensions/google-workspace/bin/gauth.sh for %s and approve in the browser." % (_acct, _h.get("reason") or "invalid_grant", _when, _acct)})
             _gaps = _google_scope_gaps()
             if _gaps:
                 issues.append({"sev": "warn", "path": "google", "msg": "google token is MISSING scope(s) for wired service(s): %s -- those tools will 403 at runtime. Re-mint to consent them: run extensions/google-workspace/bin/enable-services.sh (approve in browser), then restart." % ", ".join(_gaps)})
@@ -17824,6 +18009,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/launch-tree":  return self._s(200, json.dumps(launch_tree()))
         # ---- Google Workspace (live client) ----
         if u.path == "/api/google/status":   return self._s(200, json.dumps(google_status()))
+        if u.path == "/api/google-accounts": return self._s(200, json.dumps(google_accounts_status()))
         if u.path == "/api/google/gmail":    return self._s(200, json.dumps(gmail_list(q.get("view", ["inbox"])[0], q.get("q", [""])[0], q.get("max", ["25"])[0], fresh=(q.get("fresh", [""])[0] in ("1", "true")), page_token=q.get("page", [""])[0])))
         if u.path == "/api/google/gmail-msg":return self._s(200, json.dumps(gmail_get(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-unread": return self._s(200, json.dumps(gmail_unread()))
@@ -18471,6 +18657,12 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/vault-lease":
             ok = _mesh_ingress_ok(self.headers) or self._operator_only()
             return self._s(200, json.dumps(vault_lease(body.get("id", ""), body.get("node", ""), authed=ok)))
+        if u.path == "/api/google-lease":                 # EMAIL AUTH: a family node leases the accounts MC approved for it
+            ok = _mesh_ingress_ok(self.headers) or self._operator_only()
+            return self._s(200, json.dumps(google_lease(body.get("node", "") or INSTANCE_ID, authed=ok)))
+        if u.path == "/api/google-approve":               # EMAIL AUTH: set which nodes an account is available to (operator)
+            if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
+            return self._s(200, json.dumps(_google_approve(body.get("account", ""), body.get("nodes", ["*"]))))
         if u.path == "/api/core-sign":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
             return self._s(200, json.dumps(core_sign()))
@@ -24572,6 +24764,7 @@ function gmRailHTML(){
          +GM.accounts.map(function(a){return '<option value="'+esc(a)+'"'+((a===(GM.acct||GM.email))?' selected':'')+'>'+e2(a)+'</option>';}).join('')
          +'</select>'
        : '<div class="gm-acct">'+e2(GM.email||GM.acct||'')+'</div>')
+    +'<div class="gm-sec" style="cursor:pointer" onclick="gmAuthPanel()" title="Account health, keep-alive, and which nodes each email is available on">Accounts &amp; availability</div>'
     +sys
     +(ulArr.length?'<div class="gm-sec gm-lbltog" onclick="gmToggleLabels()"><span class="gm-lblchev" id="gmLblChev">'+(lblOpen?'▾':'▸')+'</span> Labels <span class="gm-lblct">'+ulArr.length+'</span></div>'
         +'<div id="gmLabelWrap" style="display:'+(lblOpen?'block':'none')+'">'+userLabels+'</div>':'')
@@ -24580,6 +24773,50 @@ function gmRailHTML(){
     +'</aside>';
 }
 
+// ---- EMAIL AUTH panel: per-account health (live), keep-alive status, and per-account node availability ----
+function gaAgo(ts){ if(!ts) return '—'; var s=Math.max(0,Math.floor(Date.now()/1000-ts)); if(s<90) return s+'s ago'; if(s<5400) return Math.round(s/60)+'m ago'; if(s<172800) return Math.round(s/3600)+'h ago'; return Math.round(s/86400)+'d ago'; }
+async function gmAuthPanel(){
+  showM('<h2>Email accounts — availability &amp; health</h2><div id="gaBody" class="meta">Loading…</div>');
+  var d; try{ d=await(await fetch('/api/google-accounts')).json(); }catch(e){ d={ok:false}; }
+  var b=document.getElementById('gaBody'); if(!b) return;
+  if(!d||!d.ok){ b.innerHTML='Couldn’t load account status.'; return; }
+  var ka = d.keepalive ? '<span class="badge bdg-ok">keep-alive on · every '+(d.keepalive_hours||6)+'h</span>' : '<span class="badge bdg-amber">keep-alive OFF</span>';
+  var head = '<div style="margin-bottom:8px">'+ka+' <span class="badge bdg-slate">'+esc(d.node)+(d.is_authority?' · authority':' · leases from MC')+'</span></div>';
+  var rows = (d.accounts||[]).map(function(a){
+    var ok = a.ok && a.live;
+    var dot = ok ? '<span class="badge bdg-ok">live</span>' : '<span class="badge bdg-red">'+esc(a.reason||'down')+'</span>';
+    var src = '<span class="badge bdg-'+(a.source==='local'?'azure':(a.source==='leased'?'violet':'slate'))+'">'+esc(a.source)+'</span>';
+    var appr = (a.approved&&a.approved.indexOf('*')<0) ? a.approved.join(', ') : 'all nodes';
+    var ctl = d.is_authority
+      ? '<div style="margin-top:5px" class="meta sub">Available on: <b>'+esc(appr)+'</b> <button class="mini" onclick="gaEditApproval(\''+esc(a.account)+'\')">edit</button></div>'
+      : '';
+    return '<div class="card" style="cursor:default"><h3><span>'+esc(a.account)+'</span>'+dot+' '+src+'</h3>'
+      +'<div class="meta">'+a.scopes+' scopes'+(a.last_ok?' · last ok '+gaAgo(a.last_ok):'')+((!ok&&a.since)?' · down since '+gaAgo(a.since):'')+'</div>'+ctl+'</div>';
+  }).join('') || '<div class="meta">No Google accounts on this node yet.</div>';
+  var foot = d.is_authority
+    ? '<div class="meta sub" style="margin-top:8px">A vaulted account is kept alive automatically and is available to every approved node. Restrict one above if it should not reach every node.</div>'
+    : '<div class="meta sub" style="margin-top:8px">These accounts are leased from Mission Control; keep-alive + re-consent are handled there.</div>';
+  b.innerHTML = head + rows + foot + '<div class="btns" style="margin-top:10px"><button class="mini" onclick="closeM()">Close</button></div>';
+}
+async function gaEditApproval(acct){
+  var d; try{ d=await(await fetch('/api/google-accounts')).json(); }catch(e){ return; }
+  var peers = (d&&d.peers)||[]; var cur=null;
+  (d.accounts||[]).forEach(function(a){ if(a.account===acct) cur=a.approved||['*']; });
+  var all = !cur || cur.indexOf('*')>=0;
+  var boxes = peers.map(function(p){ var on = !all && cur.indexOf(p)>=0; return '<label style="display:block;margin:3px 0"><input type="checkbox" class="gaNode" value="'+esc(p)+'"'+(on?' checked':'')+'> '+esc(p)+'</label>'; }).join('') || '<div class="meta sub">No peer nodes known.</div>';
+  showM('<h2>Available on which nodes?</h2><div class="meta">'+esc(acct)+'</div>'
+    +'<div class="row" style="margin-top:8px"><label><input type="radio" name="gaMode" value="all"'+(all?' checked':'')+' onchange="gaModeToggle()"> All nodes (recommended)</label></div>'
+    +'<div class="row"><label><input type="radio" name="gaMode" value="some"'+(all?'':' checked')+' onchange="gaModeToggle()"> Specific nodes</label></div>'
+    +'<div id="gaNodes" style="margin:4px 0 8px 18px;display:'+(all?'none':'block')+'">'+boxes+'</div>'
+    +'<div class="btns"><button class="mini" onclick="gmAuthPanel()">Back</button><button class="mini go" onclick="gaSaveApproval(\''+esc(acct)+'\')">Save</button></div>');
+}
+function gaModeToggle(){ var m=document.querySelector('input[name=gaMode]:checked'); var box=document.getElementById('gaNodes'); if(box) box.style.display=(m&&m.value==='some')?'block':'none'; }
+async function gaSaveApproval(acct){
+  var mode=document.querySelector('input[name=gaMode]:checked'); var nodes=['*'];
+  if(mode&&mode.value==='some'){ nodes=Array.prototype.map.call(document.querySelectorAll('.gaNode:checked'),function(x){return x.value;}); if(!nodes.length){ toast('Pick at least one node, or choose All.'); return; } }
+  var r=await(await fetch('/api/google-approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({account:acct,nodes:nodes})})).json();
+  if(r&&r.ok){ toast('Saved availability for '+acct+'.'); gmAuthPanel(); } else toast('Couldn’t save: '+((r&&r.error)||'?'),6000);
+}
 function gmListShell(){
   var chips=GM_CHIPS.map(function(c){
     return '<button class="gm-chip'+(GM.chips[c.k]?' on':'')+'" onclick="gmToggleChip(\''+c.k+'\')">'+e2(c.label)+'</button>';
@@ -31913,6 +32150,7 @@ if __name__ == "__main__":
     _daemon("gc_sync", _gc_sync_loop)                    # same for Calendar/Drive (resilient cache)
     _daemon("skill_scan", _skill_scan_loop)              # SKILLS: keep the skill-suggestions cache fresh (self-populating Suggestions queue) + opt-in notify on new repeated-procedure candidates (cc.config skill_suggestions)
     _daemon("warm_views", _warm_default_views)           # one-shot: boot-warm the UI's default views + prime the OAuth token (non-blocking)
+    _daemon("google_keepalive", _google_keepalive_loop)  # EMAIL AUTH once-and-for-all: exercise each locally-held refresh token < the ~7-day idle cliff so a vaulted account NEVER dies (opt-out google_keepalive=false)
     try: _google_vault_resync()        # heal the re-mint gap: push any fresher token FILE (a re-mint) into the vault the server reads first
     except Exception: pass
     try: _vault_materialize_google()   # re-hydrate google_oauth.json + tokens/ from the vault for the external MCP server (vault stays source of truth)
