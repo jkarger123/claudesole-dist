@@ -195,7 +195,30 @@ def _src_calendar(cfg):
 
 @source("gmail", "Inbox")
 def _src_gmail(cfg):
-    r = _call("gmail_list", "inbox", "", 18)
+    """THREAD-AWARE inbox. A flat list of 200-char snippets hides the resolution -- the brief would tell the operator
+    to answer something they already answered three messages ago. Each thread instead carries its real back-and-forth
+    plus an explicit [YOU ALREADY REPLIED] / [AWAITING YOUR REPLY] state, which is the single most reliable
+    'is this actually still open?' signal available. Falls back to the flat snippet list if the accessor isn't wired."""
+    th = _call("gmail_threads", 14)
+    if th:
+        out = []
+        for t in th:
+            if not isinstance(t, dict): continue
+            subj = t.get("subject") or "(no subject)"
+            n = int(t.get("count") or 1)
+            if t.get("i_replied"):
+                state = "[YOU ALREADY REPLIED -- the newest message in this thread is yours, %s]" % _fmt_dt(t.get("last_date"))
+            else:
+                state = "[AWAITING YOUR REPLY -- newest is from %s, %s; you have not answered]" % (
+                    (t.get("last_from") or "them")[:40], _fmt_dt(t.get("last_inbound_date") or t.get("last_date")))
+            convo = " || ".join("%s from %s: %s" % (_fmt_dt(m.get("date")), (m.get("from") or "")[:40],
+                                                    (m.get("snippet") or "")[:180])
+                                for m in (t.get("messages") or []) if isinstance(m, dict))
+            out.append({"label": subj[:80],
+                        "text": "%s \"%s\" (%d message%s) -- %s" % (state, subj, n, "" if n == 1 else "s", convo),
+                        "ts": t.get("last_date") or "", "ref": "gmail"})
+        return out
+    r = _call("gmail_list", "inbox", "", 18)          # fallback: flat snippets (no thread accessor on this node)
     msgs = (r.get("messages") if isinstance(r, dict) else r) or []
     out = []
     for m in msgs[:18]:
@@ -407,6 +430,9 @@ def _brief_prompt(blocks, cfg, style=""):
             "the PAST) and my Sent mail (lines that start 'I SENT'). Rules:\n"
             "- NEVER tell me to schedule, book, or 'send my availability' for a meeting that already exists on my "
             "calendar or that [ALREADY HAPPENED] -- that ask is done; at most note the meeting happened.\n"
+            "- Inbox threads are tagged with their state. NEVER tell me to reply to, follow up on, or chase a thread "
+            "marked [YOU ALREADY REPLIED] -- I have answered it; the ball is in their court, so at most note I'm "
+            "waiting on them. Only threads marked [AWAITING YOUR REPLY] are actually mine to answer.\n"
             "- If my Sent mail shows I already replied to a person or thread, treat that follow-up as DONE and do "
             "not raise it.\n"
             "- A task is a SUGGESTION that may be stale; the calendar and my sent mail are ground truth. When they "

@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.215 -- 2026-07-23  (Morning Brief reads inbox THREADS with reply-state, not flat snippets)
+Follow-on to 0.99.212's task reconciliation, closing the last two blind spots that let the brief nag about
+handled work. Previously the brief saw the inbox as a flat list of 200-character snippets, so it could not tell
+that a thread had already been resolved -- it would tell the operator to answer something they answered three
+messages ago.
+- **`brief_mail_threads()` (`server.py`, new):** READ-ONLY threaded inbox context -- the real back-and-forth per
+  thread (last few turns) plus an explicit per-thread REPLY-STATE. Deliberately NOT `gmail_thread()`, which
+  strips the UNREAD label; the brief must never mutate the operator's inbox. Cheap `metadata` format, fetched in
+  parallel, degrades to `[]` when Google isn't configured.
+- **Thread-aware `_src_gmail` (`morning_brief.py`):** every thread is tagged `[YOU ALREADY REPLIED -- ...]` or
+  `[AWAITING YOUR REPLY -- ...]` and carries its conversation, with the old flat-snippet list kept as a fallback
+  for nodes without the accessor.
+- **Prompt:** the brief is now told never to chase a `[YOU ALREADY REPLIED]` thread (the ball is in their court --
+  at most note that I'm waiting on them); only `[AWAITING YOUR REPLY]` threads are the operator's to answer.
+
 ## 0.99.214 -- 2026-07-23  (Email auth: enroll a node into central vault leasing via superadmin -- no one-off edits)
 
 `vault_url`, `google_keepalive`, `google_keepalive_hours` added to the superadmin `set_config` allowlist

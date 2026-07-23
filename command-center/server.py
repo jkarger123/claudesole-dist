@@ -1552,6 +1552,45 @@ def gmail_thread(tid):
     return {"id": tid, "subject": subj, "messages": msgs, "count": len(msgs),
             "drafts": drafts, "email": _g_acct()}
 
+def brief_mail_threads(maxn=14):
+    """READ-ONLY threaded inbox context for the Morning Brief: recent threads with their actual back-and-forth AND an
+    explicit REPLY-STATE (have I already answered this?). Two reasons this exists instead of reusing gmail_thread():
+      1. gmail_thread() MARKS THE THREAD READ (it strips UNREAD). The brief must NEVER mutate the operator's inbox.
+      2. A flat list of 200-char snippets hides the resolution -- the brief would nag about a thread the operator
+         already answered. Per-thread reply-state is a far stronger signal than inferring it from the sent list.
+    Uses cheap `metadata` format (headers + snippet, no bodies) fetched in parallel. Degrades to [] if Google is off."""
+    if not google_configured(): return []
+    me = (_g_acct() or "").lower()
+    try: r = gmail_list(view="inbox", maxn=maxn)
+    except Exception: return []
+    seen, tids = set(), []
+    for m in (r.get("messages", []) if isinstance(r, dict) else []):
+        t = m.get("threadId") or m.get("id")
+        if t and t not in seen: seen.add(t); tids.append(t)
+    def fetch(tid):
+        t = _g_api("GET", GMAIL_BASE + "/threads/" + tid,
+                   params={"format": "metadata", "metadataHeaders": ["From", "To", "Subject", "Date"]},
+                   timeout=GOOGLE_LIST_TIMEOUT)          # NOTE: GET only -- never a /modify call here
+        if not isinstance(t, dict) or "error" in t: return None
+        out = []
+        for m in t.get("messages", []):
+            if "DRAFT" in (m.get("labelIds") or []): continue
+            hs = {h["name"].lower(): h["value"] for h in m.get("payload", {}).get("headers", [])}
+            out.append({"from": hs.get("from", ""), "to": hs.get("to", ""), "subject": hs.get("subject", ""),
+                        "date": hs.get("date", ""), "snippet": (m.get("snippet", "") or "").strip()})
+        return {"id": tid, "messages": out} if out else None
+    res = []
+    for th in [x for x in _g_parallel([(lambda t=t: fetch(t)) for t in tids[:maxn]]) if x]:
+        ms = th["messages"]                                # Gmail returns a thread OLDEST -> NEWEST
+        mine = lambda s: bool(me) and me in (s or "").lower()
+        last = ms[-1]
+        last_in = next((m for m in reversed(ms) if not mine(m.get("from"))), None)
+        res.append({"id": th["id"], "subject": (ms[0].get("subject") or "(no subject)"), "count": len(ms),
+                    "i_replied": mine(last.get("from")), "last_from": last.get("from", ""),
+                    "last_date": last.get("date", ""), "last_inbound_date": (last_in or {}).get("date", ""),
+                    "messages": ms[-4:]})                  # last few turns = enough context, bounded tokens
+    return res
+
 # plain-text fallback derived from the HTML body
 def _html_to_text(h):
     import html as _html
@@ -11301,6 +11340,7 @@ except Exception as _e: print("[zoom] init failed:", _e)
 try:
     morning_brief.init({"CC": CC, "PROJECT": PROJECT, "STATE_DIR": STATE_DIR, "secret": _deploy_env,
                         "calendar_events": calendar_events, "gmail_list": gmail_list,
+                        "gmail_threads": brief_mail_threads,   # READ-ONLY threaded inbox + per-thread reply-state (never marks read)
                         "drive_open_comments": drive_open_comments,   # unresolved Doc/Sheet comment THREADS (full + resolution-aware)
                         "context_assemble": (context.assemble if context else None),
                         # lambda: voice_profile_get is defined LATER in the file than this init call site,
