@@ -3,10 +3,11 @@
 <!-- CC:NOTES append-only; agents file learnings that belong to THIS module here -->
 ## Learnings (filed by agents; append-only)
 - Morning Brief 'never checks back' bug: the ai-scan re-mints a to-do with a reworded title every day while `_task_fp` dedups on the EXACT title, so one ask stacked up 6x and the brief nagged about it daily (e.g. 'follow up with X about your availability' AFTER that meeting had already happened). Root cause: nothing reconciled a task against the calendar (meeting occurred) or sent mail (already replied). FIX (morning_brief.py + server.py): (1) brief-side calendar-aware SUPPRESSION of schedule/send-availability/book-a-call tasks whose named person already has a calendar event (past OR booked); (2) gather-time fuzzy dedup of paraphrased titles (person+object token Jaccard>=0.6 / overlap>=0.72); (3) new `sent` mail source + `[ALREADY HAPPENED]` past-calendar tags + a RECONCILE-before-you-resurface prompt clause; (4) `tasks_reconcile()` calendar-closes moot tasks + expires never-accepted suggestions >21d (morning loop + `/api/tasks-reconcile`); (5) `tasks_ai_scan` is handed the open-task list -> dedups + returns `done[]` to auto-close from sent-mail evidence; (6) `gmail_list` rows now carry `To`. Rule: the calendar + sent mail are ground truth; a task is only a stale suggestion.
+- Brief mail context v0.99.215: a flat list of 200-char inbox snippets HIDES a thread's resolution, so the brief tells the operator to answer something they answered 3 messages ago. Fix = READ-ONLY brief_mail_threads() in server.py returning per-thread back-and-forth + an explicit reply-state, and _src_gmail tags each thread [YOU ALREADY REPLIED] or [AWAITING YOUR REPLY] (flat snippets kept as fallback). CRITICAL: do NOT reuse gmail_thread() for this -- it POSTs /modify to strip UNREAD, which would mark the operator's mail read as a side effect of generating a brief. The brief is strictly read-o
 <!-- /CC:NOTES -->
 
 <!-- LATEST-HANDOFF -->
-**>> Resume here:** read `_handoffs/20260720-0309__morning-brief.md` first -- it is the latest handoff.
+**>> Resume here:** read `_handoffs/20260724-0229__morning-brief.md` first -- it is the latest handoff.
 <!-- /LATEST-HANDOFF -->
 
 Turn the operator's own data into a short spoken brief of their day, ready before they start and played in

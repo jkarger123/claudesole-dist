@@ -3,6 +3,31 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.216 -- 2026-07-24  (Mobile Session Stage + terminal Select&copy reflow)
+Makes running sessions genuinely usable on a phone, and fixes the long-standing "copying from the terminal
+pastes with broken line-wraps" problem everywhere (desktop included). All new UI is gated to `wkMobile()` /
+`<=820px` except the copy reflow, which is shared; desktop split-pane/workspace is untouched.
+- **The Session Stage (`server.py` PAGE):** on a phone, tapping a session (dock tile / a card in the Sessions
+  lens / the ↗ button, all via `stageOpen`) blows it up FULL-SCREEN in-app -- no `/term` navigation, no page
+  reload. A bounded LRU pool (cap 3) of persistent `/term` iframes lives at body level (outside `#grid`, which
+  `loadSessions` rebuilds) so switching sessions is instant and never reconnects the WebSocket. Header =
+  `[<- back] [breadcrumb node -> session location] [model chip] [idle/working chip] [kebab menu]`; the terminal's
+  own floating action bar is hidden (`&embed=stage` -> `body.stg-embed`) and every action (Skills, Select&copy,
+  file, review, compact, end/kill) lives in the one header menu. Its own scrollable session-switcher strip
+  (busy/gold-done dots) replaces the tiny bottom dock inside the Stage. Back = `<-` / header swipe-down / OS
+  back gesture (`pushState` -> `popstate`, no `restoreFromHash` rebuild). Stage is z-45 so confirm dialogs +
+  pickers land above it.
+- **Mobile Sessions lens = a tappable card LIST** (`renderSessionsListMobile`), not the old unusable inline
+  terminal with an overflowing button row.
+- **Tap-the-terminal closes an open menu:** an embedded `/term` forwards a `pointerdown` to the parent to close
+  Skills/model/kebab dropdowns (an iframe click never reached the parent's outside-click handler before).
+- **Long-press the mobile terminal opens Select&copy** (you cannot drag-select an xterm canvas on touch).
+- **Select&copy CLEAN reflow (`cleanCopy`, shared -> desktop drag-select copy defaults to it too, toggle in the
+  overlay, remembered in `cc_copymode`):** rejoins the terminal's soft-wrapped rows into clean paragraphs so
+  pasted prose isn't chopped mid-line and a wrapped URL/path becomes one continuous token. Per-BLOCK local wrap
+  width (adapts to a phone-narrow pane AND a wide desktop pane in the same capture); markers/blanks/borders are
+  boundaries; sentence punctuation keeps a space, a long char-wrapped token joins with none. Raw = exact.
+
 ## 0.99.215 -- 2026-07-23  (Morning Brief reads inbox THREADS with reply-state, not flat snippets)
 Follow-on to 0.99.212's task reconciliation, closing the last two blind spots that let the brief nag about
 handled work. Previously the brief saw the inbox as a flat list of 200-character snippets, so it could not tell

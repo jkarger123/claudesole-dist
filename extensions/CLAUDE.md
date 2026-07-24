@@ -9,7 +9,7 @@
 - `incident-commander/payload/` -- I am the Incident Commander for this ClaudeFather. Scoped agent-tool: my own dir, this charter, tools/,
 - `media-contact-sync/` -- Keeps ONE shared media-contact list current + clean, automatically. Affiliate managers each connect their OWN
 - `mediastudio/` -- >> Resume here: read _handoffs/20260718-1531__mediastudio.md first -- it is the latest handoff.
-- `morning-brief/` -- >> Resume here: read _handoffs/20260720-0309__morning-brief.md first -- it is the latest handoff.
+- `morning-brief/` -- >> Resume here: read _handoffs/20260724-0229__morning-brief.md first -- it is the latest handoff.
 - `skimlinks-merchant-sync/payload/` -- I am the Skimlinks sync tool. I keep a tenant's full Skimlinks affiliate-merchant catalog mirrored into their
 <!-- /CC:CHILDREN -->
 

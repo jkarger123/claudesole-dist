@@ -18886,6 +18886,7 @@ html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;font-family:
 #t,#t *{touch-action:none}
 body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;user-select:text}
 #bar{position:fixed;top:0;right:0;z-index:9;background:var(--card);color:var(--mut);font:12px -apple-system,sans-serif;padding:4px 10px;border:1px solid var(--line);border-radius:0 0 0 8px}
+body.stg-embed #bar{display:none!important}   /* rendered inside the mobile Session Stage -> its header ⋮ owns every action; drop the floating pill for max terminal */
 #bar a{color:var(--accent-light);text-decoration:none;margin-left:10px}
 #bar button{background:var(--card2);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:3px 9px;margin-left:10px;cursor:pointer;font:inherit}
 #mdlbtn{font-weight:700}
@@ -18923,7 +18924,14 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 #copyov.show{display:flex}
 #copybar{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--card);border-bottom:1px solid var(--line);color:var(--mut);font:12px -apple-system,sans-serif;flex:0 0 auto}
 #copybar button{background:var(--card2);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 12px;cursor:pointer;font:inherit}
-#copybody{flex:1;overflow:auto;-webkit-overflow-scrolling:touch;margin:0;padding:10px 12px 50px;font:12px/1.5 ui-monospace,Menlo,monospace;color:var(--near);white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text;touch-action:auto}
+#copybody{flex:1;overflow:auto;-webkit-overflow-scrolling:touch;margin:0 auto;max-width:860px;width:100%;box-sizing:border-box;padding:16px 18px 64px;font:13.5px/1.75 ui-monospace,Menlo,monospace;color:var(--near);white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text;touch-action:auto}
+#copybody::selection{background:var(--accent-light);color:var(--bg-warm)}
+#copybody::-moz-selection{background:var(--accent-light);color:var(--bg-warm)}
+#copybar b{font-size:13px;color:var(--ink)}
+#copybar .cseg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;flex:0 0 auto}
+#copybar .cseg button{border:0;border-radius:0;background:transparent;color:var(--mut);padding:6px 13px;margin:0;font:700 12px -apple-system,sans-serif;cursor:pointer}
+#copybar .cseg button.on{background:var(--accent-light);color:var(--bg-warm)}
+#copyst{color:var(--dim);font-size:11px}
 /* on-screen key bar: iPhone keyboards have no arrow keys, so Claude's option menus are unanswerable -- these send the real key sequences. Touch devices only. */
 #keybar{display:none;gap:3px;padding:5px;background:var(--bg2);border-top:1px solid var(--line);flex:0 0 auto}
 #compose{display:none;gap:6px;padding:5px 5px calc(5px + env(safe-area-inset-bottom));background:var(--bg2);border-top:1px solid var(--line);align-items:center;flex:0 0 auto}
@@ -18963,7 +18971,7 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 </style></head><body>
 <div id="bar"><span id="st">connecting...</span><button id="mdlbtn" onclick="mdlPickTerm(event)" title="the model this session runs -- click to change">Model</button><button id="skillsbtn" onclick="skPickTerm(event)" title="Skills: pick a Claude Code skill to run here -- see what each does, then it types the /command in (you review + press Enter)">Skills</button><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button onclick="termAdvise()" title="Third-party review: an independent external GPT (a different AI vendor) reviews this session's recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." style="color:#58a6ff">&#128309; review</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button id="actog" onclick="toggleAutoCopy()" title="Auto-copy: when ON, whatever you have selected is copied to your clipboard the moment you release the mouse (no Ctrl+C needed). Needs a secure origin (https/localhost); on plain http a one-tap Copy chip is used instead.">&#9113; auto-copy</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button id="anbtn" onclick="toggleAn()" title="Auto-nudge: auto-send your keep-going message to this session every time it stops at a turn-end, until you turn it off (you are the brake)" style="color:#8a8a99">Auto-nudge</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
 <button id="live" onclick="toLive()">&#8595; jump to live</button><button id="selcopy" onclick="doSelCopy()">&#10697; Copy selection</button><div id="cliptoast"></div>
-<div id="copyov"><div id="copybar"><b>Selectable text</b><span id="copyst" style="color:#8a8a99">long-press to select, or</span><button onclick="copyAll()">&#10697; copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" style="border-color:#e8c547">&#10005; close</button></div><pre id="copybody"></pre></div>
+<div id="copyov"><div id="copybar"><b>Copy text</b><span class="cseg"><button id="cmClean" class="on" onclick="setCopyMode('clean')" title="Reflow the terminal's wrapped lines into clean paragraphs so pasted text doesn't break mid-sentence">Clean</button><button id="cmRaw" onclick="setCopyMode('raw')" title="Exact terminal text — every line break exactly as shown">Raw</button></span><span id="copyst">drag to select, or</span><button onclick="copyAll()" title="Copy everything below to the clipboard">&#10697; Copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" class="cclose" style="border-color:var(--accent-light)">&#10005; Close</button></div><pre id="copybody"></pre></div>
 <div id="wrap">
 <div id="t"></div>
 <div id="keybar">
@@ -18985,6 +18993,10 @@ body.selmode #t,body.selmode #t *{touch-action:auto;-webkit-user-select:text;use
 <script>
 function confirmM(msg){return new Promise(function(res){var ov=document.getElementById('tdlg');if(!ov){ov=document.createElement('div');ov.id='tdlg';ov.tabIndex=-1;document.body.appendChild(ov);}ov.innerHTML='<div class="tdlg-box"><div class="tdlg-msg"></div><div class="tdlg-btns"><button class="tdlg-b" id="_tNo">Cancel</button><button class="tdlg-b go" id="_tYes">Confirm</button></div></div>';ov.querySelector('.tdlg-msg').textContent=String(msg);ov.style.display='flex';var fin=function(v){ov.style.display='none';res(v);};document.getElementById('_tYes').onclick=function(){fin(true);};document.getElementById('_tNo').onclick=function(){fin(false);};ov.onkeydown=function(e){if(e.key==='Escape'){e.preventDefault();fin(false);}};ov.onmousedown=function(e){if(e.target===ov)fin(false);};setTimeout(function(){var y=document.getElementById('_tYes');if(y)y.focus();},40);});}
 const name=new URLSearchParams(location.search).get('name')||'';document.title='Claude: '+name;
+if(new URLSearchParams(location.search).get('embed')==='stage'){try{document.body.classList.add('stg-embed');}catch(e){}}   // Session Stage host hides this page's floating action bar (actions live in the Stage header ⋮)
+if(window.parent && window.parent!==window){   // embedded: a tap in the terminal closes any open PARENT dropdown (skills / model / ⋮). An iframe click never reaches the parent's own outside-click handler, so people who open Skills then just tap the terminal were stuck with it open.
+  document.addEventListener('pointerdown',function(){ try{ var p=window.parent; ['closeSkMenu','closeMdlMenu','closeStageMenu'].forEach(function(fn){ try{ if(typeof p[fn]==='function') p[fn](); }catch(_){}}); }catch(e){} },true);
+}
 // Protected services (the Chief of Staff mesh endpoint / live product / Ralph loops) are constant
 // singletons -- strip their end+kill buttons so they can't be closed from the terminal view.
 if(/^(chief-|ralph-)/.test(name)||((window.CC&&window.CC.protectedSessions)||[]).indexOf(name)>=0){document.querySelectorAll('#bar button').forEach(function(b){var oc=(b.getAttribute('onclick')||'');if(/gracefulEnd|killSess/.test(oc))b.remove();});}
@@ -19187,10 +19199,14 @@ term.onData(d=>{if(ws&&ws.readyState===1)ws.send(new TextEncoder().encode(d));})
 // navigator.clipboard API is blocked on a non-secure origin).
 function ccCopy(t){try{if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t);return;}}catch(e){}
   const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.left='-9999px';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta);term.focus();}
+// Copy defaults to CLEAN (reflow the terminal's wrapped lines so pasted text isn't chopped mid-sentence) --
+// on desktop drag-select too, not just the ⎘ overlay. The shared 'cc_copymode' toggle (set in the overlay)
+// switches to Raw for code/verbatim. So one preference governs every copy path on this page.
+function maybeClean(t){var m='clean';try{m=localStorage.getItem('cc_copymode')||'clean';}catch(e){}return (m==='raw')?t:cleanCopy(t);}
 term.attachCustomKeyEventHandler((e)=>{
   if(e.type==='keydown'&&(e.ctrlKey||e.metaKey)&&!e.altKey&&(e.key==='v'||e.key==='V'))return false;                       // paste: handled below
   if(e.type==='keydown'&&(e.ctrlKey||e.metaKey)&&!e.altKey&&(e.key==='c'||e.key==='C')&&selActive){ccCopy(_selText);selFlash(_selText.length);selReturnLive();return false;}  // copy the tmux copy-mode selection + clear + back to live
-  if(e.type==='keydown'&&(e.ctrlKey||e.metaKey)&&!e.altKey&&(e.key==='c'||e.key==='C')&&term.hasSelection()){var _s=term.getSelection();ccCopy(_s);clipToast(_s.length);return false;}  // copy selection, don't send SIGINT
+  if(e.type==='keydown'&&(e.ctrlKey||e.metaKey)&&!e.altKey&&(e.key==='c'||e.key==='C')&&term.hasSelection()){var _s=maybeClean(term.getSelection());ccCopy(_s);clipToast(_s.length);return false;}  // copy selection (clean by default; Raw via the ⎘ toggle), don't send SIGINT
   return true;
 });
 (term.textarea||document).addEventListener('paste',(e)=>{
@@ -19240,16 +19256,26 @@ el.addEventListener('wheel',(e)=>{e.preventDefault();e.stopPropagation();
   if(steps!==0){accY-=steps*WHEELPX;queueScroll(-steps*SPEED);}   // wheel up -> older(up); wheel down -> newer(down)
 },{passive:false,capture:true});
 // MOBILE swipe -> the same copy-mode scroll (a phone has no wheel). A tap snaps back to live + opens the keyboard.
-el.addEventListener('touchstart',(e)=>{if(e.touches.length!==1)return;startY=lastY=e.touches[0].clientY;accY=0;moved=false;},{passive:true,capture:true});
+// A LONG-PRESS (the universal "select text" gesture) opens Select & copy -- you CANNOT drag-select the xterm
+// canvas on a touch screen, so people who try to copy by pressing/dragging get nothing. This makes the natural
+// gesture Just Work + teaches the feature via a one-line hint.
+var lpTimer=null,lpFired=false;
+el.addEventListener('touchstart',(e)=>{if(e.touches.length!==1)return;startY=lastY=e.touches[0].clientY;accY=0;moved=false;
+  lpFired=false;clearTimeout(lpTimer);
+  if(window.matchMedia&&matchMedia('(pointer:coarse)').matches){ lpTimer=setTimeout(function(){ if(moved)return; lpFired=true;
+    if(navigator.vibrate){try{navigator.vibrate(12);}catch(_){}} if(typeof tToast==='function')tToast('Select & copy — drag to highlight, then Copy',2600); showCopy(); },480); }
+},{passive:true,capture:true});
 el.addEventListener('touchmove',(e)=>{if(e.touches.length!==1)return;
   const y=e.touches[0].clientY,dy=y-lastY;lastY=y;
-  if(Math.abs(y-startY)>8)moved=true;
+  if(Math.abs(y-startY)>8){moved=true;clearTimeout(lpTimer);}   // a real swipe -> scroll, not a long-press
   if(!moved)return;
   e.preventDefault();e.stopPropagation();
   accY+=dy;const steps=Math.trunc(accY/LINEPX);
   if(steps!==0){accY-=steps*LINEPX;queueScroll(steps*SPEED);}   // swipe down(+) -> older(up); swipe up(-) -> newer(down)
 },{passive:false,capture:true});
-el.addEventListener('touchend',()=>{if(!moved){if(inMode){toLive();}else{term.focus();}}},{passive:true,capture:true});
+el.addEventListener('touchend',()=>{clearTimeout(lpTimer); if(lpFired){lpFired=false;return;}   // long-press already opened Select & copy -> don't also snap-to-live/focus
+  if(!moved){if(inMode){toLive();}else{term.focus();}}},{passive:true,capture:true});
+el.addEventListener('touchcancel',()=>{clearTimeout(lpTimer);},{passive:true,capture:true});
 // ---- DESKTOP DRAG-SELECT: drive tmux's OWN copy-mode selection from the mouse ------------------------------
 // Selecting across history isn't possible in xterm (it only holds the visible window), so a drag drives tmux
 // copy-mode: mousedown anchors, drag extends (auto-scrolling past the top/bottom edge through the full
@@ -19282,7 +19308,7 @@ function selReturnLive(){selActive=false;selChip(false);inMode=false;liveBtn(fal
 // Called on mouse release with the selection text. If auto-copy is ON and the origin is secure, write it to the
 // clipboard now, confirm, and snap back to live. Otherwise leave the '⎘ Copy' chip -- a click (or Ctrl+C) copies
 // it (that's a user gesture, so it works even on plain http). The text stays in hand (_selText) either way.
-function ccDeliver(t){_selText=t;selActive=true;const b=document.getElementById('selcopy');if(b)b.innerHTML='&#10697; Copy '+t.length+' chars';
+function ccDeliver(t){t=maybeClean(t);_selText=t;selActive=true;const b=document.getElementById('selcopy');if(b)b.innerHTML='&#10697; Copy '+t.length+' chars';
   if(AUTOCOPY&&navigator.clipboard&&window.isSecureContext){
     navigator.clipboard.writeText(t).then(function(){clipToast(t.length);selReturnLive();}).catch(function(){selChip(true);});
   } else { selChip(true); }}
@@ -19333,13 +19359,65 @@ document.addEventListener('mouseup',(e)=>{if(!dsel)return;e.stopPropagation();va
 // screenful. A one-tap 'copy all' grabs everything. Falls back to the on-screen buffer if the fetch fails.
 function termAllText(){const b=term.buffer.active,out=[];for(let i=0;i<b.length;i++){const ln=b.getLine(i);out.push(ln?ln.translateToString(true):'');}
   while(out.length&&!out[out.length-1].trim())out.pop();return out.join('\n');}
+var _copyRaw='',_copyMode='clean';
+try{_copyMode=localStorage.getItem('cc_copymode')||'clean';}catch(e){}
+// CLEAN copy: undo the terminal's line-WRAPPING so pasted prose isn't chopped mid-sentence, without touching
+// real structure. We estimate the pane's wrap width (the most common near-full line length) and only merge a
+// row into the previous one when that previous row REACHED the wrap edge (i.e. it was wrapped) and this row is
+// plain prose (not a list item, quote, heading, table, or indented code). Pure box-drawing/TUI chrome rows are
+// dropped. Nothing merges when there's no recurring full-width line -> short output stays byte-identical. Raw
+// mode keeps everything exactly. Shared by mobile + desktop + the standalone /term page.
+function cleanCopy(raw){
+  var lines=String(raw||'').split('\n').map(function(l){return l.replace(/[ \t]+$/,'');});
+  var n=lines.length;
+  // a line that STARTS a new logical line (keeps its own row): blank, or a marker -- Claude's ⏺ ❯ ⎿ bullets,
+  // list/quote/heading/table glyphs, numbered items, box-drawing. Everything else is a soft-wrap continuation.
+  var MARK=/^[⏺❯⎿⧉▶▸›»•‣◦⁃∙*+#>|✓✗☐☑☒▪●✦✳✶·─-╿▀-▟]/;
+  var NUM=/^\d+[.)]\s/, DASH=/^-\s/, BORDER=/^[\s─-╿▀-▟_=~]+$/;
+  function isMarker(s){ return MARK.test(s)||NUM.test(s)||DASH.test(s); }
+  function isBoundary(l){ return l.trim()===''||BORDER.test(l); }
+  // per-line LOCAL wrap width = max length in the contiguous non-blank/non-border run it belongs to. This
+  // adapts to a phone-narrow pane (~46 cols) AND a wide desktop pane in the SAME capture -- a single global
+  // width can't (a session resized over its life mixes widths); the local max is the block's true right edge.
+  var localW=new Array(n);
+  for(var i=0;i<n;){
+    if(isBoundary(lines[i])){ localW[i]=0; i++; continue; }
+    var j=i, mx=0;
+    while(j<n && !isBoundary(lines[j])){ if(lines[j].length>mx)mx=lines[j].length; j++; }
+    for(var k=i;k<j;k++) localW[k]=mx;
+    i=j;
+  }
+  var out=[], lastLen=0;
+  for(var i=0;i<n;i++){
+    var l=lines[i], s=l.replace(/^\s+/,'');
+    if(s===''){ out.push(''); lastLen=0; continue; }      // blank -> paragraph boundary
+    if(BORDER.test(l)){ lastLen=0; continue; }             // drop pure box-drawing / rule rows (also a boundary)
+    var thr=Math.max(16, localW[i]-12);                    // this block's wrap edge (minus a word-wrap gap)
+    var prev=out.length?out[out.length-1]:null;
+    if(prev!==null && prev!=='' && !isMarker(s) && lastLen>=thr){   // soft-wrap continuation of a full previous row
+      var m=prev.match(/\S+$/), tail=m?m[0]:'';
+      // space vs none: a sentence/clause boundary keeps a space; a LONG unbroken trailing token (url/path/hash
+      // char-wrapped mid-token) joins with none; otherwise it's a normal word-wrap -> single space.
+      var jn=(/[.!?,:;)\]]$/.test(prev))?' ':(tail.length>=30?'':' ');
+      out[out.length-1]=prev+jn+s; lastLen=l.length;
+    } else { out.push(l); lastLen=l.length; }
+  }
+  return out.join('\n').replace(/\n{3,}/g,'\n\n').trim();
+}
+function renderCopy(){var cb=document.getElementById('copybody');if(!cb)return;
+  cb.textContent=(_copyMode==='raw')?_copyRaw:cleanCopy(_copyRaw);
+  var a=document.getElementById('cmClean'),b=document.getElementById('cmRaw');
+  if(a)a.classList.toggle('on',_copyMode!=='raw'); if(b)b.classList.toggle('on',_copyMode==='raw');}
+function setCopyMode(m){_copyMode=(m==='raw')?'raw':'clean';try{localStorage.setItem('cc_copymode',_copyMode);}catch(e){}
+  var cb=document.getElementById('copybody');var top=cb?cb.scrollTop:0;renderCopy();if(cb)cb.scrollTop=top;}
 function showCopy(){const cb=document.getElementById('copybody');cb.textContent='loading full history…';
   document.getElementById('copyov').classList.add('show');
   fetch('/api/term-capture?name='+encodeURIComponent(name)).then(r=>r.json()).then(d=>{
-    cb.textContent=(d&&d.ok&&d.text)?d.text:(termAllText()||'(nothing yet)');cb.scrollTop=cb.scrollHeight;
-  }).catch(()=>{cb.textContent=termAllText()||'(nothing yet)';cb.scrollTop=cb.scrollHeight;});}
+    _copyRaw=(d&&d.ok&&d.text)?d.text:(termAllText()||'(nothing yet)');renderCopy();cb.scrollTop=cb.scrollHeight;
+  }).catch(()=>{_copyRaw=termAllText()||'(nothing yet)';renderCopy();cb.scrollTop=cb.scrollHeight;});}
 function hideCopy(){document.getElementById('copyov').classList.remove('show');term.focus();}
-function copyAll(){ccCopy(document.getElementById('copybody').textContent);const s=document.getElementById('copyst');if(s)s.textContent='copied!';setTimeout(()=>{if(s)s.textContent='long-press to select, or';},1500);}
+function copyAll(){var txt=document.getElementById('copybody').textContent;ccCopy(txt);
+  const s=document.getElementById('copyst');if(s){s.textContent='✓ copied '+txt.length+' chars'+(_copyMode==='clean'?' (clean)':'');setTimeout(()=>{if(s)s.textContent='drag to select, or';},1800);}}
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.getElementById('copyov').classList.contains('show'))hideCopy();});
 // GIVE CLAUDE A FILE: drag a file onto this terminal page (or use the 📎 button) -> upload + the server
 // types the file's absolute path into this session so Claude reads it. This page is its own document (no
@@ -21116,6 +21194,79 @@ body.ss-tut-on #sessbar{z-index:9995!important;box-shadow:0 -6px 40px 8px rgba(v
   body.cf-sessions .termgrip-bar.drag i,body.cf-sessions .termgrip-bar:active i{background:var(--accent);width:80px;box-shadow:0 0 14px 1px rgba(var(--accent-rgb),.55)}
   body.cf-sessions .termgrip-bar b{font-size:10px;font-weight:700;color:var(--mut);font-family:ui-monospace,Menlo,monospace}
 }
+/* ===== Mobile Session Stage: full-screen IN-APP session overlay (no navigation, no reload) =====
+   Tapping a session on a phone blows it up full-screen WITHOUT leaving the SPA. A small pool of
+   persistent /term iframes is kept mounted at body level (outside #grid, which loadSessions rebuilds)
+   so switching between open sessions is instant and never reconnects. The bottom dock stays visible as
+   the switcher (its busy/done gold state is the "which finished" cue). Back = the arrow, a header
+   swipe-down, or the OS back gesture. Desktop untouched (all gated <=820px + wkMobile()). */
+#stage{display:none}
+@keyframes stgin{from{transform:translateY(16px);opacity:.35}to{transform:none;opacity:1}}
+@media(max-width:820px){
+  #stage.on{display:flex;flex-direction:column;position:fixed;inset:0;
+    z-index:45;background:var(--bg);padding-top:env(safe-area-inset-top);animation:stgin .22s cubic-bezier(.2,.85,.2,1)}
+  /* z-45: below modal-bg(50)/mdl-menu(80)/toast so confirm dialogs + model/skill pickers land ABOVE the Stage;
+     the tiny bottom dock is display:none'd here so its z-60 never matters. */
+  body.cf-stage-open{overflow:hidden}
+  body.cf-stage-open #sessbar{display:none!important}   /* the Stage has its OWN switcher strip -> the tiny bottom dock is redundant + reclaims the row (must beat the base '#sessbar{display:flex!important}') */
+  .stg-head{display:flex;align-items:center;gap:7px;height:44px;flex:0 0 auto;padding:0 5px 0 3px;
+    background:var(--card2);border-bottom:1px solid var(--line);-webkit-user-select:none;user-select:none}
+  .stg-back{display:inline-flex;align-items:center;justify-content:center;min-width:44px;height:38px;
+    background:transparent;border:0;color:var(--ink);font-size:23px;line-height:1;cursor:pointer;border-radius:9px}
+  .stg-back:active{background:var(--card)}
+  .stg-loc{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--ink)}
+  .stg-loc .stg-node{color:var(--mut);font-weight:500}
+  .stg-loc .stg-sep{color:var(--dim);margin:0 5px}
+  .stg-model{flex:0 0 auto;display:inline-flex}
+  .stg-chip{flex:0 0 auto;display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;
+    color:var(--mut);border:1px solid var(--line);border-radius:20px;padding:3px 9px}
+  .stg-chip .stg-dot{width:7px;height:7px;border-radius:50%;background:var(--mut);flex:0 0 auto}
+  .stg-chip.work{color:var(--accent);border-color:rgba(var(--accent-rgb),.4)}
+  .stg-chip.work .stg-dot{background:var(--accent);box-shadow:0 0 7px var(--accent);animation:sbblink 1s ease-in-out infinite}
+  .stg-chip.done{color:var(--ok);border-color:rgba(var(--ok-rgb),.45)}
+  .stg-chip.done .stg-dot{background:var(--ok)}
+  .stg-more{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;min-width:44px;height:38px;
+    background:transparent;border:0;color:var(--ink);font-size:22px;line-height:1;cursor:pointer;border-radius:9px}
+  .stg-more:active{background:var(--card)}
+  /* the one dropdown that holds every session action (was the terminal's own floating bar) */
+  .stg-menu{position:fixed;z-index:90;min-width:238px;max-width:92vw;background:var(--card);border:1px solid var(--line);
+    border-radius:13px;box-shadow:0 16px 42px rgba(0,0,0,.6);padding:6px;display:flex;flex-direction:column;gap:2px}
+  .stg-mi{display:flex;align-items:center;gap:12px;width:100%;text-align:left;background:transparent;border:0;border-radius:9px;
+    padding:12px;color:var(--ink);font-size:15px;font-weight:600;cursor:pointer;min-height:48px}
+  .stg-mi:active{background:var(--card2)}
+  .stg-mi.danger{color:var(--err)}
+  .stg-mi-ic{width:22px;text-align:center;flex:0 0 auto;font-size:16px}
+  .stg-mi-sep{height:1px;background:var(--line);margin:4px 6px}
+  /* the in-Stage session switcher: a big, obviously-scrollable chip strip (fixes "can't reach the other tabs") */
+  .stg-switch{display:none;flex:0 0 auto;gap:7px;padding:7px 8px;overflow-x:auto;overflow-y:hidden;
+    background:var(--card);border-bottom:1px solid var(--line);-webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .stg-switch::-webkit-scrollbar{display:none}
+  .stg-tab{flex:0 0 auto;display:inline-flex;align-items:center;gap:7px;max-width:190px;height:36px;padding:0 13px;
+    border-radius:10px;border:1px solid var(--line);background:var(--card2);color:var(--mut);font-size:13px;font-weight:600;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+  .stg-tab .stg-tdot{width:8px;height:8px;border-radius:50%;background:var(--line);flex:0 0 auto}
+  .stg-tab.on{border-color:var(--accent);color:var(--ink);background:var(--bg)}
+  .stg-tab.busy .stg-tdot{background:var(--accent);box-shadow:0 0 7px var(--accent);animation:sbblink 1s ease-in-out infinite}
+  .stg-tab.done{border-color:var(--ok);color:var(--ink)}
+  .stg-tab.done .stg-tdot{background:var(--ok);box-shadow:0 0 7px var(--ok)}
+  .stg-frames{position:relative;flex:1;min-height:0}
+  .stg-f{position:absolute;inset:0;width:100%;height:100%;border:0;background:var(--bg);visibility:hidden}
+  .stg-f.on{visibility:visible}
+  /* MOBILE Sessions lens = a tappable manager list (the actual terminal lives in the Stage) */
+  .msess-list{display:flex;flex-direction:column;gap:10px;grid-column:1/-1}
+  .msess-card{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:13px 14px;cursor:pointer}
+  .msess-card:active{border-color:var(--accent)}
+  .msess-main{display:flex;align-items:center;gap:9px;min-width:0}
+  .msess-dot{width:10px;height:10px;border-radius:50%;background:var(--mut);flex:0 0 auto}
+  .msess-dot.busy{background:var(--accent);box-shadow:0 0 8px var(--accent);animation:sbblink 1s ease-in-out infinite}
+  .msess-dot.done{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .msess-nm{font-weight:700;font-size:16px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  .msess-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;font-size:12px;color:var(--mut)}
+  .msess-st{font-weight:700}.msess-st.work{color:var(--accent)}.msess-st.done{color:var(--ok)}
+  .msess-acts{display:flex;gap:8px;margin-top:11px;flex-wrap:wrap}
+  .msess-acts .mini{flex:1 1 auto;min-height:42px;justify-content:center;font-size:13px}
+}
+@media(max-width:820px) and (prefers-reduced-motion:reduce){#stage.on{animation:none}}
 /* Sessions LENS: focus = ONLY the big terminal (littles removed); in-flow column, never floats over usage. */
 .focusonly{display:flex;flex-direction:column;
   height:calc(100vh - 255px);min-height:420px}   /* offset = topbar + slim usage strip + bottom taskbar (the old title/control card is gone -> ~45px reclaimed for the terminal) */
@@ -22152,6 +22303,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <div class="toast" id="toast"></div>
 <div id="sessbar"></div>
 <div id="sessprev"></div>
+<div id="stage"><div class="stg-head" id="stgHead"><button class="stg-back" onclick="stageClose()" title="Back to the session list — this session keeps running">&#8592;</button><div class="stg-loc" id="stgLoc" title="where this session lives"></div><span class="stg-model" id="stgModel"></span><span class="stg-chip" id="stgChip" title="This session's live state — working (running a turn) or idle (waiting for you)"><span class="stg-dot"></span><span id="stgChipT">idle</span></span><button class="stg-more" id="stgMore" onclick="stageMenu(event)" title="Session actions — Skills, Select &amp; copy, Give Claude a file, Third-party review, Compact, End, Force kill">&#8942;</button></div><div class="stg-switch" id="stgSwitch" title="Your open sessions — tap to switch (scroll sideways for more). A gold dot means that session just finished."></div><div class="stg-frames" id="stgFrames"></div></div>
 <script>
 let D={machines:[],components:[],routines:[],ralph:[],jobs:[]},ST={},LENS="sessions";
 let AGENT_SLUGS=new Set();
@@ -22541,12 +22693,62 @@ function famNode(node,depth){var rel=node.rel||"",brand=PROJBRANDS[rel],kids=nod
   var sm=node.summary||node.title||"";var sub=sm?'<div class="famsub" title="'+esc(sm)+'">'+esc(sm)+'</div>':'';
   var pip=kids.length?'<div class="fampip" title="'+(open?"Collapse":("Expand "+kids.length))+'" onclick="event.stopPropagation();famToggle(\''+esc(rel)+'\','+(open?1:0)+')">'+(open?"−":"+")+'</div>':'';
   var _wfrac=FAMMAXW?Math.min(1,(node.tok||0)/FAMMAXW):0;
-  var card='<div class="'+cls+'" data-rel="'+esc(rel)+'" style="--wt:'+_wfrac.toFixed(3)+'" onmouseenter="agHint(\''+esc(rel)+'\')" onmouseleave="agHint(\'\')" onclick="famOpen(\''+esc(rel)+'\')">'+acts+famCrest(node,brand,"famcrest")+'<div class="famname">'+esc(node.name||"project")+'</div>'+meta+sub+famWeight(node)+pip+'</div>';
+  var card='<div class="'+cls+'" data-rel="'+esc(rel)+'" style="--wt:'+_wfrac.toFixed(3)+'" onmouseenter="famHoverIn(\''+esc(rel)+'\')" onmouseleave="famHoverOut()" onclick="famOpen(\''+esc(rel)+'\')">'+acts+famCrest(node,brand,"famcrest")+'<div class="famname">'+esc(node.name||"project")+'</div>'+meta+sub+famWeight(node)+pip+'</div>';
   var inner="";
   if(kids.length&&open)inner+=kids.map(function(k){return famNode(k,depth+1);}).join("");
   if(isGhostP)inner+=famGhostLi();
   return '<li>'+card+(inner?('<ul>'+inner+'</ul>'):'')+'</li>';}
-function famToggle(rel,wasOpen){FAMOPEN[rel]=wasOpen?false:true;famRerender();}
+function famToggle(rel,wasOpen){   // the -/+ pip: same single-path model -- "-" collapses up to the parent, "+" opens & frames this folder
+  if(wasOpen){var p=rel.indexOf("/")>=0?rel.slice(0,rel.lastIndexOf("/")):"";famFocusPath(p);}
+  else famFocusPath(rel);}
+// PROJECTS TREE -- hover-to-drill with a SINGLE open path (accordion). Research-backed feel:
+//  * open only after a short DWELL (~350ms) so sweeping the cursor across the tree never flickers
+//    (Baymard/NN-G: a 300-500ms hover delay kills the accidental-trigger problem);
+//  * only ONE branch is ever open -- focusing a node opens its ancestor chain and closes every OTHER
+//    branch (Finder / Miller-column single-path model), so you always see exactly where you are;
+//  * leaving the tree collapses the whole hover-opened path after a GRACE delay (~450ms; re-entering the
+//    branch cancels it -- the classic "diagonal problem" tolerance) and recenters back up to the top.
+// Manual expansions (the -/+ pip) are never force-closed by any of this.
+var FAM_OPEN_MS=520;
+var _famHoverT=null,_famHoverRel=null,_famActive=null,_famAutoChain=[],_famPanLock=false;
+function _famChainOf(rel){var out=[];if(!rel)return out;var parts=String(rel).split("/"),acc="";for(var i=0;i<parts.length;i++){acc=acc?acc+"/"+parts[i]:parts[i];out.push(acc);}return out;}
+function _famHasKids(rel){var n=modFind(MODTREE,rel);return !!(n&&n.children&&n.children.length);}
+function famHoverIn(rel){agHint(rel);_famHoverRel=rel;
+  if(_famHoverT){clearTimeout(_famHoverT);_famHoverT=null;}
+  if(_famPanLock)return;                                       // don't retrigger while a recenter animates
+  if(rel===_famActive)return;                                  // already framed on THIS exact folder -> nothing to do
+  // hovering ANY folder -- WITH or WITHOUT children -- refocuses here: it collapses any open branch at this
+  // level, drills into children if it has them, and recenters on the hovered folder (a childless folder just
+  // has nothing of its own to open, so it only collapses siblings + centers).
+  _famHoverT=setTimeout(function(){if(_famHoverRel!==rel||_famDrag)return;famFocusPath(rel);},FAM_OPEN_MS);}
+function famHoverOut(){agHint("");_famHoverRel=null;
+  if(_famHoverT){clearTimeout(_famHoverT);_famHoverT=null;}}   // leaving to blank space does NOT collapse -- only hovering a parent or clicking the -/+ pip collapses
+function famFocusPath(rel){var chain=_famChainOf(rel);        // [top-level ... rel], excludes root ""
+  _famAutoChain.forEach(function(a){if(chain.indexOf(a)<0)FAMOPEN[a]=false;});   // close every branch not on the new chain
+  chain.forEach(function(c){if(_famHasKids(c))FAMOPEN[c]=true;});                 // open the chain to here
+  _famAutoChain=chain.filter(_famHasKids);_famActive=rel;
+  famRerender();
+  _famPanLock=true;setTimeout(function(){_famPanLock=false;                       // after the reframe settles, re-arm only if the cursor rests off-path
+    var r=_famHoverRel;if(r!=null&&r!==_famActive&&!_famDrag)_famHoverT=setTimeout(function(){if(_famHoverRel!==r||_famDrag)return;famFocusPath(r);},FAM_OPEN_MS);},520);
+  requestAnimationFrame(function(){famFrame(rel);});}
+// Recenter + zoom so THIS folder and its freshly-opened children fit the viewport perfectly (Miller-column
+// drill feel). Smoothly animates pan+zoom to frame the node's subtree box with a little padding.
+function famFrame(rel){var wrap=document.getElementById("famwrap");if(!wrap)return;
+  var q=function(r){return document.querySelector('#famstage .famnode[data-rel="'+String(r).replace(/"/g,'\\"')+'"]');};
+  var card=q(rel);if(!card)return;
+  var li=(card.parentNode&&card.parentNode.getBoundingClientRect)?card.parentNode:card;
+  var wr=wrap.getBoundingClientRect(),br=li.getBoundingClientRect();
+  if(!br.width||!br.height)return;
+  var L=br.left,T=br.top,R=br.right,B=br.bottom;
+  // keep the PARENT card in the frame too, so an expanded folder never hides where it came from -- the parent
+  // stays visible directly above (even a folder with lots of children won't push it off the top).
+  if(rel){var prel=rel.indexOf("/")>=0?rel.slice(0,rel.lastIndexOf("/")):"";var pc=q(prel);
+    if(pc){var pr=pc.getBoundingClientRect();L=Math.min(L,pr.left);T=Math.min(T,pr.top);R=Math.max(R,pr.right);B=Math.max(B,pr.bottom);}}
+  var boxW=(R-L)/FAMZOOM,boxH=(B-T)/FAMZOOM;                                        // union box in stage (untransformed) units
+  var cx=(L-wr.left-FAMX)/FAMZOOM+boxW/2,cy=(T-wr.top-FAMY)/FAMZOOM+boxH/2;         // its center, in stage units
+  var pad=34,z=Math.min((wr.width-pad*2)/boxW,(wr.height-pad*2)/boxH);
+  z=Math.max(0.28,Math.min(z,1.35));                                               // clamp so a tiny subtree doesn't zoom in absurdly
+  FAMZOOM=z;FAMX=wr.width/2-cx*z;FAMY=wr.height/2-cy*z;famApply(true);}
 function famRerender(){var st=document.getElementById("famstage");if(st&&MODTREE){FAMMAXW=famComputeMax(MODTREE)||1;st.innerHTML='<ul class="famtree">'+famNode(MODTREE,0)+'</ul>';}}
 async function loadFamTree(){
   var _prev=document.getElementById("fdoorIn");if(_prev&&_prev.value&&!FDOOR.query)FDOOR.query=_prev.value;   // survive a re-render mid-type
@@ -22606,6 +22808,7 @@ async function famOpen(rel){_famFocusRel=rel;var node=modFind(MODTREE,rel)||MODT
     +(sm?'<div class="meta" style="margin-top:3px">'+esc(sm)+'</div>':'')+'</div></div>'
     +'<div class="btns" style="margin-top:12px">'
     +'<button class="btn go" onclick="closeM();famLaunch(\''+esc(rel)+'\')">&#9654; Launch session here</button>'
+    +'<button class="btn" onclick="closeM();famAddChild(\''+esc(rel)+'\')">&#65291; Add sub-project</button>'
     +'<button class="btn" onclick="closeM();setProjView(\'list\');loadModules(\''+esc(rel)+'\')">Open full folder view</button>'
     +'<button class="btn" onclick="closeM();famTeamSheet(\''+esc(rel)+'\',(LINEUP.length?LINEUP.slice():agSuggest(\''+esc(rel)+'\').slice(0,2)))">&#9873; Field a team</button>'
     +'<button class="btn" onclick="famBrand(\''+esc(rel)+'\')">Brand</button></div>'+pay
@@ -22781,7 +22984,9 @@ async function modLaunch(rel){toast("Launching a session in "+rel+"…");
   openInSessions(r.session);}
 // drop into the Sessions lens (Focus view) with this session as the BIG terminal; the previous big
 // becomes a dock little. Beats opening a new browser tab.
-function openInSessions(name){ panesSet(wkMobile()?[name]:(PANES.indexOf(name)>=0?PANES:PANES.concat([name])));   // pull it up into the workspace
+function openInSessions(name){
+  if(wkMobile() && typeof stageOpen==='function' && !(window.STG&&STG.open&&STG.cur===name)){ stageOpen(name); return; }   // mobile: blow up full-screen IN-APP (no navigation), never the clunky inline pane
+  panesSet(wkMobile()?[name]:(PANES.indexOf(name)>=0?PANES:PANES.concat([name])));   // pull it up into the workspace
   if(typeof sbAck==='function')sbAck(name);   // viewing it clears its taskbar gold flash immediately
   gotoLens('sessions');setTimeout(()=>loadSessions(true),300);}
 // Default: open a session/terminal INLINE in the Sessions tab. New browser tabs ONLY via the arrow icon.
@@ -23140,6 +23345,7 @@ function paneToggle(name){ (PANES.indexOf(name)>=0 && !wkMobile()) ? paneDown(na
 // '[filed away]' screen. paneDown re-renders; loadSessions then drops the taskbar tile once tmux is gone.
 window.addEventListener('message',function(e){ var d=(e&&e.data)||{};
   if(d&&d.type==='cf-session-dead'&&d.name){ try{ if(PANES.indexOf(d.name)>=0) paneDown(d.name); }catch(_){}
+    try{ if(typeof stageOnDead==='function') stageOnDead(d.name); }catch(_){}
     try{ if(typeof loadSessions==='function') setTimeout(function(){loadSessions(true);},600); }catch(_){}} });
 function wkMarkDock(){ var b=document.getElementById('sessbar'); if(!b)return; b.querySelectorAll('.sb-tile').forEach(function(t){ t.classList.toggle('up', LENS==='sessions' && PANES.indexOf(t.getAttribute('data-n'))>=0); }); }
 function fmtTok(n){n=n||0;return n>=1e9?(n/1e9).toFixed(n>=1e10?0:1)+'B':n>=1e6?(n/1e6).toFixed(n>=1e7?0:1)+'M':n>=1e3?Math.round(n/1e3)+'K':''+n;}
@@ -28732,7 +28938,7 @@ function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attache
   +'<span class="stbtns">'
   +'<button class="mini" title="give Claude a file (upload + hand the path to this session)" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
   +'<button class="mini" title="Third-party review — an independent external GPT (a different AI vendor) reviews this session\'s recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." onclick="adviseOpen(\''+esc(x.name)+'\')">🔵</button>'
-  +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
+  +'<button class="mini" title="blow up the session — full-screen in-app on mobile, new tab on desktop" onclick="termPopout(\''+esc(x.name)+'\')">↗</button>'
   +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
   +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
   +'</span></div>';}
@@ -28756,7 +28962,7 @@ function paneHead(x){return '<div class="sthead"><span class="stdot">'+(x.attach
   +'<button class="mini panedown" title="push this session back down to the taskbar" onclick="paneDown(\''+esc(x.name)+'\')">&#11015;</button>'
   +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
   +'<button class="mini" title="Third-party review — an independent external GPT (a different AI vendor) reviews this session\'s recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." onclick="adviseOpen(\''+esc(x.name)+'\')">🔵</button>'
-  +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
+  +'<button class="mini" title="blow up the session — full-screen in-app on mobile, new tab on desktop" onclick="termPopout(\''+esc(x.name)+'\')">↗</button>'
   +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
   +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
   +'</span></div>';}
@@ -28765,7 +28971,8 @@ function renderWorkspace(s){
   var up=PANES.filter(function(n){return s.find(function(x){return x.name==n;});});
   if(!up.length) up=[s[0].name];
   if(up.length!==PANES.length || up.some(function(n,i){return n!==PANES[i];})) panesSet(up);
-  var panes = wkMobile() ? [up[0]] : up;
+  if(wkMobile()) return renderSessionsListMobile(s);   // mobile: a big tappable list -> opens the full-screen Stage. NO clunky inline terminal, NO overflowing header buttons.
+  var panes = up;
   var h='<div class="wkspace" id="wkspace">';
   panes.forEach(function(name,idx){
     var x=s.find(function(y){return y.name==name;})||{name:name,label:name};
@@ -28776,6 +28983,25 @@ function renderWorkspace(s){
       +'</div>';
   });
   h+='</div><div id="wkdrop" class="wkdrop">&#11014; Drop to add this session to the workspace</div>';
+  return h;
+}
+// MOBILE Sessions lens = a manager, not a terminal. Each row opens the full-screen Stage (the actual
+// workroom). No inline iframe (unusable at phone size) and no overflowing header button row.
+function renderSessionsListMobile(s){
+  var h='<div class="msess-list">';
+  s.forEach(function(x){
+    var busy=(window.SB&&SB.prev[x.name]), done=(window.SB&&SB.done[x.name]);
+    var st=busy?'<span class="msess-st work">● working</span>':(done?'<span class="msess-st done">✓ done</span>':'<span class="msess-st">idle</span>');
+    h+='<div class="msess-card" onclick="stageOpen(\''+esc(x.name)+'\')" title="Open this session full-screen">'
+      +'<div class="msess-main"><span class="msess-dot'+(busy?' busy':'')+(done?' done':'')+'"></span><span class="msess-nm">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)+'</div>'
+      +'<div class="msess-meta">'+st+locTag(x)+'</div>'
+      +'<div class="msess-acts">'
+        +'<button class="mini go" onclick="event.stopPropagation();stageOpen(\''+esc(x.name)+'\')" title="Open this session full-screen">▶ Open</button>'
+        +'<button class="mini" onclick="event.stopPropagation();ccPickFile(\''+esc(x.name)+'\')" title="Give Claude a file to read in this session">&#128206; File</button>'
+        +'<button class="mini" onclick="event.stopPropagation();endSess(\''+esc(x.name)+'\',false)" title="Gracefully end: writes a handoff + resume pointer, then closes">End</button>'
+      +'</div></div>';
+  });
+  h+='</div>';
   return h;
 }
 // splitter drag (adjust the two adjacent panes' widths) + dock->workspace drop, wired after each render
@@ -28857,7 +29083,7 @@ function locTag(x){var t=(x&&(x.loc||x.cwd))||'';if(!t)return '';return '<span c
 function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="cursor:default"><h3>'+locTag(x)+'<span title="'+esc(x.name)+'">'+(x.attached?"🟢 ":"⚪ ")+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)+badge(x.attached?"running":"paused")+'</h3>'
   +'<div class="meta">active '+ago(now-x.activity)+' ago</div>'
   +'<div class="btns" style="margin-top:10px"><button class="mini go" onclick="openInSessions(\''+esc(x.name)+'\')">▶ open</button>'
-  +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
+  +'<button class="mini" title="blow up the session — full-screen in-app on mobile, new tab on desktop" onclick="termPopout(\''+esc(x.name)+'\')">↗</button>'
   +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">file</button>'
   +'<button class="mini" onclick="endSess(\''+esc(x.name)+'\',false)" title="handoff + close">end</button>'
   +'<button class="mini danger" onclick="endSess(\''+esc(x.name)+'\',true)" title="force kill">kill</button></div></div>';}
@@ -28868,7 +29094,7 @@ function sessTile(x,i){const big=(SESSBIG==x.name);
     +'<button class="mini" title="'+(big?'minimize':'maximize')+'" onclick="tileClick(\''+esc(x.name)+'\')">'+(big?'▒':'⤢')+'</button>'
     +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
     +'<button class="mini" title="Third-party review — an independent external GPT (a different AI vendor) reviews this session\'s recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." onclick="adviseOpen(\''+esc(x.name)+'\')">🔵</button>'
-    +'<button class="mini" title="open in new tab" onclick="window.open(\'/term?name='+encodeURIComponent(x.name)+'\',\'_blank\')">↗</button>'
+    +'<button class="mini" title="blow up the session — full-screen in-app on mobile, new tab on desktop" onclick="termPopout(\''+esc(x.name)+'\')">↗</button>'
     +'<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
     +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'
     +'</span></div>'
@@ -29925,7 +30151,7 @@ function restoreFromHash(){const h=location.hash.slice(1);if(!h)return false;
   else if(lens=="history"){if(p[1])HISTMACHINE=p[1];}
   LENS=lens;[...document.querySelectorAll("#lens button")].forEach(b=>b.classList.toggle("on",b==btn));
   const vt=document.getElementById("viewtitle");if(vt)vt.textContent=NAV[lens]||lens;refreshAgentBtn();render();cfReportFocus();return true;}
-window.addEventListener("popstate",()=>{if(!document.getElementById("cinfo"))restoreFromHash();});  // Back/Forward = rebuild the view in place, no page reload (don't fall out to the overseer)
+window.addEventListener("popstate",()=>{if(window.STG&&STG.open){stageClose(true);return;}if(!document.getElementById("cinfo"))restoreFromHash();});  // mobile Stage open -> Back closes it (no reload); else Back/Forward rebuilds the view in place (don't fall out to the overseer)
 document.addEventListener("keydown",e=>{if(LENS!="modules")return;const t=(e.target.tagName||"");if(t=="INPUT"||t=="TEXTAREA")return;if(e.key=="Backspace"){if(MODREL){e.preventDefault();loadModules(MODREL.split("/").slice(0,-1).join("/"));}}else if(e.key=="Escape"){if(MODREL)loadModules("");}});
 document.getElementById("search").addEventListener("input",render);
 // ===== MOBILE chrome: scroll-away nav/topbar + search reveal-on-demand (all gated to <=820px; desktop/tablet untouched) =====
@@ -30303,7 +30529,8 @@ async function sbPoll(){
   list.forEach(function(s){ names[s.name]=1;
     // busy -> idle = just finished -> flag for the gold pulse, UNLESS you're already viewing it big in the
     // Sessions tab (you've obviously seen it).
-    if(SB.prev[s.name]===true && s.busy===false && !sbViewing(s.name)){ SB.done[s.name]=true; }
+    if(SB.prev[s.name]===true && s.busy===false && !sbViewing(s.name)){ SB.done[s.name]=true;
+      if(window.STG&&STG.open&&s.name!==STG.cur&&typeof toast==='function'){ toast((s.label||s.name)+' finished — tap its tile below to switch',5000); } }
     SB.prev[s.name]=s.busy;
   });
   Object.keys(SB.done).forEach(function(n){ if(!names[n]) delete SB.done[n]; });
@@ -30311,7 +30538,7 @@ async function sbPoll(){
   sbRender(list);
 }
 function sbScopeToggle(){ window.SB_SCOPE=(window.SB_SCOPE==='mine')?'all':'mine'; try{localStorage.setItem('cc_sb_scope',window.SB_SCOPE);}catch(e){} SB._sig=''; sbPoll(); }
-function sbViewing(n){ return LENS==='sessions' && SESSBIG===n; }   // is this session the one open big in the Sessions tab?
+function sbViewing(n){ return (LENS==='sessions' && SESSBIG===n) || (window.STG&&STG.open&&STG.cur===n); }   // open big in the Sessions tab, OR on the mobile Stage
 function sbRender(list){
   var bar=document.getElementById('sessbar'); if(!bar)return;
   sbReorderWire();
@@ -30347,6 +30574,7 @@ function sbRender(list){
       ATTN[s.name]=eff; t.classList.add('sb-a-'+eff); t.setAttribute('data-attn',eff); }
   });
   document.title=(doneCount? '\u{1F7E1} '+doneCount+' done · ':'')+SB.baseTitle;   // cue even when in another browser tab
+  if(window.STG&&STG.open&&typeof stagePaint==='function') stagePaint();   // keep the mobile Stage header's live status chip current
 }
 function sbAck(name){ if(SB.done[name]){ delete SB.done[name]; var sel='.sb-tile[data-n="'+((window.CSS&&CSS.escape)?CSS.escape(name):name)+'"]'; var t=document.querySelector(sel); if(t)t.classList.remove('done'); } }
 // --- taskbar blow-up panel: a FULL interactive terminal + actions (b3) ---
@@ -30395,6 +30623,9 @@ function sbHide(){ var p=document.getElementById('sessprev'); if(p){p.style.disp
 // --- actions ---
 function sbUsage(name){ sbHide(); if(typeof openInSessions==='function') openInSessions(name); if(typeof gotoLens==='function') gotoLens('usage'); }
 function sbNewTab(name){ window.open('/term?name='+encodeURIComponent(name),'_blank'); }
+// The ↗ "blow up" button: on a phone, open the full-screen in-app Stage (no navigation, no reload) instead
+// of a new browser tab (leaving the SPA is exactly the reported pain). Desktop keeps the new-tab behavior.
+function termPopout(name){ if(wkMobile()&&typeof stageOpen==='function'){ stageOpen(name); return; } window.open('/term?name='+encodeURIComponent(name),'_blank'); }
 async function sbExit(name){
   if(typeof toast==='function') toast('Ending '+esc(name)+' — writing a handoff + resume pointer, then filing it away. It drops from the taskbar when done.',6500);
   try{ await fetch('/api/close-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,force:false})}); }catch(e){}
@@ -30407,7 +30638,7 @@ async function sbKill(name){
     if(r&&r.protected&&typeof toast==='function')toast(r.error||'Protected session — cannot be killed.',6000); }catch(e){}
   sbHide(); setTimeout(sbPoll,700);
 }
-function sbClick(name){ sbAck(name); if(LENS==='sessions'){ paneToggle(name); } else { sbOpen(name); } }
+function sbClick(name){ sbAck(name); if(wkMobile()){ stageOpen(name); return; } if(LENS==='sessions'){ paneToggle(name); } else { sbOpen(name); } }
 function sbDragStart(ev,name){ window.WKDRAG=name; try{ev.dataTransfer.setData('application/x-cc-pane',name);ev.dataTransfer.effectAllowed='copy';}catch(_){}
   document.body.classList.add('wk-dragging'); if(LENS!=='sessions')gotoLens('sessions'); }
 function sbDragEnd(){ document.body.classList.remove('wk-dragging'); window.WKDRAG=null; }
@@ -30453,6 +30684,135 @@ function sbReorderCommit(){
   sbOrderSet(names); if(typeof toast==='function')toast('Session order saved',2000);
 }
 function sbOpen(name){ sbAck(name); var p=document.getElementById('sessprev'); if(p)p.style.display='none'; if(typeof openInSessions==='function') openInSessions(name); }
+// ===== Mobile Session Stage: full-screen in-app session overlay (no /term navigation, no reload) =========
+// A bounded LRU pool of persistent /term iframes lives at body level (outside #grid, which loadSessions
+// rebuilds) -> switching sessions is instant and never reconnects. Everything is gated to wkMobile();
+// desktop keeps the split-pane workspace + hover-blowup untouched.
+var STG={open:false,cur:null,pool:[],cap:3};
+function _cssq(n){ return (window.CSS&&CSS.escape)?CSS.escape(n):n; }
+function stageEnsure(name){
+  var frames=document.getElementById('stgFrames'); if(!frames)return null;
+  var f=frames.querySelector('.stg-f[data-n="'+_cssq(name)+'"]'); if(f) return f;
+  while(STG.pool.length>=STG.cap){ var old=STG.pool.shift(); if(old===name)continue;   // evict least-recently-viewed (closes its WS -> server reaps the attach)
+    var of=frames.querySelector('.stg-f[data-n="'+_cssq(old)+'"]'); if(of)of.remove(); }
+  f=document.createElement('iframe'); f.className='stg-f'; f.setAttribute('data-n',name);
+  f.setAttribute('allow','clipboard-read; clipboard-write');
+  f.src='/term?name='+encodeURIComponent(name)+'&embed=stage'; frames.appendChild(f); return f;   // embed=stage -> the terminal hides its own floating action bar (actions moved to the Stage header ⋮)
+}
+function stageShow(name){
+  var frames=document.getElementById('stgFrames'); if(!frames)return;
+  stageEnsure(name);
+  STG.pool=STG.pool.filter(function(n){return n!==name;}); STG.pool.push(name);   // LRU touch
+  STG.cur=name;
+  frames.querySelectorAll('.stg-f').forEach(function(f){ f.classList.toggle('on', f.getAttribute('data-n')===name); });
+  if(typeof sbAck==='function') sbAck(name);
+  if(typeof panesSet==='function') panesSet([name]);   // keep SESSBIG/lens-hash/desktop parity consistent
+  stagePaint();
+  if(typeof sbPoll==='function') sbPoll();              // repaint dock .up + clear this tile's gold now
+}
+function stageOpen(name){
+  if(!wkMobile()){ if(typeof openInSessions==='function')openInSessions(name); return; }   // desktop: unchanged
+  var st=document.getElementById('stage'); if(!st)return;
+  if(!STG.open){ try{ history.pushState({cfStage:1},''); }catch(_){}
+    STG.open=true; document.body.classList.add('cf-stage-open'); st.classList.add('on'); stageHeadWire(); stageKbdWire(); }
+  stageShow(name);
+}
+function stageClose(fromPop){
+  var st=document.getElementById('stage'); if(!st)return;
+  // Fast back: if the user hit ← / swiped (not a popstate), just pop history and let the popstate handler do
+  // the hide -> restoreFromHash() never runs, so there's no full-page rebuild ("felt like a reload").
+  if(!fromPop && history.state && history.state.cfStage){ try{ history.back(); return; }catch(_){} }
+  STG.open=false; st.classList.remove('on'); document.body.classList.remove('cf-stage-open','cf-stage-kbd');
+  // frames stay mounted for instant re-entry; reaped on cap-evict or session death.
+}
+function _stageSortedList(){
+  var list=((window.SB&&SB.list)||[]).slice();
+  var ord=(typeof sbOrderGet==='function')?sbOrderGet():[];
+  list.sort(function(a,b){var ia=ord.indexOf(a.name),ib=ord.indexOf(b.name);
+    if(ia<0&&ib<0)return a.name<b.name?-1:1; if(ia<0)return 1; if(ib<0)return -1; return ia-ib;});
+  return list;
+}
+function stageSwitchPaint(){
+  var el=document.getElementById('stgSwitch'); if(!el)return;
+  var list=_stageSortedList();
+  el.style.display=(list.length>1)?'flex':'none';
+  var sig=list.map(function(s){return s.name+':'+(s.name===STG.cur?1:0)+':'+(SB.prev[s.name]?1:0)+':'+(SB.done[s.name]?1:0);}).join('|');
+  if(el._sig!==sig){
+    el._sig=sig;
+    el.innerHTML=list.map(function(s){
+      var cur=(s.name===STG.cur), busy=SB.prev[s.name], done=SB.done[s.name];
+      return '<button class="stg-tab'+(cur?' on':'')+(busy?' busy':'')+(done?' done':'')+'" data-n="'+e2(s.name)+'" onclick="stageShow(\''+esc(s.name)+'\')" title="'+e2(s.label||s.name)+(done?' — just finished':(busy?' — working':''))+'"><span class="stg-tdot"></span>'+e2(s.label||s.name)+'</button>';
+    }).join('');
+    var on=el.querySelector('.stg-tab.on'); if(on&&on.scrollIntoView){ try{ on.scrollIntoView({inline:'center',block:'nearest'}); }catch(_){} }
+  }
+}
+function stagePaint(){
+  var s=((window.SB&&SB.list)||[]).find(function(x){return x.name===STG.cur;})||{name:STG.cur};
+  var lo=document.getElementById('stgLoc');
+  if(lo){ var node=s.node||(window.CC&&CC.brand)||''; var leaf=s.loc||s.cwd||s.label||s.name||'';   // breadcrumb: [node/instance] -> [where the session lives]
+    lo.innerHTML = node ? ('<span class="stg-node">'+e2(node)+'</span><span class="stg-sep">&#8594;</span>'+e2(leaf)) : e2(leaf); }
+  var md=document.getElementById('stgModel'); if(md&&typeof modelChip==='function'){ md.innerHTML=modelChip(STG.cur, s.model); }   // clickable model chip -> mdlPick
+  var c=document.getElementById('stgChip'), ct=document.getElementById('stgChipT');
+  if(c){ var busy=window.SB&&SB.prev[STG.cur]; c.classList.toggle('work',!!busy); c.classList.remove('done'); if(ct)ct.textContent=busy?'working':'idle'; }
+  stageSwitchPaint();
+}
+// The Stage's one action dropdown (replaces the terminal's floating pill). Most items are parent-side session
+// actions (by name); Select&copy + Compact reach into the visible /term iframe (same-origin) since they are
+// inherently terminal-visual. The model lives as a chip in the header (tap it -> mdlPick).
+function closeStageMenu(e){ if(e&&e.target&&e.target.closest&&e.target.closest('#stgMenu'))return; var m=document.getElementById('stgMenu'); if(m)m.remove(); document.removeEventListener('click',closeStageMenu,true); }
+function stageTerm(fn){ closeStageMenu(); try{ var f=document.querySelector('.stg-f.on'); if(f&&f.contentWindow&&typeof f.contentWindow[fn]==='function'){ f.contentWindow[fn](); } else if(typeof toast==='function'){ toast('That action is still loading — try again in a moment.'); } }catch(_){} }
+function stageMenu(ev){
+  ev.stopPropagation(); closeStageMenu(); var n=STG.cur; if(!n)return; var nn=esc(n);
+  function mi(ic,lbl,call,danger){ return '<button class="stg-mi'+(danger?' danger':'')+'" onclick="'+call+'"><span class="stg-mi-ic">'+ic+'</span>'+lbl+'</button>'; }
+  var m=document.createElement('div'); m.className='stg-menu'; m.id='stgMenu';
+  m.innerHTML=
+      mi('&#10022;','Skills','closeStageMenu();skPick(event,\''+nn+'\')')
+    + mi('&#10697;','Select &amp; copy','stageTerm(\'showCopy\')')
+    + mi('&#128206;','Give Claude a file','closeStageMenu();ccPickFile(\''+nn+'\')')
+    + mi('&#128309;','Third-party review','closeStageMenu();adviseOpen(\''+nn+'\')')
+    + mi('&#8863;','Compact (handoff + /compact)','stageTerm(\'compactSess\')')
+    + '<div class="stg-mi-sep"></div>'
+    + mi('&#9195;','End (handoff + close)','closeStageMenu();endSess(\''+nn+'\',false)')
+    + mi('&#10005;','Force kill (no handoff)','closeStageMenu();endSess(\''+nn+'\',true)',true);
+  document.body.appendChild(m);
+  var r=ev.target.closest('button').getBoundingClientRect(); var w=Math.min(238,window.innerWidth-16);
+  m.style.left=Math.max(8,Math.min(r.right-w,window.innerWidth-w-8))+'px'; m.style.top=(r.bottom+6)+'px';
+  setTimeout(function(){document.addEventListener('click',closeStageMenu,true);},0);
+}
+function stageNav(d){   // prev/next in the switcher's order (header swipe left/right)
+  var list=_stageSortedList(); if(!list.length)return;
+  var i=-1; for(var k=0;k<list.length;k++){ if(list[k].name===STG.cur){i=k;break;} } if(i<0)i=0;
+  var j=(i+d+list.length)%list.length; if(list[j]) stageShow(list[j].name);
+}
+function stageOnDead(name){   // a pooled session ended/was killed -> drop its frame, advance or close
+  var frames=document.getElementById('stgFrames');
+  if(frames){ var f=frames.querySelector('.stg-f[data-n="'+_cssq(name)+'"]'); if(f)f.remove(); }
+  STG.pool=STG.pool.filter(function(n){return n!==name;});
+  if(STG.open && STG.cur===name){ if(STG.pool.length) stageShow(STG.pool[STG.pool.length-1]); else stageClose(); }
+}
+// header gestures: swipe-down = back; swipe left/right = prev/next session. They live ONLY on the header
+// strip because the terminal canvas already owns vertical swipe (tmux copy-mode scrollback) -> no conflict.
+function stageHeadWire(){
+  var h=document.getElementById('stgHead'); if(!h||h._w)return; h._w=1;
+  var sx=0,sy=0,act=false;
+  h.addEventListener('touchstart',function(e){ if(e.touches.length!==1)return; sx=e.touches[0].clientX; sy=e.touches[0].clientY; act=true; },{passive:true});
+  h.addEventListener('touchend',function(e){ if(!act)return; act=false;
+    var t=(e.changedTouches&&e.changedTouches[0])||null; if(!t)return;
+    var dx=t.clientX-sx, dy=t.clientY-sy;
+    if(Math.abs(dy)>50 && Math.abs(dy)>Math.abs(dx)){ if(dy>0) stageClose(); return; }
+    if(Math.abs(dx)>50 && Math.abs(dx)>Math.abs(dy)) stageNav(dx<0?1:-1);
+  },{passive:true});
+}
+// parent-side soft-keyboard awareness: when the keyboard opens, hide the dock + extend the stage to the
+// bottom so the terminal's own compose row stays reachable (fixed-bottom elements hide behind the iOS kbd).
+function stageKbdWire(){
+  if(stageKbdWire._w || !window.visualViewport)return; stageKbdWire._w=1;
+  window.visualViewport.addEventListener('resize',function(){
+    if(!STG.open)return;
+    document.body.classList.toggle('cf-stage-kbd',(window.innerHeight-window.visualViewport.height)>90);
+  });
+}
+window.addEventListener('resize',function(){ if(STG.open && !wkMobile()) stageClose(); });   // rotated/resized up to tablet -> drop the stage
 sbPoll(); setInterval(sbPoll,4000);
 
 // ====================================================================================================
