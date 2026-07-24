@@ -19369,38 +19369,28 @@ try{_copyMode=localStorage.getItem('cc_copymode')||'clean';}catch(e){}
 // mode keeps everything exactly. Shared by mobile + desktop + the standalone /term page.
 function cleanCopy(raw){
   var lines=String(raw||'').split('\n').map(function(l){return l.replace(/[ \t]+$/,'');});
-  var n=lines.length;
-  // a line that STARTS a new logical line (keeps its own row): blank, or a marker -- Claude's ⏺ ❯ ⎿ bullets,
-  // list/quote/heading/table glyphs, numbered items, box-drawing. Everything else is a soft-wrap continuation.
+  // Rebuild logical lines: a line KEEPS its own row only when it STARTS one -- a blank, or a marker (Claude's
+  // ⏺ ❯ ⎿ ⧉ action glyphs, bullets, quotes, headings, tables, numbered items, box-drawing). EVERY other line
+  // is a soft-wrap continuation and is merged into the line above. No width threshold: the terminal
+  // character-wraps at whatever column fits, so within a paragraph there are NO intended breaks -- markers +
+  // blank lines carry all the real structure. Works identically on a phone-narrow pane and a wide desktop one.
   var MARK=/^[⏺❯⎿⧉▶▸›»•‣◦⁃∙*+#>|✓✗☐☑☒▪●✦✳✶·─-╿▀-▟]/;
   var NUM=/^\d+[.)]\s/, DASH=/^-\s/, BORDER=/^[\s─-╿▀-▟_=~]+$/;
   function isMarker(s){ return MARK.test(s)||NUM.test(s)||DASH.test(s); }
-  function isBoundary(l){ return l.trim()===''||BORDER.test(l); }
-  // per-line LOCAL wrap width = max length in the contiguous non-blank/non-border run it belongs to. This
-  // adapts to a phone-narrow pane (~46 cols) AND a wide desktop pane in the SAME capture -- a single global
-  // width can't (a session resized over its life mixes widths); the local max is the block's true right edge.
-  var localW=new Array(n);
-  for(var i=0;i<n;){
-    if(isBoundary(lines[i])){ localW[i]=0; i++; continue; }
-    var j=i, mx=0;
-    while(j<n && !isBoundary(lines[j])){ if(lines[j].length>mx)mx=lines[j].length; j++; }
-    for(var k=i;k<j;k++) localW[k]=mx;
-    i=j;
-  }
-  var out=[], lastLen=0;
-  for(var i=0;i<n;i++){
+  var out=[];
+  for(var i=0;i<lines.length;i++){
     var l=lines[i], s=l.replace(/^\s+/,'');
-    if(s===''){ out.push(''); lastLen=0; continue; }      // blank -> paragraph boundary
-    if(BORDER.test(l)){ lastLen=0; continue; }             // drop pure box-drawing / rule rows (also a boundary)
-    var thr=Math.max(16, localW[i]-12);                    // this block's wrap edge (minus a word-wrap gap)
+    if(s===''){ out.push(''); continue; }                  // blank -> paragraph boundary
+    if(BORDER.test(l)) continue;                            // drop pure box-drawing / rule rows (chrome)
     var prev=out.length?out[out.length-1]:null;
-    if(prev!==null && prev!=='' && !isMarker(s) && lastLen>=thr){   // soft-wrap continuation of a full previous row
+    if(prev===null || prev==='' || isMarker(s)){ out.push(l); }   // new logical line
+    else {                                                        // wrap continuation -> merge into prev
       var m=prev.match(/\S+$/), tail=m?m[0]:'';
       // space vs none: a sentence/clause boundary keeps a space; a LONG unbroken trailing token (url/path/hash
-      // char-wrapped mid-token) joins with none; otherwise it's a normal word-wrap -> single space.
+      // char-wrapped mid-token) joins with none; otherwise a normal word-wrap -> single space.
       var jn=(/[.!?,:;)\]]$/.test(prev))?' ':(tail.length>=30?'':' ');
-      out[out.length-1]=prev+jn+s; lastLen=l.length;
-    } else { out.push(l); lastLen=l.length; }
+      out[out.length-1]=prev+jn+s;
+    }
   }
   return out.join('\n').replace(/\n{3,}/g,'\n\n').trim();
 }

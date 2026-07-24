@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.217 -- 2026-07-24  (Select&copy reflow: aggressive block-join; desktop drag actually reflows)
+Follow-up to 0.99.216's reflow. The per-block width-threshold version barely joined on real terminal output
+(so desktop drag-select copy still pasted with the on-screen line breaks) -- because the terminal
+character-wraps at whatever column fits, so a full-width threshold both missed the partial first row of a drag
+and got fooled by mixed pane widths. Rewrote `cleanCopy` (`server.py` TERM_PAGE) to the simpler, correct model:
+a line keeps its own row ONLY when it starts one -- a blank or a marker (⏺ ❯ ⎿ ⧉ bullets / quotes / headings /
+tables / numbered / box-drawing); every other line is a soft-wrap continuation and is merged into the line
+above, with no width threshold. Markers + blank lines carry all real structure. URLs/paths (long unbroken
+trailing token) still merge with no space; sentence punctuation keeps a space. Fixes: desktop drag-select copy
+now reflows, the mobile narrow pane collapses, and real output collapses ~3x harder than the .216 version.
+
 ## 0.99.216 -- 2026-07-24  (Mobile Session Stage + terminal Select&copy reflow)
 Makes running sessions genuinely usable on a phone, and fixes the long-standing "copying from the terminal
 pastes with broken line-wraps" problem everywhere (desktop included). All new UI is gated to `wkMobile()` /
