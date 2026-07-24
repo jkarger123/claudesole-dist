@@ -3,6 +3,25 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.218 -- 2026-07-24  (Google/email auth: never fight this again -- scope-floor guard + mint hardening)
+Fallout + permanent fix from a multi-hour Google auth incident (james.k.karger lost gmail READ silently). Root
+causes + full audit: `extensions/google-workspace/deliverables/EMAIL_AUTH_INCIDENT_AUDIT_20260724.md`.
+- **`bin/mint_token.py` -- two hard fixes so consent can't dead-end:** (1) forces Google's CURRENT
+  `…/o/oauth2/v2/auth` endpoint (client JSONs still carry the LEGACY `…/o/oauth2/auth`, which 401s
+  `invalid_client / OAuth client was not found` AFTER sign-in for clients created in the new Google Auth Platform
+  console -- the multi-hour dead end); (2) drops the console-unlisted scopes `gmail.modify`/`calendar.events`/
+  `forms.body.readonly` that `workspace-mcp` 1.22.x requests (they made Google reject the WHOLE consent with
+  `invalid_scope`). Both overridable via `AUTH_URI=`/`DROP_SCOPES=`.
+- **`workspace-mcp` PINNED to `@1.22.1`** in the extension template `mcp.json` (and this node's live `.mcp.json`)
+  so `uvx` can't silently pull a version that changes which scopes are requested.
+- **SCOPE FLOOR guard (`server.py`) -- the real gap:** keep-alive keeps a token ALIVE but had no concept of
+  scope, so a re-mint that narrowed an account went unnoticed. Now `_google_health` tracks each account's
+  high-watermark caps (read/send); `_vault_materialize_google` REFUSES to overwrite a broader token with a
+  narrower one; and Doctor goes RED + fires a throttled loud alert the instant `canRead`/`canSend` drops below
+  what the account previously had. Silent capability loss is now impossible.
+- **`SETUP.md`** gains an auth-error decoder (each error string -> one cause -> one fix), the reliable
+  tunnel-less remote-auth recipe (local minter + curl the callback), and the scope-floor note.
+
 ## 0.99.217 -- 2026-07-24  (Select&copy reflow: aggressive block-join; desktop drag actually reflows)
 Follow-up to 0.99.216's reflow. The per-block width-threshold version barely joined on real terminal output
 (so desktop drag-select copy still pasted with the on-screen line breaks) -- because the terminal

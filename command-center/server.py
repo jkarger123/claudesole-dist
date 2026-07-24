@@ -31,6 +31,7 @@ substack = _opt_import("substack") # Substack -> READ (RSS track) + DRAFT (headl
 cc_policy = _opt_import("cc_policy")# per-action POLICY ENGINE (ALLOW/DENY/ASK) for the PreToolUse hook; deep-audit graft G1
 morning_brief = _opt_import("morning_brief")  # MORNING BRIEF: scheduled, voice-read daily brief from your sources
 notebook = _opt_import("notebook")            # NOTEBOOK: speak/write a note -> structured tasks + context event
+voice = _opt_import("voice")                  # VOICE I/O: talk to a session (Deepgram STT) + hear its last reply (TTS)
 email_archive = _opt_import("email_archive")  # EMAIL ARCHIVE: full-text search over an exported (mbox) email history
 try:   # Ed25519 for asymmetric superadmin (public-key). Optional: nodes without it fall back to HMAC + a doctor warning.
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
@@ -919,6 +920,11 @@ def _google_mark_ok(acct):
     was_ok = h.get("ok")
     h.update(ok=True, at=int(time.time()), reason="", since=0)
     if was_ok is False: h["alerted"] = 0                      # recovered -> re-arm the alert
+    try:                                                      # SCOPE FLOOR: remember the BEST capabilities this account has ever granted
+        caps = _caps_from_scopes((_gtok(acct) or {}).get("scopes"))
+        mx = h.get("caps_max") or {}
+        h["caps_max"] = {k: bool(mx.get(k) or caps.get(k)) for k in ("read", "send")}
+    except Exception: pass
     _google_health[acct] = h; _google_save_health()
 def _google_dead(acct, err):
     """A refresh token is definitively dead. Mark unhealthy + fire ONE throttled LOUD operator alert (phone +
@@ -937,6 +943,33 @@ def _google_dead(acct, err):
                         "in the browser." % (acct, (err or "invalid_grant")[:60], acct))
         except Exception: pass
     return None
+
+# ---- SCOPE FLOOR (2026-07-24 incident): a vaulted account must never SILENTLY lose a capability it once had.
+# james.k.karger was minted with gmail.readonly, then a later re-mint/overwrite narrowed the token to send-only
+# and NOTHING noticed (keep-alive keeps a token ALIVE but has no concept of scope). These three guard that. ----
+def _caps_from_scopes(scopes):
+    """Coarse capability set (read/send) from a granted-scope list -- the unit the scope-floor guard compares."""
+    def has(*subs): return any(any(sub in x for sub in subs) for x in (scopes or []))
+    return {"read": has("gmail.readonly", "gmail.modify", "mail.google.com"),
+            "send": has("gmail.send", "gmail.compose", "mail.google.com")}
+def _google_scope_downgrade(acct):
+    """Capabilities this account GRANTED before (high-watermark in _google_health) but no longer does. Returns
+    e.g. ['read']; [] when nothing was lost. This is the exact signal that was missing on 2026-07-24."""
+    h = _google_health.get(acct) or {}; mx = h.get("caps_max") or {}
+    if not mx: return []
+    now = _caps_from_scopes((_gtok(acct) or {}).get("scopes"))
+    return [k for k in ("read", "send") if mx.get(k) and not now.get(k)]
+def _google_downgrade_alert(acct, lost):
+    """ONE throttled (6h) LOUD operator alert when an account loses a capability it used to have."""
+    if not acct or not lost: return
+    now = int(time.time()); h = _google_health.get(acct) or {}
+    if (now - int(h.get("dg_alerted") or 0)) <= 6 * 3600: return
+    h["dg_alerted"] = now; _google_health[acct] = h; _google_save_health()
+    try:
+        notify_send("[ClaudeFather] Google account %s LOST %s access it had before (silent scope downgrade). "
+                    "Re-mint to restore it: extensions/google-workspace/bin/gauth.sh for %s, approve in the browser."
+                    % (acct, "+".join(lost), acct))
+    except Exception: pass
 
 def _google_tokens_local_raw():
     """Accounts whose REAL refresh token is in THIS install's local vault (+ legacy disk files) -- the AUTHORITY
@@ -6247,6 +6280,15 @@ def _vault_materialize_google():
                         cur = json.load(open(tp)); want = tj if isinstance(tj, dict) else json.loads(tj)
                         if (cur or {}).get("refresh_token") != (want or {}).get("refresh_token"): write = True
                     except Exception: write = True
+                if write and os.path.isfile(tp):             # SCOPE FLOOR: never clobber a BROADER disk token with a narrower incoming one
+                    try:
+                        _cur = json.load(open(tp)) or {}; _want = tj if isinstance(tj, dict) else json.loads(tj)
+                        _cc = _caps_from_scopes(_cur.get("scopes")); _wc = _caps_from_scopes((_want or {}).get("scopes"))
+                        _drop = [k for k in ("read", "send") if _cc.get(k) and not _wc.get(k)]
+                        if _drop:
+                            print("[google] REFUSED to overwrite %s with a narrower token (would drop %s) -- keeping the broader disk copy" % (acct, "+".join(_drop)))
+                            _google_downgrade_alert(acct, _drop); write = False
+                    except Exception: pass
                 if write:
                     fd = os.open(tp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, body.encode()); os.close(fd)
                     out["tokens"].append(str(acct))
@@ -10671,11 +10713,16 @@ def doctor():
     try:                                                       # google-workspace: scope drift + portable secret paths (CCRs 369/334)
         if google_configured():
             for _acct in _google_accounts():                   # EMAIL AUTH: LIVE token liveness -- a dead refresh token is RED, never silent (the probe also updates health + fires the alert on invalid_grant, so Doctor doubles as a liveness sweep on every instance)
-                with _g_as(_acct): _live = bool(_google_access_token())
+                with _g_as(_acct):
+                    _live = bool(_google_access_token())
+                    _dg = _google_scope_downgrade(_acct) if _live else []   # SCOPE FLOOR: had read/send before, not now?
                 _h = _google_health.get(_acct) or {}
                 if (not _live) and _h.get("ok") is False:
                     _when = time.strftime("%Y-%m-%d %H:%M", time.localtime(_h.get("since") or _h.get("at") or time.time()))
                     issues.append({"sev": "err", "path": "google", "msg": "google account %s auth is DOWN (%s) since %s -- its Gmail/Calendar/Drive are unavailable. Re-consent: run extensions/google-workspace/bin/gauth.sh for %s and approve in the browser." % (_acct, _h.get("reason") or "invalid_grant", _when, _acct)})
+                elif _dg:                                          # live, but SILENTLY lost a capability it used to have -> RED + LOUD alert (the 2026-07-24 gap)
+                    _google_downgrade_alert(_acct, _dg)
+                    issues.append({"sev": "err", "path": "google", "msg": "google account %s LOST %s access it previously had (silent scope downgrade) -- re-mint to restore it: run extensions/google-workspace/bin/gauth.sh for %s and approve in the browser." % (_acct, "+".join(_dg), _acct)})
             _gaps = _google_scope_gaps()
             if _gaps:
                 issues.append({"sev": "warn", "path": "google", "msg": "google token is MISSING scope(s) for wired service(s): %s -- those tools will 403 at runtime. Re-mint to consent them: run extensions/google-workspace/bin/enable-services.sh (approve in browser), then restart." % ", ".join(_gaps)})
@@ -11354,6 +11401,12 @@ try:
                    "context_ingest": (context.ingest_event if context else None),
                    "task_add": (lambda *a, **k: task_add(*a, **k))})    # task_add is defined later -> lazy
 except Exception as _e: print("[notebook] init failed:", _e)
+try:
+    # VOICE I/O reuses the Notebook's single Deepgram STT path (one key, one code path) + its own TTS chain.
+    voice.init({"CC": CC, "STATE_DIR": STATE_DIR, "secret": _deploy_env,
+                "node_label": (CC.get("voice_node_label") or PROJECT_NAME or ""),   # spoken node name -> know which instance is talking
+                "stt": (lambda ab, mm: notebook.nb_transcribe(ab, mm))})   # notebook == the single Deepgram path
+except Exception as _e: print("[voice] init failed:", _e)
 try: email_archive.init({"CC": CC, "STATE_DIR": STATE_DIR, "secret": _deploy_env})
 except Exception as _e: print("[email_archive] init failed:", _e)
 try: substack.init({"CC": CC, "STATE_DIR": STATE_DIR})
@@ -12118,6 +12171,139 @@ def _session_transcript_path(name):
         fs = sorted(glob.glob(os.path.join(d, "*.jsonl")), key=lambda f: -os.path.getmtime(f))
         return fs[0] if fs else None
     except Exception: return None
+
+def _session_last_assistant(name, maxchars=16000):
+    """The TEXT of the most recent assistant message in a session's transcript (skips pure tool-use turns).
+    Powers the Voice 'read the last message' button + conversation-mode 'a new reply landed' detection."""
+    p = _session_transcript_path(name)
+    if not p: return ""
+    try:
+        with open(p, errors="ignore") as f: lines = f.readlines()
+    except Exception: return ""
+    for ln in reversed(lines[-400:]):
+        try: o = json.loads(ln)
+        except Exception: continue
+        m = o.get("message") if isinstance(o.get("message"), dict) else None
+        role = (m.get("role") if m else None) or o.get("type") or ""
+        if role != "assistant": continue
+        c = (m or o).get("content")
+        parts = []
+        if isinstance(c, str): parts.append(c)
+        elif isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and b.get("type") == "text" and b.get("text"): parts.append(b["text"])
+        txt = "\n".join(parts).strip()
+        if txt: return txt[:maxchars]   # keep scanning back past tool-only assistant turns
+    return ""
+
+def _voice_announce(sess):
+    """The spoken 'who + where' preamble for a readback: node name + the session's folder scope, read top-down,
+    so with multiple instances open you know who's talking. e.g. 'Mission Control here, working in the command
+    center, voice folder'. Empty if announce is turned off. Config: cc.config voice_node_label (else project name)."""
+    try:
+        if not voice: return ""
+        cfg = voice.cfg_get()
+        if not cfg.get("announce_node"): return ""
+        nl = (cfg.get("node_label") or "").strip()
+        if not nl: return ""
+        cwd = _pane_cwd(sess) or ""
+        scope = ""
+        for root in (CC_HOME, PROJECT):   # the folders the operator navigates live under the checkout (CC_HOME); PROJECT is a fallback
+            try:
+                if cwd and root and (cwd == root or cwd.startswith(root.rstrip("/") + "/")):
+                    r = os.path.relpath(cwd, root); scope = "" if r == "." else r; break
+            except Exception: pass
+        parts = [p.replace("-", " ").replace("_", " ").strip() for p in scope.split("/") if p.strip()]
+        where = ", ".join(parts)
+        return ("%s here, working in the %s folder" % (nl, where)) if where else ("%s here" % nl)
+    except Exception:
+        return ""
+
+# ---- Voice attention QUEUE (P1: single-node completion queue + speaking floor) -----------------------
+# Enrolled sessions that FINISH (idle + a NEW final message) queue themselves; the dashboard's voice
+# orchestrator presents them ONE at a time (read -> you reply -> route back -> next). One entry per session.
+# TENANCY: operates on THIS instance's OWN sessions only (each install has its own STATE_DIR) -- a node never
+# sees another operator's queue; cross-node aggregation (operator-matched, overseer-only) is a later phase.
+VOICE_QUEUE_FILE = os.path.join(STATE_DIR, "_voice_queue.json")
+_VQ_LOCK = threading.Lock()
+def _vq_load(): return load(VOICE_QUEUE_FILE, {"enrolled": {}, "queue": []})
+def _vq_save(d): save(VOICE_QUEUE_FILE, d)
+def _vq_fp(sess):
+    t = _session_last_assistant(sess)
+    return hashlib.sha1(t.encode("utf-8", "ignore")).hexdigest()[:16] if t else ""
+def vq_enroll(session, on):
+    if not session: return {"ok": False, "error": "no session"}
+    with _VQ_LOCK:
+        d = _vq_load(); en = d.setdefault("enrolled", {}); q = d.setdefault("queue", [])
+        if on:
+            (d.setdefault("muted", {})).pop(session, None)   # explicit enroll un-mutes
+            fp = _vq_fp(session); busy = _pane_busy(session)
+            en[session] = {"seen_fp": fp}
+            if fp and not busy:   # already idle with something to say -> present it right away (start the conversation now)
+                q[:] = [x for x in q if x.get("session") != session]
+                q.append({"session": session, "fp": fp, "scope": (_session_scope(session) or ""), "ts": int(time.time())})
+            # busy -> baseline seen_fp set; the watcher enqueues it when it FINISHES
+        else:
+            en.pop(session, None)
+            d["queue"] = [x for x in q if x.get("session") != session]
+        _vq_save(d)
+    return vq_state()
+def vq_ack(session):
+    with _VQ_LOCK:
+        d = _vq_load(); d["queue"] = [q for q in d.get("queue", []) if q.get("session") != session]; _vq_save(d)
+    return {"ok": True}
+def vq_mute(session, on):
+    """Per-session opt-OUT: a muted session never enqueues + never auto-enrolls (until un-muted)."""
+    if not session: return {"ok": False, "error": "no session"}
+    with _VQ_LOCK:
+        d = _vq_load(); m = d.setdefault("muted", {})
+        if on:
+            m[session] = 1
+            d["enrolled"] = {k: v for k, v in (d.get("enrolled") or {}).items() if k != session}
+            d["queue"] = [x for x in d.get("queue", []) if x.get("session") != session]
+        else:
+            m.pop(session, None)
+        _vq_save(d)
+    return vq_state()
+def vq_mode(on):
+    """The global 'Voice mode' switch. Off clears the live queue but keeps the enrolled/muted roster for resume."""
+    with _VQ_LOCK:
+        d = _vq_load(); d["mode"] = bool(on)
+        if not on: d["queue"] = []
+        _vq_save(d)
+    return vq_state()
+def vq_state():
+    d = _vq_load()
+    return {"ok": True, "mode": bool(d.get("mode")), "enrolled": list((d.get("enrolled") or {}).keys()),
+            "muted": list((d.get("muted") or {}).keys()), "queue": d.get("queue", [])}
+def _voice_queue_watch():
+    """Every ~4s (only while Voice mode is ON): an enrolled, un-muted session that's idle with a NEW final
+    message enqueues (dedup: one entry/session)."""
+    while True:
+        try:
+            d0 = _vq_load()
+            if not d0.get("mode"): time.sleep(4); continue      # voice mode off -> watcher idle
+            en = (d0.get("enrolled") or {}); muted = (d0.get("muted") or {})
+            updates = []
+            for sess, meta in list(en.items()):
+                try:
+                    if sess in muted: continue                    # opted out
+                    if _pane_busy(sess): continue                 # still working -> not ready to present
+                    fp = _vq_fp(sess)
+                    if not fp or fp == meta.get("seen_fp"): continue
+                    updates.append((sess, fp, _session_scope(sess) or ""))
+                except Exception: continue
+            if updates:
+                with _VQ_LOCK:
+                    d = _vq_load(); en2 = d.setdefault("enrolled", {}); q = d.setdefault("queue", []); now = int(time.time())
+                    for sess, fp, scope in updates:
+                        if sess not in en2 or en2[sess].get("seen_fp") == fp: continue
+                        q[:] = [x for x in q if x.get("session") != sess]
+                        q.append({"session": sess, "fp": fp, "scope": scope, "ts": now})
+                        en2[sess]["seen_fp"] = fp
+                    _vq_save(d)
+        except Exception: pass
+        time.sleep(4)
 
 def _transcript_tail(path, maxchars=6000):
     """The recent human+assistant TEXT from a transcript (no tool noise), tail-trimmed -- input for distill/refresh."""
@@ -18070,6 +18256,25 @@ class H(BaseHTTPRequestHandler):
             try:
                 with open(p, "rb") as _af: return self._s(200, _af.read(), ct)
             except Exception: return self._s(404, "not found")
+        if u.path == "/api/voice/audio":   # VOICE I/O: stream a rendered TTS clip (path-traversal guarded)
+            p = voice.audio_path(q.get("f", [""])[0]) if voice else None
+            if not p: return self._s(404, "not found")
+            ct = "audio/mpeg" if p.endswith(".mp3") else ("audio/aiff" if p.endswith(".aiff") else "application/octet-stream")
+            try:
+                with open(p, "rb") as _af: return self._s(200, _af.read(), ct)
+            except Exception: return self._s(404, "not found")
+        if u.path == "/api/voice/config":   # VOICE I/O: current provider/read-mode + which keys are present
+            return self._s(200, json.dumps(voice.cfg_get())) if voice else self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
+        if u.path == "/api/voice/state":    # VOICE conversation-mode poll: is the agent busy + has a new reply landed
+            sess = q.get("session", [""])[0]
+            if not sess: return self._s(200, json.dumps({"ok": False, "error": "no session"}))
+            txt = _session_last_assistant(sess)
+            fp = hashlib.sha1(txt.encode("utf-8", "ignore")).hexdigest()[:16] if txt else ""
+            return self._s(200, json.dumps({"ok": True, "busy": _pane_busy(sess), "msg_fp": fp, "has_msg": bool(txt)}))
+        if u.path == "/api/voice/queue":    # VOICE attention queue (P1): enrolled sessions + who's waiting to present
+            return self._s(200, json.dumps(vq_state()))
+        if u.path == "/api/voice/usage":    # VOICE cost meter: this month's Deepgram seconds + TTS chars -> $ estimate
+            return self._s(200, json.dumps(voice.usage_summary())) if voice else self._s(200, json.dumps({"ok": False}))
         if u.path == "/api/google/gmail-thread":  return self._s(200, json.dumps(gmail_thread(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-att":
             b, err = gmail_attachment_bytes(q.get("id", [""])[0], q.get("att", [""])[0])
@@ -18614,6 +18819,34 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/note-transcribe":
             if not notebook: return self._s(200, json.dumps({"ok": False, "error": "notebook not available"}))
             return self._s(200, json.dumps(notebook.nb_transcribe(body.get("audio", ""), body.get("mime", "audio/webm"))))
+        if u.path == "/api/voice/dictate":   # VOICE talk: transcribe a recorded mic blob (Deepgram) -> text
+            if not voice: return self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
+            return self._s(200, json.dumps(voice.vc_stt(body.get("audio", ""), body.get("mime", "audio/webm"))))
+        if u.path == "/api/voice/speak-last":   # VOICE hear: render a session's last assistant reply to audio (smart)
+            if not voice: return self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
+            sess = body.get("session", "")
+            txt = _session_last_assistant(sess) if sess else ""
+            if not txt: return self._s(200, json.dumps({"ok": False, "error": "no readable message yet in that session"}))
+            _res = voice.vc_speak_last(txt, announce=_voice_announce(sess))
+            if isinstance(_res, dict) and _res.get("ok"):
+                _res["fp"] = hashlib.sha1(txt.encode("utf-8", "ignore")).hexdigest()[:16]   # fp of the message actually read -> the loop pins its 'new reply' baseline to this (no off-by-one)
+            return self._s(200, json.dumps(_res))
+        if u.path == "/api/voice/send":   # VOICE talk: inject a spoken turn into a session (guarded injector)
+            sess, txt = body.get("session", ""), (body.get("text", "") or "").strip()
+            if not sess or not txt: return self._s(200, json.dumps({"ok": False, "error": "session and text required"}))
+            _mesh_deliver(sess, txt)
+            return self._s(200, json.dumps({"ok": True}))
+        if u.path == "/api/voice/enroll":   # VOICE queue: add/remove a session from the attention queue
+            return self._s(200, json.dumps(vq_enroll(body.get("session", ""), bool(body.get("on", True)))))
+        if u.path == "/api/voice/queue-ack":   # VOICE queue: this session was presented -> drop it from the queue
+            return self._s(200, json.dumps(vq_ack(body.get("session", ""))))
+        if u.path == "/api/voice/mute":     # VOICE: per-session opt-out
+            return self._s(200, json.dumps(vq_mute(body.get("session", ""), bool(body.get("on", True)))))
+        if u.path == "/api/voice/mode":     # VOICE: global Voice-mode switch
+            return self._s(200, json.dumps(vq_mode(bool(body.get("on", True)))))
+        if u.path == "/api/voice/config-set":   # VOICE settings popover: provider / read-mode / voice_id / threshold
+            if not voice: return self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
+            return self._s(200, json.dumps({"ok": True, "config": voice.cfg_set(body or {})}))
         if u.path == "/api/granola-apply": return self._s(200, json.dumps(granola.gr_apply(body.get("id", ""), body.get("edited"))))
         if u.path == "/api/granola-skip":  return self._s(200, json.dumps(granola.gr_skip(body.get("id", ""))))
         if u.path == "/api/substack-sync":  # RSS fetch across publications -> background (network)
@@ -18969,7 +19202,7 @@ body.stg-embed #bar{display:none!important}   /* rendered inside the mobile Sess
 #tdlg .tdlg-b{padding:9px 16px;border-radius:9px;border:1px solid var(--line);background:var(--card2);color:#e8e8ea;cursor:pointer;font-weight:600;font-size:13px;font-family:inherit}
 #tdlg .tdlg-b.go{background:linear-gradient(135deg,var(--accent-light),var(--accent));color:var(--bg-warm);border:none;font-weight:700}
 </style></head><body>
-<div id="bar"><span id="st">connecting...</span><button id="mdlbtn" onclick="mdlPickTerm(event)" title="the model this session runs -- click to change">Model</button><button id="skillsbtn" onclick="skPickTerm(event)" title="Skills: pick a Claude Code skill to run here -- see what each does, then it types the /command in (you review + press Enter)">Skills</button><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button onclick="termAdvise()" title="Third-party review: an independent external GPT (a different AI vendor) reviews this session's recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." style="color:#58a6ff">&#128309; review</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button id="actog" onclick="toggleAutoCopy()" title="Auto-copy: when ON, whatever you have selected is copied to your clipboard the moment you release the mouse (no Ctrl+C needed). Needs a secure origin (https/localhost); on plain http a one-tap Copy chip is used instead.">&#9113; auto-copy</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button id="anbtn" onclick="toggleAn()" title="Auto-nudge: auto-send your keep-going message to this session every time it stops at a turn-end, until you turn it off (you are the brake)" style="color:#8a8a99">Auto-nudge</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
+<div id="bar"><span id="st">connecting...</span><button id="mdlbtn" onclick="mdlPickTerm(event)" title="the model this session runs -- click to change">Model</button><button id="skillsbtn" onclick="skPickTerm(event)" title="Skills: pick a Claude Code skill to run here -- see what each does, then it types the /command in (you review + press Enter)">Skills</button><button id="cpbtn" onclick="showCopy()" title="Select &amp; copy ANY amount: opens the full session history as real selectable text -- drag past the top/bottom to keep selecting (desktop), or long-press to select (mobile), then copy. The live terminal can only select what's on screen (tmux holds the history), so use this to grab more.">&#10697; select &amp; copy</button><button onclick="tPick()" title="Give Claude a file: upload it and hand its path to this session (Claude reads it by path). Drag a file onto the terminal too.">&#128206; file</button><button onclick="termAdvise()" title="Third-party review: an independent external GPT (a different AI vendor) reviews this session's recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." style="color:#58a6ff">&#128309; review</button><button id="more" type="button" onclick="toggleMore()" aria-label="More actions" title="more actions">&#8943;</button><div id="moremenu"><span class="fontgrp"><button onclick="setFont(-1)" title="smaller terminal font">A-</button><span id="fsz" title="terminal font size" style="color:#8a8a99;font-size:11px;margin-left:8px;min-width:16px;display:inline-block;text-align:center">13</span><button onclick="setFont(1)" title="larger terminal font" style="margin-left:6px">A+</button></span><button id="actog" onclick="toggleAutoCopy()" title="Auto-copy: when ON, whatever you have selected is copied to your clipboard the moment you release the mouse (no Ctrl+C needed). Needs a secure origin (https/localhost); on plain http a one-tap Copy chip is used instead.">&#9113; auto-copy</button><button onclick="compactSess()" title="Compact: the agent writes a full handoff, runs /compact, then re-reads the handoff -- keeps its memory across compaction" style="color:#58a6ff">&#8863; compact</button><button onclick="termVoiceSpeak()" title="Read the agent's last message aloud (long replies are summarized to 1-3 sentences)">&#128266; read last</button><button onclick="termVoiceMic()" title="Dictate: tap to talk, tap again to send it into this session">&#127908; dictate</button><button id="tgbtn" onclick="toggleTg()" title="Route this session to Telegram: get pinged on your phone when it finishes or blocks, and reply to interact" style="color:#8a8a99;display:none">&#128241; Telegram</button><button id="skbtn" onclick="toggleSk()" title="Route this session to a Slack channel: your team gets pinged in a thread when it finishes or blocks, and can reply in-thread to interact" style="color:#8a8a99;display:none">&#128172; Slack</button><button id="anbtn" onclick="toggleAn()" title="Auto-nudge: auto-send your keep-going message to this session every time it stops at a turn-end, until you turn it off (you are the brake)" style="color:#8a8a99">Auto-nudge</button><button onclick="gracefulEnd()" title="Gracefully end: Claude writes a handoff + resume pointer, then closes">&#9211; end</button><button onclick="killSess()" title="Force-kill: NO handoff, NO resume notes" style="color:#f85149" class="danger">&#10005; kill</button><a href="/#sessions">dashboard</a></div></div>
 <button id="live" onclick="toLive()">&#8595; jump to live</button><button id="selcopy" onclick="doSelCopy()">&#10697; Copy selection</button><div id="cliptoast"></div>
 <div id="copyov"><div id="copybar"><b>Copy text</b><span class="cseg"><button id="cmClean" class="on" onclick="setCopyMode('clean')" title="Reflow the terminal's wrapped lines into clean paragraphs so pasted text doesn't break mid-sentence">Clean</button><button id="cmRaw" onclick="setCopyMode('raw')" title="Exact terminal text — every line break exactly as shown">Raw</button></span><span id="copyst">drag to select, or</span><button onclick="copyAll()" title="Copy everything below to the clipboard">&#10697; Copy all</button><span style="margin-left:auto"></span><button onclick="hideCopy()" class="cclose" style="border-color:var(--accent-light)">&#10005; Close</button></div><pre id="copybody"></pre></div>
 <div id="wrap">
@@ -19108,6 +19341,17 @@ function _aEsc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){retu
 function _aBadge(vd){var m={ship:['#2ea043','SHIP'],revise:['#d29922','REVISE'],block:['#f85149','BLOCK'],skipped:['#6a6a7a','SKIPPED']};var b=m[vd]||['#6a6a7a',String(vd||'?').toUpperCase()];return '<span style="background:'+b[0]+';color:#08080c;font-weight:700;font-size:11px;padding:2px 8px;border-radius:6px">'+b[1]+'</span>';}
 function _aOv(){var o=document.getElementById('advOv');if(!o){o=document.createElement('div');o.id='advOv';o.style.cssText='position:fixed;inset:0;background:rgba(6,6,10,.72);z-index:100000;display:flex;align-items:center;justify-content:center;padding:16px';document.body.appendChild(o);o.addEventListener('mousedown',function(e){if(e.target===o)_aClose();});}return o;}
 function _aClose(){var o=document.getElementById('advOv');if(o)o.style.display='none';_aPolling=false;}
+// ---- VOICE I/O (compact, self-contained for standalone /term): read last reply + dictate a turn ----
+var TVC={rec:null,chunks:[],stream:null,audio:null};
+function tvToast(m,t){if(typeof tToast==='function')tToast(m,t||2500);}
+function tvRate(){try{var r=parseFloat(localStorage.getItem('cc_voice_rate')||'1.15');return (r>=0.5&&r<=3)?r:1.15;}catch(e){return 1.15;}}
+function tvSilenceMs(){try{var s=parseInt(localStorage.getItem('cc_voice_silence_ms')||'5000',10);return (s>=800&&s<=20000)?s:5000;}catch(e){return 5000;}}
+function tvCloseMenu(){var mm=document.getElementById('moremenu');if(mm)mm.classList.remove('open');}
+async function termVoiceSpeak(){tvCloseMenu();tvToast('Reading the last message…',1800);try{var r=await(await fetch('/api/voice/speak-last',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:name})})).json();if(!r.ok){tvToast('Voice: '+(r.error||'could not read'),4000);return;}try{if(TVC.audio)TVC.audio.pause();}catch(e){}TVC.audio=new Audio('/api/voice/audio?f='+encodeURIComponent(r.file));try{TVC.audio.playbackRate=tvRate();}catch(e){}var p=TVC.audio.play();if(p&&p.catch)p.catch(function(){});}catch(e){tvToast('Voice: read failed',3000);}}
+function tvPill(txt){var p=document.getElementById('tvPill');if(!txt){if(p)p.remove();return;}if(!p){p=document.createElement('div');p.id='tvPill';p.style.cssText='position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:120;background:#14141c;border:1px solid #58a6ff;color:#e6e6f0;padding:9px 16px;border-radius:22px;font-size:14px;cursor:pointer;box-shadow:0 8px 28px rgba(0,0,0,.6)';p.onclick=function(){if(TVC.rec&&TVC.rec.state==='recording')TVC.rec.stop();};document.body.appendChild(p);}p.textContent=txt;}
+async function termVoiceMic(){tvCloseMenu();if(TVC.rec&&TVC.rec.state==='recording'){TVC.rec.stop();return;}var stream;try{stream=await navigator.mediaDevices.getUserMedia({audio:true});}catch(e){tvToast('Microphone permission needed.',3500);return;}TVC.stream=stream;TVC.chunks=[];var mr;try{mr=new MediaRecorder(stream);}catch(e){tvToast('Recording not supported in this browser.',3500);try{stream.getTracks().forEach(function(t){t.stop();});}catch(_){}return;}TVC.rec=mr;mr.ondataavailable=function(ev){if(ev.data&&ev.data.size)TVC.chunks.push(ev.data);};mr.onstop=function(){tvStopVad();tvPill('');try{TVC.stream.getTracks().forEach(function(t){t.stop();});}catch(e){}var blob=new Blob(TVC.chunks,{type:mr.mimeType||'audio/webm'});TVC.rec=null;if(TVC.noSpeech||!blob.size||blob.size<1800){if(!TVC.noSpeech)tvToast('Didn\'t catch that — try again.',2500);return;}var fr=new FileReader();fr.onloadend=async function(){var b64=(String(fr.result||'').split(',')[1])||'';if(!b64)return;tvPill('transcribing…');var text='';try{var r=await(await fetch('/api/voice/dictate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:b64,mime:(mr.mimeType||'audio/webm').split(';')[0]})})).json();if(r.ok)text=(r.text||'').trim();else{var em=/corrupt|unsupported|Bad Request|no audio/i.test(r.error||'')?'Didn\'t catch that — try again.':('Transcribe: '+(r.error||'?'));tvToast(em,4000);}}catch(e){tvToast('Transcribe failed',3000);}tvPill('');if(text){try{await fetch('/api/voice/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:name,text:text})});tvToast('Sent: '+text.slice(0,50),3000);}catch(e){tvToast('Send failed',3000);}}};fr.readAsDataURL(blob);};mr.start();tvPill('🎤 Listening… ✓ tap to send now');tvStartVad(stream);}
+function tvStartVad(stream){try{tvStopVad();TVC.noSpeech=false;var AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;var ac=new AC();if(ac.state==='suspended'){try{ac.resume();}catch(e){}}var src=ac.createMediaStreamSource(stream);var an=ac.createAnalyser();an.fftSize=1024;src.connect(an);var buf=new Uint8Array(an.fftSize);var t0=Date.now(),spoke=false,silenceAt=0,sil=tvSilenceMs();TVC.vad={ac:ac};TVC.vadTimer=setInterval(function(){if(!TVC.rec||TVC.rec.state!=='recording'){tvStopVad();return;}an.getByteTimeDomainData(buf);var sum=0;for(var i=0;i<buf.length;i++){var v=(buf[i]-128)/128;sum+=v*v;}var rms=Math.sqrt(sum/buf.length);var now=Date.now();if(rms>0.05){spoke=true;silenceAt=0;}else if(spoke&&rms<0.03){if(!silenceAt)silenceAt=now;else if(now-silenceAt>sil){TVC.rec.stop();return;}}if(!spoke&&now-t0>Math.max(9000,sil+3000)){TVC.noSpeech=true;TVC.rec.stop();return;}if(now-t0>Math.max(45000,sil+15000)){TVC.rec.stop();return;}},120);}catch(e){}}
+function tvStopVad(){try{if(TVC.vadTimer){clearInterval(TVC.vadTimer);TVC.vadTimer=null;}}catch(e){}try{if(TVC.vad&&TVC.vad.ac){TVC.vad.ac.close();}TVC.vad=null;}catch(e){}}
 async function termAdvise(){
   var st={};try{st=await(await fetch('/api/advise-state?name='+encodeURIComponent(name))).json()||{};}catch(e){}
   var o=_aOv();o.style.display='flex';
@@ -22293,7 +22537,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <div class="toast" id="toast"></div>
 <div id="sessbar"></div>
 <div id="sessprev"></div>
-<div id="stage"><div class="stg-head" id="stgHead"><button class="stg-back" onclick="stageClose()" title="Back to the session list — this session keeps running">&#8592;</button><div class="stg-loc" id="stgLoc" title="where this session lives"></div><span class="stg-model" id="stgModel"></span><span class="stg-chip" id="stgChip" title="This session's live state — working (running a turn) or idle (waiting for you)"><span class="stg-dot"></span><span id="stgChipT">idle</span></span><button class="stg-more" id="stgMore" onclick="stageMenu(event)" title="Session actions — Skills, Select &amp; copy, Give Claude a file, Third-party review, Compact, End, Force kill">&#8942;</button></div><div class="stg-switch" id="stgSwitch" title="Your open sessions — tap to switch (scroll sideways for more). A gold dot means that session just finished."></div><div class="stg-frames" id="stgFrames"></div></div>
+<div id="stage"><div class="stg-head" id="stgHead"><button class="stg-back" onclick="stageClose()" title="Back to the session list — this session keeps running">&#8592;</button><div class="stg-loc" id="stgLoc" title="where this session lives"></div><span class="stg-model" id="stgModel"></span><span class="stg-chip" id="stgChip" title="This session's live state — working (running a turn) or idle (waiting for you)"><span class="stg-dot"></span><span id="stgChipT">idle</span></span><button class="stg-more" id="stgVoice" onclick="voiceModeToggle()" title="Voice mode — talk to your sessions hands-free. On = any session you open/finish is read to you and you reply by voice.">&#127908;</button><button class="stg-more" id="stgMore" onclick="stageMenu(event)" title="Session actions — Skills, Select &amp; copy, Give Claude a file, Third-party review, Compact, End, Force kill">&#8942;</button></div><div class="stg-switch" id="stgSwitch" title="Your open sessions — tap to switch (scroll sideways for more). A gold dot means that session just finished."></div><div class="stg-frames" id="stgFrames"></div></div>
 <script>
 let D={machines:[],components:[],routines:[],ralph:[],jobs:[]},ST={},LENS="sessions";
 let AGENT_SLUGS=new Set();
@@ -28924,10 +29168,347 @@ function ccWireDropzones(){
     })(ov,name);
   }
 }
+// ===== VOICE I/O: talk to a session (Deepgram STT) + hear its last reply (TTS). Distinct from VoiceMatch
+// (the writing-tone engine). Backend: /api/voice/{speak-last,dictate,send,state,audio,config,config-set}. =====
+var VC={rec:null,chunks:[],stream:null,recFor:null,conv:null,audio:null,lastFp:'',holding:false,_convResolve:null};
+window.VCFG=null;
+function voiceLoadCfg(){fetch('/api/voice/config').then(function(r){return r.json();}).then(function(c){window.VCFG=c||{};}).catch(function(){});}
+function voiceKeyOK(){ if(window.VCFG&&VCFG.has_deepgram===false){ vcToast('Voice input is off — add DEEPGRAM_API_KEY in the Vault lens.',4500); return false; } return true; }
+function vcToast(m,t){try{toast(m,t||2500);}catch(e){}}
+// the three header/menu buttons (shared by every session surface)
+function voiceBtns(n){var e=esc(n);
+  return '<button class="mini" title="Read the agent\'s last message aloud (long replies are summarized to 1-3 sentences)" onclick="voiceSpeakLast(\''+e+'\')">🔊</button>'
+   +'<button class="mini" title="Dictate: tap to talk, tap again to send it into the session. On desktop you can also HOLD the backtick (`) key to talk hands-free." onclick="voiceMic(\''+e+'\')">🎤</button>'
+   +'<button class="mini" title="Conversation mode: talk back-and-forth with this session. When it finishes a task or needs your input, it\'s brought up and read to you. Turn it on for several sessions and it switches between them as each finishes." onclick="voiceConvoToggle(\''+e+'\')"'+(voiceQueued(n)?' style="color:var(--accent)"':'')+'>💬</button>';}
+// ---- audio playback (single tracked element) ----
+// mobile (esp. iOS) blocks audio not started inside a tap handler. Reuse ONE <audio> element and "unlock" it on
+// the first user tap (muted play), so later TTS playback -- which happens a few async steps after your tap -- works.
+function voiceAudioEl(){if(!VC.audioEl){try{VC.audioEl=new Audio();}catch(e){}}return VC.audioEl;}
+function voiceUnlockAudio(){try{if(VC._auOK)return;var a=voiceAudioEl();if(!a)return;a.muted=true;var p=a.play();if(p&&p.then)p.then(function(){try{a.pause();a.currentTime=0;}catch(e){}a.muted=false;VC._auOK=true;}).catch(function(){a.muted=false;});}catch(e){}}
+// hard kill-switch: silence playback THIS FRAME (detach src) + invalidate any in-flight play. Fixes the barge
+// race where a pending play()/buffering clip outran a bare pause() and played to completion (iOS).
+function voiceStopAudio(){VC.playGen=(VC.playGen||0)+1;var a=VC.audioEl;if(a){try{a.pause();}catch(e){}try{a.removeAttribute('src');a.load();}catch(e){}a.onended=null;a.onerror=null;}}
+function voicePlay(file,cb){try{var a=voiceAudioEl();if(!a){if(cb)cb();return;}var gen=(VC.playGen=(VC.playGen||0)+1);try{a.pause();}catch(e){}a.muted=false;try{a.playbackRate=voiceRate();}catch(e){}a.onended=function(){if(gen!==VC.playGen)return;if(cb)cb();};a.onerror=function(){if(gen!==VC.playGen)return;if(cb)cb();};a.src='/api/voice/audio?f='+encodeURIComponent(file);var p=a.play();if(p&&p.catch)p.catch(function(){if(gen!==VC.playGen)return;if(cb)cb();});}catch(e){if(cb)cb();}}
+async function voiceSpeakLast(n){vcToast('Reading the last message…',1800);try{var r=await(await fetch('/api/voice/speak-last',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n})})).json();if(!r.ok){vcToast('Voice: '+(r.error||'could not read'),4000);return;}voicePlay(r.file);}catch(e){vcToast('Voice: read failed',3000);}}
+// ---- recording (generalized from the Notebook's nbToggleRec) ----
+function vcPill(txt){var p=document.getElementById('vcPill');if(!txt){if(p)p.remove();return;}if(!p){p=document.createElement('div');p.id='vcPill';p.style.cssText='position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:10070;background:var(--accent);border:1px solid var(--accent);color:var(--bg-warm);padding:14px 26px;border-radius:26px;box-shadow:0 10px 34px rgba(0,0,0,.55);font-size:16px;font-weight:600;display:flex;align-items:center;gap:9px;cursor:pointer;min-width:180px;justify-content:center;text-align:center';p.onclick=function(){if(typeof VC.pillClick==='function'){VC.pillClick();return;}if(VC.amb){voiceAmbientSendNow();}else if(VC.rec&&VC.rec.state==='recording')VC.rec.stop();};document.body.appendChild(p);}p.innerHTML=txt;}
+async function voiceStartRec(n){if(VC.rec&&VC.rec.state==='recording')return true;if(!voiceKeyOK())return false;var stream;try{stream=await navigator.mediaDevices.getUserMedia({audio:true});}catch(e){vcToast('Microphone permission needed.',3500);return false;}VC.stream=stream;VC.chunks=[];VC.recFor=n;var mr;try{mr=new MediaRecorder(stream);}catch(e){vcToast('Recording not supported in this browser.',3500);try{stream.getTracks().forEach(function(t){t.stop();});}catch(_){}return false;}VC.rec=mr;mr.ondataavailable=function(ev){if(ev.data&&ev.data.size)VC.chunks.push(ev.data);};mr.onstop=voiceOnStop;mr.start();vcPill('🎤 Listening… ✓ tap to send now');voiceStartVad(stream);return true;}
+// Voice-activity detection: auto-stop ~1.1s after you stop talking so a dictation feels instant + hands-free
+// (Deepgram itself is sub-second; the old lag was recording until a manual stop). Manual tap + hotkey still work.
+function voiceStartVad(stream){try{voiceStopVad();VC.noSpeech=false;var AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;var ac=new AC();if(ac.state==='suspended'){try{ac.resume();}catch(e){}}var src=ac.createMediaStreamSource(stream);var an=ac.createAnalyser();an.fftSize=1024;src.connect(an);var buf=new Uint8Array(an.fftSize);var t0=Date.now(),spoke=false,silenceAt=0;var sil=voiceSilenceMs();var nsp=VC.conv?20000:Math.max(9000,sil+3000);VC.vad={ac:ac};   // in conversation, wait ~20s for you to start before going idle
+  VC.vadTimer=setInterval(function(){if(!VC.rec||VC.rec.state!=='recording'){voiceStopVad();return;}if(VC.holding)return;   // hold-to-talk: the key release ends it, not VAD
+    an.getByteTimeDomainData(buf);var sum=0;for(var i=0;i<buf.length;i++){var v=(buf[i]-128)/128;sum+=v*v;}var rms=Math.sqrt(sum/buf.length);var now=Date.now();
+    if(rms>0.05){spoke=true;silenceAt=0;}
+    else if(spoke&&rms<0.03){if(!silenceAt)silenceAt=now;else if(now-silenceAt>sil){VC.rec.stop();return;}}   // auto-send after `sil` of quiet (adjustable, default 5s)
+    if(!spoke&&now-t0>nsp){VC.noSpeech=true;VC.rec.stop();return;}   // no real sound heard -> stop WITHOUT transcribing (don't burn on dead air)
+    if(now-t0>Math.max(45000,sil+15000)){VC.rec.stop();return;}          // hard safety cap
+  },120);}catch(e){}}
+function voiceStopVad(){try{if(VC.vadTimer){clearInterval(VC.vadTimer);VC.vadTimer=null;}}catch(e){}try{if(VC.vad&&VC.vad.ac){VC.vad.ac.close();}VC.vad=null;}catch(e){}}
+function voiceOnStop(){voiceStopVad();var mr=VC.rec;var n=VC.recFor;vcPill('');try{VC.stream.getTracks().forEach(function(t){t.stop();});}catch(e){}var blob=new Blob(VC.chunks,{type:(mr&&mr.mimeType)||'audio/webm'});VC.rec=null;
+  if(VC.noSpeech||!blob.size||blob.size<1800){ if(VC._convResolve){var f=VC._convResolve;VC._convResolve=null;f('');} else if(!VC.noSpeech) vcToast('Didn\'t catch that — try again.',2500); return; }   // no real speech / too short -> DON'T send to Deepgram (no wasted transcription)
+  var fr=new FileReader();fr.onloadend=function(){var b64=(String(fr.result||'').split(',')[1])||'';voiceHeard(n,b64,((mr&&mr.mimeType)||'audio/webm').split(';')[0]);};fr.readAsDataURL(blob);}
+async function voiceHeard(n,b64,mime){var text='';if(b64){vcPill('✍️ transcribing…');try{var r=await(await fetch('/api/voice/dictate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:b64,mime:mime})})).json();if(r.ok)text=(r.text||'').trim();else{var em=/corrupt|unsupported|Bad Request|no audio/i.test(r.error||'')?'Didn\'t catch that — try again.':('Transcribe: '+(r.error||'?'));vcToast(em,4000);}}catch(e){vcToast('Transcribe failed',3000);}vcPill('');}
+  if(VC._convResolve){var f=VC._convResolve;VC._convResolve=null;f(text);return;}
+  if(text)voiceSend(n,text);}
+async function voiceSend(n,text){try{await fetch('/api/voice/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,text:text})});vcToast('Sent: '+text.slice(0,60),3000);try{if(window.VQ&&VQ.mode)voiceAutoEnroll(n);}catch(e){}}catch(e){vcToast('Send failed',3000);}}
+function voiceMic(n){if(VC.rec&&VC.rec.state==='recording'){VC.rec.stop();return;}voiceStartRec(n);}
+// ---- hold-to-talk hotkey (backtick) -- desktop, when focus isn't in an input or the terminal iframe ----
+function voiceActiveSession(){if(VC.conv)return VC.conv;try{if(window.STG&&STG.open&&STG.cur)return STG.cur;}catch(e){}try{if(window.SESSBIG)return SESSBIG;}catch(e){}return null;}
+document.addEventListener('keydown',function(e){if(e.key!=='`'||e.repeat||e.metaKey||e.ctrlKey||e.altKey)return;var t=e.target;if(t&&(/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName||'')||t.isContentEditable))return;var n=voiceActiveSession();if(!n)return;e.preventDefault();if(window.VQ&&VQ.on&&VQ.presenting){if(VC._readResolve)voiceBargeReply();else voiceDockTalk();return;}if(VC.conv){if(VC._gate)voiceConvGo();else voiceAmbientSendNow();return;}VC.holding=true;if(!(VC.rec&&VC.rec.state==='recording'))voiceStartRec(n);});   // queue: ` = barge/talk-send; else conversation send
+document.addEventListener('keyup',function(e){if(e.key!=='`'||!VC.holding)return;VC.holding=false;if(VC.rec&&VC.rec.state==='recording')VC.rec.stop();});
+// ---- conversation mode: listen -> send -> wait for the finished reply -> read it -> (auto re-arm?) ----
+function voiceAutoRearm(){try{var v=localStorage.getItem('cc_voice_autorearm');return v===null?true:v==='1';}catch(e){return true;}}   // continuous listening ON by default
+function voiceRate(){try{var r=parseFloat(localStorage.getItem('cc_voice_rate')||'1.15');return (r>=0.5&&r<=3)?r:1.15;}catch(e){return 1.15;}}   // readback speed (client-side; works for any provider)
+function voiceSilenceMs(){try{var s=parseInt(localStorage.getItem('cc_voice_silence_ms')||'5000',10);return (s>=800&&s<=20000)?s:5000;}catch(e){return 5000;}}   // pause before auto-send
+function voiceEndMode(){try{var m=localStorage.getItem('cc_voice_endmode');return (m==='word'||m==='pause'||m==='button')?m:'button';}catch(e){return 'button';}}   // how a conversation turn ENDS: button (tap/key), word (say it), pause (deliberate silence)
+function voiceCommitPhrase(){try{return (localStorage.getItem('cc_voice_commit_phrase')||'over').trim().toLowerCase()||'over';}catch(e){return 'over';}}
+function voiceNorm(s){return (s||'').toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();}
+function voiceEndHint(){var m=voiceEndMode();return (m==='word')?('say "'+voiceCommitPhrase()+'" to send'):(m==='pause')?'pause when done to send':'tap ✓ Done (or press `) to send';}
+function voicePillLabel(){return '✓ Done — tap to send';}
+function voiceToggleAuto(){var v=voiceAutoRearm();try{localStorage.setItem('cc_voice_autorearm',v?'0':'1');}catch(e){}if(VC.conv)voiceConvBar(VC.conv,null);if(!v&&VC._gate)voiceConvGo();}   // just turned ON while waiting -> resume the loop
+function voiceConvGate(n,force){return new Promise(function(res){if(!force&&voiceAutoRearm()){res();return;}VC._gate=res;voiceConvBar(n,force?'Still there? — tap 🎤 or press ` when you\'re ready':'Your turn — tap 🎤 talk (or press `) when ready');});}
+function voiceConvGo(){if(VC._gate){var g=VC._gate;VC._gate=null;g();}}
+function voiceConvBar(n,msg){var b=document.getElementById('vcBar');if(!b){b=document.createElement('div');b.id='vcBar';b.style.cssText='position:fixed;left:50%;top:12px;transform:translateX(-50%);z-index:10065;background:var(--card);border:1px solid var(--accent);border-radius:12px;padding:8px 12px;display:flex;align-items:center;gap:10px;box-shadow:0 8px 28px rgba(0,0,0,.5);max-width:94vw;font-size:13px;color:var(--ink)';b.dataset.msg='';document.body.appendChild(b);}if(msg!=null)b.dataset.msg=msg;var auto=voiceAutoRearm();
+  var head='<span style="font-weight:600;flex:0 0 auto">'+((window.VQ&&VQ.on)?'🎧':'💬')+' '+esc(n)+'</span><span style="color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(b.dataset.msg||'')+'</span>';
+  if(window.VQ&&VQ.on){   // queue-orchestrator bar: Skip this one / Stop the whole queue
+    b.innerHTML=head+'<button class="mini" title="Done with this session — move to the next one waiting in the queue" onclick="voiceQueueNext()">Next ▶</button><button class="mini" title="Voice settings" onclick="voiceSettings()">⚙</button><button class="mini danger" title="Stop the voice queue" onclick="voiceQueueStop()">Stop</button>';
+  }else{
+    b.innerHTML=head
+     +'<button class="mini" title="Talk — start your next turn" onclick="voiceConvGo()">🎤</button>'
+     +'<button class="mini" title="Continuous listening: keep the mic open and auto-capture whenever you talk (hands-free). Off = tap 🎤 for each turn." onclick="voiceToggleAuto()"'+(auto?' style="color:var(--accent)"':'')+'>listen: '+(auto?'continuous':'manual')+'</button>'
+     +'<button class="mini" title="Voice settings (provider, read mode)" onclick="voiceSettings()">⚙</button>'
+     +'<button class="mini danger" title="End conversation mode" onclick="voiceConvStop()">Stop</button>';
+  }}
+function voiceQueueNext(){if(window.VQ)VQ.next=true;try{voiceStopAudio();}catch(e){}try{if(VC.btnRec&&VC.btnRec.state==='recording'){VC.btnCancel=true;VC.btnRec.stop();}}catch(e){}
+  if(VC._readResolve){var a=VC._readResolve;VC._readResolve=null;a('next');}
+  if(VC._dockResolve){var b=VC._dockResolve;VC._dockResolve=null;b('');}
+  if(VC._btnResolve){var c=VC._btnResolve;VC._btnResolve=null;try{voiceButtonCleanup();}catch(e){}c('');}}
+function voiceConvStop(){if(VC._gate){var g=VC._gate;VC._gate=null;g();}if(VC._btnResolve){var bf=VC._btnResolve;VC._btnResolve=null;bf('');}VC.conv=null;VC._convResolve=null;try{voiceAmbientStop();}catch(e){}try{voiceButtonCleanup();}catch(e){}try{if(VC.rec&&VC.rec.state==='recording')VC.rec.stop();}catch(e){}vcPill('');var b=document.getElementById('vcBar');if(b)b.remove();try{if(typeof render==='function')render();}catch(e){}}
+function voiceListenOnce(n){return new Promise(function(res){VC._convResolve=res;voiceStartRec(n).then(function(ok){if(!ok){VC._convResolve=null;res('');}});});}
+function voiceWaitReply(n){return new Promise(function(res){var sawBusy=false,tries=0;(function step(){if(VC.conv!==n||(window.VQ&&VQ.next)){res(false);return;}tries++;fetch('/api/voice/state?session='+encodeURIComponent(n)).then(function(r){return r.json();}).then(function(s){if(!s||!s.ok){setTimeout(step,2200);return;}if(s.busy)sawBusy=true;var changed=s.msg_fp&&s.msg_fp!==VC.lastFp;if(!s.busy&&changed&&(sawBusy||tries>20)){VC.lastFp=s.msg_fp;res(true);return;}if(tries>900){res(changed);return;}setTimeout(step,2200);}).catch(function(){setTimeout(step,2600);});})();});}
+function voiceSpeakAndWait(n){return new Promise(function(res){fetch('/api/voice/speak-last',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n})}).then(function(r){return r.json();}).then(function(r){if(r&&r.ok)voicePlay(r.file,res);else res();}).catch(res);});}
+// ===== Ambient VAD (conversation mode): keep the mic OPEN and monitor levels continuously, but only RECORD
+// when you actually start talking (onset) and only SEND if it was real speech (never a blank transcript).
+// One fresh MediaRecorder per utterance = a valid standalone clip each time. Energy/RMS with hysteresis:
+// onset(0.045) starts capture, speech(0.055) confirms it's real, silence(<0.03 for `sil`) ends the utterance. =====
+function voiceAmbientEnsure(){if(VC.amb&&VC.amb.stream)return Promise.resolve(true);
+  return navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
+    var AC=window.AudioContext||window.webkitAudioContext;if(!AC){try{stream.getTracks().forEach(function(t){t.stop();});}catch(e){}return false;}
+    var ac=new AC();if(ac.state==='suspended'){try{ac.resume();}catch(e){}}
+    var src=ac.createMediaStreamSource(stream);var an=ac.createAnalyser();an.fftSize=1024;src.connect(an);
+    VC.amb={stream:stream,ac:ac,an:an,buf:new Uint8Array(an.fftSize),capture:false,recording:false,mr:null,chunks:[],spoke:false,silenceAt:0,recStart:0,idleAt:0,mime:'audio/webm',resolve:null};
+    VC.ambTimer=setInterval(voiceAmbientTick,80);return true;
+  }).catch(function(){vcToast('Microphone permission needed.',3500);return false;});}
+function voiceAmbientTick(){var A=VC.amb;if(!A||!A.stream||!A.capture)return;
+  A.an.getByteTimeDomainData(A.buf);var sum=0;for(var i=0;i<A.buf.length;i++){var v=(A.buf[i]-128)/128;sum+=v*v;}var rms=Math.sqrt(sum/A.buf.length);var now=Date.now();var mode=voiceEndMode();var endSil=(mode==='pause')?voiceSilenceMs():850;   // button/word chunk fast (buffer); pause uses your silence setting
+  if(!A.recording){
+    if(rms>0.035){try{A.mr=new MediaRecorder(A.stream);}catch(e){return;}A.chunks=[];A.spoke=false;A.silenceAt=0;A.recStart=now;A.mime=(A.mr.mimeType||'audio/webm').split(';')[0];A.mr.ondataavailable=function(ev){if(ev.data&&ev.data.size)A.chunks.push(ev.data);};A.mr.onstop=voiceAmbientUttDone;A.mr.start();A.recording=true;return;}
+    if(A.draft&&A.lastAt){   // auto-send between utterances, per mode (button never auto-sends -> only the ✓ Done button / ` key)
+      if(mode==='pause'&&now-A.lastAt>voiceSilenceMs())voiceAmbientFinalize('');
+      else if(mode==='word'&&now-A.lastAt>40000)voiceAmbientFinalize('');   // walk-away backstop
+    }
+    return;}
+  if(rms>0.045){A.spoke=true;A.silenceAt=0;}
+  else if(rms<0.022){if(!A.silenceAt)A.silenceAt=now;else if(now-A.silenceAt>endSil){try{A.mr.stop();}catch(e){}A.recording=false;}}
+  else{A.silenceAt=0;}   // in-between level: still talking softly -> don't count as silence
+  if(now-A.recStart>30000){try{A.mr.stop();}catch(e){}A.recording=false;}   // hard cap per utterance
+}
+function voiceAmbientUttDone(){var A=VC.amb;if(!A)return;var blob=new Blob(A.chunks,{type:A.mime||'audio/webm'});vcPill(A.capture?'🎧 listening…':'');
+  if(blob.size<600)return;   // only drop truly tiny clicks; Deepgram returns empty for real silence, so let it be the filter (a short quiet 'over' must get through)
+  var fr=new FileReader();fr.onloadend=function(){var b64=(String(fr.result||'').split(',')[1])||'';if(b64)voiceAmbientDeliver(b64,A.mime);};fr.readAsDataURL(blob);}
+function voiceAmbientFinalize(extra){var A=VC.amb;if(!A)return;var d=((A.draft?A.draft+' ':'')+(extra||'')).trim();A.draft='';A.forceSend=false;if(d&&A.resolve){var f=A.resolve;A.resolve=null;A.capture=false;vcPill('');f(d);}else{vcPill(A.capture?voicePillLabel():'');}}
+function voiceAmbientSendNow(){var A=VC.amb;if(!A)return;A.forceSend=true;if(A.recording&&A.mr){try{A.mr.stop();}catch(e){}return;}voiceAmbientFinalize('');}   // ✓ Done: include an in-progress burst, then send
+function voiceAmbientDeliver(b64,mime){vcPill('✍️ transcribing…');
+  fetch('/api/voice/dictate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:b64,mime:mime})}).then(function(r){return r.json();}).then(function(r){var A=VC.amb;var text=(r&&r.ok)?(r.text||'').trim():'';if(!A)return;
+    if(A.forceSend){voiceAmbientFinalize(text);return;}   // ✓ Done pressed mid-utterance -> include this burst + send
+    if(!text){vcPill(A.capture?voicePillLabel():'');return;}
+    var mode=voiceEndMode();
+    if(mode==='word'){   // commit word: END of a short clip (alone or with a lead-in word) -> send
+      var norm=voiceNorm(text), ph=voiceNorm(voiceCommitPhrase());var pw=ph?ph.split(' ').length:1, w=norm?norm.split(' ').length:0;
+      if(ph&&w>0&&w<=pw+1&&(norm===ph||norm.endsWith(' '+ph))){voiceAmbientFinalize((norm===ph)?'':norm.slice(0,norm.length-ph.length).trim());return;}
+    }
+    A.lastAt=Date.now();A.draft=(A.draft?A.draft+' ':'')+text;   // buffer; button waits for ✓ Done, pause waits for silence, word waits for the word
+    vcPill(A.capture?voicePillLabel():'');
+    voiceConvBar(VC.conv,'\u{1F4DD} '+A.draft.slice(-64)+'  —  '+voiceEndHint());
+  }).catch(function(){var A=VC.amb;vcPill((A&&A.capture)?voicePillLabel():'');});}
+function voiceAmbientNext(n){return new Promise(function(res){var A=VC.amb;if(!A){res('');return;}VC.pillClick=null;A.resolve=res;A.capture=true;A.recording=false;A.draft='';A.forceSend=false;A.lastAt=0;A.idleAt=Date.now();vcPill(voicePillLabel());voiceConvBar(n,'🎧 Listening — talk freely; '+voiceEndHint());});}
+function voiceAmbientPause(){var A=VC.amb;if(!A)return;A.capture=false;A.resolve=null;if(A.recording){try{if(A.mr)A.mr.stop();}catch(e){}A.recording=false;}vcPill('');}
+function voiceAmbientStop(){if(VC.ambTimer){clearInterval(VC.ambTimer);VC.ambTimer=null;}var A=VC.amb;VC.amb=null;if(A){if(A.resolve){try{A.resolve('');}catch(e){}}try{if(A.mr&&A.recording)A.mr.stop();}catch(e){}try{A.stream.getTracks().forEach(function(t){t.stop();});}catch(e){}try{A.ac.close();}catch(e){}}vcPill('');}
+// ---- Button (tap-to-record) mode: the mic is OFF until you tap; tap again to stop + send. No ambient
+// listening, so it never picks up background noise (kids, a room, public spaces) -> the reliable default. ----
+function voiceButtonTurn(n){return new Promise(function(res){VC._btnResolve=res;VC.pillClick=function(){voiceButtonToggle(n);};vcPill('🎤 Your turn — tap to talk');voiceConvBar(n,'🎤 Tap the big button below to talk (or press `)');});}
+function voiceButtonToggle(n){
+  try{voiceUnlockAudio();}catch(e){}
+  if(VC.btnRec&&VC.btnRec.state==='recording'){try{VC.btnRec.stop();}catch(e){}return;}
+  navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
+    VC.btnStream=stream;VC.btnChunks=[];VC.btnCancel=false;var mr;try{mr=new MediaRecorder(stream);}catch(e){vcToast('Recording not supported here.',3000);try{stream.getTracks().forEach(function(t){t.stop();});}catch(_){}return;}
+    VC.btnRec=mr;mr.ondataavailable=function(ev){if(ev.data&&ev.data.size)VC.btnChunks.push(ev.data);};
+    mr.onstop=function(){try{VC.btnStream.getTracks().forEach(function(t){t.stop();});}catch(e){}if(VC.btnCancel){VC.btnCancel=false;VC.btnRec=null;return;}var blob=new Blob(VC.btnChunks,{type:mr.mimeType||'audio/webm'});VC.pillClick=null;vcPill('✍️ transcribing…');
+      var fr=new FileReader();fr.onloadend=async function(){var b64=(String(fr.result||'').split(',')[1])||'';var text='';if(b64&&blob.size>600){try{var r=await(await fetch('/api/voice/dictate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:b64,mime:(mr.mimeType||'audio/webm').split(';')[0]})})).json();if(r.ok)text=(r.text||'').trim();else vcToast((/corrupt|unsupported|Bad Request|no audio/i.test(r.error||''))?'Didn\'t catch that — tap to try again.':('Transcribe: '+(r.error||'?')),3500);}catch(e){}}VC.btnRec=null;if(VC._btnResolve){var f=VC._btnResolve;VC._btnResolve=null;f(text);}};fr.readAsDataURL(blob);};
+    mr.start();vcPill('🔴 Recording… tap to send');voiceConvBar(n,'🔴 Recording — tap ⏹ (or press `) when you\'re done');
+  }).catch(function(){vcToast('Microphone permission needed.',3500);});}
+function voiceButtonCleanup(){try{VC.btnCancel=true;if(VC.btnRec&&VC.btnRec.state==='recording')VC.btnRec.stop();}catch(e){}try{if(VC.btnStream)VC.btnStream.getTracks().forEach(function(t){t.stop();});}catch(e){}VC.btnRec=null;VC._btnResolve=null;VC.pillClick=null;}
+async function voiceConverse(n){if(VC.conv===n){voiceConvStop();return;}if(!voiceKeyOK())return;if(VC.conv)voiceConvStop();VC.conv=n;VC._gate=null;try{if(typeof render==='function')render();}catch(e){}voiceConvBar(n,'Starting…');
+  if(voiceEndMode()!=='button'){var okmic=await voiceAmbientEnsure();if(!okmic){voiceConvStop();return;}}   // button mode = tap to start; don't hold the mic open
+  try{var s=await(await fetch('/api/voice/state?session='+encodeURIComponent(n))).json();VC.lastFp=(s&&s.msg_fp)||'';}catch(e){VC.lastFp='';}
+  while(VC.conv===n){
+    var text;
+    if(voiceEndMode()==='button'){text=await voiceButtonTurn(n);}
+    else{if(!(VC.amb&&VC.amb.stream)){var ok2=await voiceAmbientEnsure();if(!ok2)break;}text=await voiceAmbientNext(n);}   // resolves on a real utterance (never blank)
+    if(VC.conv!==n)break;
+    if(!text)continue;
+    VC.pillClick=null;voiceAmbientPause();   // (no-op in button mode) stop listening while the agent works + reads back
+    vcPill('⏳ working…');voiceConvBar(n,'Sent: '+text.slice(0,44)+' — the agent is working, then it\'ll read the reply…');await voiceSend(n,text);
+    var ok=await voiceWaitReply(n);if(VC.conv!==n)break;
+    if(ok){voiceConvBar(n,'🔊 reading the reply…');await voiceSpeakAndWait(n);}
+    if(VC.conv!==n)break;
+    if(voiceEndMode()!=='button'&&!voiceAutoRearm()){await voiceConvGate(n,true);if(VC.conv!==n)break;}   // continuous OFF -> wait for a manual 🎤 / ` before listening again
+  }
+  voiceAmbientStop();voiceButtonCleanup();}
+// ---- settings popover (provider / read-mode / threshold; auto-rearm + hotkey are per-browser) ----
+function voiceSettings(){var c=window.VCFG||{};function opt(v,cur){return '<option value="'+v+'"'+(cur===v?' selected':'')+'>'+v+'</option>';}
+  var m=document.getElementById('vcSet');if(m)m.remove();m=document.createElement('div');m.id='vcSet';m.style.cssText='position:fixed;inset:0;z-index:10080;display:flex;align-items:center;justify-content:center;background:rgba(8,8,12,.7);backdrop-filter:blur(6px)';
+  m.innerHTML='<div style="background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;width:min(420px,94vw);box-shadow:0 18px 50px rgba(0,0,0,.55)">'
+   +'<h3 style="margin:0 0 12px">Voice settings</h3>'
+   +'<div style="display:flex;flex-direction:column;gap:12px;font-size:13px">'
+   +'<label>Text-to-speech provider<br><select id="vcProv" class="cc-in" style="width:100%;margin-top:4px">'+opt('elevenlabs',c.provider)+opt('openai',c.provider)+opt('say',c.provider)+'</select><span class="sub">'+(c.has_elevenlabs?'ElevenLabs key ✓':'no ElevenLabs key')+' · '+(c.has_openai?'OpenAI key ✓':'no OpenAI key')+' · falls back to the local voice</span></label>'
+   +'<label>How much to read<br><select id="vcMode" class="cc-in" style="width:100%;margin-top:4px">'+opt('smart',c.read_mode)+opt('verbatim',c.read_mode)+opt('summarize',c.read_mode)+'</select><span class="sub">smart = short messages verbatim, long ones summarized</span></label>'
+   +'<label>Summarize when longer than (characters)<br><input id="vcThr" class="cc-in" style="width:100%;margin-top:4px" value="'+(c.summarize_threshold||600)+'"></label>'
+   +'<label>Readback speed<br><select id="vcRate" class="cc-in" style="width:100%;margin-top:4px">'+[['0.9','0.9x'],['1','1.0x'],['1.15','1.15x'],['1.25','1.25x'],['1.5','1.5x'],['1.75','1.75x'],['2','2.0x']].map(function(o){return '<option value="'+o[0]+'"'+(String(voiceRate())===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+'</select></label>'
+   +'<label>Pause before auto-send (seconds)<br><input id="vcSil" class="cc-in" style="width:100%;margin-top:4px" value="'+(voiceSilenceMs()/1000)+'"><span class="sub">how long to wait after you stop talking — tap the "✓ send" pill to send instantly instead</span></label>'
+   +'<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="vcAuto"'+(voiceAutoRearm()?' checked':'')+'> Continuous listening — keep the mic open and auto-capture when you talk (hands-free)</label>'
+   +'<label>How to finish a turn (conversation)<br><select id="vcEnd" class="cc-in" style="width:100%;margin-top:4px">'+[['button','Tap ✓ Done / press ` — reliable (recommended)'],['word','Say a word (e.g. "over")'],['pause','Pause when done']].map(function(o){return '<option value="'+o[0]+'"'+(voiceEndMode()===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+'</select><span class="sub">Button = talk hands-free, then tap the big ✓ Done button (or press `) when finished. The others auto-detect (still being tuned).</span></label>'
+   +'<label>Send word (for "say a word" mode)<br><input id="vcPhrase" class="cc-in" style="width:100%;margin-top:4px" value="'+esc(voiceCommitPhrase())+'"><span class="sub">say it at the end, on its own — e.g. "over".</span></label>'
+   +'<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="vcAnn"'+(c.announce_node?' checked':'')+'> Announce the node name before each readback'+(c.node_label?(' ('+esc(c.node_label)+')'):'')+'</label>'
+   +'<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="vcEar"'+(voiceEarconOn()?' checked':'')+'> Play a chime when another session becomes ready</label>'
+   +'<span class="sub">Hold the backtick key <b>`</b> to talk hands-free on desktop.</span>'
+   +'</div>'
+   +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px"><button class="btn" onclick="document.getElementById(\'vcSet\').remove()">Cancel</button><button class="btn go" onclick="voiceSettingsSave()">Save</button></div></div>';
+  m.addEventListener('mousedown',function(e){if(e.target===m)m.remove();});document.body.appendChild(m);}
+async function voiceSettingsSave(){var prov=(document.getElementById('vcProv')||{}).value,mode=(document.getElementById('vcMode')||{}).value,thr=parseInt((document.getElementById('vcThr')||{}).value||'600',10)||600,auto=(document.getElementById('vcAuto')||{}).checked,rate=parseFloat((document.getElementById('vcRate')||{}).value||'1.15')||1.15,sil=Math.round((parseFloat((document.getElementById('vcSil')||{}).value||'5')||5)*1000),ann=(document.getElementById('vcAnn')||{}).checked;
+  var endmode=(document.getElementById('vcEnd')||{}).value||'button',phrase=((document.getElementById('vcPhrase')||{}).value||'over').trim()||'over';
+  var ear=(document.getElementById('vcEar')||{}).checked;
+  try{localStorage.setItem('cc_voice_autorearm',auto?'1':'0');localStorage.setItem('cc_voice_rate',String(rate));localStorage.setItem('cc_voice_silence_ms',String(sil));localStorage.setItem('cc_voice_endmode',endmode);localStorage.setItem('cc_voice_commit_phrase',phrase);localStorage.setItem('cc_voice_earcon',ear?'1':'0');}catch(e){}
+  try{var r=await(await fetch('/api/voice/config-set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:prov,read_mode:mode,summarize_threshold:thr,announce_node:ann})})).json();if(r.ok)window.VCFG=r.config;vcToast('Voice settings saved',2200);}catch(e){vcToast('Save failed',3000);}
+  var m=document.getElementById('vcSet');if(m)m.remove();if(VC.conv)voiceConvBar(VC.conv,null);}
+try{voiceLoadCfg();}catch(e){}
+// ===== VOICE ATTENTION QUEUE (P1): enrolled sessions that finish -> queue -> the orchestrator presents them
+// one at a time (focus -> read the summary -> you tap-reply -> route back -> next). Single speaking floor. =====
+window.VQ={on:false,mode:false,enrolled:[],muted:[],queue:[],presenting:null,jumpTo:null,_looping:false};
+(function(){try{if(document.getElementById('vqStyle'))return;var s=document.createElement('style');s.id='vqStyle';s.textContent='.vq-active{animation:vqpulse 1.5s ease-in-out infinite;border-radius:12px}@keyframes vqpulse{0%,100%{box-shadow:0 0 0 2px var(--accent),0 0 14px rgba(var(--accent-rgb),.35)}50%{box-shadow:0 0 0 3px var(--accent),0 0 26px rgba(var(--accent-rgb),.6)}}'
+  +'#vcDock{position:fixed;left:0;right:0;bottom:0;z-index:10068;display:none;flex-direction:column;gap:7px;background:var(--card);border-top:2px solid var(--accent);padding:9px 11px;padding-bottom:calc(9px + env(safe-area-inset-bottom,0px));box-shadow:0 -8px 24px rgba(0,0,0,.45)}'
+  +'#vcDock.on{display:flex}'
+  +'#vcDock .vd-id{display:flex;align-items:center;gap:8px;min-width:0}#vcDock .vd-id.tap{cursor:pointer}'
+  +'#vcDock .vd-name{font-weight:800;color:var(--accent);font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;max-width:52%}'
+  +'#vcDock .vd-scope{color:var(--mut);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto}'
+  +'#vcDock .vd-row2{display:flex;align-items:center;gap:8px}'
+  +'#vcDock .vd-msg{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--mut)}'
+  +'#vcDock .vd-big{flex:0 0 auto;background:var(--accent);color:var(--bg-warm);border:none;border-radius:22px;padding:11px 22px;font-size:15px;font-weight:700;cursor:pointer;animation:vqpulse 1.6s ease-in-out infinite}'
+  +'#vcDock .vd-big.rec,#vcDock .vd-big.dis{animation:none}#vcDock .vd-big.dis{opacity:.5;pointer-events:none}'
+  +'#vcDock .vd-shelf{background:rgba(var(--accent-rgb),.14);border:1px solid var(--accent);border-radius:10px;color:var(--accent);font-weight:700;font-size:13px;padding:9px 12px;cursor:pointer;text-align:center}#vcDock .vd-shelf.pop{animation:vqpop .35s ease-out}@keyframes vqpop{0%{transform:scale(.94);opacity:.2}100%{transform:scale(1);opacity:1}}'
+  +'body.cf-vdock #stage{padding-bottom:104px}'
+  +'.vd-glyph{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:20px;height:16px}'
+  +'.vd-spin{display:inline-block;width:15px;height:15px;border:2px solid rgba(var(--accent-rgb),.3);border-top-color:var(--accent);border-radius:50%;animation:vdspin .8s linear infinite}@keyframes vdspin{to{transform:rotate(360deg)}}'
+  +'.vd-eq{display:inline-flex;align-items:flex-end;gap:2px;height:14px}.vd-eq i{width:3px;background:var(--accent);border-radius:2px;animation:vdeq .9s ease-in-out infinite}.vd-eq i:nth-child(2){animation-delay:.15s}.vd-eq i:nth-child(3){animation-delay:.3s}.vd-eq i:nth-child(4){animation-delay:.45s}@keyframes vdeq{0%,100%{height:4px}50%{height:14px}}'
+  +'.vd-mic{width:12px;height:12px;border-radius:50%;background:var(--accent)}.vd-mic.rec{width:15px;height:15px;background:var(--err);box-shadow:0 0 10px var(--err);animation:vdblink .8s steps(1) infinite}@keyframes vdblink{0%,58%{opacity:1}59%,100%{opacity:.25}}.vd-idle{width:9px;height:9px;border-radius:50%;background:var(--mut)}'
+  +'#vcDock.rec-on{border-top-color:var(--err)}@media(min-width:821px){#vcDock.rec-on{border-color:var(--err)}}#vcDock.rec-on .vd-name{color:var(--err)}'
+  +'@media(min-width:821px){#vcDock{left:50%;right:auto;transform:translateX(-50%);max-width:680px;border:2px solid var(--accent);border-radius:14px;bottom:52px}}';
+  document.head.appendChild(s);}catch(e){}})();
+async function vqFetch(){try{var s=await(await fetch('/api/voice/queue')).json();VQ.mode=!!s.mode;VQ.enrolled=s.enrolled||[];VQ.muted=s.muted||[];VQ.queue=s.queue||[];return s;}catch(e){return {mode:VQ.mode,enrolled:VQ.enrolled,muted:VQ.muted,queue:VQ.queue};}}
+function voiceQueued(n){return (VQ.enrolled||[]).indexOf(n)>=0;}
+function voiceMuted(n){return (VQ.muted||[]).indexOf(n)>=0;}
+// GLOBAL Voice-mode switch. ON = the dock lives; any session you OPEN or TALK TO auto-joins the rotation.
+async function voiceModeToggle(){var on=!VQ.on;   // base on THIS TAB's live state (not the persisted server flag) -> a fresh load's first tap always turns it ON/resumes
+  if(on){if(!voiceKeyOK())return;try{voiceUnlockAudio();}catch(e){}}
+  try{var r=await(await fetch('/api/voice/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:on})})).json();VQ.mode=!!r.mode;VQ.enrolled=r.enrolled||[];VQ.muted=r.muted||[];VQ.queue=r.queue||[];}catch(e){}
+  if(on){VQ.on=true;var f=voiceActiveSession();if(f)voiceAutoEnroll(f);voiceDock('armed',f);if(!VQ._looping){VQ._looping=true;voiceQueueLoop();}vcToast('Voice mode ON — I\'ll bring up any session you use when it has something for you',4200);}
+  else{VQ.on=false;VQ.next=true;try{voiceStopAudio();}catch(e){}if(VC._readResolve){var a=VC._readResolve;VC._readResolve=null;a('stop');}if(VC._dockResolve){var b=VC._dockResolve;VC._dockResolve=null;b('');}try{voiceButtonCleanup();}catch(e){}VQ.presenting=null;VC.dockKind=null;VC.shelfKey='';voiceDockHide();vcToast('Voice mode off',2000);}
+  try{voiceMarkTiles();}catch(e){}try{if(typeof render==='function')render();}catch(e){}}
+async function voiceAutoEnroll(n){if(!n||!VQ.mode||voiceMuted(n)||voiceQueued(n))return;try{var r=await(await fetch('/api/voice/enroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,on:true})})).json();VQ.enrolled=r.enrolled||[];VQ.queue=r.queue||VQ.queue;}catch(e){}voiceDockRefresh();}
+// per-session control is now MUTE (opt out). Old names kept as aliases so existing buttons keep working.
+async function voiceMuteToggle(n){var mute=!voiceMuted(n);try{voiceUnlockAudio();}catch(e){}
+  try{var r=await(await fetch('/api/voice/mute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,on:mute})})).json();VQ.muted=r.muted||[];VQ.enrolled=r.enrolled||[];VQ.queue=r.queue||VQ.queue;}catch(e){}
+  vcToast(mute?('Muted “'+n+'” — I won\'t read this one to you'):('Un-muted “'+n+'”'),2800);
+  if(mute&&VQ.presenting===n){voiceQueueNext();}else if(!mute&&VQ.mode){voiceAutoEnroll(n);}
+  voiceDockRefresh();try{voiceMarkTiles();}catch(e){}try{if(typeof render==='function')render();}catch(e){}}
+async function voiceConvoToggle(n){return voiceMuteToggle(n);}
+async function voiceQueueToggle(n){return voiceMuteToggle(n);}
+function voiceQueueBtn(n){var e=esc(n);var m=voiceMuted(n);return '<button class="mini" title="'+(m?'This session is MUTED for voice — tap to let it talk to you again':'Voice: tap to MUTE this session (stop reading it to you)')+'" onclick="voiceMuteToggle(\''+e+'\')"'+(m?'':' style="color:var(--accent)"')+'>'+(m?'\u{1F507}':'\u{1F4AC}')+'</button>';}
+function voiceQueuePaint(){var b=document.getElementById('vqLauncher');if(b)b.remove();}   // launcher retired -> the dock is the only surface
+async function voiceQueueBadgePoll(){await vqFetch();voiceDockRefresh();try{voiceMarkTiles();}catch(e){}}
+function voiceQueueStart(){if(!VQ.mode)voiceModeToggle();}   // legacy entry
+function voiceQueueStop(){VQ.on=false;VQ.next=true;VC.conv=null;try{voiceStopAudio();}catch(e){}try{if(VC.btnRec&&VC.btnRec.state==='recording'){VC.btnCancel=true;VC.btnRec.stop();}}catch(e){}
+  if(VC._readResolve){var a=VC._readResolve;VC._readResolve=null;a('stop');}if(VC._dockResolve){var b=VC._dockResolve;VC._dockResolve=null;b('');}
+  try{voiceButtonCleanup();}catch(e){}try{voiceAmbientStop();}catch(e){}vcPill('');voiceDockHide();var bar=document.getElementById('vcBar');if(bar)bar.remove();VQ.presenting=null;voiceQueuePaint();try{if(typeof render==='function')render();}catch(e){}}
+function vqFocus(n){
+  try{if(typeof wkMobile==='function'&&wkMobile()){if(typeof stageShow==='function')stageShow(n);return;}}catch(e){}   // mobile: bring it up full-screen in the Stage
+  // desktop: bring it up if minimized (not in the workspace), maximize/front it, land on the sessions lens, and the render glows it
+  try{if(typeof PANES!=='undefined'&&PANES.indexOf(n)<0){panesSet([n].concat(PANES).slice(0,4));}else{window.SESSBIG=n;}if(typeof gotoLens==='function')gotoLens('sessions');if(typeof render==='function')render();}catch(e){}
+}
+// ---- consolidated voice control DOCK: ONE bottom bar with state + Repeat + Talk/Send + smart Next + Stop ----
+function voiceEarconOn(){try{return localStorage.getItem('cc_voice_earcon')!=='0';}catch(e){return true;}}
+function voiceEarcon(){try{var AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;var c=VC._eac||(VC._eac=new AC());if(c.state==='suspended')c.resume();var t=c.currentTime;[880,1174].forEach(function(f,i){var o=c.createOscillator(),g=c.createGain();o.type='sine';o.frequency.value=f;o.connect(g);g.connect(c.destination);var s=t+i*0.1;g.gain.setValueAtTime(0.0001,s);g.gain.exponentialRampToValueAtTime(0.11,s+0.02);g.gain.exponentialRampToValueAtTime(0.0001,s+0.16);o.start(s);o.stop(s+0.19);});}catch(e){}}
+// ONE persistent two-row cockpit: Row 1 = WHO has the floor (never moves); Row 2 = the ONE big action + minis.
+function voiceDock(kind,n){if((kind==='armed'||kind==='yourturn')&&typeof voiceTalkTarget==='function'){var _t=voiceTalkTarget();if(_t)n=_t;}   // identity == the session you'll talk to (what's on screen)
+  VC.dockKind=kind;VC.dockN=n;var d=document.getElementById('vcDock');if(!d){d=document.createElement('div');d.id='vcDock';document.body.appendChild(d);}
+  var others=(VQ.queue||[]).filter(function(x){return x.session!==n;});
+  var shelfKey=others.map(function(x){return x.session;}).join(',');
+  var newArrival=(shelfKey&&shelfKey!==VC.shelfKey);
+  if(newArrival&&kind!=='speaking'&&kind!=='recording'&&kind!=='preparing'){try{if(voiceEarconOn())voiceEarcon();}catch(e){}}
+  VC.shelfKey=shelfKey;
+  var shelf=others.length?('<div class="vd-shelf'+(newArrival?' pop':'')+'" onclick="voiceQueueJump(\''+esc(others[0].session)+'\')">'+esc(others[0].session)+(others.length>1?(' · +'+(others.length-1)+' more'):'')+' — ready ▸</div>'):'';
+  var glyph=(kind==='speaking')?'<span class="vd-eq"><i></i><i></i><i></i><i></i></span>':(kind==='preparing'||kind==='sending'||kind==='switching')?'<span class="vd-spin"></span>':(kind==='recording')?'<span class="vd-mic rec"></span>':(kind==='yourturn'||kind==='arming')?'<span class="vd-mic"></span>':'<span class="vd-idle"></span>';
+  var scope=(VC.dockScope||'');
+  var mute=n?('<button class="mini" title="Mute this session — stop reading it to you" onclick="voiceMuteToggle(\''+esc(n)+'\')">mute</button>'):'';
+  var id='<div class="vd-id'+(n?' tap':'')+'"'+(n?(' onclick="vqFocus(\''+esc(n)+'\')"'):'')+'><span class="vd-glyph">'+glyph+'</span><span class="vd-name">'+(n?esc(n):'Voice mode')+'</span><span class="vd-scope">'+esc(scope)+'</span>'+mute+'</div>';
+  var stopB='<button class="mini danger" title="End voice mode" onclick="voiceModeToggle()">Stop</button>';
+  var repeatB='<button class="mini" title="Repeat — replay the last message (no extra cost)" onclick="voiceRepeat()">Repeat</button>';
+  var msg='',big='',minis='';
+  if(kind==='armed'){msg='Voice on — waiting for a session to finish. Talk any time.';big='<button class="vd-big" onclick="voiceDockTalk()">Talk</button>';}
+  else if(kind==='preparing'){msg='Summarizing + rendering voice…';big='<button class="vd-big" onclick="voiceBargeReply()">Skip — reply</button>';}
+  else if(kind==='speaking'){msg='Speaking…';big='<button class="vd-big" onclick="voiceBargeReply()">Reply</button>';minis=repeatB;}
+  else if(kind==='yourturn'){msg='Your turn — tap Talk, or press `';big='<button class="vd-big" onclick="voiceDockTalk()">Talk</button>';minis=repeatB+'<button class="mini" title="Nothing to add — move on" onclick="voiceQueueDone()">Done</button>';}
+  else if(kind==='arming'){msg='Opening the mic…';big='<button class="vd-big dis" title="Opening the microphone…">…</button>';}
+  else if(kind==='recording'){msg='<span style="color:var(--err);font-weight:800">● REC</span> — tap Send when done';big='<button class="vd-big rec" onclick="voiceDockTalk()">Send</button>';minis='<button class="mini" title="Discard this recording" onclick="voiceDockCancel()">Cancel</button>';}
+  else if(kind==='sending'){msg='Transcribing + sending…';}
+  else if(kind==='working'){msg='working — I\'ll read the reply when it\'s done';big='<button class="vd-big" onclick="voiceDockTalk()">Talk</button>';minis=repeatB;}
+  else if(kind==='switching'){msg='Switching…';}
+  var row2='<div class="vd-row2"><span class="vd-msg">'+msg+'</span>'+minis+big+stopB+'</div>';
+  d.innerHTML=shelf+id+row2;d.classList.add('on');d.classList.toggle('rec-on',kind==='recording');
+  try{document.body.classList.toggle('cf-vdock',!!(window.STG&&STG.open));}catch(e){}}
+function voiceDockHide(){var d=document.getElementById('vcDock');if(d)d.classList.remove('on');try{document.body.classList.remove('cf-vdock');}catch(e){}}
+// keep the dock live so a NEWLY-ready session shows up in the shelf while you're mid-turn (skip transient states).
+function voiceDockRefresh(){try{if(window.VQ&&VQ.on&&VC.dockKind&&VC.dockKind!=='recording'&&VC.dockKind!=='sending'&&VC.dockKind!=='arming'&&VC.dockKind!=='preparing'){voiceDock(VC.dockKind,VC.dockN);}}catch(e){}}
+function voiceRepeat(){if(VC.lastAudioFile){try{voiceUnlockAudio();}catch(e){}voicePlay(VC.lastAudioFile);}else vcToast('Nothing to repeat yet',2000);}
+function voiceBargeReply(){voiceStopAudio();VC._barge=true;if(VC._readResolve){var f=VC._readResolve;VC._readResolve=null;f('barge');}}
+function voiceSpeakInteractive(n){return new Promise(function(res){VC._readResolve=res;VC._barge=false;voiceDock('preparing',n);
+  fetch('/api/voice/speak-last',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n})}).then(function(r){return r.json();}).then(function(r){
+    if(!VC._readResolve)return;   // skipped/next/stopped during prepare -> abort, don't play
+    if(r&&r.ok){
+      if(r.fp&&r.fp===VC._spokeFp){var g=VC._readResolve;VC._readResolve=null;if(g)g('dup');return;}   // already read THIS exact message -> never read it twice in a row
+      VC._spokeFp=r.fp||'';VC.lastAudioFile=r.file;if(r.fp)VC.lastFp=r.fp;voiceDock('speaking',n);voicePlay(r.file,function(){if(VC._readResolve){var f=VC._readResolve;VC._readResolve=null;f('end');}});}
+    else{var f=VC._readResolve;VC._readResolve=null;f('noaudio');}
+  }).catch(function(){if(VC._readResolve){var f=VC._readResolve;VC._readResolve=null;f('err');}});});}
+function voiceDockListen(n){return new Promise(function(res){VC._dockResolve=res;voiceDock('yourturn',n);});}
+function voiceDockCancel(){try{if(VC.btnRec&&VC.btnRec.state==='recording'){VC.btnCancel=true;VC.btnRec.stop();}}catch(e){}voiceDock(VQ.presenting?'yourturn':'armed',VQ.presenting||voiceActiveSession());}
+function voiceQueueDone(){voiceQueueNext();}
+function voiceQueueJump(n){if(window.VQ)VQ.jumpTo=n;voiceQueueNext();}
+// CRITICAL: your reply ALWAYS goes to the session ON YOUR SCREEN, never the hidden rotation "floor".
+function voiceTalkTarget(){try{if(window.STG&&STG.open&&STG.cur)return STG.cur;}catch(e){}try{if(window.SESSBIG)return SESSBIG;}catch(e){}return VQ.presenting||VC.dockN||null;}
+function voiceDockTalk(){var n=voiceTalkTarget();if(!n)return;VC.talkTgt=n;
+  if(VC.btnRec&&VC.btnRec.state==='recording'){try{VC.btnRec.stop();}catch(e){}return;}
+  try{voiceUnlockAudio();}catch(e){}voiceDock('arming',n);
+  navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
+    VC.btnStream=stream;VC.btnChunks=[];VC.btnCancel=false;var mr;try{mr=new MediaRecorder(stream);}catch(e){vcToast('Recording not supported here.',3000);try{stream.getTracks().forEach(function(t){t.stop();});}catch(_){}voiceDock(VQ.presenting?'yourturn':'armed',n);return;}
+    VC.btnRec=mr;mr.ondataavailable=function(ev){if(ev.data&&ev.data.size)VC.btnChunks.push(ev.data);};
+    mr.onstop=function(){try{VC.btnStream.getTracks().forEach(function(t){t.stop();});}catch(e){}if(VC.btnCancel){VC.btnCancel=false;VC.btnRec=null;return;}var blob=new Blob(VC.btnChunks,{type:mr.mimeType||'audio/webm'});voiceDock('sending',n);
+      var fr=new FileReader();fr.onloadend=async function(){var b64=(String(fr.result||'').split(',')[1])||'';var text='';if(b64&&blob.size>600){try{var rr=await(await fetch('/api/voice/dictate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:b64,mime:(mr.mimeType||'audio/webm').split(';')[0]})})).json();if(rr.ok)text=(rr.text||'').trim();else vcToast((/corrupt|unsupported|Bad Request|no audio/i.test(rr.error||''))?'Didn\'t catch that — tap to try again.':('Transcribe: '+(rr.error||'?')),3500);}catch(e){}}VC.btnRec=null;
+        if(VC._dockResolve){var f=VC._dockResolve;VC._dockResolve=null;f({tgt:n,text:text});}   // presenting: loop sends to THIS on-screen target
+        else{if(text)voiceSend(n,text);voiceDock('armed',n);}                                      // armed one-off: send directly to on-screen target
+      };fr.readAsDataURL(blob);};
+    mr.start();voiceDock('recording',n);try{if(navigator.vibrate)navigator.vibrate(35);}catch(e){}   // tactile cue: recording started
+  }).catch(function(){vcToast('Microphone permission needed.',3500);voiceDock(VQ.presenting?'yourturn':'armed',n);});}
+async function voiceReadRetry(n){var how=await voiceSpeakInteractive(n),t=0;   // a read that fails transiently (server restart / network blip) retries instead of silently skipping the summary
+  while((how==='err'||how==='noaudio')&&VQ.on&&!VQ.next&&t<4){await new Promise(function(r){setTimeout(r,1600);});how=await voiceSpeakInteractive(n);t++;}return how;}
+async function voiceQueueLoop(){
+  var myId=(VQ._loopGen=(VQ._loopGen||0)+1);VQ._looping=true;   // only the newest loop survives -> never two presenting at once
+  while(VQ.on){
+    if(VQ._loopGen!==myId)return;   // a newer loop took over
+    var s=await vqFetch();
+    var q=s.queue||[];var item=null;
+    if(VQ.jumpTo){for(var i=0;i<q.length;i++){if(q[i].session===VQ.jumpTo){item=q[i];break;}}VQ.jumpTo=null;}
+    if(!item)item=q[0];
+    if(!item){ voiceDock('armed',voiceActiveSession()); await new Promise(function(r){setTimeout(r,2500);}); continue; }
+    var n=item.session;VQ.presenting=n;VQ.next=false;VC.conv=n;VC.lastFp=item.fp;VC.dockScope=item.scope||'';
+    if(!VQ.on)break;
+    var how=await voiceReadRetry(n);   // read WITHOUT yanking the screen — you stay where you are; tap the dock name to open this session (keeps reading)
+    while(VQ.on&&!VQ.next){
+      var lp=voiceDockListen(n);
+      if(how==='barge'){how='';voiceDockTalk();}
+      var res=await lp;
+      if(!VQ.on||VQ.next)break;
+      if(!res||!res.text){continue;}
+      var tgt=res.tgt||n;   // route to the session that was ON SCREEN when you talked (never the hidden floor)
+      n=tgt;VQ.presenting=tgt;VC.conv=tgt;   // follow the session you actually replied to
+      voiceDock('working',tgt);await voiceSend(tgt,res.text);
+      var ok=await voiceWaitReply(tgt);
+      if(!VQ.on||VQ.next)break;
+      how=ok?await voiceReadRetry(tgt):'';
+    }
+    try{await fetch('/api/voice/queue-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n})});}catch(e){}
+    VC.conv=null;VQ.presenting=null;VQ.next=false;VC.dockScope='';
+    try{if(typeof render==='function')render();}catch(e){}
+  }
+  VQ._looping=false;VQ.presenting=null;if(!VQ.on)voiceDockHide();
+}
+function voiceMarkTiles(){try{var v=document.getElementById('stgVoice');if(v)v.style.color=(window.VQ&&VQ.on)?'var(--accent)':'';}catch(e){}
+  try{document.querySelectorAll('#sessbar .sb-tile[data-name]').forEach(function(t){var nm=t.getAttribute('data-name');t.classList.toggle('sb-voice',!!(window.VQ&&VQ.on&&voiceQueued(nm)&&!voiceMuted(nm)));});}catch(e){}}
+try{voiceQueueBadgePoll();setInterval(voiceQueueBadgePoll,5000);}catch(e){}
 function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)+skillChip(x.name)
   +'<span class="stbtns">'
   +'<button class="mini" title="give Claude a file (upload + hand the path to this session)" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
   +'<button class="mini" title="Third-party review — an independent external GPT (a different AI vendor) reviews this session\'s recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." onclick="adviseOpen(\''+esc(x.name)+'\')">🔵</button>'
+  +voiceBtns(x.name)
   +'<button class="mini" title="blow up the session — full-screen in-app on mobile, new tab on desktop" onclick="termPopout(\''+esc(x.name)+'\')">↗</button>'
   +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
   +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
@@ -28937,7 +29518,7 @@ function renderFocus(s){
   var big=s.find(function(x){return x.name==SESSBIG;});
   // One big terminal + a visible attach bar (mobile/fallback) + a drag overlay (covers the iframe on dragover).
   var h='<div class="focusonly">'
-    +'<div class="bigsess" data-ccsess="'+esc(big.name)+'">'+bigHead(big)+ccDropBar(big.name)+'<iframe class="stframe" src="/term?name='+encodeURIComponent(big.name)+'"></iframe>'+ccDropOverlay()+'</div>'
+    +'<div class="bigsess'+((window.VQ&&VQ.presenting===big.name)?' vq-active':'')+'" data-ccsess="'+esc(big.name)+'">'+bigHead(big)+ccDropBar(big.name)+'<iframe class="stframe" src="/term?name='+encodeURIComponent(big.name)+'"></iframe>'+ccDropOverlay()+'</div>'
     +'<div class="termgrip" id="termGrip">'
       +'<button class="termgrip-b" type="button" title="Shorter" onclick="termStep(-90)">&minus;</button>'
       +'<span class="termgrip-bar" id="termBar" title="Drag up/down to resize (remembered on this device)"><i></i><b id="termGripN"></b></span>'
@@ -28952,6 +29533,7 @@ function paneHead(x){return '<div class="sthead"><span class="stdot">'+(x.attach
   +'<button class="mini panedown" title="push this session back down to the taskbar" onclick="paneDown(\''+esc(x.name)+'\')">&#11015;</button>'
   +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
   +'<button class="mini" title="Third-party review — an independent external GPT (a different AI vendor) reviews this session\'s recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." onclick="adviseOpen(\''+esc(x.name)+'\')">🔵</button>'
+  +voiceBtns(x.name)
   +'<button class="mini" title="blow up the session — full-screen in-app on mobile, new tab on desktop" onclick="termPopout(\''+esc(x.name)+'\')">↗</button>'
   +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
   +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
@@ -28968,7 +29550,7 @@ function renderWorkspace(s){
     var x=s.find(function(y){return y.name==name;})||{name:name,label:name};
     if(idx>0) h+='<div class="pane-split" data-l="'+esc(panes[idx-1])+'" data-r="'+esc(name)+'" title="drag to resize"></div>';
     var grow=PANEW[name]||1;
-    h+='<div class="wkpane bigsess" data-ccsess="'+esc(name)+'" data-pane="'+esc(name)+'" style="flex:'+grow+' 1 0">'
+    h+='<div class="wkpane bigsess'+((window.VQ&&VQ.presenting===name)?' vq-active':'')+'" data-ccsess="'+esc(name)+'" data-pane="'+esc(name)+'" style="flex:'+grow+' 1 0">'
       + paneHead(x) + ccDropBar(name) + '<iframe class="stframe" src="/term?name='+encodeURIComponent(name)+'"></iframe>' + ccDropOverlay()
       +'</div>';
   });
@@ -29078,12 +29660,13 @@ function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="c
   +'<button class="mini" onclick="endSess(\''+esc(x.name)+'\',false)" title="handoff + close">end</button>'
   +'<button class="mini danger" onclick="endSess(\''+esc(x.name)+'\',true)" title="force kill">kill</button></div></div>';}
 function sessTile(x,i){const big=(SESSBIG==x.name);
-  return '<div class="stile'+(big?' big':'')+attnTileCls(x.name)+'" id="atile_'+attnCssid(x.name)+'" data-name="'+esc(x.name)+'"'+(big?(' data-ccsess="'+esc(x.name)+'"'):'')+'>'
+  return '<div class="stile'+(big?' big':'')+attnTileCls(x.name)+((window.VQ&&VQ.presenting===x.name)?' vq-active':'')+'" id="atile_'+attnCssid(x.name)+'" data-name="'+esc(x.name)+'"'+(big?(' data-ccsess="'+esc(x.name)+'"'):'')+'>'
     +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')">'+attnDotHTML(x)+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)
     +'<span class="stbtns" onclick="event.stopPropagation()">'
     +'<button class="mini" title="'+(big?'minimize':'maximize')+'" onclick="tileClick(\''+esc(x.name)+'\')">'+(big?'▒':'⤢')+'</button>'
     +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
     +'<button class="mini" title="Third-party review — an independent external GPT (a different AI vendor) reviews this session\'s recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." onclick="adviseOpen(\''+esc(x.name)+'\')">🔵</button>'
+    +voiceBtns(x.name)
     +'<button class="mini" title="blow up the session — full-screen in-app on mobile, new tab on desktop" onclick="termPopout(\''+esc(x.name)+'\')">↗</button>'
     +'<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
     +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'
@@ -30699,6 +31282,7 @@ function stageShow(name){
   if(typeof panesSet==='function') panesSet([name]);   // keep SESSBIG/lens-hash/desktop parity consistent
   stagePaint();
   if(typeof sbPoll==='function') sbPoll();              // repaint dock .up + clear this tile's gold now
+  try{if(window.VQ&&VQ.mode){voiceAutoEnroll(name);voiceDockRefresh();}}catch(e){}   // voice mode: opening a session auto-joins it + the dock follows you (Talk targets what's on screen)
 }
 function stageOpen(name){
   if(!wkMobile()){ if(typeof openInSessions==='function')openInSessions(name); return; }   // desktop: unchanged
@@ -30760,6 +31344,13 @@ function stageMenu(ev){
     + mi('&#10697;','Select &amp; copy','stageTerm(\'showCopy\')')
     + mi('&#128206;','Give Claude a file','closeStageMenu();ccPickFile(\''+nn+'\')')
     + mi('&#128309;','Third-party review','closeStageMenu();adviseOpen(\''+nn+'\')')
+    + '<div class="stg-mi-sep"></div>'
+    + mi('&#128266;','Read the last reply aloud','closeStageMenu();voiceSpeakLast(\''+nn+'\')')
+    + mi('&#127908;','Dictate a message','closeStageMenu();voiceMic(\''+nn+'\')')
+    + mi('&#127908;',(window.VQ&&VQ.on)?'Voice mode: ON — tap to turn off':'Voice mode: turn ON (talk to your sessions)','closeStageMenu();voiceModeToggle()')
+    + mi('&#9881;','Voice settings','closeStageMenu();voiceSettings()')
+    + ((window.VQ&&VQ.on)?mi('&#128172;',(voiceMuted(n)?'Un-mute this session':'Mute this session (don’t read it)'),'closeStageMenu();voiceMuteToggle(\''+nn+'\')'):'')
+    + '<div class="stg-mi-sep"></div>'
     + mi('&#8863;','Compact (handoff + /compact)','stageTerm(\'compactSess\')')
     + '<div class="stg-mi-sep"></div>'
     + mi('&#9195;','End (handoff + close)','closeStageMenu();endSess(\''+nn+'\',false)')
@@ -32551,6 +33142,7 @@ if __name__ == "__main__":
     try: _colo_publish()               # publish this instance's {project_root, port} so co-located viewers resolve payload ownership
     except Exception: pass
     _daemon("context_backfill", _context_backfill_loop)  # CONTEXT LAYER: ingest existing surfaces into the store (idempotent, every 15 min)
+    _daemon("voice_queue", _voice_queue_watch)           # VOICE attention queue (P1): enrolled sessions that finish -> queue for the voice orchestrator
     _daemon("housekeeping", _housekeeping_loop)          # HOUSEKEEPING: regen module map + Doctor sweep + surface new issues (hourly, idempotent)
     _daemon("housekeeping_eod", _housekeeping_eod_loop)  # END-OF-DAY tidy (opt-in housekeeping_eod): thorough sort + re-surface declined day-work; evening-hour OR 2h-idle; propose-only
     _daemon("reconcile", _reconcile_loop)                # RECONCILE: heads-up + retire idle conversations after their grace window (every 10 min)

@@ -144,6 +144,39 @@ Request only what the use case needs; start read/draft, upgrade deliberately. **
 `--permissions` register their tools** -- so adding a service means re-minting the token (re-consent) with a
 matching `PERMS`, or the new tools 403.
 
+## Auth error decoder (2026-07-24 incident -- learn these ONCE, never fight them again)
+Each failure string has ONE cause and ONE fix. Don't guess -- match the string:
+- **`Error 400: invalid_scope`** -> a requested scope isn't listed on the OAuth consent screen. Cause: `uvx`
+  pulled a newer `workspace-mcp` whose `:full` levels request `gmail.modify`/`calendar.events`/`forms.body.readonly`.
+  Fix: already handled -- `bin/mint_token.py` drops those (redundant) scopes, and `mcp.json` PINS the version.
+- **`Error 401: invalid_client / OAuth client was not found`** (AFTER you sign in, for a client that clearly
+  exists + whose refresh token works) -> the client JSON points at Google's LEGACY `…/o/oauth2/auth` endpoint,
+  which new-console clients reject post-login. Fix: already handled -- `mint_token.py` forces `…/o/oauth2/v2/auth`.
+  (If you ever hit it hand-rolling: `curl` the consent URL from the box -- a clean 302 to sign-in means the client
+  is fine and the endpoint is the problem.)
+- **`Error 403: access_denied … only … testers`** -> the signing-in account is NOT a Test user on THIS OAuth
+  app's project. Fix: add it under the project's **Audience -> Test users**. Confirm you're in the RIGHT project
+  (the client_id in the consent URL tells you which) and that the operator actually OWNS/can access it.
+- **`SERVICE_DISABLED` (403 on a real API call, scope IS granted)** -> the Cloud API isn't enabled in the project.
+  Fix: enable it (Console URLs in step 2). This is NOT a scope problem -- do not re-mint.
+- **`invalid_grant` on refresh** -> the refresh token is genuinely dead (idle >~7d on a Testing personal Gmail,
+  or revoked). Fix: re-mint. (This is the only one keep-alive can't prevent; Doctor flags it RED + alerts.)
+
+## Remote operator with NO browser on the Mac -- the RELIABLE, tunnel-less way (preferred over `--remote`)
+Don't fight SSH tunnels or guess the operator's machine. Run the minter LOCALLY on the Mac; it listens on
+`localhost:8765` and holds the PKCE verifier in memory. The operator opens the printed consent URL in ANY
+browser, approves, and the browser lands on `http://localhost:8765/?...&code=...` ("can't reach" -- expected).
+They copy that WHOLE address; you deliver it to the still-listening minter by curling it ON the Mac:
+`curl 'http://localhost:8765/?state=..&code=..&scope=..'`. The minter exchanges + stores. No tunnel, no inbound
+SSH, no `--remote`, works regardless of which device the operator is on.
+
+## Scope floor -- read/send can't silently vanish anymore (server.py)
+Keep-alive keeps a token ALIVE but has no concept of scope; on 2026-07-24 a re-mint narrowed an account to
+send-only and nothing noticed until a read failed. Now: `_google_health` records each account's high-watermark
+capabilities; `_vault_materialize_google` REFUSES to overwrite a broader token with a narrower one; and Doctor
+goes RED + fires a loud alert the moment `canRead`/`canSend` drops below what the account had. So a downgrade is
+loud, and a narrow token can't clobber a good one.
+
 ## Gotchas (these cost real time on the first install -- bake them in)
 - **Unbuffered stdout:** the auth lib prints the consent URL with a plain `print()`; under nohup/pipes it
   buffers forever. `gauth.sh` already runs the minter with `python -u` -- if you roll your own, do the same.

@@ -33,6 +33,18 @@ from auth.credential_store import LocalDirectoryCredentialStore
 set_permissions(parse_permissions_arg(PERMS))
 SCOPES = sorted(set(BASE_SCOPES) | set(get_all_permission_scopes()))
 
+# workspace-mcp 1.22.x expands the `:full` levels to a few scopes this Desktop OAuth client's consent screen
+# does NOT list, so Google rejects the ENTIRE consent with `invalid_scope` (Error 400) -- which is why a re-mint
+# that "worked yesterday" suddenly fails. Each is redundant with a scope we DO get, so drop them and the consent
+# succeeds cleanly:  gmail.modify (<- gmail.readonly+send already cover read+send),  calendar.events (<- the full
+# `calendar` scope covers events),  forms.body.readonly (<- forms.body covers it). Override via DROP_SCOPES="" to
+# request the raw set (only if you've added these scopes to the Cloud consent screen).
+_DENY_DEFAULT = ("https://www.googleapis.com/auth/gmail.modify",
+                 "https://www.googleapis.com/auth/calendar.events",
+                 "https://www.googleapis.com/auth/forms.body.readonly")
+_DENY = set((os.environ["DROP_SCOPES"].split() if "DROP_SCOPES" in os.environ else _DENY_DEFAULT))
+SCOPES = [s for s in SCOPES if s not in _DENY]
+
 def _scopes_to_perms(scopes):
     """Map ACTUAL granted OAuth scopes -> workspace-mcp service:level labels, faithfully (CCR ccr-1782880284369:
     --check must never under-report). Matches on each scope's final path segment (e.g. 'drive', 'spreadsheets',
@@ -85,7 +97,18 @@ if not ACCOUNT:
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-flow = InstalledAppFlow.from_client_secrets_file(CLIENT, scopes=SCOPES)
+# Force Google's CURRENT v2 authorization endpoint. Client JSONs downloaded from the console still carry the
+# LEGACY `auth_uri` (`https://accounts.google.com/o/oauth2/auth`), and for OAuth clients created in the new
+# "Google Auth Platform" console that legacy endpoint returns `Error 401: invalid_client / OAuth client was not
+# found` AFTER the user signs in -- even though the client is valid and its refresh token works. The v2 endpoint
+# (`/o/oauth2/v2/auth`) resolves the same client correctly. This one line is the difference between "works" and a
+# multi-hour dead end. (Override with AUTH_URI=... if ever needed.)
+import json as _json
+_cfg = _json.load(open(CLIENT))
+_k = "installed" if "installed" in _cfg else ("web" if "web" in _cfg else None)
+if _k:
+    _cfg[_k]["auth_uri"] = os.environ.get("AUTH_URI", "https://accounts.google.com/o/oauth2/v2/auth")
+flow = InstalledAppFlow.from_client_config(_cfg, scopes=SCOPES)
 print("WAITING_FOR_CALLBACK on localhost:%d" % PORT, flush=True)
 creds = flow.run_local_server(
     host="localhost", port=PORT, open_browser=False,

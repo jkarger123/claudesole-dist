@@ -50,7 +50,8 @@ def nb_transcribe(audio_b64, mime="audio/webm"):
         with urllib.request.urlopen(req, timeout=120) as r: res = json.loads(r.read().decode())
         ch = ((res.get("results") or {}).get("channels") or [{}])
         alt = (ch[0].get("alternatives") or [{}]) if ch else [{}]
-        return {"ok": True, "text": (alt[0].get("transcript") or "").strip()}
+        dur = ((res.get("metadata") or {}).get("duration"))   # audio seconds Deepgram billed -> usage metering
+        return {"ok": True, "text": (alt[0].get("transcript") or "").strip(), "dur": dur}
     except urllib.error.HTTPError as e:
         return {"ok": False, "error": "Deepgram HTTP %d: %s" % (e.code, (e.read().decode() or "")[:140])}
     except Exception as e:

@@ -40,9 +40,10 @@
 - `Usage/` -- >> Resume here: read _handoffs/20260702-1502__Usage.md first -- it is the latest handoff.
 - `autonudge/` -- My job: when a Claude session keeps stopping to ask "want me to keep going?", auto-send a canned push (e.g.
 - `front-door/` -- >> Resume here: read _handoffs/20260720-0541__front-door.md first -- it is the latest handoff.
-- `mobile/` -- There is NO separate mobile app, no separate mobile codebase, no build step, no React
+- `mobile/` -- >> Resume here: read _handoffs/20260724-0644__mobile.md first -- it is the latest handoff.
 - `update/` -- This folder is the home + documentation of how a ClaudeFather node gets new framework code, reliably,
 - `vault/` -- This folder is the documentation home for ClaudeFather's credential system: the per-install vault, the
+- `voice/` -- All things voice: speech-to-text (talk to a session) and text-to-speech (hear a session's replies).
 <!-- /CC:CHILDREN -->
 
 The ClaudeFather platform's web control plane: a single **stdlib-Python HTTP server** (`server.py`,
