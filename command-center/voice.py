@@ -85,7 +85,36 @@ def cfg_set(patch):
 
 
 # ---- speech -> text (reuse the Notebook's single Deepgram path) --------------------------------------
-def vc_stt(audio_b64, mime="audio/webm"):
+def _transcripts_file(): return os.path.join(_CTX.get("STATE_DIR", "."), "_voice_transcripts.jsonl")
+def _log_transcript(text, dur=None, session=""):
+    """DURABLE SAFETY NET: every successful transcription is written to disk the instant Deepgram returns it --
+    BEFORE the text leaves this function -- so a spoken message can NEVER silently evaporate if the browser then
+    fails to deliver it (voice-mode flipped, target session rotated, network blip). A long dictation is expensive
+    to redo; losing it is unacceptable. Bounded to the newest ~300 lines. Read it back via vc_transcripts()."""
+    text = (text or "").strip()
+    if not text: return
+    try:
+        f = _transcripts_file()
+        rec = {"ts": int(time.time()), "chars": len(text), "dur": dur, "session": session or "", "text": text}
+        with open(f, "a", encoding="utf-8") as fh: fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        try:                                             # cap growth without a full rewrite each call
+            lines = open(f, encoding="utf-8").read().splitlines()
+            if len(lines) > 360:
+                with open(f, "w", encoding="utf-8") as fh: fh.write("\n".join(lines[-300:]) + "\n")
+        except Exception: pass
+    except Exception: pass
+def vc_transcripts(n=30):
+    """Recent successful transcriptions, newest first -- the recovery view for a dictation the client dropped."""
+    try:
+        lines = open(_transcripts_file(), encoding="utf-8").read().splitlines()
+        out = []
+        for l in lines[-max(1, int(n)):][::-1]:
+            try: out.append(json.loads(l))
+            except Exception: pass
+        return {"ok": True, "items": out}
+    except Exception: return {"ok": True, "items": []}
+
+def vc_stt(audio_b64, mime="audio/webm", session=""):
     stt = _CTX.get("stt")
     if not callable(stt):
         return {"ok": False, "error": "voice not enabled yet -- add DEEPGRAM_API_KEY to the vault (Vault lens)."}
@@ -93,6 +122,7 @@ def vc_stt(audio_b64, mime="audio/webm"):
         r = stt(audio_b64 or "", mime or "audio/webm")
         if isinstance(r, dict) and r.get("ok"):
             _meter({"stt_sec": float(r.get("dur") or 0), "stt_calls": 1})   # dur = Deepgram-reported audio seconds
+            _log_transcript(r.get("text") or "", r.get("dur"), session)     # persist BEFORE returning -- never lose a spoken message
         return r
     except Exception as e: return {"ok": False, "error": str(e)[:140]}
 
@@ -149,7 +179,9 @@ def vc_tts(text, cfg=None):
             if p == "openai":
                 key = _secret("OPENAI_API_KEY")
                 if not key: reasons.append("openai: no OPENAI_API_KEY in vault"); continue
-                body = json.dumps({"model": "tts-1-hd", "voice": (cfg.get("voice_id") or "nova"),
+                # tts-1 (standard), NOT tts-1-hd: same voices, ~2x faster to first byte + half the price. The HD
+                # model's extra fidelity is inaudible for a short spoken summary but roughly doubles render latency.
+                body = json.dumps({"model": (cfg.get("openai_model") or "tts-1"), "voice": (cfg.get("voice_id") or "nova"),
                                    "input": text[:4000]}).encode()
                 req = urllib.request.Request(
                     "https://api.openai.com/v1/audio/speech", data=body,
@@ -177,6 +209,16 @@ _SUMM_PROMPT = (
     "NO file paths unless essential, NO emoji. Output ONLY the spoken summary, nothing else.\n\nMESSAGE:\n%s\n")
 
 
+def _summarizer_cwd():
+    """The headless `claude -p` summarizer WRITES a transcript into ~/.claude/projects/<slug-of-its-cwd>/.
+    If it runs inside a real session's directory (e.g. the CC root, where the Chief of Staff lives), that fresh
+    transcript becomes the NEWEST .jsonl there -- and voice's 'newest jsonl in the cwd' resolver then reads the
+    SUMMARIZER'S transcript as if it were the session's last reply (the 'Chief read a summary about double-escapes'
+    bug). Pin the summarizer to an ISOLATED dir so its transcripts never collide with any real session's."""
+    d = os.path.join(_CTX.get("STATE_DIR", "/tmp"), "_voice_summarizer_cwd")
+    try: os.makedirs(d, exist_ok=True); return d
+    except Exception: return "/tmp"
+
 def vc_summarize(text):
     inj = _CTX.get("summarizer")   # tests may inject
     if callable(inj):
@@ -184,20 +226,44 @@ def vc_summarize(text):
         except Exception: pass
     env = {**os.environ, "PATH": os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin"}
     try:
-        r = subprocess.run(["claude", "--dangerously-skip-permissions", "-p", _SUMM_PROMPT % (text or "")[:16000]],
-                           capture_output=True, text=True, timeout=90, env=env)
+        # --strict-mcp-config (with no --mcp-config) loads ZERO MCP servers -> cuts the biggest, most variable part
+        # of `claude -p` cold-start. This is a one-shot text summarize; it needs no tools/MCP/project context.
+        r = subprocess.run(["claude", "--dangerously-skip-permissions", "--strict-mcp-config",
+                            "-p", _SUMM_PROMPT % (text or "")[:16000]],
+                           capture_output=True, text=True, timeout=90, env=env, cwd=_summarizer_cwd())
         out = (r.stdout or "").strip()
         return out or ""
     except Exception:
         return ""
 
 
+_META_RX = re.compile(
+    r"(appears? to be (completely |entirely )?(empty|blank)"
+    r"|nothing to summariz|cannot summariz|can't summariz|unable to summariz"
+    r"|no (message|content|text) (was |is )?(provided|given|included|attached)"
+    r"|there('s| is) no (message|content|text)"
+    r"|i don'?t see (a|any) (message|content|text)"
+    r"|please (provide|share) (the|a) message)", re.I)
+
+def _summary_usable(s, orig):
+    """A summary is usable only if it's real prose ABOUT the message -- never the summarizer talking about
+    its own inability to summarize. Meta/refusal shapes are short; only screen short outputs so a genuine
+    (long) summary that merely mentions the word 'empty' is never wrongly rejected."""
+    s = (s or "").strip()
+    if not s: return False
+    if len(s) < 600 and _META_RX.search(s): return False       # meta/refusal, not a summary
+    if len(s) > max(len(orig or ""), 800): return False        # "summary" longer than the source = broken
+    return True
+
+
 def vc_speak_last(text, cfg=None, announce=""):
     """Smart read of an agent's last message: verbatim when short, distilled when long. `announce` is an
     optional spoken preamble (who + where, built by the server) so you know which instance is talking.
-    Returns {ok, file, provider, spoken_text, summarized}."""
+    Returns {ok, file, provider, spoken_text, summarized} -- or {ok:False, empty:True} when there is no
+    speakable content (the caller treats empty as a first-class silent-skip, NOT a retryable error)."""
     text = (text or "").strip()
-    if not text: return {"ok": False, "error": "no message to read"}
+    if not text: return {"ok": False, "empty": True, "error": "no message to read"}
+    if not _speakable(text): return {"ok": False, "empty": True, "error": "message has no speakable text"}
     cfg = cfg or cfg_get()
     mode = cfg.get("read_mode") or "smart"
     thr = int(cfg.get("summarize_threshold") or 600)
@@ -205,7 +271,9 @@ def vc_speak_last(text, cfg=None, announce=""):
     spoken, summarized = text, False
     if do_sum:
         s = vc_summarize(text)
-        if s: spoken, summarized = s, True   # if the summarizer fails, fall back to reading it verbatim
+        if _summary_usable(s, text): spoken, summarized = s, True
+        # unusable/meta summary (e.g. "the message appears to be completely empty") -> fall back to reading
+        # the real text verbatim; NEVER speak the summarizer's meta-commentary aloud
     announce = (announce or "").strip()
     if announce: spoken = announce.rstrip(". ") + ". " + spoken   # e.g. "Mission Control here, working in the command center, voice folder. <reply>"
     res = vc_tts(spoken, cfg)
@@ -217,11 +285,27 @@ def vc_speak_last(text, cfg=None, announce=""):
                 ("tts_chars_" + ("elevenlabs" if prov == "elevenlabs" else ("say" if prov == "say" else "openai"))): len(_speakable(spoken))})
     return res
 
+def vc_render(text, cfg=None, announce=""):
+    """Speak EXACTLY the given text (verbatim, never summarized) -- for reading a pending question + its options
+    aloud. Same provider chain + metering as vc_speak_last."""
+    text = (text or "").strip()
+    if not text: return {"ok": False, "empty": True}
+    cfg = cfg or cfg_get()
+    announce = (announce or "").strip()
+    spoken = (announce.rstrip(". ") + ". " + text) if announce else text
+    res = vc_tts(spoken, cfg)
+    if res.get("ok"):
+        res["spoken_text"] = _speakable(spoken)[:1200]
+        prov = res.get("provider") or "openai"
+        _meter({"tts_chars": len(_speakable(spoken)), "tts_calls": 1,
+                ("tts_chars_" + ("elevenlabs" if prov == "elevenlabs" else ("say" if prov == "say" else "openai"))): len(_speakable(spoken))})
+    return res
+
 
 # ---- usage metering (so voice cost is VISIBLE, not guessed) ------------------------------------------
 # Deepgram prerecorded ~$0.0043/min; OpenAI tts-1-hd $30/1M chars, tts-1 $15/1M; ElevenLabs ~ $0.30/1k (est);
 # macOS `say` = free. We meter TTS chars (by provider) + STT seconds, roll up per month, and estimate $.
-_RATE = {"stt_per_sec": 0.0043 / 60.0, "openai": 30e-6, "openai_hd": 30e-6, "elevenlabs": 300e-6, "say": 0.0}
+_RATE = {"stt_per_sec": 0.0043 / 60.0, "openai": 15e-6, "openai_hd": 30e-6, "elevenlabs": 300e-6, "say": 0.0}   # openai now tts-1 ($15/1M chars); tts-1-hd was $30/1M
 def _usage_file(): return os.path.join(_CTX.get("STATE_DIR", "."), "_voice_usage.json")
 def _meter(patch):
     try:

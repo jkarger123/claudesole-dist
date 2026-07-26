@@ -6,7 +6,7 @@ A faithful port of the Karger & Co Command Center, adapted for the HP Tuners fle
    so every session is persistent + attachable in the BROWSER TERMINAL (stdlib WebSocket -> PTY)
  - lenses: Pillars / Routines / Ralph Loops / Machines / Sessions / Docs(managed CLAUDE.md blocks)
 Python stdlib only. Serves on 0.0.0.0:8799 -> reachable over Tailscale at http://100.109.63.56:8799 ."""
-import base64, fcntl, glob, hashlib, hmac, json, os, pty, re, secrets, select, shutil, signal, socket, struct, subprocess, sys, termios, threading, time, urllib.parse, urllib.request, urllib.error
+import base64, calendar, fcntl, glob, hashlib, hmac, json, os, pty, re, secrets, select, shutil, signal, socket, struct, subprocess, sys, termios, threading, time, urllib.parse, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # Engine sub-modules are imported DEFENSIVELY: a missing/broken optional module must NEVER crash-loop a whole
 # node (an un-shipped clips.py once took AFP down). On import failure we substitute an inert stub whose every
@@ -2876,7 +2876,7 @@ def _cwd_slug(cwd):
     return re.sub(r"[^A-Za-z0-9]", "-", cwd or "")
 
 def _pane_cwd(name):
-    code, o, _ = sh([TMUX, "display-message", "-p", "-t", name, "#{pane_current_path}"])
+    code, o, _ = sh([TMUX, "display-message", "-p", "-t", name, "#{pane_current_path}"], timeout=3)
     return o.strip() if code == 0 else ""
 
 def _transcripts_in(slugdir):
@@ -6067,7 +6067,8 @@ def _vault_audit(action, sid, node, result):
 def _vault_meta(sid, rec):
     return {"id": sid, "label": rec.get("label") or sid, "scope": rec.get("scope") or ["*"],
             "has_shared": bool(rec.get("shared")), "node_overrides": sorted((rec.get("per_node") or {}).keys()),
-            "revoked": bool(rec.get("revoked")), "created": rec.get("created"), "updated": rec.get("updated")}
+            "needed_by": rec.get("needed_by") or [], "revoked": bool(rec.get("revoked")),
+            "created": rec.get("created"), "updated": rec.get("updated")}
 def _vault_in_scope(rec, node):
     sc = rec.get("scope") or ["*"]
     return ("*" in sc) or (node in sc)
@@ -6307,6 +6308,54 @@ def vault_declare(key, label=None, scope=None, needed_by=None):
     rec["needed_by"] = sorted(set((rec.get("needed_by") or []) + ([needed_by] if needed_by else [])))
     rec["updated"] = int(time.time()); rec.setdefault("revoked", False); d[key] = rec; _vault_save(d)
     return {"ok": True, "declared": key}
+
+# ==== CORE CAPABILITY REGISTRY -- the optional keys that unlock BUILT-IN features ==============================
+# The built-in twin of an extension's `requires`: a declarative map of core feature -> the secret that turns it
+# on. It exists so the platform is HONEST about its optional inputs -- a fresh install is prompted for these keys
+# (the Vault lens "Features & the keys that unlock them" panel + a reserved 'needed, not set' slot each), and each
+# feature auto-enables the moment its key resolves (no code change, no restart beyond the lease TTL). Absent a key
+# the feature simply stays off -- graceful, never an error. Keys resolve VAULT-FIRST via _deploy_env, so a value
+# set once at Mission Control (scope '*') lights the feature up on every node that can lease it.
+#   To register a new core feature's key: add a row here (that's the whole contract) -- do NOT hardcode a second
+#   presence check elsewhere; read _core_capabilities_status() / _deploy_env(key).
+CORE_CAPABILITIES = [
+    {"key": "DEEPGRAM_API_KEY", "feature": "Voice input", "group": "Voice",
+     "unlocks": "Talk to any session and answer multiple-choice by voice (speech-to-text).",
+     "without": "Voice input is disabled -- you can still HEAR replies. No local STT fallback exists.",
+     "get": "deepgram.com"},
+    {"key": "ELEVENLABS_API_KEY", "feature": "Premium read-aloud", "group": "Voice",
+     "unlocks": "Natural ElevenLabs voice when a session is read aloud to you.",
+     "without": "Read-aloud falls back to OpenAI, then the built-in macOS voice.",
+     "get": "elevenlabs.io"},
+    {"key": "OPENAI_API_KEY", "feature": "OpenAI voice + generative AI", "group": "Voice / AI",
+     "unlocks": "OpenAI text-to-speech and OpenAI-backed generative features.",
+     "without": "Read-aloud uses the built-in macOS voice; OpenAI generative features stay off.",
+     "get": "platform.openai.com"},
+    {"key": "TELEGRAM_BOT_TOKEN", "feature": "Telegram notifications", "group": "Notify",
+     "unlocks": "Push alerts (job results, incidents, morning brief) to Telegram.",
+     "without": "Telegram push is disabled -- other notify channels are unaffected.",
+     "get": "@BotFather on Telegram"},
+]
+def _core_capabilities_status():
+    """The registry annotated with live present/absent for THIS node (via _deploy_env). Booleans only -- NEVER a
+    value. Powers the Vault-lens capabilities panel and onboarding: green = on, grey = add the key to enable."""
+    out = []
+    for c in CORE_CAPABILITIES:
+        try: present = bool(_deploy_env(c["key"]))
+        except Exception: present = False
+        out.append(dict(c, present=present))
+    return out
+def _declare_core_capabilities():
+    """Reserve a 'needed, not set' Vault slot for every core capability key -- the built-in twin of
+    _ext_declare_secrets. Idempotent: a key that already holds a value (locally or upstream) is left alone."""
+    n = 0
+    for c in CORE_CAPABILITIES:
+        try:
+            if _deploy_env(c["key"]): continue          # already satisfied (own vault or leased) -- don't reserve
+            r = vault_declare(c["key"], label=c["feature"], needed_by="core:" + re.sub(r"\W+", "-", c["feature"].lower()).strip("-"))
+            if r.get("ok") and not r.get("already"): n += 1
+        except Exception: pass
+    return n
 
 # ==== SECURE FIELDS -- out-of-band channel for sensitive values (they NEVER touch the chat/transcript) =========
 # REQUEST (user -> destination): an agent needs a secret -> POST /api/secure-request {label, dest}. A box pops up
@@ -9308,10 +9357,12 @@ def _compact_lock_acquire(name):
     except Exception:
         return False
 
-def _pane_busy(name):
-    """Claude Code shows 'esc to interrupt' while it's working; absence of it = idle/ready for input."""
-    _, o, _ = sh([TMUX, "capture-pane", "-t", name, "-p"])
-    return "esc to interrupt" in o.lower()
+def _pane_busy(name, pane=None):
+    """Claude Code shows 'esc to interrupt' while it's working; absence of it = idle/ready for input.
+    Pass a pre-captured `pane` to avoid a second capture-pane on the hot voice-watcher path."""
+    if pane is None:
+        _, pane, _ = sh([TMUX, "capture-pane", "-t", name, "-p"], timeout=3)   # short timeout: a wedged pane must not hang the voice path
+    return "esc to interrupt" in (pane or "").lower()
 
 # ---- PROJECT ONBOARDING: bring a just-added project up to ClaudeFather spec, then hand to the Chief of Staff.
 # ADOPT (brownfield) = point at an existing codebase, fan out cheap readers, structure + document it to spec.
@@ -12161,25 +12212,43 @@ def _claude_text(prompt, model="claude-haiku-4-5", timeout=40):
     except Exception:
         return None
 
-def _session_transcript_path(name):
-    """Best-effort path to a session's Claude Code transcript: its cwd -> the projects slug -> newest .jsonl."""
+def _jsonl_ts(lnb):
     try:
-        cwd = _pane_cwd(name)
-        if not cwd: return None
-        d = os.path.join(CLAUDE_PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", cwd))   # CC slugifies the abs path
-        if not os.path.isdir(d): return None
-        fs = sorted(glob.glob(os.path.join(d, "*.jsonl")), key=lambda f: -os.path.getmtime(f))
-        return fs[0] if fs else None
-    except Exception: return None
-
-def _session_last_assistant(name, maxchars=16000):
-    """The TEXT of the most recent assistant message in a session's transcript (skips pure tool-use turns).
-    Powers the Voice 'read the last message' button + conversation-mode 'a new reply landed' detection."""
-    p = _session_transcript_path(name)
-    if not p: return ""
+        o = json.loads(lnb); t = o.get("timestamp")
+        if t: return time.mktime(time.strptime(str(t)[:19], "%Y-%m-%dT%H:%M:%S"))
+    except Exception: pass
+    return None
+def _jsonl_span(p):
+    """(first_ts, last_ts) epochs from a transcript's OWN timestamp fields -- same parse basis, so the DIFFERENCE
+    is timezone-safe. Cheap: first line + a 16KB tail (never loads a multi-GB transcript into memory)."""
+    first = last = None
     try:
-        with open(p, errors="ignore") as f: lines = f.readlines()
-    except Exception: return ""
+        with open(p, "rb") as f:
+            for _ in range(40):
+                ln = f.readline()
+                if not ln: break
+                v = _jsonl_ts(ln)
+                if v: first = v; break
+            try:
+                f.seek(0, 2); sz = f.tell(); f.seek(max(0, sz - 16384)); tail = f.read().splitlines()
+            except Exception: tail = []
+            for ln in reversed(tail):
+                v = _jsonl_ts(ln)
+                if v: last = v; break
+    except Exception: return (None, None)
+    return (first, last)
+def _tail_lines(path, nbytes=262144):
+    """The last ~nbytes of a file as lines -- so a 30MB transcript never gets fully read into memory."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2); sz = f.tell(); f.seek(max(0, sz - nbytes))
+            data = f.read()
+        return data.decode("utf-8", "ignore").splitlines()
+    except Exception: return []
+def _last_assistant_in(path, maxchars=16000):
+    """Last assistant TEXT in a SPECIFIC transcript file (skips pure tool-use turns)."""
+    if not path: return ""
+    lines = _tail_lines(path)
     for ln in reversed(lines[-400:]):
         try: o = json.loads(ln)
         except Exception: continue
@@ -12193,8 +12262,245 @@ def _session_last_assistant(name, maxchars=16000):
             for b in c:
                 if isinstance(b, dict) and b.get("type") == "text" and b.get("text"): parts.append(b["text"])
         txt = "\n".join(parts).strip()
-        if txt: return txt[:maxchars]   # keep scanning back past tool-only assistant turns
+        if txt: return txt[:maxchars]
     return ""
+
+def _norm_txt(s): return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+def _tmux_session_created(name):
+    try:
+        code, o, _ = sh([TMUX, "display-message", "-p", "-t", name, "#{session_created}"], timeout=3)
+        o = o.strip()
+        return int(o) if (code == 0 and o.isdigit()) else None
+    except Exception: return None
+def _jsonl_first_epoch(path):
+    """UTC epoch of a transcript's FIRST record (calendar.timegm -> the 'Z' string is UTC; matches os/tmux epochs)."""
+    try:
+        with open(path, "rb") as f:
+            for _ in range(60):
+                ln = f.readline()
+                if not ln: break
+                try:
+                    o = json.loads(ln); t = o.get("timestamp")
+                    if t: return calendar.timegm(time.strptime(str(t)[:19], "%Y-%m-%dT%H:%M:%S"))
+                except Exception: continue
+    except Exception: pass
+    return None
+_TP_CACHE = {}   # name -> (ts, path); a 3s memo so a single readback's several lookups don't recompute the match
+def _session_transcript_path(name):
+    """The session's Claude Code transcript. cwd -> projects slug dir. ONE transcript there = easy. But a SHARED
+    cwd (the CC root, where EVERY Chief-of-Staff session AND every headless `claude -p` run live) holds many
+    .jsonl files, so 'newest' is a coin flip. Resolve it DETERMINISTICALLY + work-state-independently:
+    PRIMARY = match the transcript CREATED when THIS tmux session launched (session_created ~= the transcript's
+    first-record timestamp; each tmux session writes ONE transcript from launch, so two Chiefs in one folder are
+    told apart by WHEN they started -- proven to nail it within ~1s). FALLBACKS (only if no session_created
+    match): drop one-shot `-p` transcripts (interactive span >= 3min), then match the pane's visible last message,
+    then newest mtime. 3s memo cache."""
+    try:
+        try:
+            c = _TP_CACHE.get(name)
+            if c and (time.time() - c[0]) < 3 and c[1] and os.path.exists(c[1]): return c[1]
+        except Exception: pass
+        cwd = _pane_cwd(name)
+        if not cwd: return None
+        d = os.path.join(CLAUDE_PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", cwd))   # CC slugifies the abs path
+        if not os.path.isdir(d): return None
+        js = glob.glob(os.path.join(d, "*.jsonl"))
+        if not js: return None
+        chosen = None
+        if len(js) == 1:
+            chosen = js[0]
+        # PRIMARY: the transcript whose first record lines up with this tmux session's creation time
+        if not chosen:
+            sc = _tmux_session_created(name)
+            if sc:
+                best, bestd = None, None
+                for j in js:
+                    fe = _jsonl_first_epoch(j)
+                    if fe is None: continue
+                    dd = abs(fe - sc)
+                    if bestd is None or dd < bestd: bestd, best = dd, j
+                if best and bestd is not None and bestd <= 300:   # within 5 min of session start = confident
+                    chosen = best
+        # FALLBACK: interactive filter -> pane-content match -> newest mtime
+        if not chosen:
+            inter = []
+            for j in js:
+                try:
+                    fs, ls = _jsonl_span(j)
+                    if (ls and fs and (ls - fs) >= 180): inter.append((os.path.getmtime(j), j))
+                except Exception: pass
+            cands = inter if inter else [(os.path.getmtime(j), j) for j in js]
+            cands.sort(reverse=True)
+            if len(cands) == 1:
+                chosen = cands[0][1]
+            else:
+                try:
+                    _, pane, _ = sh([TMUX, "capture-pane", "-t", name, "-p", "-S", "-80"], timeout=3)
+                    pn = _norm_txt(pane); best, bestscore = None, 0
+                    if pn:
+                        for mt, j in cands:
+                            lt = _norm_txt(_last_assistant_in(j, 600))
+                            if len(lt) < 24: continue
+                            score = sum(1 for k in range(0, max(1, len(lt) - 24), 12) if lt[k:k+24] in pn)
+                            if score > bestscore: bestscore, best = score, j
+                    chosen = best if (best and bestscore > 0) else cands[0][1]
+                except Exception:
+                    chosen = cands[0][1]
+        try: _TP_CACHE[name] = (time.time(), chosen)
+        except Exception: pass
+        return chosen
+    except Exception: return None
+
+def _session_last_assistant(name, maxchars=16000):
+    """The TEXT of the most recent assistant message in a session's transcript (skips pure tool-use turns).
+    Powers the Voice 'read the last message' button + conversation-mode 'a new reply landed' detection."""
+    return _last_assistant_in(_session_transcript_path(name), maxchars)
+
+_OPT_RE = re.compile(r"^\s*[>❯❱▶*\s]*(\d+)\.\s+(\S.*?)\s*$")   # "❯ 1. Alpha" / "  2. Bravo"
+_AUTO_OPT = re.compile(r"^(type something|chat about|other\b|let me type|write my own)", re.I)   # Claude Code's auto-added rows
+def _session_pending_question(name, pane=None):
+    """If the session is PAUSED on an AskUserQuestion, return the parsed question so voice can read + answer it.
+    CRITICAL: Claude Code buffers the whole turn and does NOT write the question to the transcript until AFTER you
+    answer -- so the transcript can NEVER see a LIVE question. The live picker only exists on the terminal PANE:
+        ❯ 1. Alpha
+          2. Bravo
+          4. Type something.
+        Enter to select · ↑/↓ to navigate · Esc to cancel
+    So detect + parse it straight off the pane. Numbered options, arrow-navigable, starts highlighted on #1.
+    Pass a pre-captured `pane` (-S -45) to avoid a redundant capture on the hot watcher path."""
+    if pane is None:
+        try:
+            _, pane, _ = sh([TMUX, "capture-pane", "-t", name, "-p", "-S", "-45"], timeout=3)
+        except Exception:
+            return None
+    if not pane or ("to navigate" not in pane and "Enter to select" not in pane): return None   # the picker footer = the signature
+    lines = pane.split("\n")
+    def _clean(s): return s.strip().rstrip("…").strip()
+    def _prog(s): return ("←" in s or "→" in s) or (sum(s.count(c) for c in "☐☒◻◼◽▫") >= 2)   # multi-part progress bar "← ☐ Meal ☐ Season ✔ Submit →"
+    def _junk(s): return (not s) or ("─" in s) or ("to navigate" in s) or ("Enter to select" in s) or _prog(s)
+    def _hdr(s): return s.lstrip().startswith(("☐", "◻", "▢", "◽", "▫")) or _prog(s)
+    # ISOLATE THE CURRENT PICKER (the pane holds scrollback -- earlier messages, old questions, task lists).
+    # The live picker is at the BOTTOM: its footer is the LAST 'to navigate' line; its block starts at the
+    # nearest '☐' header above that. Parse ONLY that window, else you read the whole screen + wrong numbers.
+    foot_i = None
+    for i in range(len(lines) - 1, -1, -1):
+        if "to navigate" in lines[i] or "Enter to select" in lines[i]: foot_i = i; break
+    if foot_i is None: return None
+    top_i = None
+    for i in range(foot_i - 1, -1, -1):
+        if _hdr(lines[i]): top_i = i; break
+    win = lines[(top_i if top_i is not None else max(0, foot_i - 14)):foot_i]   # the current picker's block only
+    opt_i = [(i, m) for i, ln in enumerate(win) for m in [_OPT_RE.match(ln)] if m]
+    if len(opt_i) < 2: return None
+    first_i = opt_i[0][0]
+    # QUESTION = the header row (☐ topic) + lines down to the first option -- all within THIS picker's window
+    qlines = []
+    for ln in win[:first_i]:
+        s = ln.strip()
+        if _junk(s): continue
+        if _hdr(s): s = s[1:].strip()   # keep the header topic as a lead-in
+        qlines.append(s)
+    qtext = re.sub(r"\s+", " ", " ".join(qlines)).strip() or "There's a multiple-choice question on screen"
+    # OPTIONS with DESCRIPTIONS (indented lines under each numbered row, up to the next option), within the window
+    opts = []
+    for k, (i, m) in enumerate(opt_i):
+        lab = _clean(m.group(2))
+        if not lab or _AUTO_OPT.match(lab): continue   # drop Claude Code's auto-added 'Type something' / 'Chat about'
+        nexti = opt_i[k + 1][0] if k + 1 < len(opt_i) else len(win)
+        desc = []
+        for ln in win[i + 1:nexti]:
+            s = ln.strip()
+            if s and not _junk(s) and not _OPT_RE.match(ln): desc.append(_clean(s))
+        opts.append({"label": lab, "description": re.sub(r"\s+", " ", " ".join(desc)).strip()})
+    if len(opts) < 2: return None
+    # is this the FINAL 'submit your answers' step of a multi-part question? ("1. Submit answers  2. Cancel")
+    submit_i = next((i for i, o in enumerate(opts) if re.match(r"submit\b", o["label"], re.I)), -1)
+    is_submit = submit_i >= 0 and any(re.match(r"(cancel|keep|review|edit|no\b|go back)", o["label"], re.I) for o in opts)
+    return {"tool_id": "pane", "questions": [{"question": qtext, "header": "", "multiSelect": False,
+            "options": opts, "submit_index": (submit_i if is_submit else -1)}]}
+
+_ORDINALS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
+def _question_speech(sess, q):
+    """The spoken form of a pending question -- the FULL question text AND each option's label + description, so
+    you actually know what's being asked, not just the choices."""
+    parts = []
+    qt = re.sub(r"\s+", " ", (q.get("question") or "").strip())
+    if qt: parts.append(qt if qt.rstrip().endswith(("?", ".", "!")) else qt + ".")
+    opts = q.get("options") or []
+    if opts:
+        parts.append("Here are the options.")
+        for i, op in enumerate(opts):
+            lab = (op.get("label") or "").strip()
+            desc = re.sub(r"\s+", " ", (op.get("description") or "").strip())
+            line = "%s: %s." % (_ORDINALS[i] if i < len(_ORDINALS) else str(i + 1), lab)
+            if desc: line += " " + desc + ("" if desc.endswith((".", "!", "?")) else ".")
+            parts.append(line)
+        parts.append("Say the number, the option, or your own answer.")
+    return " ".join(parts)
+
+def _answer_question(session, index, num_options, text=""):
+    """Submit an answer to a pending AskUserQuestion by driving the terminal picker: Down x index + Enter picks
+    option `index`; index None/out-of-range picks 'Other' (the row after the provided options) and types `text`."""
+    if sh([TMUX, "has-session", "-t", session])[0] != 0: return False
+    try:
+        if index is not None and 0 <= index < num_options:
+            for _ in range(index):
+                sh([TMUX, "send-keys", "-t", session, "Down"]); time.sleep(0.12)
+            sh([TMUX, "send-keys", "-t", session, "Enter"])
+        else:
+            for _ in range(num_options):   # 'Other' is auto-added after the provided options
+                sh([TMUX, "send-keys", "-t", session, "Down"]); time.sleep(0.12)
+            sh([TMUX, "send-keys", "-t", session, "Enter"]); time.sleep(0.5)
+            if text:
+                sh([TMUX, "send-keys", "-t", session, "-l", text]); time.sleep(0.3)
+                sh([TMUX, "send-keys", "-t", session, "Enter"])
+        return True
+    except Exception: return False
+
+def _session_finished(name):
+    """TRUE only when the session has genuinely ENDED ITS TURN and is waiting for you -- not mid-task.
+    'esc to interrupt' (pane_busy) is racy: it blinks off between an intermediate message and the next tool,
+    so a message read the instant Voice mode flips on could be a mid-step message ('let me check X...'), not
+    the final answer. The transcript is authoritative: the LAST meaningful record must be an assistant message
+    that ended with end_turn (not a tool_use turn, and not a trailing tool_result the agent is about to act on)."""
+    p = _session_transcript_path(name)
+    if not p: return False
+    lines = _tail_lines(p)
+    for ln in reversed(lines[-80:]):
+        try: o = json.loads(ln)
+        except Exception: continue
+        m = o.get("message") if isinstance(o.get("message"), dict) else None
+        role = (m.get("role") if m else None) or o.get("type") or ""
+        if role == "assistant":
+            sr = (m or o).get("stop_reason")
+            if sr == "tool_use": return False           # the agent is about to run tools -> still working
+            c = (m or o).get("content")
+            has_tool = isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_use" for b in c)
+            if has_tool and not sr: return False         # tool-call turn with no recorded stop -> still working
+            return True                                  # end_turn / stop_sequence / max_tokens -> the turn is over
+        if role == "user":
+            c = (m or o).get("content")
+            if isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
+                return False                             # a tool just returned; the agent will continue -> busy
+            return False                                 # the last thing is your own message; no reply yet -> busy
+        # system / summary / other -> keep scanning back
+    return False
+
+VOICE_DEBUG_FILE = os.path.join(STATE_DIR, "_voice_debug.jsonl")
+def _voice_dbg(rec):
+    """Append a one-line trace of a voice readback so we can SEE what/why it generated (per operator request):
+    which session, which transcript file it RESOLVED to, whether it judged finished/busy, and the text+summary
+    heads. Keeps the last ~300 lines. Read via GET /api/voice/debug."""
+    try:
+        rec["ts"] = time.strftime("%H:%M:%S")
+        line = json.dumps(rec, ensure_ascii=False)
+        old = []
+        try:
+            with open(VOICE_DEBUG_FILE, errors="ignore") as f: old = f.read().splitlines()
+        except Exception: pass
+        old.append(line); old = old[-300:]
+        with open(VOICE_DEBUG_FILE, "w") as f: f.write("\n".join(old) + "\n")
+    except Exception: pass
 
 def _voice_announce(sess):
     """The spoken 'who + where' preamble for a readback: node name + the session's folder scope, read top-down,
@@ -12237,12 +12543,13 @@ def vq_enroll(session, on):
         d = _vq_load(); en = d.setdefault("enrolled", {}); q = d.setdefault("queue", [])
         if on:
             (d.setdefault("muted", {})).pop(session, None)   # explicit enroll un-mutes
-            fp = _vq_fp(session); busy = _pane_busy(session)
+            fp = _vq_fp(session); done = _session_finished(session) and not _pane_busy(session)
             en[session] = {"seen_fp": fp}
-            if fp and not busy:   # already idle with something to say -> present it right away (start the conversation now)
+            if fp and done:   # already FINISHED its turn with something to say -> present it right away
                 q[:] = [x for x in q if x.get("session") != session]
                 q.append({"session": session, "fp": fp, "scope": (_session_scope(session) or ""), "ts": int(time.time())})
-            # busy -> baseline seen_fp set; the watcher enqueues it when it FINISHES
+            # still working (or mid-task) -> baseline seen_fp set; the watcher enqueues it ONLY when it truly FINISHES
+            # (this is the fix for "I turned Voice mode on while it was working and it read me a mid-step message")
         else:
             en.pop(session, None)
             d["queue"] = [x for x in q if x.get("session") != session]
@@ -12252,6 +12559,18 @@ def vq_ack(session):
     with _VQ_LOCK:
         d = _vq_load(); d["queue"] = [q for q in d.get("queue", []) if q.get("session") != session]; _vq_save(d)
     return {"ok": True}
+def vq_touch(session):
+    """After a voice REPLY was injected: enroll the session with its CURRENT message as the seen baseline
+    (WITHOUT immediate-presenting -- the watcher enqueues the REPLY when it lands), and drop any queued entry
+    for it (you just replied to it, so its older queued message is stale). Muted stays muted / no-op if mode off."""
+    if not session: return
+    with _VQ_LOCK:
+        d = _vq_load()
+        if not d.get("mode") or session in (d.get("muted") or {}): return
+        en = d.setdefault("enrolled", {})
+        en[session] = {"seen_fp": _vq_fp(session)}
+        d["queue"] = [x for x in d.get("queue", []) if x.get("session") != session]
+        _vq_save(d)
 def vq_mute(session, on):
     """Per-session opt-OUT: a muted session never enqueues + never auto-enrolls (until un-muted)."""
     if not session: return {"ok": False, "error": "no session"}
@@ -12266,44 +12585,84 @@ def vq_mute(session, on):
         _vq_save(d)
     return vq_state()
 def vq_mode(on):
-    """The global 'Voice mode' switch. Off clears the live queue but keeps the enrolled/muted roster for resume."""
+    """The global 'Voice mode' switch. Off clears the live queue but keeps the enrolled/muted roster for resume.
+    ON = start FRESH: only completions from NOW ON surface. MUST be FAST (the mic tap awaits this): do NOT read
+    transcripts here (that means capture-pane + big-file reads per session, which can hang the request). Instead
+    bump baseline_gen and let the background watcher baseline every enrolled seen_fp on its next tick."""
     with _VQ_LOCK:
-        d = _vq_load(); d["mode"] = bool(on)
-        if not on: d["queue"] = []
+        d = _vq_load(); d["mode"] = bool(on); d["queue"] = []
+        if on: d["baseline_gen"] = int(d.get("baseline_gen", 0)) + 1
         _vq_save(d)
     return vq_state()
 def vq_state():
     d = _vq_load()
+    # SELF-CLEANING: a queued session that has RESUMED WORKING (new turn started after it finished) is stale --
+    # never show it as "ready". Filter the served queue to sessions still at end-of-turn (cheap transcript check;
+    # the watcher re-enqueues it when it finishes AGAIN). Fixes "my working session shows as ready / it looks like
+    # it's summarizing the session I'm in."
+    q = d.get("queue", [])
+    def _keep(x):
+        s = x.get("session")
+        if not s: return False
+        if x.get("kind") == "question": return _session_pending_question(s) is not None   # keep only while still unanswered
+        return _session_finished(s)
+    ready = [x for x in q if _keep(x)]
     return {"ok": True, "mode": bool(d.get("mode")), "enrolled": list((d.get("enrolled") or {}).keys()),
-            "muted": list((d.get("muted") or {}).keys()), "queue": d.get("queue", [])}
+            "muted": list((d.get("muted") or {}).keys()), "queue": ready}
 def _voice_queue_watch():
     """Every ~4s (only while Voice mode is ON): an enrolled, un-muted session that's idle with a NEW final
     message enqueues (dedup: one entry/session)."""
+    handled_baseline = None
     while True:
         try:
             d0 = _vq_load()
             if not d0.get("mode"): time.sleep(4); continue      # voice mode off -> watcher idle
             en = (d0.get("enrolled") or {}); muted = (d0.get("muted") or {})
+            # BASELINE pass (moved off the request path so the mic never hangs): when Voice mode was just turned on,
+            # mark whatever's currently there as already-seen so a pre-existing completion doesn't dump on you.
+            bg = d0.get("baseline_gen")
+            if bg != handled_baseline:
+                base = {}
+                for sess in list(en.keys()):
+                    try: base[sess] = _vq_fp(sess)
+                    except Exception: base[sess] = ""
+                with _VQ_LOCK:
+                    d = _vq_load(); en2 = d.setdefault("enrolled", {})
+                    for sess, fp in base.items():
+                        if sess in en2: en2[sess] = {"seen_fp": fp}
+                    _vq_save(d)
+                handled_baseline = bg
+                time.sleep(2.5); continue        # this pass only baselines; enqueue on the next tick
             updates = []
             for sess, meta in list(en.items()):
                 try:
                     if sess in muted: continue                    # opted out
-                    if _pane_busy(sess): continue                 # still working -> not ready to present
+                    _, _pane, _ = sh([TMUX, "capture-pane", "-t", sess, "-p", "-S", "-45"], timeout=3)   # ONE capture, reused below
+                    pq = _session_pending_question(sess, pane=_pane)   # PAUSED on a multiple-choice question -> surface it (a 'needs you', even though the pane isn't 'finished')
+                    if pq and pq.get("questions"):
+                        q0 = pq["questions"][0]
+                        fp = hashlib.sha1((pq.get("tool_id", "") + (q0.get("question") or "")).encode("utf-8", "ignore")).hexdigest()[:16]
+                        if fp and fp != meta.get("seen_fp"): updates.append((sess, fp, _session_scope(sess) or "", "question"))
+                        continue
+                    if _pane_busy(sess, pane=_pane): continue     # still working -> not ready to present
+                    if not _session_finished(sess): continue      # mid-task (last transcript record is a tool turn) -> wait for the REAL end of turn
                     fp = _vq_fp(sess)
                     if not fp or fp == meta.get("seen_fp"): continue
-                    updates.append((sess, fp, _session_scope(sess) or ""))
+                    updates.append((sess, fp, _session_scope(sess) or "", "done"))
                 except Exception: continue
             if updates:
                 with _VQ_LOCK:
                     d = _vq_load(); en2 = d.setdefault("enrolled", {}); q = d.setdefault("queue", []); now = int(time.time())
-                    for sess, fp, scope in updates:
+                    for sess, fp, scope, kind in updates:
                         if sess not in en2 or en2[sess].get("seen_fp") == fp: continue
                         q[:] = [x for x in q if x.get("session") != sess]
-                        q.append({"session": sess, "fp": fp, "scope": scope, "ts": now})
+                        q.append({"session": sess, "fp": fp, "scope": scope, "ts": now, "kind": kind})
                         en2[sess]["seen_fp"] = fp
+                        try: _voice_dbg({"ev": "enqueue", "sess": sess, "kind": kind, "fp": fp})   # trace: the watcher found a completion/question
+                        except Exception: pass
                     _vq_save(d)
         except Exception: pass
-        time.sleep(4)
+        time.sleep(2.5)   # snappier finish-detection for OTHER sessions (the client fast-poll covers your own reply)
 
 def _transcript_tail(path, maxchars=6000):
     """The recent human+assistant TEXT from a transcript (no tool noise), tail-trimmed -- input for distill/refresh."""
@@ -18096,7 +18455,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/extensions":    return self._s(200, json.dumps(extensions_list()))
         if u.path == "/api/vault":
             if not self._operator_only(): return self._s(403, json.dumps({"ok": False, "error": "operator only"}))
-            return self._s(200, json.dumps({**vault_list(), "audit": vault_audit_tail(40)}))
+            return self._s(200, json.dumps({**vault_list(), "audit": vault_audit_tail(40), "capabilities": _core_capabilities_status()}))
         if u.path == "/api/secret-resolve":
             # Resolve a vault KEY to its VALUE for an on-box agent to USE (probe/call an API). LOCALHOST-ONLY +
             # token-gated: the value goes to the agent's own shell (capture into a var), never the dashboard or
@@ -18265,16 +18624,45 @@ class H(BaseHTTPRequestHandler):
             except Exception: return self._s(404, "not found")
         if u.path == "/api/voice/config":   # VOICE I/O: current provider/read-mode + which keys are present
             return self._s(200, json.dumps(voice.cfg_get())) if voice else self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
+        if u.path == "/api/voice/transcripts":   # VOICE recovery: recent successful transcriptions (safety net if the client dropped one)
+            if not voice: return self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
+            try: _n = int(q.get("n", ["30"])[0])
+            except Exception: _n = 30
+            return self._s(200, json.dumps(voice.vc_transcripts(_n)))
         if u.path == "/api/voice/state":    # VOICE conversation-mode poll: is the agent busy + has a new reply landed
             sess = q.get("session", [""])[0]
             if not sess: return self._s(200, json.dumps({"ok": False, "error": "no session"}))
             txt = _session_last_assistant(sess)
             fp = hashlib.sha1(txt.encode("utf-8", "ignore")).hexdigest()[:16] if txt else ""
-            return self._s(200, json.dumps({"ok": True, "busy": _pane_busy(sess), "msg_fp": fp, "has_msg": bool(txt)}))
+            busy = _pane_busy(sess) or not _session_finished(sess)   # 'busy' means "not ready to read yet" -> mid-task never triggers a readback
+            return self._s(200, json.dumps({"ok": True, "busy": busy, "msg_fp": fp, "has_msg": bool(txt)}))
+        if u.path == "/api/voice/question":   # VOICE: is this session paused on a multiple-choice question? -> read+answer by voice
+            sess = q.get("session", [""])[0]
+            pq = _session_pending_question(sess) if sess else None
+            if not pq or not pq.get("questions"):
+                return self._s(200, json.dumps({"ok": True, "pending": False}))
+            q0 = pq["questions"][0]   # v1: the first question (multi-question falls back to on-screen for the rest)
+            opts = [{"label": (o.get("label") or ""), "description": (o.get("description") or "")} for o in (q0.get("options") or [])]
+            qtext = q0.get("question") or ""
+            fp = hashlib.sha1((pq.get("tool_id", "") + qtext).encode("utf-8", "ignore")).hexdigest()[:16]
+            if q0.get("submit_index", -1) >= 0:
+                _voice_dbg({"ev": "submit-step", "sess": sess, "submit_index": q0.get("submit_index"), "text_head": qtext[:80]})
+            return self._s(200, json.dumps({"ok": True, "pending": True, "fp": fp, "tool_id": pq.get("tool_id"),
+                "question": qtext, "header": q0.get("header", ""), "multiSelect": bool(q0.get("multiSelect")),
+                "options": opts, "num_questions": len(pq["questions"]), "submit_index": q0.get("submit_index", -1)}))
         if u.path == "/api/voice/queue":    # VOICE attention queue (P1): enrolled sessions + who's waiting to present
             return self._s(200, json.dumps(vq_state()))
         if u.path == "/api/voice/usage":    # VOICE cost meter: this month's Deepgram seconds + TTS chars -> $ estimate
             return self._s(200, json.dumps(voice.usage_summary())) if voice else self._s(200, json.dumps({"ok": False}))
+        if u.path == "/api/voice/debug":    # VOICE trace: what/why each readback generated (session, resolved transcript, text+summary heads)
+            rows = []
+            try:
+                with open(VOICE_DEBUG_FILE, errors="ignore") as f:
+                    for ln in f.read().splitlines()[-80:]:
+                        try: rows.append(json.loads(ln))
+                        except Exception: pass
+            except Exception: pass
+            return self._s(200, json.dumps({"ok": True, "rows": rows}))
         if u.path == "/api/google/gmail-thread":  return self._s(200, json.dumps(gmail_thread(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-att":
             b, err = gmail_attachment_bytes(q.get("id", [""])[0], q.get("att", [""])[0])
@@ -18821,21 +19209,67 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(notebook.nb_transcribe(body.get("audio", ""), body.get("mime", "audio/webm"))))
         if u.path == "/api/voice/dictate":   # VOICE talk: transcribe a recorded mic blob (Deepgram) -> text
             if not voice: return self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
-            return self._s(200, json.dumps(voice.vc_stt(body.get("audio", ""), body.get("mime", "audio/webm"))))
+            return self._s(200, json.dumps(voice.vc_stt(body.get("audio", ""), body.get("mime", "audio/webm"), body.get("session", ""))))
         if u.path == "/api/voice/speak-last":   # VOICE hear: render a session's last assistant reply to audio (smart)
             if not voice: return self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
             sess = body.get("session", "")
+            _tp = _session_transcript_path(sess) if sess else None
+            _pb = _pane_busy(sess) if sess else False
+            _fin = _session_finished(sess) if sess else False
+            # NEVER read a session that's mid-task -- its "last message" would be an intermediate step, not the
+            # final answer. This is the hard backstop: no matter how a session got presented, if it's working now,
+            # refuse to render audio (the queue self-heals; the dock skips busy and waits for the real end of turn).
+            if sess and (_pb or not _fin):
+                _voice_dbg({"ev": "refuse-busy", "sess": sess, "pane_busy": _pb, "finished": _fin,
+                            "transcript": os.path.basename(_tp) if _tp else None})
+                return self._s(200, json.dumps({"ok": False, "busy": True, "error": "session is still working"}))
             txt = _session_last_assistant(sess) if sess else ""
-            if not txt: return self._s(200, json.dumps({"ok": False, "error": "no readable message yet in that session"}))
+            if not txt:
+                _voice_dbg({"ev": "empty", "sess": sess, "transcript": os.path.basename(_tp) if _tp else None})
+                return self._s(200, json.dumps({"ok": False, "empty": True, "error": "no readable message yet in that session"}))
             _res = voice.vc_speak_last(txt, announce=_voice_announce(sess))
             if isinstance(_res, dict) and _res.get("ok"):
                 _res["fp"] = hashlib.sha1(txt.encode("utf-8", "ignore")).hexdigest()[:16]   # fp of the message actually read -> the loop pins its 'new reply' baseline to this (no off-by-one)
+            _voice_dbg({"ev": "read", "sess": sess, "transcript": os.path.basename(_tp) if _tp else None,
+                        "finished": _fin, "summarized": bool(isinstance(_res, dict) and _res.get("summarized")),
+                        "text_head": txt[:180], "spoken_head": (_res.get("spoken_text", "")[:180] if isinstance(_res, dict) else ""),
+                        "provider": (_res.get("provider") if isinstance(_res, dict) else None)})
             return self._s(200, json.dumps(_res))
         if u.path == "/api/voice/send":   # VOICE talk: inject a spoken turn into a session (guarded injector)
             sess, txt = body.get("session", ""), (body.get("text", "") or "").strip()
             if not sess or not txt: return self._s(200, json.dumps({"ok": False, "error": "session and text required"}))
             _mesh_deliver(sess, txt)
+            try: vq_touch(sess)   # baseline this session's current message so the queue watcher enqueues the REPLY when it lands
+            except Exception: pass
             return self._s(200, json.dumps({"ok": True}))
+        if u.path == "/api/voice/say":   # VOICE: render an arbitrary short phrase to audio (confirmations, prompts)
+            if not voice: return self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
+            _txt = (body.get("text", "") or "").strip()
+            if not _txt: return self._s(200, json.dumps({"ok": False, "empty": True}))
+            return self._s(200, json.dumps(voice.vc_render(_txt)))
+        if u.path == "/api/voice/speak-question":   # VOICE: render a pending question + its options to audio
+            if not voice: return self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
+            sess = body.get("session", "")
+            pq = _session_pending_question(sess) if sess else None
+            if not pq or not pq.get("questions"): return self._s(200, json.dumps({"ok": False, "empty": True, "error": "no pending question"}))
+            q0 = pq["questions"][0]
+            spoken = _question_speech(sess, q0)
+            _res = voice.vc_render(spoken, announce=_voice_announce(sess))
+            if isinstance(_res, dict) and _res.get("ok"):
+                _res["fp"] = hashlib.sha1((pq.get("tool_id", "") + (q0.get("question") or "")).encode("utf-8", "ignore")).hexdigest()[:16]
+            _voice_dbg({"ev": "question", "sess": sess, "text_head": spoken[:180]})
+            return self._s(200, json.dumps(_res))
+        if u.path == "/api/voice/answer":   # VOICE: answer a pending multiple-choice question (index = picked option, else Other+text)
+            sess = body.get("session", "")
+            idx = body.get("index"); text = (body.get("text", "") or "").strip()
+            pq = _session_pending_question(sess) if sess else None
+            if not pq or not pq.get("questions"): return self._s(200, json.dumps({"ok": False, "error": "no pending question to answer"}))
+            n = len((pq["questions"][0].get("options") or []))
+            try: idx = int(idx) if idx is not None and str(idx) != "" else None
+            except Exception: idx = None
+            ok = _answer_question(sess, idx, n, text)
+            _voice_dbg({"ev": "answer", "sess": sess, "text_head": ("option#" + str(idx) if idx is not None else ("Other: " + text[:80]))})
+            return self._s(200, json.dumps({"ok": bool(ok)}))
         if u.path == "/api/voice/enroll":   # VOICE queue: add/remove a session from the attention queue
             return self._s(200, json.dumps(vq_enroll(body.get("session", ""), bool(body.get("on", True)))))
         if u.path == "/api/voice/queue-ack":   # VOICE queue: this session was presented -> drop it from the queue
@@ -28308,6 +28742,7 @@ async function loadVault(){
     +'<div class="aff-wrap">'
     +'<div class="aff-head"><b style="font-size:16px">🔐 Credential Vault</b><span class="sub">'+esc(d.node||'')+' · encrypted at rest · checkout/lease on demand</span></div>'
     +'<div class="aff-kpis">'+affKpi(secs.length,'secrets')+affKpi(shared,'shared')+affKpi(overrides,'node overrides')+affKpi(revoked,'revoked')+'</div>'
+    +vaultCaps(d.capabilities||[])
     +'<div class="aff-panels">'
       +'<div class="aff-pane"><h3><span>Secrets</span><span class="sub">scope = which nodes may lease</span></h3><div class="aff-scroll"><table class="aff-tbl">'
         +'<thead><tr><th>ID / label</th><th>Scope</th><th>Values</th><th>Status</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div></div>'
@@ -28323,13 +28758,35 @@ async function loadVault(){
     +'</div></div>';
   g.innerHTML=h;
 }
+function vaultCaps(caps){
+  if(!caps||!caps.length) return '';
+  var on=caps.filter(function(c){return c.present;}).length;
+  var rows=caps.map(function(c){
+    var dot='<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:'+(c.present?'var(--ok,#3fb950)':'var(--dim)')+';margin:4px 8px 0 0;flex:0 0 auto"></span>';
+    var stat=c.present?'<span style="color:var(--ok,#3fb950);font-size:11px">on</span>':'<span style="color:var(--warn,#d29922);font-size:11px">add key to enable</span>';
+    var getl=(!c.present&&c.get)?('<span class="sub" style="font-size:11px"> · get one at '+esc(c.get)+'</span>'):'';
+    var btn=c.present?'':'<div style="margin-top:5px"><button class="mini go" onclick="vaultFill(\''+esc(c.key)+'\',\''+esc(c.feature)+'\')">Add '+esc(c.key)+'</button></div>';
+    return '<div style="display:flex;align-items:flex-start;padding:7px 0;border-top:1px solid var(--line)">'+dot
+      +'<div style="flex:1;min-width:0"><b>'+esc(c.feature)+'</b> <span class="vlt-tag">'+esc(c.group||'')+'</span> '+stat
+      +'<div class="sub" style="font-size:11px;margin-top:2px">'+esc(c.present?c.unlocks:c.without)+getl+'</div>'+btn+'</div></div>';
+  }).join('');
+  return '<div class="aff-pane" style="margin-bottom:12px"><h3><span>Features &amp; the keys that unlock them</span><span class="sub">'+on+'/'+caps.length+' on · set a key here (scope *) and the feature lights up on every node</span></h3><div style="padding:2px 13px 11px">'+rows+'</div></div>';
+}
 function vaultRow(s){
+  var empty=!s.has_shared&&!((s.node_overrides||[]).length);
   var scope=(s.scope||['*']).map(function(x){return '<span class="vlt-tag">'+esc(x)+'</span>';}).join('');
   var vals=(s.has_shared?'<span class="vlt-tag">shared</span>':'')+(s.node_overrides||[]).map(function(n){return '<span class="vlt-tag" style="border-color:var(--accent)">'+esc(n)+'</span>';}).join('');
-  var st=s.revoked?'<span style="color:var(--err)">revoked</span>':'<span style="color:var(--ok,#3fb950)">active</span>';
-  var act='<button class="mini" onclick="vaultRevoke(\''+esc(s.id)+'\','+(s.revoked?'false':'true')+')">'+(s.revoked?'Restore':'Revoke')+'</button>'
+  var st=s.revoked?'<span style="color:var(--err)">revoked</span>':(empty?'<span style="color:var(--warn,#d29922)">needed, not set</span>':'<span style="color:var(--ok,#3fb950)">active</span>');
+  var need=(s.needed_by||[]).map(function(n){return '<span class="vlt-tag" title="reserved by this feature">'+esc(String(n).replace(/^core:/,'').replace(/^ext:/,''))+'</span>';}).join('');
+  var act=(empty?'<button class="mini go" onclick="vaultFill(\''+esc(s.id)+'\',\''+esc(s.label||'')+'\')" title="Add the value for this key">Add key</button> ':'')
+    +'<button class="mini" onclick="vaultRevoke(\''+esc(s.id)+'\','+(s.revoked?'false':'true')+')">'+(s.revoked?'Restore':'Revoke')+'</button>'
     +' <button class="mini danger" onclick="vaultDel(\''+esc(s.id)+'\')">Delete</button>';
-  return '<tr><td><b>'+esc(s.id)+'</b>'+(s.label&&s.label!==s.id?('<div class="sub" style="font-size:11px">'+esc(s.label)+'</div>'):'')+'</td><td>'+(scope||'—')+'</td><td>'+(vals||'<span style="color:var(--dim)">empty</span>')+'</td><td>'+st+'</td><td style="text-align:right">'+act+'</td></tr>';
+  return '<tr><td><b>'+esc(s.id)+'</b>'+(s.label&&s.label!==s.id?('<div class="sub" style="font-size:11px">'+esc(s.label)+'</div>'):'')+(need?('<div style="margin-top:3px">'+need+'</div>'):'')+'</td><td>'+(scope||'—')+'</td><td>'+(vals||'<span style="color:var(--dim)">empty</span>')+'</td><td>'+st+'</td><td style="text-align:right">'+act+'</td></tr>';
+}
+function vaultFill(id,label){
+  var a=document.getElementById('vsid'); if(a)a.value=id;
+  var b=document.getElementById('vslabel'); if(b)b.value=label||'';
+  var c=document.getElementById('vsval'); if(c){c.focus();c.scrollIntoView({block:'center',behavior:'smooth'});}
 }
 async function vaultSave(){
   var id=(document.getElementById('vsid').value||'').trim();if(!id){await alertM('Secret ID required');return;}
@@ -29170,7 +29627,8 @@ function ccWireDropzones(){
 }
 // ===== VOICE I/O: talk to a session (Deepgram STT) + hear its last reply (TTS). Distinct from VoiceMatch
 // (the writing-tone engine). Backend: /api/voice/{speak-last,dictate,send,state,audio,config,config-set}. =====
-var VC={rec:null,chunks:[],stream:null,recFor:null,conv:null,audio:null,lastFp:'',holding:false,_convResolve:null};
+var VC={audioEl:null,playGen:0,_auOK:false,lastFp:''};   // trimmed: only the shared audio element state survives the v3 rebuild
+var VC_SILENT='data:audio/wav;base64,UklGRmQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YUAAAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA';   // 8ms of real silence -- playing it UNMUTED inside a tap is the reliable iOS unlock (muted-play does NOT grant later audible playback)
 window.VCFG=null;
 function voiceLoadCfg(){fetch('/api/voice/config').then(function(r){return r.json();}).then(function(c){window.VCFG=c||{};}).catch(function(){});}
 function voiceKeyOK(){ if(window.VCFG&&VCFG.has_deepgram===false){ vcToast('Voice input is off — add DEEPGRAM_API_KEY in the Vault lens.',4500); return false; } return true; }
@@ -29178,154 +29636,407 @@ function vcToast(m,t){try{toast(m,t||2500);}catch(e){}}
 // the three header/menu buttons (shared by every session surface)
 function voiceBtns(n){var e=esc(n);
   return '<button class="mini" title="Read the agent\'s last message aloud (long replies are summarized to 1-3 sentences)" onclick="voiceSpeakLast(\''+e+'\')">🔊</button>'
-   +'<button class="mini" title="Dictate: tap to talk, tap again to send it into the session. On desktop you can also HOLD the backtick (`) key to talk hands-free." onclick="voiceMic(\''+e+'\')">🎤</button>'
-   +'<button class="mini" title="Conversation mode: talk back-and-forth with this session. When it finishes a task or needs your input, it\'s brought up and read to you. Turn it on for several sessions and it switches between them as each finishes." onclick="voiceConvoToggle(\''+e+'\')"'+(voiceQueued(n)?' style="color:var(--accent)"':'')+'>💬</button>';}
+   +'<button class="mini" title="Dictate: tap to talk, tap again to send it into the session. On desktop you can also press the backtick (`) key to start/stop." onclick="voiceMic(\''+e+'\')">🎤</button>'
+   +'<button class="mini" title="Conversation: MUTE or un-mute this session for Voice mode (when Voice mode is on, any session you open is read to you as it finishes; mute stops this one)." onclick="voiceMuteToggle(\''+e+'\')"'+(voiceMuted(n)?'':(voiceQueued(n)?' style="color:var(--accent)"':''))+'>'+(voiceMuted(n)?'\u{1F507}':'\u{1F4AC}')+'</button>';}
 // ---- audio playback (single tracked element) ----
-// mobile (esp. iOS) blocks audio not started inside a tap handler. Reuse ONE <audio> element and "unlock" it on
-// the first user tap (muted play), so later TTS playback -- which happens a few async steps after your tap -- works.
+// mobile (esp. iOS) blocks audio not started inside a tap handler. Reuse ONE <audio> element and "unlock" it by
+// playing REAL silent bytes UNMUTED inside a user gesture -- a muted play does NOT grant later audible playback on
+// iOS, which is why reads stayed silent. A global first-tap listener (below) arms it no matter what you tap first.
 function voiceAudioEl(){if(!VC.audioEl){try{VC.audioEl=new Audio();}catch(e){}}return VC.audioEl;}
-function voiceUnlockAudio(){try{if(VC._auOK)return;var a=voiceAudioEl();if(!a)return;a.muted=true;var p=a.play();if(p&&p.then)p.then(function(){try{a.pause();a.currentTime=0;}catch(e){}a.muted=false;VC._auOK=true;}).catch(function(){a.muted=false;});}catch(e){}}
+function voiceUnlockAudio(){try{if(VC._auOK)return;var a=voiceAudioEl();if(!a)return;a.muted=false;try{a.playbackRate=1;}catch(e){}a.src=VC_SILENT;var p=a.play();if(p&&p.then){p.then(function(){try{a.pause();a.currentTime=0;}catch(e){}VC._auOK=true;}).catch(function(){});}else{VC._auOK=true;}}catch(e){}}
+// arm audio on the VERY FIRST user gesture anywhere -- guarantees _auOK is set before any auto-read fires (no-op once armed).
+(function(){var f=function(){try{voiceUnlockAudio();}catch(e){}};try{document.addEventListener('touchend',f,{capture:true,passive:true});document.addEventListener('pointerup',f,{capture:true,passive:true});document.addEventListener('click',f,true);}catch(e){}})();
 // hard kill-switch: silence playback THIS FRAME (detach src) + invalidate any in-flight play. Fixes the barge
 // race where a pending play()/buffering clip outran a bare pause() and played to completion (iOS).
 function voiceStopAudio(){VC.playGen=(VC.playGen||0)+1;var a=VC.audioEl;if(a){try{a.pause();}catch(e){}try{a.removeAttribute('src');a.load();}catch(e){}a.onended=null;a.onerror=null;}}
-function voicePlay(file,cb){try{var a=voiceAudioEl();if(!a){if(cb)cb();return;}var gen=(VC.playGen=(VC.playGen||0)+1);try{a.pause();}catch(e){}a.muted=false;try{a.playbackRate=voiceRate();}catch(e){}a.onended=function(){if(gen!==VC.playGen)return;if(cb)cb();};a.onerror=function(){if(gen!==VC.playGen)return;if(cb)cb();};a.src='/api/voice/audio?f='+encodeURIComponent(file);var p=a.play();if(p&&p.catch)p.catch(function(){if(gen!==VC.playGen)return;if(cb)cb();});}catch(e){if(cb)cb();}}
-async function voiceSpeakLast(n){vcToast('Reading the last message…',1800);try{var r=await(await fetch('/api/voice/speak-last',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n})})).json();if(!r.ok){vcToast('Voice: '+(r.error||'could not read'),4000);return;}voicePlay(r.file);}catch(e){vcToast('Voice: read failed',3000);}}
-// ---- recording (generalized from the Notebook's nbToggleRec) ----
-function vcPill(txt){var p=document.getElementById('vcPill');if(!txt){if(p)p.remove();return;}if(!p){p=document.createElement('div');p.id='vcPill';p.style.cssText='position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:10070;background:var(--accent);border:1px solid var(--accent);color:var(--bg-warm);padding:14px 26px;border-radius:26px;box-shadow:0 10px 34px rgba(0,0,0,.55);font-size:16px;font-weight:600;display:flex;align-items:center;gap:9px;cursor:pointer;min-width:180px;justify-content:center;text-align:center';p.onclick=function(){if(typeof VC.pillClick==='function'){VC.pillClick();return;}if(VC.amb){voiceAmbientSendNow();}else if(VC.rec&&VC.rec.state==='recording')VC.rec.stop();};document.body.appendChild(p);}p.innerHTML=txt;}
-async function voiceStartRec(n){if(VC.rec&&VC.rec.state==='recording')return true;if(!voiceKeyOK())return false;var stream;try{stream=await navigator.mediaDevices.getUserMedia({audio:true});}catch(e){vcToast('Microphone permission needed.',3500);return false;}VC.stream=stream;VC.chunks=[];VC.recFor=n;var mr;try{mr=new MediaRecorder(stream);}catch(e){vcToast('Recording not supported in this browser.',3500);try{stream.getTracks().forEach(function(t){t.stop();});}catch(_){}return false;}VC.rec=mr;mr.ondataavailable=function(ev){if(ev.data&&ev.data.size)VC.chunks.push(ev.data);};mr.onstop=voiceOnStop;mr.start();vcPill('🎤 Listening… ✓ tap to send now');voiceStartVad(stream);return true;}
-// Voice-activity detection: auto-stop ~1.1s after you stop talking so a dictation feels instant + hands-free
-// (Deepgram itself is sub-second; the old lag was recording until a manual stop). Manual tap + hotkey still work.
-function voiceStartVad(stream){try{voiceStopVad();VC.noSpeech=false;var AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;var ac=new AC();if(ac.state==='suspended'){try{ac.resume();}catch(e){}}var src=ac.createMediaStreamSource(stream);var an=ac.createAnalyser();an.fftSize=1024;src.connect(an);var buf=new Uint8Array(an.fftSize);var t0=Date.now(),spoke=false,silenceAt=0;var sil=voiceSilenceMs();var nsp=VC.conv?20000:Math.max(9000,sil+3000);VC.vad={ac:ac};   // in conversation, wait ~20s for you to start before going idle
-  VC.vadTimer=setInterval(function(){if(!VC.rec||VC.rec.state!=='recording'){voiceStopVad();return;}if(VC.holding)return;   // hold-to-talk: the key release ends it, not VAD
-    an.getByteTimeDomainData(buf);var sum=0;for(var i=0;i<buf.length;i++){var v=(buf[i]-128)/128;sum+=v*v;}var rms=Math.sqrt(sum/buf.length);var now=Date.now();
-    if(rms>0.05){spoke=true;silenceAt=0;}
-    else if(spoke&&rms<0.03){if(!silenceAt)silenceAt=now;else if(now-silenceAt>sil){VC.rec.stop();return;}}   // auto-send after `sil` of quiet (adjustable, default 5s)
-    if(!spoke&&now-t0>nsp){VC.noSpeech=true;VC.rec.stop();return;}   // no real sound heard -> stop WITHOUT transcribing (don't burn on dead air)
-    if(now-t0>Math.max(45000,sil+15000)){VC.rec.stop();return;}          // hard safety cap
-  },120);}catch(e){}}
-function voiceStopVad(){try{if(VC.vadTimer){clearInterval(VC.vadTimer);VC.vadTimer=null;}}catch(e){}try{if(VC.vad&&VC.vad.ac){VC.vad.ac.close();}VC.vad=null;}catch(e){}}
-function voiceOnStop(){voiceStopVad();var mr=VC.rec;var n=VC.recFor;vcPill('');try{VC.stream.getTracks().forEach(function(t){t.stop();});}catch(e){}var blob=new Blob(VC.chunks,{type:(mr&&mr.mimeType)||'audio/webm'});VC.rec=null;
-  if(VC.noSpeech||!blob.size||blob.size<1800){ if(VC._convResolve){var f=VC._convResolve;VC._convResolve=null;f('');} else if(!VC.noSpeech) vcToast('Didn\'t catch that — try again.',2500); return; }   // no real speech / too short -> DON'T send to Deepgram (no wasted transcription)
-  var fr=new FileReader();fr.onloadend=function(){var b64=(String(fr.result||'').split(',')[1])||'';voiceHeard(n,b64,((mr&&mr.mimeType)||'audio/webm').split(';')[0]);};fr.readAsDataURL(blob);}
-async function voiceHeard(n,b64,mime){var text='';if(b64){vcPill('✍️ transcribing…');try{var r=await(await fetch('/api/voice/dictate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:b64,mime:mime})})).json();if(r.ok)text=(r.text||'').trim();else{var em=/corrupt|unsupported|Bad Request|no audio/i.test(r.error||'')?'Didn\'t catch that — try again.':('Transcribe: '+(r.error||'?'));vcToast(em,4000);}}catch(e){vcToast('Transcribe failed',3000);}vcPill('');}
-  if(VC._convResolve){var f=VC._convResolve;VC._convResolve=null;f(text);return;}
-  if(text)voiceSend(n,text);}
-async function voiceSend(n,text){try{await fetch('/api/voice/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,text:text})});vcToast('Sent: '+text.slice(0,60),3000);try{if(window.VQ&&VQ.mode)voiceAutoEnroll(n);}catch(e){}}catch(e){vcToast('Send failed',3000);}}
-function voiceMic(n){if(VC.rec&&VC.rec.state==='recording'){VC.rec.stop();return;}voiceStartRec(n);}
-// ---- hold-to-talk hotkey (backtick) -- desktop, when focus isn't in an input or the terminal iframe ----
-function voiceActiveSession(){if(VC.conv)return VC.conv;try{if(window.STG&&STG.open&&STG.cur)return STG.cur;}catch(e){}try{if(window.SESSBIG)return SESSBIG;}catch(e){}return null;}
-document.addEventListener('keydown',function(e){if(e.key!=='`'||e.repeat||e.metaKey||e.ctrlKey||e.altKey)return;var t=e.target;if(t&&(/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName||'')||t.isContentEditable))return;var n=voiceActiveSession();if(!n)return;e.preventDefault();if(window.VQ&&VQ.on&&VQ.presenting){if(VC._readResolve)voiceBargeReply();else voiceDockTalk();return;}if(VC.conv){if(VC._gate)voiceConvGo();else voiceAmbientSendNow();return;}VC.holding=true;if(!(VC.rec&&VC.rec.state==='recording'))voiceStartRec(n);});   // queue: ` = barge/talk-send; else conversation send
-document.addEventListener('keyup',function(e){if(e.key!=='`'||!VC.holding)return;VC.holding=false;if(VC.rec&&VC.rec.state==='recording')VC.rec.stop();});
-// ---- conversation mode: listen -> send -> wait for the finished reply -> read it -> (auto re-arm?) ----
-function voiceAutoRearm(){try{var v=localStorage.getItem('cc_voice_autorearm');return v===null?true:v==='1';}catch(e){return true;}}   // continuous listening ON by default
+function voicePlay(file,cb){try{var a=voiceAudioEl();if(!a){if(cb)cb();return;}var gen=(VC.playGen=(VC.playGen||0)+1);try{a.pause();}catch(e){}a.muted=false;try{a.playbackRate=voiceRate();}catch(e){}a.onended=function(){if(gen!==VC.playGen)return;if(cb)cb();};a.onerror=function(){if(gen!==VC.playGen)return;try{vcToast('Audio error: '+((a.error&&a.error.code)||'?'),5000);}catch(e){}if(cb)cb();};a.src='/api/voice/audio?f='+encodeURIComponent(file);var p=a.play();if(p&&p.catch)p.catch(function(err){if(gen!==VC.playGen)return;try{vcToast('Audio blocked: '+((err&&(err.name||err.message))||'?')+(VC._auOK?' (armed)':' (NOT armed)'),6000);}catch(e){}if(cb)cb();});}catch(e){if(cb)cb();}}
+function voiceSpeakLast(n){try{voiceUnlockAudio();}catch(e){}vcToast('Reading the last message…',1800);fetch('/api/voice/speak-last',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n})}).then(function(r){return r.json();}).then(function(r){if(!r.ok){vcToast(r.empty?'Nothing to read in that session yet':('Voice: '+(r.error||'could not read')),3500);return;}VM.lastAudio=r.file;voicePlay(r.file);}).catch(function(){vcToast('Voice: read failed',3000);});}
 function voiceRate(){try{var r=parseFloat(localStorage.getItem('cc_voice_rate')||'1.15');return (r>=0.5&&r<=3)?r:1.15;}catch(e){return 1.15;}}   // readback speed (client-side; works for any provider)
-function voiceSilenceMs(){try{var s=parseInt(localStorage.getItem('cc_voice_silence_ms')||'5000',10);return (s>=800&&s<=20000)?s:5000;}catch(e){return 5000;}}   // pause before auto-send
-function voiceEndMode(){try{var m=localStorage.getItem('cc_voice_endmode');return (m==='word'||m==='pause'||m==='button')?m:'button';}catch(e){return 'button';}}   // how a conversation turn ENDS: button (tap/key), word (say it), pause (deliberate silence)
-function voiceCommitPhrase(){try{return (localStorage.getItem('cc_voice_commit_phrase')||'over').trim().toLowerCase()||'over';}catch(e){return 'over';}}
-function voiceNorm(s){return (s||'').toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();}
-function voiceEndHint(){var m=voiceEndMode();return (m==='word')?('say "'+voiceCommitPhrase()+'" to send'):(m==='pause')?'pause when done to send':'tap ✓ Done (or press `) to send';}
-function voicePillLabel(){return '✓ Done — tap to send';}
-function voiceToggleAuto(){var v=voiceAutoRearm();try{localStorage.setItem('cc_voice_autorearm',v?'0':'1');}catch(e){}if(VC.conv)voiceConvBar(VC.conv,null);if(!v&&VC._gate)voiceConvGo();}   // just turned ON while waiting -> resume the loop
-function voiceConvGate(n,force){return new Promise(function(res){if(!force&&voiceAutoRearm()){res();return;}VC._gate=res;voiceConvBar(n,force?'Still there? — tap 🎤 or press ` when you\'re ready':'Your turn — tap 🎤 talk (or press `) when ready');});}
-function voiceConvGo(){if(VC._gate){var g=VC._gate;VC._gate=null;g();}}
-function voiceConvBar(n,msg){var b=document.getElementById('vcBar');if(!b){b=document.createElement('div');b.id='vcBar';b.style.cssText='position:fixed;left:50%;top:12px;transform:translateX(-50%);z-index:10065;background:var(--card);border:1px solid var(--accent);border-radius:12px;padding:8px 12px;display:flex;align-items:center;gap:10px;box-shadow:0 8px 28px rgba(0,0,0,.5);max-width:94vw;font-size:13px;color:var(--ink)';b.dataset.msg='';document.body.appendChild(b);}if(msg!=null)b.dataset.msg=msg;var auto=voiceAutoRearm();
-  var head='<span style="font-weight:600;flex:0 0 auto">'+((window.VQ&&VQ.on)?'🎧':'💬')+' '+esc(n)+'</span><span style="color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(b.dataset.msg||'')+'</span>';
-  if(window.VQ&&VQ.on){   // queue-orchestrator bar: Skip this one / Stop the whole queue
-    b.innerHTML=head+'<button class="mini" title="Done with this session — move to the next one waiting in the queue" onclick="voiceQueueNext()">Next ▶</button><button class="mini" title="Voice settings" onclick="voiceSettings()">⚙</button><button class="mini danger" title="Stop the voice queue" onclick="voiceQueueStop()">Stop</button>';
-  }else{
-    b.innerHTML=head
-     +'<button class="mini" title="Talk — start your next turn" onclick="voiceConvGo()">🎤</button>'
-     +'<button class="mini" title="Continuous listening: keep the mic open and auto-capture whenever you talk (hands-free). Off = tap 🎤 for each turn." onclick="voiceToggleAuto()"'+(auto?' style="color:var(--accent)"':'')+'>listen: '+(auto?'continuous':'manual')+'</button>'
-     +'<button class="mini" title="Voice settings (provider, read mode)" onclick="voiceSettings()">⚙</button>'
-     +'<button class="mini danger" title="End conversation mode" onclick="voiceConvStop()">Stop</button>';
-  }}
-function voiceQueueNext(){if(window.VQ)VQ.next=true;try{voiceStopAudio();}catch(e){}try{if(VC.btnRec&&VC.btnRec.state==='recording'){VC.btnCancel=true;VC.btnRec.stop();}}catch(e){}
-  if(VC._readResolve){var a=VC._readResolve;VC._readResolve=null;a('next');}
-  if(VC._dockResolve){var b=VC._dockResolve;VC._dockResolve=null;b('');}
-  if(VC._btnResolve){var c=VC._btnResolve;VC._btnResolve=null;try{voiceButtonCleanup();}catch(e){}c('');}}
-function voiceConvStop(){if(VC._gate){var g=VC._gate;VC._gate=null;g();}if(VC._btnResolve){var bf=VC._btnResolve;VC._btnResolve=null;bf('');}VC.conv=null;VC._convResolve=null;try{voiceAmbientStop();}catch(e){}try{voiceButtonCleanup();}catch(e){}try{if(VC.rec&&VC.rec.state==='recording')VC.rec.stop();}catch(e){}vcPill('');var b=document.getElementById('vcBar');if(b)b.remove();try{if(typeof render==='function')render();}catch(e){}}
-function voiceListenOnce(n){return new Promise(function(res){VC._convResolve=res;voiceStartRec(n).then(function(ok){if(!ok){VC._convResolve=null;res('');}});});}
-function voiceWaitReply(n){return new Promise(function(res){var sawBusy=false,tries=0;(function step(){if(VC.conv!==n||(window.VQ&&VQ.next)){res(false);return;}tries++;fetch('/api/voice/state?session='+encodeURIComponent(n)).then(function(r){return r.json();}).then(function(s){if(!s||!s.ok){setTimeout(step,2200);return;}if(s.busy)sawBusy=true;var changed=s.msg_fp&&s.msg_fp!==VC.lastFp;if(!s.busy&&changed&&(sawBusy||tries>20)){VC.lastFp=s.msg_fp;res(true);return;}if(tries>900){res(changed);return;}setTimeout(step,2200);}).catch(function(){setTimeout(step,2600);});})();});}
-function voiceSpeakAndWait(n){return new Promise(function(res){fetch('/api/voice/speak-last',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n})}).then(function(r){return r.json();}).then(function(r){if(r&&r.ok)voicePlay(r.file,res);else res();}).catch(res);});}
-// ===== Ambient VAD (conversation mode): keep the mic OPEN and monitor levels continuously, but only RECORD
-// when you actually start talking (onset) and only SEND if it was real speech (never a blank transcript).
-// One fresh MediaRecorder per utterance = a valid standalone clip each time. Energy/RMS with hysteresis:
-// onset(0.045) starts capture, speech(0.055) confirms it's real, silence(<0.03 for `sil`) ends the utterance. =====
-function voiceAmbientEnsure(){if(VC.amb&&VC.amb.stream)return Promise.resolve(true);
-  return navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
-    var AC=window.AudioContext||window.webkitAudioContext;if(!AC){try{stream.getTracks().forEach(function(t){t.stop();});}catch(e){}return false;}
-    var ac=new AC();if(ac.state==='suspended'){try{ac.resume();}catch(e){}}
-    var src=ac.createMediaStreamSource(stream);var an=ac.createAnalyser();an.fftSize=1024;src.connect(an);
-    VC.amb={stream:stream,ac:ac,an:an,buf:new Uint8Array(an.fftSize),capture:false,recording:false,mr:null,chunks:[],spoke:false,silenceAt:0,recStart:0,idleAt:0,mime:'audio/webm',resolve:null};
-    VC.ambTimer=setInterval(voiceAmbientTick,80);return true;
-  }).catch(function(){vcToast('Microphone permission needed.',3500);return false;});}
-function voiceAmbientTick(){var A=VC.amb;if(!A||!A.stream||!A.capture)return;
-  A.an.getByteTimeDomainData(A.buf);var sum=0;for(var i=0;i<A.buf.length;i++){var v=(A.buf[i]-128)/128;sum+=v*v;}var rms=Math.sqrt(sum/A.buf.length);var now=Date.now();var mode=voiceEndMode();var endSil=(mode==='pause')?voiceSilenceMs():850;   // button/word chunk fast (buffer); pause uses your silence setting
-  if(!A.recording){
-    if(rms>0.035){try{A.mr=new MediaRecorder(A.stream);}catch(e){return;}A.chunks=[];A.spoke=false;A.silenceAt=0;A.recStart=now;A.mime=(A.mr.mimeType||'audio/webm').split(';')[0];A.mr.ondataavailable=function(ev){if(ev.data&&ev.data.size)A.chunks.push(ev.data);};A.mr.onstop=voiceAmbientUttDone;A.mr.start();A.recording=true;return;}
-    if(A.draft&&A.lastAt){   // auto-send between utterances, per mode (button never auto-sends -> only the ✓ Done button / ` key)
-      if(mode==='pause'&&now-A.lastAt>voiceSilenceMs())voiceAmbientFinalize('');
-      else if(mode==='word'&&now-A.lastAt>40000)voiceAmbientFinalize('');   // walk-away backstop
-    }
-    return;}
-  if(rms>0.045){A.spoke=true;A.silenceAt=0;}
-  else if(rms<0.022){if(!A.silenceAt)A.silenceAt=now;else if(now-A.silenceAt>endSil){try{A.mr.stop();}catch(e){}A.recording=false;}}
-  else{A.silenceAt=0;}   // in-between level: still talking softly -> don't count as silence
-  if(now-A.recStart>30000){try{A.mr.stop();}catch(e){}A.recording=false;}   // hard cap per utterance
-}
-function voiceAmbientUttDone(){var A=VC.amb;if(!A)return;var blob=new Blob(A.chunks,{type:A.mime||'audio/webm'});vcPill(A.capture?'🎧 listening…':'');
-  if(blob.size<600)return;   // only drop truly tiny clicks; Deepgram returns empty for real silence, so let it be the filter (a short quiet 'over' must get through)
-  var fr=new FileReader();fr.onloadend=function(){var b64=(String(fr.result||'').split(',')[1])||'';if(b64)voiceAmbientDeliver(b64,A.mime);};fr.readAsDataURL(blob);}
-function voiceAmbientFinalize(extra){var A=VC.amb;if(!A)return;var d=((A.draft?A.draft+' ':'')+(extra||'')).trim();A.draft='';A.forceSend=false;if(d&&A.resolve){var f=A.resolve;A.resolve=null;A.capture=false;vcPill('');f(d);}else{vcPill(A.capture?voicePillLabel():'');}}
-function voiceAmbientSendNow(){var A=VC.amb;if(!A)return;A.forceSend=true;if(A.recording&&A.mr){try{A.mr.stop();}catch(e){}return;}voiceAmbientFinalize('');}   // ✓ Done: include an in-progress burst, then send
-function voiceAmbientDeliver(b64,mime){vcPill('✍️ transcribing…');
-  fetch('/api/voice/dictate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:b64,mime:mime})}).then(function(r){return r.json();}).then(function(r){var A=VC.amb;var text=(r&&r.ok)?(r.text||'').trim():'';if(!A)return;
-    if(A.forceSend){voiceAmbientFinalize(text);return;}   // ✓ Done pressed mid-utterance -> include this burst + send
-    if(!text){vcPill(A.capture?voicePillLabel():'');return;}
-    var mode=voiceEndMode();
-    if(mode==='word'){   // commit word: END of a short clip (alone or with a lead-in word) -> send
-      var norm=voiceNorm(text), ph=voiceNorm(voiceCommitPhrase());var pw=ph?ph.split(' ').length:1, w=norm?norm.split(' ').length:0;
-      if(ph&&w>0&&w<=pw+1&&(norm===ph||norm.endsWith(' '+ph))){voiceAmbientFinalize((norm===ph)?'':norm.slice(0,norm.length-ph.length).trim());return;}
-    }
-    A.lastAt=Date.now();A.draft=(A.draft?A.draft+' ':'')+text;   // buffer; button waits for ✓ Done, pause waits for silence, word waits for the word
-    vcPill(A.capture?voicePillLabel():'');
-    voiceConvBar(VC.conv,'\u{1F4DD} '+A.draft.slice(-64)+'  —  '+voiceEndHint());
-  }).catch(function(){var A=VC.amb;vcPill((A&&A.capture)?voicePillLabel():'');});}
-function voiceAmbientNext(n){return new Promise(function(res){var A=VC.amb;if(!A){res('');return;}VC.pillClick=null;A.resolve=res;A.capture=true;A.recording=false;A.draft='';A.forceSend=false;A.lastAt=0;A.idleAt=Date.now();vcPill(voicePillLabel());voiceConvBar(n,'🎧 Listening — talk freely; '+voiceEndHint());});}
-function voiceAmbientPause(){var A=VC.amb;if(!A)return;A.capture=false;A.resolve=null;if(A.recording){try{if(A.mr)A.mr.stop();}catch(e){}A.recording=false;}vcPill('');}
-function voiceAmbientStop(){if(VC.ambTimer){clearInterval(VC.ambTimer);VC.ambTimer=null;}var A=VC.amb;VC.amb=null;if(A){if(A.resolve){try{A.resolve('');}catch(e){}}try{if(A.mr&&A.recording)A.mr.stop();}catch(e){}try{A.stream.getTracks().forEach(function(t){t.stop();});}catch(e){}try{A.ac.close();}catch(e){}}vcPill('');}
-// ---- Button (tap-to-record) mode: the mic is OFF until you tap; tap again to stop + send. No ambient
-// listening, so it never picks up background noise (kids, a room, public spaces) -> the reliable default. ----
-function voiceButtonTurn(n){return new Promise(function(res){VC._btnResolve=res;VC.pillClick=function(){voiceButtonToggle(n);};vcPill('🎤 Your turn — tap to talk');voiceConvBar(n,'🎤 Tap the big button below to talk (or press `)');});}
-function voiceButtonToggle(n){
-  try{voiceUnlockAudio();}catch(e){}
-  if(VC.btnRec&&VC.btnRec.state==='recording'){try{VC.btnRec.stop();}catch(e){}return;}
+// which session is "current" (for auto-enroll on Voice-mode-on + the backtick hotkey)
+function voiceActiveSession(){try{if(window.STG&&STG.open&&STG.cur)return STG.cur;}catch(e){}try{if(window.SESSBIG)return SESSBIG;}catch(e){}return (window.VM&&VM.floor&&VM.floor.session)||null;}
+// ---- the "another session is ready" chime ----
+function voiceEarconOn(){try{return localStorage.getItem('cc_voice_earcon')!=='0';}catch(e){return true;}}
+// HANDS-FREE (driving) mode: OFF = desk behavior (a finish flashes; tap to hear; never talk over what you're watching).
+// ON = it BRINGS UP each finished session and reads it aloud automatically, one at a time -- you answer by voice and
+// it continues. Per-DEVICE (your phone in the car), so localStorage, not a node setting.
+function voiceHandsfreeOn(){try{return localStorage.getItem('cc_voice_handsfree')==='1';}catch(e){return false;}}
+// hands-free grace: after a session reads, hold at 'your turn' this long so you can reply BEFORE it moves you to
+// the next waiting agent. 0 = advance immediately. Per-device (localStorage). Default 12s.
+function voiceGraceMs(){try{var s=parseInt(localStorage.getItem('cc_voice_grace_ms')||'12000',10);return (s>=0&&s<=60000)?s:12000;}catch(e){return 12000;}}
+// NO-HANG: cap how long we wait for a readback to RENDER (TTS can intermittently crawl). On timeout we stop
+// waiting and just show you the options / let you reply -- never freeze on 'rendering'. Per-device, default 15s.
+function voiceReadTimeoutMs(){try{var s=parseInt(localStorage.getItem('cc_voice_read_timeout_ms')||'15000',10);return (s>=3000&&s<=60000)?s:15000;}catch(e){return 15000;}}
+function voiceFetchT(url,opts,ms){return new Promise(function(res,rej){var c=new AbortController(),done=false;var to=setTimeout(function(){if(!done){done=true;try{c.abort();}catch(e){}rej(new Error('timeout'));}},ms||15000);var o=opts||{};o.signal=c.signal;fetch(url,o).then(function(r){if(done)return;done=true;clearTimeout(to);res(r);}).catch(function(e){if(done)return;done=true;clearTimeout(to);rej(e);});});}
+function voiceHandsfreeToggle(){var on=!voiceHandsfreeOn();try{localStorage.setItem('cc_voice_handsfree',on?'1':'0');}catch(e){}
+  vcToast(on?'Hands-free ON — I\'ll bring up & read each session as it finishes':'Hands-free off — finishes will flash to tap',3200);
+  try{if(window.VM&&VM.on){vmDock();vmPollNow();}}catch(e){}}
+function voiceEarcon(){try{var AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;var c=VC._eac||(VC._eac=new AC());if(c.state==='suspended')c.resume();var t=c.currentTime;[880,1174].forEach(function(f,i){var o=c.createOscillator(),g=c.createGain();o.type='sine';o.frequency.value=f;o.connect(g);g.connect(c.destination);var s=t+i*0.1;g.gain.setValueAtTime(0.0001,s);g.gain.exponentialRampToValueAtTime(0.11,s+0.02);g.gain.exponentialRampToValueAtTime(0.0001,s+0.16);o.start(s);o.stop(s+0.19);});}catch(e){}}
+
+// ===== VOICE MODE v3 — one state machine (VM), one recorder (REC), one renderer (vmDock) =====
+// Ownership: REC owns the mic ("am I recording" === REC.state==='recording'); VM owns the position
+// (off/idle/preparing/speaking/yourturn); vmDock() is the ONLY writer of #vcDock. Every async continuation
+// carries the gen it was born under and bails if the world moved on. Buttons carry no state: every tap hits a
+// dispatcher that re-reads live state, so a repaint mid-tap can never misroute a tap.
+window.VM={on:false,state:'off',gen:0,floor:null,await:'',awaitBase:'',sending:false,lastAudio:'',read:{},shelfKey:'',pollT:null,readNote:'',ready:{},_rendering:{},yourturnAt:0,floorQ:null,confirmA:null};
+window.REC={state:'idle',gen:0,mr:null,stream:null,chunks:[],mime:'audio/webm',target:null,discard:false,onDone:null,t0:0,capT:null};
+function vmGen(){return ++VM.gen;}
+function vmSet(st){if(st==='yourturn'&&VM.state!=='yourturn'){try{VM.yourturnAt=Date.now();}catch(e){VM.yourturnAt=0;}}VM.state=st;vmDock();}
+
+// ---- THE RECORDER (single owner of the microphone) ----
+function recStart(target,onDone){                 // -> false if refused (already busy / no STT key)
+  if(REC.state!=='idle')return false;             // single owner: a second start NEVER toggles or orphans
+  if(!voiceKeyOK())return false;
+  var gen=++REC.gen;REC.state='arming';REC.target=target;REC.onDone=onDone;REC.chunks=[];REC.discard=false;
   navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
-    VC.btnStream=stream;VC.btnChunks=[];VC.btnCancel=false;var mr;try{mr=new MediaRecorder(stream);}catch(e){vcToast('Recording not supported here.',3000);try{stream.getTracks().forEach(function(t){t.stop();});}catch(_){}return;}
-    VC.btnRec=mr;mr.ondataavailable=function(ev){if(ev.data&&ev.data.size)VC.btnChunks.push(ev.data);};
-    mr.onstop=function(){try{VC.btnStream.getTracks().forEach(function(t){t.stop();});}catch(e){}if(VC.btnCancel){VC.btnCancel=false;VC.btnRec=null;return;}var blob=new Blob(VC.btnChunks,{type:mr.mimeType||'audio/webm'});VC.pillClick=null;vcPill('✍️ transcribing…');
-      var fr=new FileReader();fr.onloadend=async function(){var b64=(String(fr.result||'').split(',')[1])||'';var text='';if(b64&&blob.size>600){try{var r=await(await fetch('/api/voice/dictate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:b64,mime:(mr.mimeType||'audio/webm').split(';')[0]})})).json();if(r.ok)text=(r.text||'').trim();else vcToast((/corrupt|unsupported|Bad Request|no audio/i.test(r.error||''))?'Didn\'t catch that — tap to try again.':('Transcribe: '+(r.error||'?')),3500);}catch(e){}}VC.btnRec=null;if(VC._btnResolve){var f=VC._btnResolve;VC._btnResolve=null;f(text);}};fr.readAsDataURL(blob);};
-    mr.start();vcPill('🔴 Recording… tap to send');voiceConvBar(n,'🔴 Recording — tap ⏹ (or press `) when you\'re done');
-  }).catch(function(){vcToast('Microphone permission needed.',3500);});}
-function voiceButtonCleanup(){try{VC.btnCancel=true;if(VC.btnRec&&VC.btnRec.state==='recording')VC.btnRec.stop();}catch(e){}try{if(VC.btnStream)VC.btnStream.getTracks().forEach(function(t){t.stop();});}catch(e){}VC.btnRec=null;VC._btnResolve=null;VC.pillClick=null;}
-async function voiceConverse(n){if(VC.conv===n){voiceConvStop();return;}if(!voiceKeyOK())return;if(VC.conv)voiceConvStop();VC.conv=n;VC._gate=null;try{if(typeof render==='function')render();}catch(e){}voiceConvBar(n,'Starting…');
-  if(voiceEndMode()!=='button'){var okmic=await voiceAmbientEnsure();if(!okmic){voiceConvStop();return;}}   // button mode = tap to start; don't hold the mic open
-  try{var s=await(await fetch('/api/voice/state?session='+encodeURIComponent(n))).json();VC.lastFp=(s&&s.msg_fp)||'';}catch(e){VC.lastFp='';}
-  while(VC.conv===n){
-    var text;
-    if(voiceEndMode()==='button'){text=await voiceButtonTurn(n);}
-    else{if(!(VC.amb&&VC.amb.stream)){var ok2=await voiceAmbientEnsure();if(!ok2)break;}text=await voiceAmbientNext(n);}   // resolves on a real utterance (never blank)
-    if(VC.conv!==n)break;
-    if(!text)continue;
-    VC.pillClick=null;voiceAmbientPause();   // (no-op in button mode) stop listening while the agent works + reads back
-    vcPill('⏳ working…');voiceConvBar(n,'Sent: '+text.slice(0,44)+' — the agent is working, then it\'ll read the reply…');await voiceSend(n,text);
-    var ok=await voiceWaitReply(n);if(VC.conv!==n)break;
-    if(ok){voiceConvBar(n,'🔊 reading the reply…');await voiceSpeakAndWait(n);}
-    if(VC.conv!==n)break;
-    if(voiceEndMode()!=='button'&&!voiceAutoRearm()){await voiceConvGate(n,true);if(VC.conv!==n)break;}   // continuous OFF -> wait for a manual 🎤 / ` before listening again
+    if(gen!==REC.gen||REC.state!=='arming'){try{stream.getTracks().forEach(function(t){t.stop();});}catch(e){}return;}   // abandoned while arming
+    var mr;try{mr=new MediaRecorder(stream);}catch(e){try{stream.getTracks().forEach(function(t){t.stop();});}catch(_){}recSettle(gen,null,'Recording not supported in this browser.');return;}
+    REC.stream=stream;REC.mr=mr;REC.mime=(mr.mimeType||'audio/webm');REC.t0=Date.now();
+    mr.ondataavailable=function(ev){if(ev.data&&ev.data.size)REC.chunks.push(ev.data);};
+    mr.onstop=function(){if(gen!==REC.gen)return;var blob=new Blob(REC.chunks,{type:REC.mime});recSettle(gen,blob,null);};
+    mr.start();REC.state='recording';try{if(navigator.vibrate)navigator.vibrate(35);}catch(e){}
+    REC.capT=setTimeout(function(){if(gen===REC.gen&&REC.state==='recording'){vcToast('Recording capped at 2 minutes — sending',2500);recStop(false);}},120000);   // walk-away safety
+    vmDock();
+  }).catch(function(){recSettle(gen,null,'Microphone permission needed.');});
+  vmDock();return true;}
+function recStop(discard){
+  if(REC.state==='arming'){REC.gen++;recReset();vmDock();return;}     // never got the mic -> just abandon
+  if(REC.state!=='recording')return;
+  REC.discard=!!discard;REC.state='stopping';vmDock();
+  try{REC.mr.stop();}catch(e){recSettle(REC.gen,null,'record failed');}}
+function recSettle(gen,blob,err){if(gen!==REC.gen)return;
+  var done=REC.onDone,tgt=REC.target,disc=REC.discard,mime=REC.mime;recReset();
+  if(done)done({target:tgt,blob:(disc||err)?null:blob,mime:mime,err:err,discarded:disc});
+  vmDock();}
+function recReset(){try{if(REC.capT){clearTimeout(REC.capT);REC.capT=null;}}catch(e){}
+  try{if(REC.stream)REC.stream.getTracks().forEach(function(t){t.stop();});}catch(e){}
+  REC.mr=null;REC.stream=null;REC.chunks=[];REC.onDone=null;REC.target=null;REC.discard=false;REC.state='idle';}
+
+// ---- shared STT helper (blob -> text; used by the dock and by standalone dictation) ----
+function voiceTranscribe(blob,mime,session){return new Promise(function(res){
+  if(!blob||blob.size<1800){res('');return;}                          // too small to be speech -> don't bill Deepgram
+  var fr=new FileReader();fr.onloadend=function(){var b64=(String(fr.result||'').split(',')[1])||'';
+    if(!b64){res('');return;}
+    fetch('/api/voice/dictate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:b64,mime:(mime||'audio/webm').split(';')[0],session:session||''})})
+      .then(function(r){return r.json();}).then(function(r){
+        if(r&&r.ok){res((r.text||'').trim());return;}
+        vcToast((/corrupt|unsupported|Bad Request|no audio/i.test((r&&r.error)||''))?'Didn\'t catch that — try again.':('Transcribe: '+((r&&r.error)||'?')),3500);res('');
+      }).catch(function(){vcToast('Transcribe failed',3000);res('');});
+  };fr.readAsDataURL(blob);});}
+
+// ---- reply routing: your reply ALWAYS goes to the session ON YOUR SCREEN (captured at Talk-tap) ----
+function voiceTalkTarget(){try{if(window.STG&&STG.open&&STG.cur)return STG.cur;}catch(e){}
+  try{if(window.SESSBIG)return SESSBIG;}catch(e){}
+  return (VM.floor&&VM.floor.session)||null;}
+
+// ---- dispatchers (every dock control lands here; each re-reads LIVE state) ----
+function vmBigTap(){try{voiceUnlockAudio();}catch(e){}
+  if(REC.state==='recording'){recStop(false);return;}                 // hard toggle, tap #2 = SEND
+  if(REC.state==='arming'||REC.state==='stopping'||VM.sending)return; // in-flight -> ignore
+  if(VM.state==='preparing'||VM.state==='speaking'){vmBarge();return;}
+  vmTalk();}                                                          // idle / yourturn: tap #1 = record
+function vmTalk(){var tgt=voiceTalkTarget();if(!tgt){vcToast('Open a session first',2200);return;}
+  recStart(tgt,vmRecDone);}
+function vmBarge(){voiceStopAudio();vmGen();                          // silence THIS FRAME + invalidate the in-flight read
+  vmSet('yourturn');vmTalk();}
+function vmCancelRec(){recStop(true);}
+async function vmRecDone(res){
+  if(res.err){vcToast(res.err,3200);vmDock();return;}
+  if(res.discarded){vmDock();return;}
+  if(!res.blob||res.blob.size<1800){vcToast('Didn\'t catch that — try again.',2500);vmDock();return;}
+  VM.sending=true;vmDock();
+  var text=await voiceTranscribe(res.blob,res.mime,res.target);
+  VM.sending=false;
+  if(!text){vmDock();return;}                                         // nothing transcribed -> stay put (yourturn/idle)
+  if(VM.confirmA){return vmConfirmResponse(text);}                     // waiting for you to confirm/change a spoken answer
+  if(VM.floorQ){return vmAnswer(text);}                                // a multiple-choice question is on the floor -> this is your ANSWER, not a normal message
+  // DELIVER -- a successfully-transcribed message is NEVER dropped just because voice-mode toggled during a long
+  // transcription. It's also persisted server-side (Recent dictations) as a backstop. (bugfix: two lost messages)
+  if(!res.target){vcToast('No session was open — transcript saved (Voice ▸ Recent dictations)',6000);vmDock();return;}
+  try{await fetch('/api/voice/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:res.target,text:text})});}
+  catch(e){vcToast('Send failed — transcript saved, recover it in Voice ▸ Recent dictations',6000);vmDock();return;}
+  vcToast('Sent to '+res.target+': '+text.slice(0,50),2800);
+  if(!VM.on){vmDock();return;}                                         // voice mode ended mid-transcription -> delivered, just don't start a reply-read cycle
+  if(VM.floor){vmAck(VM.floor.session);VM.floor=null;}                // you replied -> the floor item is dealt with
+  VM.await=res.target;VM.readNote='';
+  try{var b=await(await fetch('/api/voice/state?session='+encodeURIComponent(res.target))).json();VM.awaitBase=(b&&b.msg_fp)||'';}catch(e){VM.awaitBase='';}   // baseline so the fast-poll only fires on a NEW reply
+  vmSet('idle');vmPollNow();}                                         // the fast-poll (or the server watcher) presents the REPLY
+function vmDone(){voiceStopAudio();vmGen();
+  if(VM.floor){vmAck(VM.floor.session);VM.floor=null;}
+  VM.readNote='';VM.await='';VM.floorQ=null;VM.confirmA=null;vmSet('idle');vmPollNow();}
+function vmJump(n){if(window.VQ)VQ.jumpTo=n;vmDone();}
+function vmRepeat(){if(!VM.lastAudio){vcToast('Nothing to repeat yet',2000);return;}
+  try{voiceUnlockAudio();}catch(e){}
+  voicePlay(VM.lastAudio,function(){if(VM.state==='speaking')vmSet('yourturn');});}
+function vmAck(n){try{fetch('/api/voice/queue-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n})});}catch(e){}
+  VQ.queue=(VQ.queue||[]).filter(function(x){return x.session!==n;});}
+
+// ---- presentation: read the floor item WITHOUT yanking the screen ----
+async function vmPresent(item){var gen=vmGen();
+  if(voiceHandsfreeOn()){try{vqFocus(item.session);}catch(e){}}   // driving: TAKE me to the session that's talking
+  VM.floor=item;VM.await='';VM.readNote='';VM.floorQ=null;vmSet('preparing');
+  if(item.kind==='question'){return vmPresentQuestion(item,gen);}   // a multiple-choice question -> read it + let you answer by voice
+  if(item.fp&&VM.read[item.session]===item.fp){vmAck(item.session);VM.floor=null;vmSet('idle');return;}   // PER-SESSION dedup: this session's THIS message was already read -> drop it (never re-read / ping-pong)
+  var pre=VM.ready[item.session];   // already pre-rendered as a background session -> play instantly, no re-summarize/re-bill
+  if(pre&&pre.fp===item.fp){vmMarkRead(item.session,pre.fp);VM.lastAudio=pre.file;delete VM.ready[item.session];vmSet('speaking');voicePlay(pre.file,function(){if(gen!==VM.gen)return;vmSet('yourturn');});return;}
+  var tries=0;
+  while(true){var r=null,timedout=false;
+    try{r=await(await voiceFetchT('/api/voice/speak-last',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:item.session})},voiceReadTimeoutMs())).json();}catch(e){timedout=(e&&e.message==='timeout');r=null;}
+    if(gen!==VM.gen)return;                                           // barged / jumped / stopped meanwhile -> this read is dead
+    if(r&&r.ok)break;
+    if(r&&r.busy){VM.floor=null;VM.readNote='';vmSet('idle');return;}   // it started working again -> don't read a mid-step msg; the self-cleaning queue drops it until it truly finishes
+    if(r&&r.empty){vmSkipEmpty(item);return;}                         // EMPTY is first-class: silent skip, NO retry, nothing spoken
+    if(timedout){VM.readNote='reading is slow — tap the name to view it, or just reply';vmSet('yourturn');return;}   // NO-HANG: TTS render took too long -> don't freeze
+    tries++;if(tries>2){VM.readNote='couldn\'t read aloud — tap the name to view it';vmSet('yourturn');return;}
+    VM.readNote='retrying ('+tries+')';vmDock();
+    await new Promise(function(x){setTimeout(x,2000);});
+    if(gen!==VM.gen)return;
   }
-  voiceAmbientStop();voiceButtonCleanup();}
-// ---- settings popover (provider / read-mode / threshold; auto-rearm + hotkey are per-browser) ----
+  vmMarkRead(item.session,r.fp||'');VM.lastAudio=r.file;VM.readNote='';
+  vmSet('speaking');
+  voicePlay(r.file,function(){if(gen!==VM.gen)return;vmSet('yourturn');});}
+function vmMarkRead(sess,fp){VM.read[sess]=fp||'';vmAck(sess);}   // heard it -> remember (per session) AND drop it from the waiting queue so it can never re-present
+// ---- MULTIPLE-CHOICE by voice: read the question + options aloud, you answer by voice, it picks the option ----
+async function vmPresentQuestion(item,gen){var s=item.session;
+  var qd=null;try{qd=await(await fetch('/api/voice/question?session='+encodeURIComponent(s))).json();}catch(e){}
+  if(gen!==VM.gen)return;
+  if(!qd||!qd.pending){vmAck(s);VM.floor=null;VM.floorQ=null;vmSet('idle');return;}   // already answered elsewhere -> drop
+  if(qd.submit_index>=0){   // the FINAL 'submit your answers' step of a multi-part question -> just submit it (you answered every part)
+    VM.read[s]=qd.fp;vmAck(s);VM.floorQ=null;var gs=vmGen();vmSet('speaking');
+    voiceSay('Submitting your answers.',function(){if(gs!==VM.gen)return;
+      try{fetch('/api/voice/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:s,index:qd.submit_index})});}catch(e){}
+      VM.floor=null;VM.await=s;VM.readNote='';vmSet('idle');vmPollNow();});
+    return;}
+  VM.floorQ={session:s,options:qd.options||[],multiSelect:!!qd.multiSelect,question:qd.question||'',fp:qd.fp,extra:(qd.num_questions||1)>1};
+  VM.read[s]=qd.fp;   // heard this question (per-session dedup)
+  var r=null;try{r=await(await voiceFetchT('/api/voice/speak-question',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:s})},voiceReadTimeoutMs())).json();}catch(e){}
+  if(gen!==VM.gen)return;
+  vmAck(s);   // heard -> out of the queue (VM.floorQ keeps it as the answer target)
+  if(r&&r.ok){VM.lastAudio=r.file;vmSet('speaking');voicePlay(r.file,function(){if(gen!==VM.gen)return;vmSet('yourturn');});}
+  else{VM.readNote='';vmSet('yourturn');}}   // slow/failed render -> DON'T hang; the options are on the dock, just answer
+// parse a spoken answer -> option index (or -1 for free-text/Other)
+function vmMatchAnswer(text,opts){var t=(text||'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();if(!t||!opts)return -1;
+  function ok(n){return (n>=1&&n<=opts.length)?n-1:-1;}
+  // if the answer names TWO+ DIFFERENT options (e.g. "one and two", "the first and third"), it's a custom answer -> free text
+  var tok={one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,first:1,second:2,third:3,fourth:4,fifth:5,sixth:6};
+  var idxs={};(t.match(/\b([a-z]+|\d+)\b/g)||[]).forEach(function(w){var n=/^\d+$/.test(w)?parseInt(w,10):tok[w];if(n>=1&&n<=opts.length)idxs[n]=1;});
+  if(Object.keys(idxs).length>=2)return -1;
+  // 1) explicit "option/number/pick N" or a bare number -> high confidence
+  var m=t.match(/\b(?:option|number|choice|answer|pick)\s+(\d+)\b/)||t.match(/^\s*(\d+)\s*$/);
+  if(m){var r=ok(parseInt(m[1],10));if(r>=0)return r;}
+  // 2) ORDINAL words first (so 'the second one' -> 2, not the filler 'one')
+  var ord={first:1,second:2,third:3,fourth:4,fifth:5,sixth:6,seventh:7,eighth:8};
+  for(var w in ord){if(new RegExp('\\b'+w+'\\b').test(t)){var r2=ok(ord[w]);if(r2>=0)return r2;}}
+  // 3) explicit "option/number/pick <word>"
+  var card={one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8};
+  for(var w in card){if(new RegExp('\\b(?:option|number|choice|pick|answer)\\s+'+w+'\\b').test(t)){var r3=ok(card[w]);if(r3>=0)return r3;}}
+  // 4) bare cardinals two..eight (skip bare 'one' -- too often a filler like 'this one')
+  for(var w in card){if(w==='one')continue;if(new RegExp('\\b'+w+'\\b').test(t)){var r4=ok(card[w]);if(r4>=0)return r4;}}
+  // 5) 'recommended'
+  if(/\brecommend/.test(t)){for(var i=0;i<opts.length;i++){if(/recommend/i.test(opts[i].label||''))return i;}}
+  // 6) fuzzy label-word overlap
+  var best=-1,bestscore=0;for(var i=0;i<opts.length;i++){var lab=(opts[i].label||'').toLowerCase().replace(/[^a-z0-9 ]/g,' ');var lw=lab.split(' ').filter(function(x){return x.length>3;});var score=0;lw.forEach(function(x){if(t.indexOf(x)>=0)score++;});if(score>bestscore){bestscore=score;best=i;}}
+  if(bestscore>=1)return best;
+  // 7) PHONETIC (sound-alike) fallback: 'done' -> 'Dawn', 'coffey' -> 'Coffee'. Uniquely-matching soundex only.
+  var tw=t.split(' ').filter(function(x){return x.length>=3;});
+  var hits={};for(var i=0;i<opts.length;i++){var lw2=(opts[i].label||'').toLowerCase().replace(/[^a-z ]/g,' ').split(' ').filter(function(x){return x.length>=3;});
+    for(var a=0;a<tw.length;a++)for(var b=0;b<lw2.length;b++){var sc=voiceSoundex(tw[a]);if(sc&&sc!=='0000'&&sc===voiceSoundex(lw2[b])){hits[i]=1;}}}
+  var hk=Object.keys(hits);if(hk.length===1)return parseInt(hk[0],10);   // exactly ONE option sounds like what you said -> use it (ambiguous -> free text)
+  return -1;}
+function voiceSoundex(s){s=(s||'').toUpperCase().replace(/[^A-Z]/g,'');if(!s)return '';var code={B:1,F:1,P:1,V:1,C:2,G:2,J:2,K:2,Q:2,S:2,X:2,Z:2,D:3,T:3,L:4,M:5,N:5,R:6};var out=s[0],prev=code[s[0]]||0;for(var i=1;i<s.length&&out.length<4;i++){var c=code[s[i]]||0;if(c&&c!==prev)out+=c;if(s[i]!=='H'&&s[i]!=='W')prev=c;}return (out+'000').slice(0,4);}
+// how a voice answer is finalized: 'quiet' = send immediately; 'confirm' = say it back then send; 'correct' = say it back + wait for yes / a change
+function voiceAnswerMode(){try{var m=localStorage.getItem('cc_voice_answer_mode');return (m==='quiet'||m==='confirm'||m==='correct')?m:'correct';}catch(e){return 'correct';}}
+function voiceSay(text,cb){try{voiceUnlockAudio();}catch(e){}
+  voiceFetchT('/api/voice/say',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text})},voiceReadTimeoutMs()).then(function(r){return r.json();}).then(function(r){
+    if(r&&r.ok){VM.lastAudio=r.file;voicePlay(r.file,cb);}else if(cb)cb();}).catch(function(){if(cb)cb();});}   // timeout/err -> just proceed (don't hang the confirm step)
+async function vmAnswer(text){var fq=VM.floorQ;if(!fq)return;var idx=vmMatchAnswer(text,fq.options);
+  var a={session:fq.session,idx:idx,text:text,label:(idx>=0)?((fq.options[idx]||{}).label||''):text,options:fq.options,question:fq.question};
+  var mode=voiceAnswerMode();
+  if(mode==='quiet')return vmSubmitAnswer(a);
+  VM.floorQ=null;VM.confirmA=a;   // leave answer-mode -> confirm-mode (so it isn't re-read as a question)
+  var said=(idx>=0)?('You picked, '+a.label+'.'):('You said, '+text+'.');
+  if(mode==='confirm'){var g0=vmGen();vmSet('speaking');voiceSay(said+' Sending it.',function(){if(g0!==VM.gen)return;vmSubmitAnswer(a);});return;}
+  var g=vmGen();vmSet('speaking');voiceSay(said+' Say yes to send it, or say a different option.',function(){if(g!==VM.gen)return;vmSet('yourturn');if(voiceHandsfreeOn())vmTalk();});}
+async function vmSubmitAnswer(a){var s=a.session;var body={session:s};if(a.idx>=0)body.index=a.idx;else body.text=a.text;
+  try{await fetch('/api/voice/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}catch(e){}
+  vcToast(a.idx>=0?('Answered “'+(a.label||'').slice(0,40)+'”'):('Answered: '+(a.text||'').slice(0,40)),3000);
+  VM.confirmA=null;VM.floorQ=null;VM.floor=null;VM.await=s;VM.readNote='';   // the session now processes your answer -> wait for its reply
+  try{var b=await(await fetch('/api/voice/state?session='+encodeURIComponent(s))).json();VM.awaitBase=(b&&b.msg_fp)||'';}catch(e){VM.awaitBase='';}
+  vmSet('idle');vmPollNow();}
+function vmConfirmResponse(text){var a=VM.confirmA;if(!a)return;var t=(text||'').toLowerCase();
+  var yes=/\b(yes|yeah|yep|yup|correct|right|send|confirm|do it|sure|good|perfect|that works|go)\b/.test(t);
+  var no=/\b(no|nope|cancel|never ?mind|wrong|change it|stop|different)\b/.test(t);
+  var idx=vmMatchAnswer(text,a.options);
+  if(yes&&idx<0)return vmSubmitAnswer(a);                          // plain "yes" -> send the current pick
+  if(idx>=0){                                                     // they named a (maybe different) option -> re-confirm THAT
+    var a2={session:a.session,idx:idx,text:text,label:(a.options[idx]||{}).label||'',options:a.options,question:a.question};VM.confirmA=a2;
+    var g=vmGen();vmSet('speaking');voiceSay('You picked, '+a2.label+'. Say yes to send, or another option.',function(){if(g!==VM.gen)return;vmSet('yourturn');if(voiceHandsfreeOn())vmTalk();});return;}
+  if(no){VM.confirmA=null;VM.floorQ={session:a.session,options:a.options,question:a.question};   // cancel -> back to answering
+    var g2=vmGen();vmSet('speaking');voiceSay('Okay. Say your answer.',function(){if(g2!==VM.gen)return;vmSet('yourturn');if(voiceHandsfreeOn())vmTalk();});return;}
+  var g3=vmGen();vmSet('speaking');voiceSay('Say yes to send '+(a.label||'that')+', or say a different option.',function(){if(g3!==VM.gen)return;vmSet('yourturn');if(voiceHandsfreeOn())vmTalk();});}
+function vmSkipEmpty(item){vcToast('Nothing to read from “'+item.session+'” — skipped',2600);
+  vmAck(item.session);VM.floor=null;vmSet('idle');}
+
+// ---- the poller: THE one scheduler (server queue -> floor). Runs only while VM.on. Fast while awaiting a reply. ----
+async function vmPoll(){if(!VM.on)return;
+  // FAST PATH: the reply to a message you just SENT by voice -> auto-play (it's a focus interaction you asked for)
+  if(VM.state==='idle'&&VM.await&&REC.state==='idle'&&!VM.sending){
+    try{var st=await(await fetch('/api/voice/state?session='+encodeURIComponent(VM.await))).json();
+      if(!VM.on)return;
+      if(st&&st.ok&&!st.busy&&st.msg_fp&&st.msg_fp!==VM.awaitBase&&st.msg_fp!==VM.read[VM.await]){var aw=VM.await;VM.await='';vmPresent({session:aw,fp:st.msg_fp,scope:''});return;}
+    }catch(e){}
+  }
+  await vqFetch();
+  if(!VM.on)return;
+  try{voiceMarkTiles();}catch(e){}
+  var q=VQ.queue||[],focus=voiceTalkTarget(),floor=VM.floor?VM.floor.session:null;
+  vmPruneReady(q);   // forget pre-rendered audio for sessions no longer waiting (acked / started working again)
+  // BACKGROUND pre-render runs ALWAYS (even while you're engaged with another session) so a finished background
+  // session is rendered + FLASHING the instant it's done -- tapping it then plays immediately with no wait.
+  var canAutoFocus=(VM.state==='idle'&&REC.state==='idle'&&!VM.sending);   // will the focus auto-play THIS tick?
+  for(var j=0;j<q.length;j++){var it=q[j];
+    if(it.session===floor)continue;                          // the floor is already being handled (playing now)
+    if(it.session===focus&&canAutoFocus)continue;            // focus auto-plays below this tick -> don't pre-empt it with a bg render
+    // everything else pre-renders -- INCLUDING the focused session WHEN you're busy (hearing another read): it renders in the
+    // background so it's ready to auto-play the instant you're free, instead of starting from scratch then.
+    if((VM.ready[it.session]&&VM.ready[it.session].fp===it.fp)||VM._rendering[it.session])continue;
+    vmPrerender(it);}
+  if(VM.state==='idle'&&REC.state==='idle'&&!VM.sending){
+    // 1) explicit shelf-tap jump is always honored
+    if(VQ.jumpTo){var jt=VQ.jumpTo;VQ.jumpTo=null;for(var i=0;i<q.length;i++){if(q[i].session===jt){vmPresent(q[i]);return;}}}
+    // 2) THE SESSION YOU'RE LOOKING AT finished with a NEW message -> auto-summarize + auto-PLAY (you're watching it)
+    if(focus){for(var k=0;k<q.length;k++){if(q[k].session===focus){if(q[k].fp!==VM.read[q[k].session]&&!VM._rendering[focus]){vmPresent(q[k]);return;}break;}}}   // defer if a background pre-render is in flight -> next tick plays it from VM.ready instantly (no double-render/bill)
+  }
+  // 3) HANDS-FREE (driving) AUTO-ADVANCE: roll to the next UNHEARD finished session so it rings you through each
+  //    one without a tap. But after a read (yourturn) GIVE YOU A GRACE WINDOW to reply first -- only move you to
+  //    the next agent once the grace elapses with no response. Starting to talk cancels it (REC != idle).
+  if(voiceHandsfreeOn()&&REC.state==='idle'&&!VM.sending&&!VM.floorQ){   // a pending question holds the floor -- never auto-skip it
+    var grace=voiceGraceMs();
+    var mayAdvance=(VM.state==='idle')||(VM.state==='yourturn'&&(Date.now()-(VM.yourturnAt||0))>=grace);
+    if(mayAdvance){for(var h=0;h<q.length;h++){var s=q[h];
+      if(s.session===floor)continue;                 // don't re-grab the one just read (it's the current floor)
+      if(s.fp===VM.read[s.session])continue;         // already heard
+      vmPresent(s);return;}}
+  }
+  vmDock();}
+// pre-render a BACKGROUND session's summary audio so it's ready to play the instant you tap -> then flash the dock
+async function vmPrerender(it){var s=it.session;
+  if(it.kind==='question'){   // a pending QUESTION: flash it (no summary audio -- tapping reads the Q + options and opens answer mode)
+    var freshQ=!VM.ready[s]||VM.ready[s].fp!==it.fp;VM.ready[s]={fp:it.fp,scope:it.scope||'',kind:'question'};
+    if(freshQ){try{if(voiceEarconOn())voiceEarcon();}catch(e){}try{if(navigator.vibrate)navigator.vibrate([30,40,30]);}catch(e){}}
+    try{voiceMarkTiles();}catch(e){}vmDock();return;}
+  VM._rendering[s]=true;vmDock();
+  try{var r=await(await fetch('/api/voice/speak-last',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:s})})).json();
+    if(r&&r.ok){var fresh=!VM.ready[s]||VM.ready[s].fp!==(r.fp||it.fp);VM.ready[s]={file:r.file,fp:r.fp||it.fp,scope:it.scope||''};
+      if(fresh){try{if(voiceEarconOn())voiceEarcon();}catch(e){}try{if(navigator.vibrate)navigator.vibrate([30,40,30]);}catch(e){}}}
+    else if(r&&r.empty){vmAck(s);}   // nothing worth reading -> drop it silently
+    // r.busy -> it started working again; leave it (the self-cleaning queue drops it)
+  }catch(e){}
+  VM._rendering[s]=false;try{voiceMarkTiles();}catch(e){}vmDock();}
+// tap the flashing "ready" button: take you to that session AND play its already-rendered summary (instant, no wait)
+function vmPlayReady(n){try{voiceUnlockAudio();}catch(e){}var r=VM.ready[n];
+  try{vqFocus(n);}catch(e){}   // bring the session up on screen -- vqFocus never touches audio
+  if(r&&r.kind==='question'){   // a pending question -> read it aloud + open answer mode
+    delete VM.ready[n];var qit=null;for(var i=0;i<(VQ.queue||[]).length;i++){if(VQ.queue[i].session===n){qit=VQ.queue[i];break;}}
+    vmPresent(qit||{session:n,kind:'question',fp:r.fp});return;}
+  if(r&&r.file){VM.floor={session:n,fp:r.fp,scope:r.scope};VM.read[n]=r.fp;VM.lastAudio=r.file;delete VM.ready[n];vmAck(n);
+    var gen=vmGen();vmSet('speaking');voicePlay(r.file,function(){if(gen!==VM.gen)return;vmSet('yourturn');});}
+  else{var it=null;for(var i=0;i<(VQ.queue||[]).length;i++){if(VQ.queue[i].session===n){it=VQ.queue[i];break;}}vmPresent(it||{session:n,fp:''});}}   // not pre-rendered yet -> read it now directly (never just navigate + go silent)
+function vmPruneReady(q){try{var live={};for(var i=0;i<(q||[]).length;i++)live[q[i].session]=q[i].fp;
+  for(var s in VM.ready){if(!(s in live)||live[s]!==VM.ready[s].fp)delete VM.ready[s];}}catch(e){}}
+function vmReadyList(){var out=[];for(var s in (VM.ready||{}))out.push(s);return out;}
+function vmPollNow(){vmPoll().catch(function(){});}
+function vmPollStart(){vmPollStop();var tick=function(){if(!VM.on)return;vmPoll().catch(function(){}).then(function(){if(VM.on)VM.pollT=setTimeout(tick,(VM.await&&VM.state==='idle')?1200:2500);});};VM.pollT=setTimeout(tick,300);}
+function vmPollStop(){if(VM.pollT){clearTimeout(VM.pollT);VM.pollT=null;}}
+function vmOthers(){var f=VM.floor?VM.floor.session:null;return (VQ.queue||[]).filter(function(x){return x.session!==f;});}
+
+// ---- THE renderer: single writer of #vcDock; a pure function of VM+REC+VQ (repaint always safe) ----
+function vmKind(){if(REC.state==='arming')return 'arming';
+  if(REC.state==='recording'||REC.state==='stopping')return 'recording';
+  if(VM.sending)return 'sending';return VM.state;}
+function vmDock(){if(!VM.on){voiceDockHide();return;}
+  var kind=vmKind();
+  var n=(kind==='recording'||kind==='arming')?REC.target:(VM.floor?VM.floor.session:(VM.await||voiceTalkTarget()));
+  var d=document.getElementById('vcDock');if(!d){d=document.createElement('div');d.id='vcDock';document.body.appendChild(d);}
+  var others=vmOthers();
+  var rd=others.filter(function(x){return VM.ready[x.session];});   // background sessions whose summary audio is RENDERED + ready to play
+  var shelf='';
+  if(rd.length){var s0=rd[0].session;var isq=(VM.ready[s0]||{}).kind==='question';shelf='<div class="vd-shelf flash" onclick="vmPlayReady(\''+esc(s0)+'\')" title="'+(isq?('Answer '+esc(s0)+'\'s question by voice'):('Play '+esc(s0)+'\'s summary and open it'))+'">'+(isq?'❓ ':'🔊 ')+esc(s0)+(rd.length>1?(' · +'+(rd.length-1)+' more'):'')+(isq?' — has a question ▸ tap to answer':' — ready ▸ tap to hear')+'</div>';}
+  else if(others.length){var o0=others[0].session;shelf='<div class="vd-shelf" onclick="vmJump(\''+esc(o0)+'\')" title="'+esc(o0)+' finished — preparing its summary">'+esc(o0)+(others.length>1?(' · +'+(others.length-1)+' more'):'')+' — finishing…</div>';}
+  var glyph=(kind==='speaking')?'<span class="vd-eq"><i></i><i></i><i></i><i></i></span>'
+    :(kind==='preparing'||kind==='sending')?'<span class="vd-spin"></span>'
+    :(kind==='recording')?'<span class="vd-mic rec"></span>'
+    :(kind==='yourturn'||kind==='arming')?'<span class="vd-mic"></span>':'<span class="vd-idle"></span>';
+  var scope=(VM.floor&&VM.floor.scope)||'';
+  var mute=n?('<button class="mini" title="Mute this session — stop reading it to you" onclick="voiceMuteToggle(\''+esc(n)+'\')">mute</button>'):'';
+  var off=false;try{off=!!(n&&voiceTalkTarget()!==n);}catch(e){}
+  var openHint=off?'<span class="vd-open" title="Open this session on screen — the audio keeps playing">▸ open</span>':'';
+  var id='<div class="vd-id'+(n?' tap':'')+'"'+(n?(' onclick="vqFocus(\''+esc(n)+'\')" title="'+(off?('Tap to open '+esc(n)+' — it keeps reading'):esc(n))+'"'):' title="Voice mode"')
+    +'><span class="vd-glyph">'+glyph+'</span><span class="vd-name">'+(n?esc(n):'Voice mode')+'</span>'+openHint+'<span class="vd-scope">'+esc(scope)+'</span>'+mute+'</div>';
+  var stopB='<button class="mini danger" title="End voice mode" onclick="voiceModeToggle()">Stop</button>';
+  var hfB='<button class="mini" title="Hands-free / driving mode — auto bring up &amp; read every session as it finishes (tap to toggle)" onclick="voiceHandsfreeToggle()"'+(voiceHandsfreeOn()?' style="background:var(--accent);color:var(--bg-warm);font-weight:800"':'')+'>🚗</button>';
+  var repeatB='<button class="mini" title="Repeat — replay the last message (no extra cost)" onclick="vmRepeat()">Repeat</button>';
+  var big='<button class="vd-big" onclick="vmBigTap()" title="Talk — record a reply to the session on screen; tap again to send">Talk</button>',msg='',minis='';
+  if(kind==='idle'){var nrdy=vmReadyList().length;msg=nrdy?(nrdy+' session'+(nrdy>1?'s':'')+' ready — tap the flashing bar to hear ▸'):(VM.await?(esc(VM.await)+' is working — I\'ll read the reply when it\'s done'):(voiceHandsfreeOn()?'🚗 Hands-free on — I\'ll bring up & read each session as it finishes':'Voice on — waiting for a session to finish. Talk any time.'));minis=VM.lastAudio?repeatB:'';}
+  else if(kind==='preparing'){msg='Summarizing + rendering voice…'+(VM.readNote?(' — '+esc(VM.readNote)):'');big='<button class="vd-big" onclick="vmBigTap()" title="Skip the readback and reply now">Skip — reply</button>';}
+  else if(kind==='speaking'){msg=VM.confirmA?'Confirming your answer…':(VM.floorQ?'Reading the question…':'Speaking…');big='<button class="vd-big" onclick="vmBigTap()" title="'+((VM.floorQ||VM.confirmA)?'Answer now':'Stop the audio and reply now')+'">'+((VM.floorQ||VM.confirmA)?'Answer':'Reply')+'</button>';minis=repeatB;}
+  else if(kind==='yourturn'&&VM.confirmA){var cl=(VM.confirmA.label||'').slice(0,28);msg='Say “yes” to send'+(cl?(' “'+esc(cl)+'”'):'')+', or a different option';big='<button class="vd-big" onclick="vmBigTap()" title="Confirm or change by voice">Answer</button>';minis=repeatB;}
+  else if(kind==='yourturn'&&VM.floorQ){msg='Question — say a number, the option, or your own answer';big='<button class="vd-big" onclick="vmBigTap()" title="Answer the question by voice">Answer</button>';minis=repeatB;}
+  else if(kind==='yourturn'){var nxt=(voiceHandsfreeOn()&&others.length)?others[0].session:'';msg=VM.readNote?esc(VM.readNote):(nxt?('Your turn — reply now, or I\'ll move to '+esc(nxt)+' shortly'):'Your turn — tap Talk, or press `');minis=repeatB+'<button class="mini" title="Nothing to add — move on'+(nxt?(' to '+esc(nxt)):'')+'" onclick="vmDone()">'+(nxt?'Next ▸':'Done')+'</button>';}
+  else if(kind==='arming'){msg='Opening the mic…';big='<button class="vd-big dis" title="Opening the microphone…">…</button>';}
+  else if(kind==='recording'){msg='<span style="color:var(--err);font-weight:800">● REC</span> — tap Send when done';big='<button class="vd-big rec" onclick="vmBigTap()" title="Stop recording and send it">Send</button>';minis='<button class="mini" title="Discard this recording" onclick="vmCancelRec()">Cancel</button>';}
+  else if(kind==='sending'){msg='Transcribing + sending…';big='<button class="vd-big dis" title="Transcribing…">…</button>';}
+  d.innerHTML=shelf+id+'<div class="vd-row2"><span class="vd-msg">'+msg+'</span>'+minis+hfB+big+stopB+'</div>';
+  d.classList.add('on');d.classList.toggle('rec-on',kind==='recording');
+  try{document.body.classList.toggle('cf-vdock',!!(window.STG&&STG.open));}catch(e){}}
+function voiceDockHide(){var d=document.getElementById('vcDock');if(d)d.classList.remove('on');try{document.body.classList.remove('cf-vdock');}catch(e){}}
+function voiceDockRefresh(){vmDock();}   // legacy alias (stageShow/showSess hooks call this) — repaint is always safe now
+
+// ---- the GLOBAL switch (per-TAB live state: first tap on a fresh load always activates) ----
+async function voiceModeToggle(){var on=!VM.on;
+  if(on){if(!voiceKeyOK())return;try{voiceUnlockAudio();}catch(e){}}
+  try{var r=await(await fetch('/api/voice/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:on})})).json();
+    VQ.mode=!!r.mode;VQ.enrolled=r.enrolled||[];VQ.muted=r.muted||[];VQ.queue=r.queue||[];}catch(e){}
+  if(on){VM.on=true;VQ.on=true;VM.state='idle';VM.read={};VM.shelfKey='';VM.await='';VM.readNote='';VM.floor=null;
+    var f=voiceActiveSession();if(f)voiceAutoEnroll(f);
+    vmDock();vmPollStart();
+    vcToast('Voice mode ON — any session you use will be read to you when it finishes',4000);
+  }else{VM.on=false;VQ.on=false;VM.state='off';vmGen();vmPollStop();
+    voiceStopAudio();recStop(true);VM.floor=null;VM.floorQ=null;VM.confirmA=null;VM.sending=false;VM.await='';
+    voiceDockHide();vcToast('Voice mode off',2000);}
+  try{voiceMarkTiles();}catch(e){}try{if(typeof render==='function')render();}catch(e){}}
+async function voiceAutoEnroll(n){if(!n||!VQ.mode||voiceMuted(n)||voiceQueued(n))return;
+  try{var r=await(await fetch('/api/voice/enroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,on:true})})).json();
+    VQ.enrolled=r.enrolled||[];VQ.queue=r.queue||VQ.queue;}catch(e){}vmDock();}
+async function voiceMuteToggle(n){var mute=!voiceMuted(n);try{voiceUnlockAudio();}catch(e){}
+  try{var r=await(await fetch('/api/voice/mute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,on:mute})})).json();
+    VQ.muted=r.muted||[];VQ.enrolled=r.enrolled||[];VQ.queue=r.queue||VQ.queue;}catch(e){}
+  vcToast(mute?('Muted “'+n+'” — I won\'t read this one to you'):('Un-muted “'+n+'”'),2800);
+  if(mute&&VM.floor&&VM.floor.session===n){vmDone();}else if(!mute&&VQ.mode){voiceAutoEnroll(n);}
+  vmDock();try{voiceMarkTiles();}catch(e){}try{if(typeof render==='function')render();}catch(e){}}
+// legacy aliases so existing onclicks / call sites keep working
+async function voiceConvoToggle(n){return voiceMuteToggle(n);}
+async function voiceQueueToggle(n){return voiceMuteToggle(n);}
+function voiceQueueStop(){if(VM.on)voiceModeToggle();}
+function voiceQueueStart(){if(!VM.on)voiceModeToggle();}
+function voiceQueueNext(){vmDone();}
+function voiceQueueDone(){vmDone();}
+function voiceQueueJump(n){vmJump(n);}
+function voiceBargeReply(){if(VM.state==='preparing'||VM.state==='speaking')vmBarge();}
+function voiceRepeat(){vmRepeat();}
+
+// ---- standalone header 🎤 dictation (NOT voice mode): routed through the single recorder owner ----
+function voiceMic(n){if(REC.state==='recording'){recStop(false);return;}if(REC.state!=='idle')return;
+  try{voiceUnlockAudio();}catch(e){}
+  recStart(n,function(res){if(res.err){vcToast(res.err,3200);return;}if(!res.blob)return;
+    voiceTranscribe(res.blob,res.mime).then(function(t){if(t)voiceSend(n,t);});});}
+function voiceSend(n,text){return fetch('/api/voice/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,text:text})}).then(function(){vcToast('Sent: '+text.slice(0,60),3000);}).catch(function(){vcToast('Send failed',3000);});}
+
+// ---- hold-to-talk hotkey (backtick) — desktop, when focus isn't in an input or the terminal iframe ----
+document.addEventListener('keydown',function(e){if(e.key!=='`'||e.repeat||e.metaKey||e.ctrlKey||e.altKey)return;var t=e.target;if(t&&(/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName||'')||t.isContentEditable))return;
+  if(window.VM&&VM.on){e.preventDefault();vmBigTap();return;}   // in Voice mode the backtick IS the big button (talk/send/barge)
+  var n=voiceActiveSession();if(!n)return;e.preventDefault();voiceMic(n);});   // outside voice mode: tap-toggle dictation on the current session
+
+// ---- settings popover (provider / read-mode / threshold / speed / announce / chime) ----
 function voiceSettings(){var c=window.VCFG||{};function opt(v,cur){return '<option value="'+v+'"'+(cur===v?' selected':'')+'>'+v+'</option>';}
   var m=document.getElementById('vcSet');if(m)m.remove();m=document.createElement('div');m.id='vcSet';m.style.cssText='position:fixed;inset:0;z-index:10080;display:flex;align-items:center;justify-content:center;background:rgba(8,8,12,.7);backdrop-filter:blur(6px)';
   m.innerHTML='<div style="background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;width:min(420px,94vw);box-shadow:0 18px 50px rgba(0,0,0,.55)">'
@@ -29335,37 +30046,64 @@ function voiceSettings(){var c=window.VCFG||{};function opt(v,cur){return '<opti
    +'<label>How much to read<br><select id="vcMode" class="cc-in" style="width:100%;margin-top:4px">'+opt('smart',c.read_mode)+opt('verbatim',c.read_mode)+opt('summarize',c.read_mode)+'</select><span class="sub">smart = short messages verbatim, long ones summarized</span></label>'
    +'<label>Summarize when longer than (characters)<br><input id="vcThr" class="cc-in" style="width:100%;margin-top:4px" value="'+(c.summarize_threshold||600)+'"></label>'
    +'<label>Readback speed<br><select id="vcRate" class="cc-in" style="width:100%;margin-top:4px">'+[['0.9','0.9x'],['1','1.0x'],['1.15','1.15x'],['1.25','1.25x'],['1.5','1.5x'],['1.75','1.75x'],['2','2.0x']].map(function(o){return '<option value="'+o[0]+'"'+(String(voiceRate())===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+'</select></label>'
-   +'<label>Pause before auto-send (seconds)<br><input id="vcSil" class="cc-in" style="width:100%;margin-top:4px" value="'+(voiceSilenceMs()/1000)+'"><span class="sub">how long to wait after you stop talking — tap the "✓ send" pill to send instantly instead</span></label>'
-   +'<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="vcAuto"'+(voiceAutoRearm()?' checked':'')+'> Continuous listening — keep the mic open and auto-capture when you talk (hands-free)</label>'
-   +'<label>How to finish a turn (conversation)<br><select id="vcEnd" class="cc-in" style="width:100%;margin-top:4px">'+[['button','Tap ✓ Done / press ` — reliable (recommended)'],['word','Say a word (e.g. "over")'],['pause','Pause when done']].map(function(o){return '<option value="'+o[0]+'"'+(voiceEndMode()===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+'</select><span class="sub">Button = talk hands-free, then tap the big ✓ Done button (or press `) when finished. The others auto-detect (still being tuned).</span></label>'
-   +'<label>Send word (for "say a word" mode)<br><input id="vcPhrase" class="cc-in" style="width:100%;margin-top:4px" value="'+esc(voiceCommitPhrase())+'"><span class="sub">say it at the end, on its own — e.g. "over".</span></label>'
    +'<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="vcAnn"'+(c.announce_node?' checked':'')+'> Announce the node name before each readback'+(c.node_label?(' ('+esc(c.node_label)+')'):'')+'</label>'
    +'<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="vcEar"'+(voiceEarconOn()?' checked':'')+'> Play a chime when another session becomes ready</label>'
-   +'<span class="sub">Hold the backtick key <b>`</b> to talk hands-free on desktop.</span>'
+   +'<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="vcHf"'+(voiceHandsfreeOn()?' checked':'')+'> <b>Hands-free (driving)</b> — auto bring up &amp; read every session as it finishes; answer by voice. Off = it flashes and you tap.</label>'
+   +'<label>Seconds to reply before moving to the next agent (hands-free)<br><input id="vcGrace" class="cc-in" style="width:100%;margin-top:4px" value="'+(voiceGraceMs()/1000)+'"><span class="sub">after a session reads, it waits this long for your reply before ushering you to the next waiting agent. 0 = move on immediately.</span></label>'
+   +'<label>Stop waiting for a readback after (seconds)<br><input id="vcRto" class="cc-in" style="width:100%;margin-top:4px" value="'+(voiceReadTimeoutMs()/1000)+'"><span class="sub">if the voice takes too long to render, it stops waiting and just shows you the options / lets you reply — never freezes on “rendering”.</span></label>'
+   +'<label>Answering a multiple-choice question by voice<br><select id="vcAns" class="cc-in" style="width:100%;margin-top:4px">'+[['correct','Read my choice back &amp; let me correct it'],['confirm','Say my choice back, then send'],['quiet','Just send it (no readback)']].map(function(o){return '<option value="'+o[0]+'"'+(voiceAnswerMode()===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+'</select><span class="sub">after you speak an answer, whether it confirms out loud + lets you change it before sending.</span></label>'
+   +'<span class="sub">In Voice mode, tap Talk (or press the backtick key <b>`</b> on desktop) to reply — tap again to send. It replies to whatever session is on screen.</span>'
    +'</div>'
-   +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px"><button class="btn" onclick="document.getElementById(\'vcSet\').remove()">Cancel</button><button class="btn go" onclick="voiceSettingsSave()">Save</button></div></div>';
+   +'<div style="display:flex;gap:8px;justify-content:space-between;align-items:center;margin-top:16px"><button class="btn" onclick="voiceRecent()" title="Recover a dictation that was transcribed but not delivered">&#128266; Recent dictations</button><span style="display:flex;gap:8px"><button class="btn" onclick="document.getElementById(\'vcSet\').remove()">Cancel</button><button class="btn go" onclick="voiceSettingsSave()">Save</button></span></div></div>';
   m.addEventListener('mousedown',function(e){if(e.target===m)m.remove();});document.body.appendChild(m);}
-async function voiceSettingsSave(){var prov=(document.getElementById('vcProv')||{}).value,mode=(document.getElementById('vcMode')||{}).value,thr=parseInt((document.getElementById('vcThr')||{}).value||'600',10)||600,auto=(document.getElementById('vcAuto')||{}).checked,rate=parseFloat((document.getElementById('vcRate')||{}).value||'1.15')||1.15,sil=Math.round((parseFloat((document.getElementById('vcSil')||{}).value||'5')||5)*1000),ann=(document.getElementById('vcAnn')||{}).checked;
-  var endmode=(document.getElementById('vcEnd')||{}).value||'button',phrase=((document.getElementById('vcPhrase')||{}).value||'over').trim()||'over';
-  var ear=(document.getElementById('vcEar')||{}).checked;
-  try{localStorage.setItem('cc_voice_autorearm',auto?'1':'0');localStorage.setItem('cc_voice_rate',String(rate));localStorage.setItem('cc_voice_silence_ms',String(sil));localStorage.setItem('cc_voice_endmode',endmode);localStorage.setItem('cc_voice_commit_phrase',phrase);localStorage.setItem('cc_voice_earcon',ear?'1':'0');}catch(e){}
+async function voiceRecent(){
+  var d={};try{d=await(await fetch('/api/voice/transcripts?n=30')).json();}catch(e){}
+  var items=(d&&d.items)||[];
+  var body=items.length?items.map(function(it){
+    var when=hoAgo?hoAgo(it.ts):''; var secs=it.dur?(' · '+Math.round(it.dur)+'s'):''; var sess=it.session?(' · '+esc(it.session)):'';
+    var tid='vrt'+it.ts+'_'+(it.chars||0);
+    return '<div style="border-top:1px solid var(--line);padding:9px 0"><div class="sub" style="font-size:11px;margin-bottom:3px">'+(when?(esc(when)+' ago'):'')+secs+sess+' · '+(it.chars||0)+' chars</div>'
+      +'<div id="'+tid+'" style="white-space:pre-wrap;font-size:13px;max-height:120px;overflow:auto">'+esc(it.text||'')+'</div>'
+      +'<div style="margin-top:5px;display:flex;gap:6px"><button class="mini" onclick="voiceCopyText(\''+tid+'\')">Copy</button>'
+      +'<button class="mini go" onclick="voiceResend('+it.ts+')">Send to current session</button></div></div>';
+  }).join(''):'<div class="sub" style="padding:14px 0">No recent transcriptions. Every dictation that Deepgram transcribes is saved here as a backstop.</div>';
+  var m=document.getElementById('vcRec');if(m)m.remove();m=document.createElement('div');m.id='vcRec';m.style.cssText='position:fixed;inset:0;z-index:10090;display:flex;align-items:center;justify-content:center;background:rgba(8,8,12,.7);backdrop-filter:blur(6px)';
+  window._vcRecItems=items;
+  m.innerHTML='<div style="background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;width:min(520px,94vw);max-height:82vh;overflow:auto;box-shadow:0 18px 50px rgba(0,0,0,.55)">'
+    +'<h3 style="margin:0 0 4px">Recent dictations</h3><div class="sub" style="margin-bottom:8px">Anything transcribed but not delivered is here — copy it or send it to the session on screen.</div>'
+    +body+'<div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn" onclick="document.getElementById(\'vcRec\').remove()">Close</button></div></div>';
+  m.addEventListener('mousedown',function(e){if(e.target===m)m.remove();});document.body.appendChild(m);}
+function voiceCopyText(id){var el=document.getElementById(id);if(!el)return;try{navigator.clipboard.writeText(el.innerText||el.textContent||'');vcToast('Copied',1600);}catch(e){vcToast('Copy failed',2200);}}
+async function voiceResend(ts){var items=window._vcRecItems||[];var it=items.filter(function(x){return x.ts===ts;})[0];if(!it){vcToast('Not found',2000);return;}
+  var tgt=(typeof voiceTalkTarget==='function'&&voiceTalkTarget())||it.session;if(!tgt){vcToast('Open a session first',2400);return;}
+  try{await fetch('/api/voice/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:tgt,text:it.text})});vcToast('Sent to '+tgt+': '+String(it.text).slice(0,50),3000);}
+  catch(e){vcToast('Send failed',3000);}}
+async function voiceSettingsSave(){var prov=(document.getElementById('vcProv')||{}).value,mode=(document.getElementById('vcMode')||{}).value,thr=parseInt((document.getElementById('vcThr')||{}).value||'600',10)||600,rate=parseFloat((document.getElementById('vcRate')||{}).value||'1.15')||1.15,ann=(document.getElementById('vcAnn')||{}).checked,ear=(document.getElementById('vcEar')||{}).checked,hf=(document.getElementById('vcHf')||{}).checked;
+  var grace=Math.round((parseFloat((document.getElementById('vcGrace')||{}).value||'12')||12)*1000);
+  var ansm=(document.getElementById('vcAns')||{}).value||'correct';
+  var rto=Math.round((parseFloat((document.getElementById('vcRto')||{}).value||'15')||15)*1000);
+  try{localStorage.setItem('cc_voice_rate',String(rate));localStorage.setItem('cc_voice_earcon',ear?'1':'0');localStorage.setItem('cc_voice_handsfree',hf?'1':'0');localStorage.setItem('cc_voice_grace_ms',String(grace));localStorage.setItem('cc_voice_answer_mode',ansm);localStorage.setItem('cc_voice_read_timeout_ms',String(rto));}catch(e){}
+  try{if(window.VM&&VM.on){vmDock();vmPollNow();}}catch(e){}
   try{var r=await(await fetch('/api/voice/config-set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:prov,read_mode:mode,summarize_threshold:thr,announce_node:ann})})).json();if(r.ok)window.VCFG=r.config;vcToast('Voice settings saved',2200);}catch(e){vcToast('Save failed',3000);}
-  var m=document.getElementById('vcSet');if(m)m.remove();if(VC.conv)voiceConvBar(VC.conv,null);}
+  var m=document.getElementById('vcSet');if(m)m.remove();}
 try{voiceLoadCfg();}catch(e){}
-// ===== VOICE ATTENTION QUEUE (P1): enrolled sessions that finish -> queue -> the orchestrator presents them
-// one at a time (focus -> read the summary -> you tap-reply -> route back -> next). Single speaking floor. =====
-window.VQ={on:false,mode:false,enrolled:[],muted:[],queue:[],presenting:null,jumpTo:null,_looping:false};
+
+// ===== VOICE ATTENTION QUEUE state + styles (kept; the v3 machine above drives it) =====
+window.VQ={on:false,mode:false,enrolled:[],muted:[],queue:[],jumpTo:null};
 (function(){try{if(document.getElementById('vqStyle'))return;var s=document.createElement('style');s.id='vqStyle';s.textContent='.vq-active{animation:vqpulse 1.5s ease-in-out infinite;border-radius:12px}@keyframes vqpulse{0%,100%{box-shadow:0 0 0 2px var(--accent),0 0 14px rgba(var(--accent-rgb),.35)}50%{box-shadow:0 0 0 3px var(--accent),0 0 26px rgba(var(--accent-rgb),.6)}}'
   +'#vcDock{position:fixed;left:0;right:0;bottom:0;z-index:10068;display:none;flex-direction:column;gap:7px;background:var(--card);border-top:2px solid var(--accent);padding:9px 11px;padding-bottom:calc(9px + env(safe-area-inset-bottom,0px));box-shadow:0 -8px 24px rgba(0,0,0,.45)}'
   +'#vcDock.on{display:flex}'
   +'#vcDock .vd-id{display:flex;align-items:center;gap:8px;min-width:0}#vcDock .vd-id.tap{cursor:pointer}'
   +'#vcDock .vd-name{font-weight:800;color:var(--accent);font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;max-width:52%}'
+  +'#vcDock .vd-open{flex:0 0 auto;color:var(--accent);font-size:11px;font-weight:700;opacity:.85;white-space:nowrap}'
   +'#vcDock .vd-scope{color:var(--mut);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto}'
   +'#vcDock .vd-row2{display:flex;align-items:center;gap:8px}'
   +'#vcDock .vd-msg{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--mut)}'
   +'#vcDock .vd-big{flex:0 0 auto;background:var(--accent);color:var(--bg-warm);border:none;border-radius:22px;padding:11px 22px;font-size:15px;font-weight:700;cursor:pointer;animation:vqpulse 1.6s ease-in-out infinite}'
   +'#vcDock .vd-big.rec,#vcDock .vd-big.dis{animation:none}#vcDock .vd-big.dis{opacity:.5;pointer-events:none}'
   +'#vcDock .vd-shelf{background:rgba(var(--accent-rgb),.14);border:1px solid var(--accent);border-radius:10px;color:var(--accent);font-weight:700;font-size:13px;padding:9px 12px;cursor:pointer;text-align:center}#vcDock .vd-shelf.pop{animation:vqpop .35s ease-out}@keyframes vqpop{0%{transform:scale(.94);opacity:.2}100%{transform:scale(1);opacity:1}}'
+  +'#vcDock .vd-shelf.flash{animation:vqflash 1s ease-in-out infinite}@keyframes vqflash{0%,100%{background:rgba(var(--accent-rgb),.16);box-shadow:0 0 0 0 rgba(var(--accent-rgb),.5)}50%{background:rgba(var(--accent-rgb),.42);box-shadow:0 0 16px 2px rgba(var(--accent-rgb),.6)}}'
+  +'#stgVoice.vflash{animation:vqflash 1s ease-in-out infinite;border-radius:8px}'
   +'body.cf-vdock #stage{padding-bottom:104px}'
   +'.vd-glyph{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:20px;height:16px}'
   +'.vd-spin{display:inline-block;width:15px;height:15px;border:2px solid rgba(var(--accent-rgb),.3);border-top-color:var(--accent);border-radius:50%;animation:vdspin .8s linear infinite}@keyframes vdspin{to{transform:rotate(360deg)}}'
@@ -29377,132 +30115,16 @@ window.VQ={on:false,mode:false,enrolled:[],muted:[],queue:[],presenting:null,jum
 async function vqFetch(){try{var s=await(await fetch('/api/voice/queue')).json();VQ.mode=!!s.mode;VQ.enrolled=s.enrolled||[];VQ.muted=s.muted||[];VQ.queue=s.queue||[];return s;}catch(e){return {mode:VQ.mode,enrolled:VQ.enrolled,muted:VQ.muted,queue:VQ.queue};}}
 function voiceQueued(n){return (VQ.enrolled||[]).indexOf(n)>=0;}
 function voiceMuted(n){return (VQ.muted||[]).indexOf(n)>=0;}
-// GLOBAL Voice-mode switch. ON = the dock lives; any session you OPEN or TALK TO auto-joins the rotation.
-async function voiceModeToggle(){var on=!VQ.on;   // base on THIS TAB's live state (not the persisted server flag) -> a fresh load's first tap always turns it ON/resumes
-  if(on){if(!voiceKeyOK())return;try{voiceUnlockAudio();}catch(e){}}
-  try{var r=await(await fetch('/api/voice/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:on})})).json();VQ.mode=!!r.mode;VQ.enrolled=r.enrolled||[];VQ.muted=r.muted||[];VQ.queue=r.queue||[];}catch(e){}
-  if(on){VQ.on=true;var f=voiceActiveSession();if(f)voiceAutoEnroll(f);voiceDock('armed',f);if(!VQ._looping){VQ._looping=true;voiceQueueLoop();}vcToast('Voice mode ON — I\'ll bring up any session you use when it has something for you',4200);}
-  else{VQ.on=false;VQ.next=true;try{voiceStopAudio();}catch(e){}if(VC._readResolve){var a=VC._readResolve;VC._readResolve=null;a('stop');}if(VC._dockResolve){var b=VC._dockResolve;VC._dockResolve=null;b('');}try{voiceButtonCleanup();}catch(e){}VQ.presenting=null;VC.dockKind=null;VC.shelfKey='';voiceDockHide();vcToast('Voice mode off',2000);}
-  try{voiceMarkTiles();}catch(e){}try{if(typeof render==='function')render();}catch(e){}}
-async function voiceAutoEnroll(n){if(!n||!VQ.mode||voiceMuted(n)||voiceQueued(n))return;try{var r=await(await fetch('/api/voice/enroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,on:true})})).json();VQ.enrolled=r.enrolled||[];VQ.queue=r.queue||VQ.queue;}catch(e){}voiceDockRefresh();}
-// per-session control is now MUTE (opt out). Old names kept as aliases so existing buttons keep working.
-async function voiceMuteToggle(n){var mute=!voiceMuted(n);try{voiceUnlockAudio();}catch(e){}
-  try{var r=await(await fetch('/api/voice/mute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,on:mute})})).json();VQ.muted=r.muted||[];VQ.enrolled=r.enrolled||[];VQ.queue=r.queue||VQ.queue;}catch(e){}
-  vcToast(mute?('Muted “'+n+'” — I won\'t read this one to you'):('Un-muted “'+n+'”'),2800);
-  if(mute&&VQ.presenting===n){voiceQueueNext();}else if(!mute&&VQ.mode){voiceAutoEnroll(n);}
-  voiceDockRefresh();try{voiceMarkTiles();}catch(e){}try{if(typeof render==='function')render();}catch(e){}}
-async function voiceConvoToggle(n){return voiceMuteToggle(n);}
-async function voiceQueueToggle(n){return voiceMuteToggle(n);}
 function voiceQueueBtn(n){var e=esc(n);var m=voiceMuted(n);return '<button class="mini" title="'+(m?'This session is MUTED for voice — tap to let it talk to you again':'Voice: tap to MUTE this session (stop reading it to you)')+'" onclick="voiceMuteToggle(\''+e+'\')"'+(m?'':' style="color:var(--accent)"')+'>'+(m?'\u{1F507}':'\u{1F4AC}')+'</button>';}
 function voiceQueuePaint(){var b=document.getElementById('vqLauncher');if(b)b.remove();}   // launcher retired -> the dock is the only surface
-async function voiceQueueBadgePoll(){await vqFetch();voiceDockRefresh();try{voiceMarkTiles();}catch(e){}}
-function voiceQueueStart(){if(!VQ.mode)voiceModeToggle();}   // legacy entry
-function voiceQueueStop(){VQ.on=false;VQ.next=true;VC.conv=null;try{voiceStopAudio();}catch(e){}try{if(VC.btnRec&&VC.btnRec.state==='recording'){VC.btnCancel=true;VC.btnRec.stop();}}catch(e){}
-  if(VC._readResolve){var a=VC._readResolve;VC._readResolve=null;a('stop');}if(VC._dockResolve){var b=VC._dockResolve;VC._dockResolve=null;b('');}
-  try{voiceButtonCleanup();}catch(e){}try{voiceAmbientStop();}catch(e){}vcPill('');voiceDockHide();var bar=document.getElementById('vcBar');if(bar)bar.remove();VQ.presenting=null;voiceQueuePaint();try{if(typeof render==='function')render();}catch(e){}}
+async function voiceQueueBadgePoll(){if(VM.on)return;await vqFetch();try{voiceMarkTiles();}catch(e){}}   // when voice mode is off, keep the tiles/mute state fresh; when on, vmPoll owns fetching
 function vqFocus(n){
   try{if(typeof wkMobile==='function'&&wkMobile()){if(typeof stageShow==='function')stageShow(n);return;}}catch(e){}   // mobile: bring it up full-screen in the Stage
   // desktop: bring it up if minimized (not in the workspace), maximize/front it, land on the sessions lens, and the render glows it
   try{if(typeof PANES!=='undefined'&&PANES.indexOf(n)<0){panesSet([n].concat(PANES).slice(0,4));}else{window.SESSBIG=n;}if(typeof gotoLens==='function')gotoLens('sessions');if(typeof render==='function')render();}catch(e){}
 }
-// ---- consolidated voice control DOCK: ONE bottom bar with state + Repeat + Talk/Send + smart Next + Stop ----
-function voiceEarconOn(){try{return localStorage.getItem('cc_voice_earcon')!=='0';}catch(e){return true;}}
-function voiceEarcon(){try{var AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;var c=VC._eac||(VC._eac=new AC());if(c.state==='suspended')c.resume();var t=c.currentTime;[880,1174].forEach(function(f,i){var o=c.createOscillator(),g=c.createGain();o.type='sine';o.frequency.value=f;o.connect(g);g.connect(c.destination);var s=t+i*0.1;g.gain.setValueAtTime(0.0001,s);g.gain.exponentialRampToValueAtTime(0.11,s+0.02);g.gain.exponentialRampToValueAtTime(0.0001,s+0.16);o.start(s);o.stop(s+0.19);});}catch(e){}}
-// ONE persistent two-row cockpit: Row 1 = WHO has the floor (never moves); Row 2 = the ONE big action + minis.
-function voiceDock(kind,n){if((kind==='armed'||kind==='yourturn')&&typeof voiceTalkTarget==='function'){var _t=voiceTalkTarget();if(_t)n=_t;}   // identity == the session you'll talk to (what's on screen)
-  VC.dockKind=kind;VC.dockN=n;var d=document.getElementById('vcDock');if(!d){d=document.createElement('div');d.id='vcDock';document.body.appendChild(d);}
-  var others=(VQ.queue||[]).filter(function(x){return x.session!==n;});
-  var shelfKey=others.map(function(x){return x.session;}).join(',');
-  var newArrival=(shelfKey&&shelfKey!==VC.shelfKey);
-  if(newArrival&&kind!=='speaking'&&kind!=='recording'&&kind!=='preparing'){try{if(voiceEarconOn())voiceEarcon();}catch(e){}}
-  VC.shelfKey=shelfKey;
-  var shelf=others.length?('<div class="vd-shelf'+(newArrival?' pop':'')+'" onclick="voiceQueueJump(\''+esc(others[0].session)+'\')">'+esc(others[0].session)+(others.length>1?(' · +'+(others.length-1)+' more'):'')+' — ready ▸</div>'):'';
-  var glyph=(kind==='speaking')?'<span class="vd-eq"><i></i><i></i><i></i><i></i></span>':(kind==='preparing'||kind==='sending'||kind==='switching')?'<span class="vd-spin"></span>':(kind==='recording')?'<span class="vd-mic rec"></span>':(kind==='yourturn'||kind==='arming')?'<span class="vd-mic"></span>':'<span class="vd-idle"></span>';
-  var scope=(VC.dockScope||'');
-  var mute=n?('<button class="mini" title="Mute this session — stop reading it to you" onclick="voiceMuteToggle(\''+esc(n)+'\')">mute</button>'):'';
-  var id='<div class="vd-id'+(n?' tap':'')+'"'+(n?(' onclick="vqFocus(\''+esc(n)+'\')"'):'')+'><span class="vd-glyph">'+glyph+'</span><span class="vd-name">'+(n?esc(n):'Voice mode')+'</span><span class="vd-scope">'+esc(scope)+'</span>'+mute+'</div>';
-  var stopB='<button class="mini danger" title="End voice mode" onclick="voiceModeToggle()">Stop</button>';
-  var repeatB='<button class="mini" title="Repeat — replay the last message (no extra cost)" onclick="voiceRepeat()">Repeat</button>';
-  var msg='',big='',minis='';
-  if(kind==='armed'){msg='Voice on — waiting for a session to finish. Talk any time.';big='<button class="vd-big" onclick="voiceDockTalk()">Talk</button>';}
-  else if(kind==='preparing'){msg='Summarizing + rendering voice…';big='<button class="vd-big" onclick="voiceBargeReply()">Skip — reply</button>';}
-  else if(kind==='speaking'){msg='Speaking…';big='<button class="vd-big" onclick="voiceBargeReply()">Reply</button>';minis=repeatB;}
-  else if(kind==='yourturn'){msg='Your turn — tap Talk, or press `';big='<button class="vd-big" onclick="voiceDockTalk()">Talk</button>';minis=repeatB+'<button class="mini" title="Nothing to add — move on" onclick="voiceQueueDone()">Done</button>';}
-  else if(kind==='arming'){msg='Opening the mic…';big='<button class="vd-big dis" title="Opening the microphone…">…</button>';}
-  else if(kind==='recording'){msg='<span style="color:var(--err);font-weight:800">● REC</span> — tap Send when done';big='<button class="vd-big rec" onclick="voiceDockTalk()">Send</button>';minis='<button class="mini" title="Discard this recording" onclick="voiceDockCancel()">Cancel</button>';}
-  else if(kind==='sending'){msg='Transcribing + sending…';}
-  else if(kind==='working'){msg='working — I\'ll read the reply when it\'s done';big='<button class="vd-big" onclick="voiceDockTalk()">Talk</button>';minis=repeatB;}
-  else if(kind==='switching'){msg='Switching…';}
-  var row2='<div class="vd-row2"><span class="vd-msg">'+msg+'</span>'+minis+big+stopB+'</div>';
-  d.innerHTML=shelf+id+row2;d.classList.add('on');d.classList.toggle('rec-on',kind==='recording');
-  try{document.body.classList.toggle('cf-vdock',!!(window.STG&&STG.open));}catch(e){}}
-function voiceDockHide(){var d=document.getElementById('vcDock');if(d)d.classList.remove('on');try{document.body.classList.remove('cf-vdock');}catch(e){}}
-// keep the dock live so a NEWLY-ready session shows up in the shelf while you're mid-turn (skip transient states).
-function voiceDockRefresh(){try{if(window.VQ&&VQ.on&&VC.dockKind&&VC.dockKind!=='recording'&&VC.dockKind!=='sending'&&VC.dockKind!=='arming'&&VC.dockKind!=='preparing'){voiceDock(VC.dockKind,VC.dockN);}}catch(e){}}
-function voiceRepeat(){if(VC.lastAudioFile){try{voiceUnlockAudio();}catch(e){}voicePlay(VC.lastAudioFile);}else vcToast('Nothing to repeat yet',2000);}
-function voiceBargeReply(){voiceStopAudio();VC._barge=true;if(VC._readResolve){var f=VC._readResolve;VC._readResolve=null;f('barge');}}
-function voiceSpeakInteractive(n){return new Promise(function(res){VC._readResolve=res;VC._barge=false;voiceDock('preparing',n);
-  fetch('/api/voice/speak-last',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n})}).then(function(r){return r.json();}).then(function(r){
-    if(!VC._readResolve)return;   // skipped/next/stopped during prepare -> abort, don't play
-    if(r&&r.ok){
-      if(r.fp&&r.fp===VC._spokeFp){var g=VC._readResolve;VC._readResolve=null;if(g)g('dup');return;}   // already read THIS exact message -> never read it twice in a row
-      VC._spokeFp=r.fp||'';VC.lastAudioFile=r.file;if(r.fp)VC.lastFp=r.fp;voiceDock('speaking',n);voicePlay(r.file,function(){if(VC._readResolve){var f=VC._readResolve;VC._readResolve=null;f('end');}});}
-    else{var f=VC._readResolve;VC._readResolve=null;f('noaudio');}
-  }).catch(function(){if(VC._readResolve){var f=VC._readResolve;VC._readResolve=null;f('err');}});});}
-function voiceDockListen(n){return new Promise(function(res){VC._dockResolve=res;voiceDock('yourturn',n);});}
-function voiceDockCancel(){try{if(VC.btnRec&&VC.btnRec.state==='recording'){VC.btnCancel=true;VC.btnRec.stop();}}catch(e){}voiceDock(VQ.presenting?'yourturn':'armed',VQ.presenting||voiceActiveSession());}
-function voiceQueueDone(){voiceQueueNext();}
-function voiceQueueJump(n){if(window.VQ)VQ.jumpTo=n;voiceQueueNext();}
-// CRITICAL: your reply ALWAYS goes to the session ON YOUR SCREEN, never the hidden rotation "floor".
-function voiceTalkTarget(){try{if(window.STG&&STG.open&&STG.cur)return STG.cur;}catch(e){}try{if(window.SESSBIG)return SESSBIG;}catch(e){}return VQ.presenting||VC.dockN||null;}
-function voiceDockTalk(){var n=voiceTalkTarget();if(!n)return;VC.talkTgt=n;
-  if(VC.btnRec&&VC.btnRec.state==='recording'){try{VC.btnRec.stop();}catch(e){}return;}
-  try{voiceUnlockAudio();}catch(e){}voiceDock('arming',n);
-  navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
-    VC.btnStream=stream;VC.btnChunks=[];VC.btnCancel=false;var mr;try{mr=new MediaRecorder(stream);}catch(e){vcToast('Recording not supported here.',3000);try{stream.getTracks().forEach(function(t){t.stop();});}catch(_){}voiceDock(VQ.presenting?'yourturn':'armed',n);return;}
-    VC.btnRec=mr;mr.ondataavailable=function(ev){if(ev.data&&ev.data.size)VC.btnChunks.push(ev.data);};
-    mr.onstop=function(){try{VC.btnStream.getTracks().forEach(function(t){t.stop();});}catch(e){}if(VC.btnCancel){VC.btnCancel=false;VC.btnRec=null;return;}var blob=new Blob(VC.btnChunks,{type:mr.mimeType||'audio/webm'});voiceDock('sending',n);
-      var fr=new FileReader();fr.onloadend=async function(){var b64=(String(fr.result||'').split(',')[1])||'';var text='';if(b64&&blob.size>600){try{var rr=await(await fetch('/api/voice/dictate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:b64,mime:(mr.mimeType||'audio/webm').split(';')[0]})})).json();if(rr.ok)text=(rr.text||'').trim();else vcToast((/corrupt|unsupported|Bad Request|no audio/i.test(rr.error||''))?'Didn\'t catch that — tap to try again.':('Transcribe: '+(rr.error||'?')),3500);}catch(e){}}VC.btnRec=null;
-        if(VC._dockResolve){var f=VC._dockResolve;VC._dockResolve=null;f({tgt:n,text:text});}   // presenting: loop sends to THIS on-screen target
-        else{if(text)voiceSend(n,text);voiceDock('armed',n);}                                      // armed one-off: send directly to on-screen target
-      };fr.readAsDataURL(blob);};
-    mr.start();voiceDock('recording',n);try{if(navigator.vibrate)navigator.vibrate(35);}catch(e){}   // tactile cue: recording started
-  }).catch(function(){vcToast('Microphone permission needed.',3500);voiceDock(VQ.presenting?'yourturn':'armed',n);});}
-async function voiceReadRetry(n){var how=await voiceSpeakInteractive(n),t=0;   // a read that fails transiently (server restart / network blip) retries instead of silently skipping the summary
-  while((how==='err'||how==='noaudio')&&VQ.on&&!VQ.next&&t<4){await new Promise(function(r){setTimeout(r,1600);});how=await voiceSpeakInteractive(n);t++;}return how;}
-async function voiceQueueLoop(){
-  var myId=(VQ._loopGen=(VQ._loopGen||0)+1);VQ._looping=true;   // only the newest loop survives -> never two presenting at once
-  while(VQ.on){
-    if(VQ._loopGen!==myId)return;   // a newer loop took over
-    var s=await vqFetch();
-    var q=s.queue||[];var item=null;
-    if(VQ.jumpTo){for(var i=0;i<q.length;i++){if(q[i].session===VQ.jumpTo){item=q[i];break;}}VQ.jumpTo=null;}
-    if(!item)item=q[0];
-    if(!item){ voiceDock('armed',voiceActiveSession()); await new Promise(function(r){setTimeout(r,2500);}); continue; }
-    var n=item.session;VQ.presenting=n;VQ.next=false;VC.conv=n;VC.lastFp=item.fp;VC.dockScope=item.scope||'';
-    if(!VQ.on)break;
-    var how=await voiceReadRetry(n);   // read WITHOUT yanking the screen — you stay where you are; tap the dock name to open this session (keeps reading)
-    while(VQ.on&&!VQ.next){
-      var lp=voiceDockListen(n);
-      if(how==='barge'){how='';voiceDockTalk();}
-      var res=await lp;
-      if(!VQ.on||VQ.next)break;
-      if(!res||!res.text){continue;}
-      var tgt=res.tgt||n;   // route to the session that was ON SCREEN when you talked (never the hidden floor)
-      n=tgt;VQ.presenting=tgt;VC.conv=tgt;   // follow the session you actually replied to
-      voiceDock('working',tgt);await voiceSend(tgt,res.text);
-      var ok=await voiceWaitReply(tgt);
-      if(!VQ.on||VQ.next)break;
-      how=ok?await voiceReadRetry(tgt):'';
-    }
-    try{await fetch('/api/voice/queue-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n})});}catch(e){}
-    VC.conv=null;VQ.presenting=null;VQ.next=false;VC.dockScope='';
-    try{if(typeof render==='function')render();}catch(e){}
-  }
-  VQ._looping=false;VQ.presenting=null;if(!VQ.on)voiceDockHide();
-}
-function voiceMarkTiles(){try{var v=document.getElementById('stgVoice');if(v)v.style.color=(window.VQ&&VQ.on)?'var(--accent)':'';}catch(e){}
-  try{document.querySelectorAll('#sessbar .sb-tile[data-name]').forEach(function(t){var nm=t.getAttribute('data-name');t.classList.toggle('sb-voice',!!(window.VQ&&VQ.on&&voiceQueued(nm)&&!voiceMuted(nm)));});}catch(e){}}
+function voiceMarkTiles(){try{var v=document.getElementById('stgVoice');if(v){v.style.color=(window.VM&&VM.on)?'var(--accent)':'';v.classList.toggle('vflash',!!(window.VM&&VM.on&&typeof vmReadyList==='function'&&vmReadyList().length));}}catch(e){}
+  try{document.querySelectorAll('#sessbar .sb-tile[data-name]').forEach(function(t){var nm=t.getAttribute('data-name');t.classList.toggle('sb-voice',!!(window.VM&&VM.on&&voiceQueued(nm)&&!voiceMuted(nm)));});}catch(e){}}
 try{voiceQueueBadgePoll();setInterval(voiceQueueBadgePoll,5000);}catch(e){}
 function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)+skillChip(x.name)
   +'<span class="stbtns">'
@@ -29518,7 +30140,7 @@ function renderFocus(s){
   var big=s.find(function(x){return x.name==SESSBIG;});
   // One big terminal + a visible attach bar (mobile/fallback) + a drag overlay (covers the iframe on dragover).
   var h='<div class="focusonly">'
-    +'<div class="bigsess'+((window.VQ&&VQ.presenting===big.name)?' vq-active':'')+'" data-ccsess="'+esc(big.name)+'">'+bigHead(big)+ccDropBar(big.name)+'<iframe class="stframe" src="/term?name='+encodeURIComponent(big.name)+'"></iframe>'+ccDropOverlay()+'</div>'
+    +'<div class="bigsess'+((window.VM&&VM.floor&&VM.floor.session===big.name)?' vq-active':'')+'" data-ccsess="'+esc(big.name)+'">'+bigHead(big)+ccDropBar(big.name)+'<iframe class="stframe" src="/term?name='+encodeURIComponent(big.name)+'"></iframe>'+ccDropOverlay()+'</div>'
     +'<div class="termgrip" id="termGrip">'
       +'<button class="termgrip-b" type="button" title="Shorter" onclick="termStep(-90)">&minus;</button>'
       +'<span class="termgrip-bar" id="termBar" title="Drag up/down to resize (remembered on this device)"><i></i><b id="termGripN"></b></span>'
@@ -29550,7 +30172,7 @@ function renderWorkspace(s){
     var x=s.find(function(y){return y.name==name;})||{name:name,label:name};
     if(idx>0) h+='<div class="pane-split" data-l="'+esc(panes[idx-1])+'" data-r="'+esc(name)+'" title="drag to resize"></div>';
     var grow=PANEW[name]||1;
-    h+='<div class="wkpane bigsess'+((window.VQ&&VQ.presenting===name)?' vq-active':'')+'" data-ccsess="'+esc(name)+'" data-pane="'+esc(name)+'" style="flex:'+grow+' 1 0">'
+    h+='<div class="wkpane bigsess'+((window.VM&&VM.floor&&VM.floor.session===name)?' vq-active':'')+'" data-ccsess="'+esc(name)+'" data-pane="'+esc(name)+'" style="flex:'+grow+' 1 0">'
       + paneHead(x) + ccDropBar(name) + '<iframe class="stframe" src="/term?name='+encodeURIComponent(name)+'"></iframe>' + ccDropOverlay()
       +'</div>';
   });
@@ -29660,7 +30282,7 @@ function sessRow(x){const now=Date.now()/1000;return '<div class="card" style="c
   +'<button class="mini" onclick="endSess(\''+esc(x.name)+'\',false)" title="handoff + close">end</button>'
   +'<button class="mini danger" onclick="endSess(\''+esc(x.name)+'\',true)" title="force kill">kill</button></div></div>';}
 function sessTile(x,i){const big=(SESSBIG==x.name);
-  return '<div class="stile'+(big?' big':'')+attnTileCls(x.name)+((window.VQ&&VQ.presenting===x.name)?' vq-active':'')+'" id="atile_'+attnCssid(x.name)+'" data-name="'+esc(x.name)+'"'+(big?(' data-ccsess="'+esc(x.name)+'"'):'')+'>'
+  return '<div class="stile'+(big?' big':'')+attnTileCls(x.name)+((window.VM&&VM.floor&&VM.floor.session===x.name)?' vq-active':'')+'" id="atile_'+attnCssid(x.name)+'" data-name="'+esc(x.name)+'"'+(big?(' data-ccsess="'+esc(x.name)+'"'):'')+'>'
     +'<div class="sthead" onclick="tileClick(\''+esc(x.name)+'\')">'+attnDotHTML(x)+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)
     +'<span class="stbtns" onclick="event.stopPropagation()">'
     +'<button class="mini" title="'+(big?'minimize':'maximize')+'" onclick="tileClick(\''+esc(x.name)+'\')">'+(big?'▒':'⤢')+'</button>'
@@ -33077,6 +33699,10 @@ if __name__ == "__main__":
         try: regen_treemap(force=True)   # stamp the whole-tree module map into the root CLAUDE.md
         except Exception: pass
         try: seed_framework_blocks()     # stamp framework governance (CCR policy) into project nodes' CLAUDE.md
+        except Exception: pass
+        try:                             # reserve a 'needed, not set' Vault slot for each core-feature key so the
+            _nc = _declare_core_capabilities()        # operator is prompted for optional keys (voice, notify, ...)
+            if _nc: print("capabilities: reserved %d core key slot(s) in the vault" % _nc)
         except Exception: pass
         try:                             # portability: re-point the google MCP secret paths at THIS install root
             _gh = _heal_google_mcp_paths(apply=True)   # (survives a drive move -- CCR ccr-1782880284334)

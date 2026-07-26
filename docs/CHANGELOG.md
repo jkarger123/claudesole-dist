@@ -3,6 +3,25 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.219 -- 2026-07-26  (Voice: never lose a dictation again + core capability registry + node vault-lease wiring)
+Two threads, both from a real HA incident where voice input was off, then two long dictations were LOST.
+- **Voice data-loss safety net.** A spoken message that Deepgram transcribed successfully could be silently
+  dropped AFTER transcription (client `vmRecDone` discarded it if voice-mode flipped mid-transcription or the
+  target session rotated), and NOTHING was persisted -> unrecoverable. Fix: `voice.py _log_transcript()` writes
+  every successful transcription to `<STATE_DIR>/_voice_transcripts.jsonl` the instant Deepgram returns it,
+  BEFORE the text leaves the server (bounded ~300 lines); `vc_transcripts()` + `GET /api/voice/transcripts`
+  read it back; `vmRecDone` now DELIVERS a transcribed message even if voice-mode ended mid-transcription
+  (no silent drop) and shows a recoverable toast on any failure; new "Recent dictations" recovery modal in
+  Voice settings (copy / re-send to the current session).
+- **Core capability registry.** The built-in twin of an extension's `requires[]`: `CORE_CAPABILITIES` maps each
+  optional key (DEEPGRAM/ELEVENLABS/OPENAI/TELEGRAM) to the feature it unlocks. `_declare_core_capabilities()`
+  reserves a "needed, not set" Vault slot at boot; `/api/vault` returns `capabilities[]`; the Vault lens gains a
+  "Features & the keys that unlock them" panel (green = on / Add key). Features auto-enable when the key resolves
+  (vault-first) -- so one key set at MC lights the feature up fleet-wide, and a fresh install is prompted for it.
+- **Node vault-lease wiring.** 7/9 co-located nodes had `vault_url=None`, so they could not lease ANY central
+  secret (voice/AI keys unreachable). Wired them to the overseer; `cc-spawn.sh` now auto-sets a child's
+  `vault_url` to its parent authority at birth so fresh nodes can lease from day one.
+
 ## 0.99.218 -- 2026-07-24  (Google/email auth: never fight this again -- scope-floor guard + mint hardening)
 Fallout + permanent fix from a multi-hour Google auth incident (james.k.karger lost gmail READ silently). Root
 causes + full audit: `extensions/google-workspace/deliverables/EMAIL_AUTH_INCIDENT_AUDIT_20260724.md`.

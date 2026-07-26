@@ -1,7 +1,7 @@
 # Command Center — the engine
 
 <!-- LATEST-HANDOFF -->
-**>> Resume here:** read `_handoffs/20260711-0537__command-center.md` first -- it is the latest handoff.
+**>> Resume here:** read `_handoffs/20260725-0541__command-center.md` first -- it is the latest handoff.
 <!-- /LATEST-HANDOFF -->
 
 > **▶ THE DISCIPLINE SYSTEM: `docs/ENGINEERING_AUTOPILOT.md`** — how we control the context payload (Menu/Scout/
@@ -40,10 +40,11 @@
 - `Usage/` -- >> Resume here: read _handoffs/20260702-1502__Usage.md first -- it is the latest handoff.
 - `autonudge/` -- My job: when a Claude session keeps stopping to ask "want me to keep going?", auto-send a canned push (e.g.
 - `front-door/` -- >> Resume here: read _handoffs/20260720-0541__front-door.md first -- it is the latest handoff.
-- `mobile/` -- >> Resume here: read _handoffs/20260724-0644__mobile.md first -- it is the latest handoff.
+- `mobile/` -- >> Resume here: read _handoffs/20260725-1522__mobile.md first -- it is the latest handoff.
+- `native-app/` -- A thin bare-Swift + WKWebView iPhone app that wraps the live ClaudeFather dashboard and adds the four native powers a web page can't have on iOS (background aud
 - `update/` -- This folder is the home + documentation of how a ClaudeFather node gets new framework code, reliably,
 - `vault/` -- This folder is the documentation home for ClaudeFather's credential system: the per-install vault, the
-- `voice/` -- All things voice: speech-to-text (talk to a session) and text-to-speech (hear a session's replies).
+- `voice/` -- >> Resume here: read _handoffs/20260725-1539__voice.md first -- it is the latest handoff.
 <!-- /CC:CHILDREN -->
 
 The ClaudeFather platform's web control plane: a single **stdlib-Python HTTP server** (`server.py`,

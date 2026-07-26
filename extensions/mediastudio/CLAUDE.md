@@ -1,7 +1,7 @@
 # mediastudio — the Video Studio feature (working scope + full map)
 
 <!-- LATEST-HANDOFF -->
-**>> Resume here:** read `_handoffs/20260718-1531__mediastudio.md` first -- it is the latest handoff.
+**>> Resume here:** read `_handoffs/20260725-0541__mediastudio.md` first -- it is the latest handoff.
 <!-- /LATEST-HANDOFF -->
 
 <!-- CC:NOTES append-only; agents file learnings that belong to THIS module here -->
