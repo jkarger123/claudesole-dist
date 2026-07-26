@@ -3,6 +3,17 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.220 -- 2026-07-26  (Voice: record as long as you talk -- kill the 2-min auto-send + no talk-over)
+Follow-on from 0.99.219, same HA session: the dock's 2-MINUTE recording cap force-stopped + AUTO-SENT a long
+dictation mid-sentence (proven: the persisted transcript logged dur=120.0s). A fixed total-time cap that sends
+is wrong -- recording must run until YOU tap send.
+- **No more 2-min cutoff.** `voiceMaxRecMs()` replaces the hardcoded 120000ms auto-send. Default 30 min and it's
+  now a pure WALK-AWAY safety (a mic left on by accident), NOT a speech cutoff; new "Max recording length" field
+  in Voice settings; set 0 to disable entirely (record until you send, any length).
+- **No talk-over.** Starting to record now silences any in-flight readback (`voiceStopAudio()` in `recStart`), and
+  a new session reply will NOT be read aloud while you're recording (`vmPresent` guards on `REC.state`) -- it stays
+  queued and presents after you send.
+
 ## 0.99.219 -- 2026-07-26  (Voice: never lose a dictation again + core capability registry + node vault-lease wiring)
 Two threads, both from a real HA incident where voice input was off, then two long dictations were LOST.
 - **Voice data-loss safety net.** A spoken message that Deepgram transcribed successfully could be silently

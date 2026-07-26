@@ -29666,6 +29666,10 @@ function voiceGraceMs(){try{var s=parseInt(localStorage.getItem('cc_voice_grace_
 // NO-HANG: cap how long we wait for a readback to RENDER (TTS can intermittently crawl). On timeout we stop
 // waiting and just show you the options / let you reply -- never freeze on 'rendering'. Per-device, default 15s.
 function voiceReadTimeoutMs(){try{var s=parseInt(localStorage.getItem('cc_voice_read_timeout_ms')||'15000',10);return (s>=3000&&s<=60000)?s:15000;}catch(e){return 15000;}}
+// WALK-AWAY SAFETY ONLY (never a normal-speech cutoff): the recorder runs until YOU tap send. This cap exists
+// solely so a mic left on by accident doesn't record forever. Default 30 min; you can talk as long as you want.
+// Per-device (localStorage). Set to 0 to disable entirely (record until you send, no matter how long).
+function voiceMaxRecMs(){try{var s=parseInt(localStorage.getItem('cc_voice_maxrec_ms')||'1800000',10);return (s===0||(s>=60000&&s<=7200000))?s:1800000;}catch(e){return 1800000;}}
 function voiceFetchT(url,opts,ms){return new Promise(function(res,rej){var c=new AbortController(),done=false;var to=setTimeout(function(){if(!done){done=true;try{c.abort();}catch(e){}rej(new Error('timeout'));}},ms||15000);var o=opts||{};o.signal=c.signal;fetch(url,o).then(function(r){if(done)return;done=true;clearTimeout(to);res(r);}).catch(function(e){if(done)return;done=true;clearTimeout(to);rej(e);});});}
 function voiceHandsfreeToggle(){var on=!voiceHandsfreeOn();try{localStorage.setItem('cc_voice_handsfree',on?'1':'0');}catch(e){}
   vcToast(on?'Hands-free ON — I\'ll bring up & read each session as it finishes':'Hands-free off — finishes will flash to tap',3200);
@@ -29686,6 +29690,7 @@ function vmSet(st){if(st==='yourturn'&&VM.state!=='yourturn'){try{VM.yourturnAt=
 function recStart(target,onDone){                 // -> false if refused (already busy / no STT key)
   if(REC.state!=='idle')return false;             // single owner: a second start NEVER toggles or orphans
   if(!voiceKeyOK())return false;
+  try{voiceStopAudio();}catch(e){}                // starting to talk SILENCES any in-flight readback (never talk over you)
   var gen=++REC.gen;REC.state='arming';REC.target=target;REC.onDone=onDone;REC.chunks=[];REC.discard=false;
   navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
     if(gen!==REC.gen||REC.state!=='arming'){try{stream.getTracks().forEach(function(t){t.stop();});}catch(e){}return;}   // abandoned while arming
@@ -29694,7 +29699,8 @@ function recStart(target,onDone){                 // -> false if refused (alread
     mr.ondataavailable=function(ev){if(ev.data&&ev.data.size)REC.chunks.push(ev.data);};
     mr.onstop=function(){if(gen!==REC.gen)return;var blob=new Blob(REC.chunks,{type:REC.mime});recSettle(gen,blob,null);};
     mr.start();REC.state='recording';try{if(navigator.vibrate)navigator.vibrate(35);}catch(e){}
-    REC.capT=setTimeout(function(){if(gen===REC.gen&&REC.state==='recording'){vcToast('Recording capped at 2 minutes — sending',2500);recStop(false);}},120000);   // walk-away safety
+    var _cap=voiceMaxRecMs();   // walk-away safety ONLY -- NOT a normal-speech cutoff. 0 = off (record until you tap send)
+    if(_cap>0){REC.capT=setTimeout(function(){if(gen===REC.gen&&REC.state==='recording'){vcToast('Mic was on for '+Math.round(_cap/60000)+' min — sending (walk-away safety). Change it in Voice settings.',3500);recStop(false);}},_cap);}
     vmDock();
   }).catch(function(){recSettle(gen,null,'Microphone permission needed.');});
   vmDock();return true;}
@@ -29772,6 +29778,7 @@ function vmAck(n){try{fetch('/api/voice/queue-ack',{method:'POST',headers:{'Cont
 
 // ---- presentation: read the floor item WITHOUT yanking the screen ----
 async function vmPresent(item){var gen=vmGen();
+  if(REC.state==='recording'||REC.state==='stopping'||VM.sending){vmDock();return;}   // you're talking -> NEVER read a new reply over you; it stays queued and presents after you send
   if(voiceHandsfreeOn()){try{vqFocus(item.session);}catch(e){}}   // driving: TAKE me to the session that's talking
   VM.floor=item;VM.await='';VM.readNote='';VM.floorQ=null;vmSet('preparing');
   if(item.kind==='question'){return vmPresentQuestion(item,gen);}   // a multiple-choice question -> read it + let you answer by voice
@@ -30051,6 +30058,7 @@ function voiceSettings(){var c=window.VCFG||{};function opt(v,cur){return '<opti
    +'<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="vcHf"'+(voiceHandsfreeOn()?' checked':'')+'> <b>Hands-free (driving)</b> — auto bring up &amp; read every session as it finishes; answer by voice. Off = it flashes and you tap.</label>'
    +'<label>Seconds to reply before moving to the next agent (hands-free)<br><input id="vcGrace" class="cc-in" style="width:100%;margin-top:4px" value="'+(voiceGraceMs()/1000)+'"><span class="sub">after a session reads, it waits this long for your reply before ushering you to the next waiting agent. 0 = move on immediately.</span></label>'
    +'<label>Stop waiting for a readback after (seconds)<br><input id="vcRto" class="cc-in" style="width:100%;margin-top:4px" value="'+(voiceReadTimeoutMs()/1000)+'"><span class="sub">if the voice takes too long to render, it stops waiting and just shows you the options / lets you reply — never freezes on “rendering”.</span></label>'
+   +'<label>Max recording length — walk-away safety (minutes)<br><input id="vcMaxRec" class="cc-in" style="width:100%;margin-top:4px" value="'+(voiceMaxRecMs()/60000)+'"><span class="sub">recording runs until YOU tap send — talk as long as you want. This only stops a mic left on by accident. 0 = no cap at all.</span></label>'
    +'<label>Answering a multiple-choice question by voice<br><select id="vcAns" class="cc-in" style="width:100%;margin-top:4px">'+[['correct','Read my choice back &amp; let me correct it'],['confirm','Say my choice back, then send'],['quiet','Just send it (no readback)']].map(function(o){return '<option value="'+o[0]+'"'+(voiceAnswerMode()===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+'</select><span class="sub">after you speak an answer, whether it confirms out loud + lets you change it before sending.</span></label>'
    +'<span class="sub">In Voice mode, tap Talk (or press the backtick key <b>`</b> on desktop) to reply — tap again to send. It replies to whatever session is on screen.</span>'
    +'</div>'
@@ -30082,7 +30090,8 @@ async function voiceSettingsSave(){var prov=(document.getElementById('vcProv')||
   var grace=Math.round((parseFloat((document.getElementById('vcGrace')||{}).value||'12')||12)*1000);
   var ansm=(document.getElementById('vcAns')||{}).value||'correct';
   var rto=Math.round((parseFloat((document.getElementById('vcRto')||{}).value||'15')||15)*1000);
-  try{localStorage.setItem('cc_voice_rate',String(rate));localStorage.setItem('cc_voice_earcon',ear?'1':'0');localStorage.setItem('cc_voice_handsfree',hf?'1':'0');localStorage.setItem('cc_voice_grace_ms',String(grace));localStorage.setItem('cc_voice_answer_mode',ansm);localStorage.setItem('cc_voice_read_timeout_ms',String(rto));}catch(e){}
+  var mrv=parseFloat((document.getElementById('vcMaxRec')||{}).value); var maxrec=(isNaN(mrv)||mrv<0)?30:mrv; maxrec=(maxrec===0)?0:Math.round(maxrec*60000);
+  try{localStorage.setItem('cc_voice_rate',String(rate));localStorage.setItem('cc_voice_earcon',ear?'1':'0');localStorage.setItem('cc_voice_handsfree',hf?'1':'0');localStorage.setItem('cc_voice_grace_ms',String(grace));localStorage.setItem('cc_voice_answer_mode',ansm);localStorage.setItem('cc_voice_read_timeout_ms',String(rto));localStorage.setItem('cc_voice_maxrec_ms',String(maxrec));}catch(e){}
   try{if(window.VM&&VM.on){vmDock();vmPollNow();}}catch(e){}
   try{var r=await(await fetch('/api/voice/config-set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:prov,read_mode:mode,summarize_threshold:thr,announce_node:ann})})).json();if(r.ok)window.VCFG=r.config;vcToast('Voice settings saved',2200);}catch(e){vcToast('Save failed',3000);}
   var m=document.getElementById('vcSet');if(m)m.remove();}
