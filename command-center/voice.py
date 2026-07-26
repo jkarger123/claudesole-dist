@@ -228,8 +228,11 @@ def vc_summarize(text):
     try:
         # --strict-mcp-config (with no --mcp-config) loads ZERO MCP servers -> cuts the biggest, most variable part
         # of `claude -p` cold-start. This is a one-shot text summarize; it needs no tools/MCP/project context.
+        # --model haiku: a 1-3 sentence TL;DR does NOT need a frontier model; Haiku renders in ~2-4s vs 5-13s+ on
+        # the account default, which was blowing the readback timeout ("reading is slow — never reads"). Big latency win.
         r = subprocess.run(["claude", "--dangerously-skip-permissions", "--strict-mcp-config",
-                            "-p", _SUMM_PROMPT % (text or "")[:16000]],
+                            "--model", "haiku",
+                            "-p", _SUMM_PROMPT % (text or "")[:6000]],   # a spoken 1-3 sentence TL;DR needs the gist, not 16k chars -> smaller input = faster Haiku render (keeps readback under the timeout)
                            capture_output=True, text=True, timeout=90, env=env, cwd=_summarizer_cwd())
         out = (r.stdout or "").strip()
         return out or ""

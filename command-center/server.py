@@ -21178,6 +21178,8 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .bigsess .sthead{cursor:default}
 /* WORKSPACE: split-pane columns (drag a session from the dock; resize the splitter; push panes back down) */
 .wkspace{display:flex;flex-direction:row;align-items:stretch;gap:0;height:calc(100vh - 255px);min-height:420px;width:100%}   /* offset = topbar + usage strip + bottom taskbar (matches the old focus view so the page never scrolls) */
+/* DESKTOP sessions lens fills the viewport EXACTLY -> no page scrollbar; the per-pane voice bar at each pane bottom is always fully visible. #grid(.wrap) becomes a flex column, the workspace flexes to fill the leftover, overflow is clipped not scrolled. */
+@media(min-width:821px){body.cf-sessions #grid{display:flex;flex-direction:column;align-items:stretch;overflow:hidden;padding:12px 24px 10px}body.cf-sessions .modstack{flex:1 1 auto;min-height:0;width:100%}body.cf-sessions .wkspace{height:auto;flex:1 1 auto;min-height:0;width:100%}}
 .wkpane{display:flex;flex-direction:column;min-width:0;overflow:hidden;border:1px solid var(--accent);border-radius:12px;box-shadow:var(--glow);position:relative}
 .wkpane .stframe{flex:1;min-height:0;width:100%;border:0}
 .pane-split{flex:0 0 10px;cursor:col-resize;align-self:stretch;display:flex;align-items:center;justify-content:center;touch-action:none}
@@ -24212,11 +24214,15 @@ async function toggleAutocompact(ev){
   }
   fetch('/api/autocompact',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:ACMP.on===false})}).then(r=>r.json()).then(r=>{if(r){ACMP={on:r.on,pct:r.pct};paintSessTools(SESSDATA?SESSDATA.length:null);}});
 }
+function voiceGlobalBtnHTML(){var on=!!(window.VM&&VM.on);
+  return '<button class="mini" id="voiceGlobalBtn"'+(on?' style="background:var(--accent);color:var(--bg-warm);font-weight:800"':' style="color:var(--accent);font-weight:700"')
+    +' title="'+(on?'Voice is ON for your open sessions — each one reads its reply aloud as it finishes and you answer by voice (a bar sits at the bottom of each pane). Tap to turn the WHOLE group off. To silence just one, hit mute on that pane\'s bar.':'Start a hands-free voice conversation for your open sessions: each reply is read aloud as it finishes and you reply by voice, with a control bar at the bottom of each pane. Turns it on for the whole group; mute individual ones from their bar.')
+    +'" onclick="voiceModeToggle()">\u{1F3A4} '+(on?'Voice: ON':'Voice')+'</button>';}
 function sessToolsHTML(count){
   // Workspace model (no focus/grid/list): drag sessions up from the taskbar into resizable split panes.
   var live=(count!=null)?('<span class="sesslive" title="'+count+' live session'+(count==1?'':'s')+'">🟢 '+count+'</span>'):'<span class="sesslive"></span>';
   var hint='<span class="sub" style="font-size:11px;color:var(--dim)" title="Drag a session up from the taskbar into the workspace to split the screen; drag the bar between panes to resize; ⏷ pushes a pane back down.">drag from the taskbar ↓ to split</span>';
-  return live+hint+acmpBtn()+cxChipHTML()+attnBarHTML()+'<button class="mini" title="Admin shell — a plain shell in this project for sudo / interactive commands (type your password here)" onclick="openAdminShell()">Admin</button>';
+  return live+hint+voiceGlobalBtnHTML()+acmpBtn()+cxChipHTML()+attnBarHTML()+'<button class="mini" title="Admin shell — a plain shell in this project for sudo / interactive commands (type your password here)" onclick="openAdminShell()">Admin</button>';
 }
 function paintSessTools(count){var el=document.getElementById('lensTools');if(el)el.innerHTML=(LENS=='sessions')?sessToolsHTML(count):'';}
 function setSessView(v){SESSVIEW=v;localStorage.setItem('hpcc_sessview',v);loadSessions(true);syncHash();}
@@ -29634,10 +29640,7 @@ function voiceLoadCfg(){fetch('/api/voice/config').then(function(r){return r.jso
 function voiceKeyOK(){ if(window.VCFG&&VCFG.has_deepgram===false){ vcToast('Voice input is off — add DEEPGRAM_API_KEY in the Vault lens.',4500); return false; } return true; }
 function vcToast(m,t){try{toast(m,t||2500);}catch(e){}}
 // the three header/menu buttons (shared by every session surface)
-function voiceBtns(n){var e=esc(n);
-  return '<button class="mini" title="Read the agent\'s last message aloud (long replies are summarized to 1-3 sentences)" onclick="voiceSpeakLast(\''+e+'\')">🔊</button>'
-   +'<button class="mini" title="Dictate: tap to talk, tap again to send it into the session. On desktop you can also press the backtick (`) key to start/stop." onclick="voiceMic(\''+e+'\')">🎤</button>'
-   +'<button class="mini" title="Conversation: MUTE or un-mute this session for Voice mode (when Voice mode is on, any session you open is read to you as it finishes; mute stops this one)." onclick="voiceMuteToggle(\''+e+'\')"'+(voiceMuted(n)?'':(voiceQueued(n)?' style="color:var(--accent)"':''))+'>'+(voiceMuted(n)?'\u{1F507}':'\u{1F4AC}')+'</button>';}
+function voiceBtns(n){return '';}   // voice is now ONE global switch in the sessions topbar (voiceGlobalBtnHTML in sessToolsHTML) + a per-pane MUTE in each pane's voice bar -- no more repeated per-header button
 // ---- audio playback (single tracked element) ----
 // mobile (esp. iOS) blocks audio not started inside a tap handler. Reuse ONE <audio> element and "unlock" it by
 // playing REAL silent bytes UNMUTED inside a user gesture -- a muted play does NOT grant later audible playback on
@@ -29665,7 +29668,7 @@ function voiceHandsfreeOn(){try{return localStorage.getItem('cc_voice_handsfree'
 function voiceGraceMs(){try{var s=parseInt(localStorage.getItem('cc_voice_grace_ms')||'12000',10);return (s>=0&&s<=60000)?s:12000;}catch(e){return 12000;}}
 // NO-HANG: cap how long we wait for a readback to RENDER (TTS can intermittently crawl). On timeout we stop
 // waiting and just show you the options / let you reply -- never freeze on 'rendering'. Per-device, default 15s.
-function voiceReadTimeoutMs(){try{var s=parseInt(localStorage.getItem('cc_voice_read_timeout_ms')||'15000',10);return (s>=3000&&s<=60000)?s:15000;}catch(e){return 15000;}}
+function voiceReadTimeoutMs(){try{var s=parseInt(localStorage.getItem('cc_voice_read_timeout_ms')||'30000',10);return (s>=3000&&s<=60000)?s:30000;}catch(e){return 30000;}}
 // WALK-AWAY SAFETY ONLY (never a normal-speech cutoff): the recorder runs until YOU tap send. This cap exists
 // solely so a mic left on by accident doesn't record forever. Default 30 min; you can talk as long as you want.
 // Per-device (localStorage). Set to 0 to disable entirely (record until you send, no matter how long).
@@ -29731,6 +29734,7 @@ function voiceTranscribe(blob,mime,session){return new Promise(function(res){
 
 // ---- reply routing: your reply ALWAYS goes to the session ON YOUR SCREEN (captured at Talk-tap) ----
 function voiceTalkTarget(){try{if(window.STG&&STG.open&&STG.cur)return STG.cur;}catch(e){}
+  try{if(window.VM&&VM.on){var a=vActiveSession();if(a)return a;}}catch(e){}   // in voice mode, the target is whoever holds the floor (per-pane) — never a stale SESSBIG
   try{if(window.SESSBIG)return SESSBIG;}catch(e){}
   return (VM.floor&&VM.floor.session)||null;}
 
@@ -29749,7 +29753,7 @@ async function vmRecDone(res){
   if(res.err){vcToast(res.err,3200);vmDock();return;}
   if(res.discarded){vmDock();return;}
   if(!res.blob||res.blob.size<1800){vcToast('Didn\'t catch that — try again.',2500);vmDock();return;}
-  VM.sending=true;vmDock();
+  VM.sending=true;VM.sendTarget=res.target;vmDock();
   var text=await voiceTranscribe(res.blob,res.mime,res.target);
   VM.sending=false;
   if(!text){vmDock();return;}                                         // nothing transcribed -> stay put (yourturn/idle)
@@ -29779,7 +29783,7 @@ function vmAck(n){try{fetch('/api/voice/queue-ack',{method:'POST',headers:{'Cont
 // ---- presentation: read the floor item WITHOUT yanking the screen ----
 async function vmPresent(item){var gen=vmGen();
   if(REC.state==='recording'||REC.state==='stopping'||VM.sending){vmDock();return;}   // you're talking -> NEVER read a new reply over you; it stays queued and presents after you send
-  if(voiceHandsfreeOn()){try{vqFocus(item.session);}catch(e){}}   // driving: TAKE me to the session that's talking
+  if(voiceAutoDrive()){try{vqFocus(item.session);}catch(e){}}   // auto-drive (desktop voice-on / driving): BRING UP the session that's talking
   VM.floor=item;VM.await='';VM.readNote='';VM.floorQ=null;vmSet('preparing');
   if(item.kind==='question'){return vmPresentQuestion(item,gen);}   // a multiple-choice question -> read it + let you answer by voice
   if(item.fp&&VM.read[item.session]===item.fp){vmAck(item.session);VM.floor=null;vmSet('idle');return;}   // PER-SESSION dedup: this session's THIS message was already read -> drop it (never re-read / ping-pong)
@@ -29900,13 +29904,15 @@ async function vmPoll(){if(!VM.on)return;
   // BACKGROUND pre-render runs ALWAYS (even while you're engaged with another session) so a finished background
   // session is rendered + FLASHING the instant it's done -- tapping it then plays immediately with no wait.
   var canAutoFocus=(VM.state==='idle'&&REC.state==='idle'&&!VM.sending);   // will the focus auto-play THIS tick?
+  var inflight=0;try{for(var _s in (VM._rendering||{}))if(VM._rendering[_s])inflight++;}catch(e){}   // how many bg summarizers are already running
   for(var j=0;j<q.length;j++){var it=q[j];
     if(it.session===floor)continue;                          // the floor is already being handled (playing now)
     if(it.session===focus&&canAutoFocus)continue;            // focus auto-plays below this tick -> don't pre-empt it with a bg render
     // everything else pre-renders -- INCLUDING the focused session WHEN you're busy (hearing another read): it renders in the
     // background so it's ready to auto-play the instant you're free, instead of starting from scratch then.
     if((VM.ready[it.session]&&VM.ready[it.session].fp===it.fp)||VM._rendering[it.session])continue;
-    vmPrerender(it);}
+    if(inflight>=2)break;   // CAP concurrent claude -p summarizers to 2 -> a stampede of bg renders was starving CPU + the ACTIVE read (which then timed out: "reading is slow"). The rest pre-render on later ticks.
+    inflight++;vmPrerender(it);}
   if(VM.state==='idle'&&REC.state==='idle'&&!VM.sending){
     // 1) explicit shelf-tap jump is always honored
     if(VQ.jumpTo){var jt=VQ.jumpTo;VQ.jumpTo=null;for(var i=0;i<q.length;i++){if(q[i].session===jt){vmPresent(q[i]);return;}}}
@@ -29916,7 +29922,7 @@ async function vmPoll(){if(!VM.on)return;
   // 3) HANDS-FREE (driving) AUTO-ADVANCE: roll to the next UNHEARD finished session so it rings you through each
   //    one without a tap. But after a read (yourturn) GIVE YOU A GRACE WINDOW to reply first -- only move you to
   //    the next agent once the grace elapses with no response. Starting to talk cancels it (REC != idle).
-  if(voiceHandsfreeOn()&&REC.state==='idle'&&!VM.sending&&!VM.floorQ){   // a pending question holds the floor -- never auto-skip it
+  if(voiceAutoDrive()&&REC.state==='idle'&&!VM.sending&&!VM.floorQ){   // a pending question holds the floor -- never auto-skip it
     var grace=voiceGraceMs();
     var mayAdvance=(VM.state==='idle')||(VM.state==='yourturn'&&(Date.now()-(VM.yourturnAt||0))>=grace);
     if(mayAdvance){for(var h=0;h<q.length;h++){var s=q[h];
@@ -29960,7 +29966,8 @@ function vmOthers(){var f=VM.floor?VM.floor.session:null;return (VQ.queue||[]).f
 function vmKind(){if(REC.state==='arming')return 'arming';
   if(REC.state==='recording'||REC.state==='stopping')return 'recording';
   if(VM.sending)return 'sending';return VM.state;}
-function vmDock(){if(!VM.on){voiceDockHide();return;}
+function vmDock(){if(!VM.on){voiceDockHide();try{vmPaintPanes();}catch(e){}return;}
+  try{if(!wkMobile()){vmPaintPanes();voiceDockHide();return;}}catch(e){}   // DESKTOP: the bar lives IN each session pane (vmPaintPanes) — no global bottom bar. MOBILE keeps the global #vcDock below.
   var kind=vmKind();
   var n=(kind==='recording'||kind==='arming')?REC.target:(VM.floor?VM.floor.session:(VM.await||voiceTalkTarget()));
   var d=document.getElementById('vcDock');if(!d){d=document.createElement('div');d.id='vcDock';document.body.appendChild(d);}
@@ -29977,26 +29984,115 @@ function vmDock(){if(!VM.on){voiceDockHide();return;}
   var mute=n?('<button class="mini" title="Mute this session — stop reading it to you" onclick="voiceMuteToggle(\''+esc(n)+'\')">mute</button>'):'';
   var off=false;try{off=!!(n&&voiceTalkTarget()!==n);}catch(e){}
   var openHint=off?'<span class="vd-open" title="Open this session on screen — the audio keeps playing">▸ open</span>':'';
-  var id='<div class="vd-id'+(n?' tap':'')+'"'+(n?(' onclick="vqFocus(\''+esc(n)+'\')" title="'+(off?('Tap to open '+esc(n)+' — it keeps reading'):esc(n))+'"'):' title="Voice mode"')
-    +'><span class="vd-glyph">'+glyph+'</span><span class="vd-name">'+(n?esc(n):'Voice mode')+'</span>'+openHint+'<span class="vd-scope">'+esc(scope)+'</span>'+mute+'</div>';
-  var stopB='<button class="mini danger" title="End voice mode" onclick="voiceModeToggle()">Stop</button>';
+  var sword,scls;
+  if(kind==='preparing'){sword='SUMMARIZING';scls='work';}
+  else if(kind==='sending'){sword='SENDING';scls='work';}
+  else if(kind==='arming'){sword='OPENING MIC';scls='work';}
+  else if(kind==='speaking'){sword=VM.confirmA?'CONFIRMING':(VM.floorQ?'ASKING YOU':'READING');scls='read';}
+  else if(kind==='recording'){sword='RECORDING';scls='rec';}
+  else if(kind==='yourturn'){sword=(VM.floorQ||VM.confirmA)?'ANSWER':'YOUR TURN';scls='turn';}
+  else {sword=(voiceHandsfreeOn()?'HANDS-FREE':'VOICE ON');scls='idle';}
+  var idInner='<span class="vd-id'+(n?' tap':'')+'"'+(n?(' onclick="vqFocus(\''+esc(n)+'\')" title="'+(off?('Tap to open '+esc(n)+' — it keeps reading'):esc(n))+'"'):' title="Voice mode"')
+    +'><span class="vd-name">'+(n?esc(n):'Voice mode')+'</span>'+openHint+'</span>';
+  var banner='<div class="vd-banner vd-k-'+scls+'"><span class="vd-glyph">'+glyph+'</span><span class="vd-state">'+sword+'</span>'+idInner+'<span class="vd-scope">'+esc(scope)+'</span>'+mute+'</div>';
+  var stopB='<button class="mini danger" style="margin-left:auto" title="End voice mode" onclick="voiceModeToggle()">Stop</button>';
   var hfB='<button class="mini" title="Hands-free / driving mode — auto bring up &amp; read every session as it finishes (tap to toggle)" onclick="voiceHandsfreeToggle()"'+(voiceHandsfreeOn()?' style="background:var(--accent);color:var(--bg-warm);font-weight:800"':'')+'>🚗</button>';
   var repeatB='<button class="mini" title="Repeat — replay the last message (no extra cost)" onclick="vmRepeat()">Repeat</button>';
   var big='<button class="vd-big" onclick="vmBigTap()" title="Talk — record a reply to the session on screen; tap again to send">Talk</button>',msg='',minis='';
   if(kind==='idle'){var nrdy=vmReadyList().length;msg=nrdy?(nrdy+' session'+(nrdy>1?'s':'')+' ready — tap the flashing bar to hear ▸'):(VM.await?(esc(VM.await)+' is working — I\'ll read the reply when it\'s done'):(voiceHandsfreeOn()?'🚗 Hands-free on — I\'ll bring up & read each session as it finishes':'Voice on — waiting for a session to finish. Talk any time.'));minis=VM.lastAudio?repeatB:'';}
   else if(kind==='preparing'){msg='Summarizing + rendering voice…'+(VM.readNote?(' — '+esc(VM.readNote)):'');big='<button class="vd-big" onclick="vmBigTap()" title="Skip the readback and reply now">Skip — reply</button>';}
-  else if(kind==='speaking'){msg=VM.confirmA?'Confirming your answer…':(VM.floorQ?'Reading the question…':'Speaking…');big='<button class="vd-big" onclick="vmBigTap()" title="'+((VM.floorQ||VM.confirmA)?'Answer now':'Stop the audio and reply now')+'">'+((VM.floorQ||VM.confirmA)?'Answer':'Reply')+'</button>';minis=repeatB;}
+  else if(kind==='speaking'){msg=VM.confirmA?'Confirming your answer…':(VM.floorQ?'Reading the question — tap Answer to interrupt & reply':'Reading it aloud — tap Reply to interrupt & talk');big='<button class="vd-big" onclick="vmBigTap()" title="'+((VM.floorQ||VM.confirmA)?'Answer now':'Stop the audio and reply now')+'">'+((VM.floorQ||VM.confirmA)?'Answer':'Reply')+'</button>';minis=repeatB;}
   else if(kind==='yourturn'&&VM.confirmA){var cl=(VM.confirmA.label||'').slice(0,28);msg='Say “yes” to send'+(cl?(' “'+esc(cl)+'”'):'')+', or a different option';big='<button class="vd-big" onclick="vmBigTap()" title="Confirm or change by voice">Answer</button>';minis=repeatB;}
   else if(kind==='yourturn'&&VM.floorQ){msg='Question — say a number, the option, or your own answer';big='<button class="vd-big" onclick="vmBigTap()" title="Answer the question by voice">Answer</button>';minis=repeatB;}
   else if(kind==='yourturn'){var nxt=(voiceHandsfreeOn()&&others.length)?others[0].session:'';msg=VM.readNote?esc(VM.readNote):(nxt?('Your turn — reply now, or I\'ll move to '+esc(nxt)+' shortly'):'Your turn — tap Talk, or press `');minis=repeatB+'<button class="mini" title="Nothing to add — move on'+(nxt?(' to '+esc(nxt)):'')+'" onclick="vmDone()">'+(nxt?'Next ▸':'Done')+'</button>';}
   else if(kind==='arming'){msg='Opening the mic…';big='<button class="vd-big dis" title="Opening the microphone…">…</button>';}
-  else if(kind==='recording'){msg='<span style="color:var(--err);font-weight:800">● REC</span> — tap Send when done';big='<button class="vd-big rec" onclick="vmBigTap()" title="Stop recording and send it">Send</button>';minis='<button class="mini" title="Discard this recording" onclick="vmCancelRec()">Cancel</button>';}
+  else if(kind==='recording'){msg='<span style="color:var(--err);font-weight:800">● Listening…</span> speak now, then tap Send';big='<button class="vd-big rec" onclick="vmBigTap()" title="Stop recording and send it">Send</button>';minis='<button class="mini" title="Discard this recording" onclick="vmCancelRec()">Cancel</button>';}
   else if(kind==='sending'){msg='Transcribing + sending…';big='<button class="vd-big dis" title="Transcribing…">…</button>';}
-  d.innerHTML=shelf+id+'<div class="vd-row2"><span class="vd-msg">'+msg+'</span>'+minis+hfB+big+stopB+'</div>';
+  d.innerHTML=shelf+banner+'<div class="vd-detail">'+msg+'</div><div class="vd-row2">'+big+minis+hfB+stopB+'</div>';
   d.classList.add('on');d.classList.toggle('rec-on',kind==='recording');
   try{document.body.classList.toggle('cf-vdock',!!(window.STG&&STG.open));}catch(e){}}
 function voiceDockHide(){var d=document.getElementById('vcDock');if(d)d.classList.remove('on');try{document.body.classList.remove('cf-vdock');}catch(e){}}
 function voiceDockRefresh(){vmDock();}   // legacy alias (stageShow/showSess hooks call this) — repaint is always safe now
+
+// ===== DESKTOP per-pane voice bars =====================================================================
+// One shared audio/mic owner (only ONE session reads/talks at a time), but the bar is drawn at the bottom of
+// EACH open session pane. The pane that holds the floor shows the FULL bar (READING/YOUR TURN/etc + Talk); every
+// other pane shows a slim strip (idle / finished-waiting / ready), expanding on hover so you can talk to it.
+function vActiveSession(){   // which session currently holds the audio floor (or null when fully idle)
+  if(REC.state==='arming'||REC.state==='recording'||REC.state==='stopping')return REC.target;
+  if(VM.floor)return VM.floor.session;
+  if(VM.sending&&VM.sendTarget)return VM.sendTarget;
+  if(VM.await&&VM.state==='idle')return VM.await;
+  return null;}
+// on desktop, voice-on IS auto-drive (bring up + read every finished session, one at a time, grace-queued);
+// mobile only auto-drives when the explicit hands-free/driving toggle is on.
+function voiceAutoDrive(){try{return voiceHandsfreeOn()||(!!(window.VM&&VM.on)&&!wkMobile());}catch(e){return false;}}
+// pure state -> view mapping (word / colour class / glyph / detail / big-button), shared by every full bar
+function vmStateView(){var kind=vmKind();
+  var glyph=(kind==='speaking')?'<span class="vd-eq"><i></i><i></i><i></i><i></i></span>'
+    :(kind==='preparing'||kind==='sending')?'<span class="vd-spin"></span>'
+    :(kind==='recording')?'<span class="vd-mic rec"></span>'
+    :(kind==='yourturn'||kind==='arming')?'<span class="vd-mic"></span>':'<span class="vd-idle"></span>';
+  var sword,scls;
+  if(kind==='preparing'){sword='SUMMARIZING';scls='work';}
+  else if(kind==='sending'){sword='SENDING';scls='work';}
+  else if(kind==='arming'){sword='OPENING MIC';scls='work';}
+  else if(kind==='speaking'){sword=VM.confirmA?'CONFIRMING':(VM.floorQ?'ASKING YOU':'READING');scls='read';}
+  else if(kind==='recording'){sword='RECORDING';scls='rec';}
+  else if(kind==='yourturn'){sword=(VM.floorQ||VM.confirmA)?'ANSWER':'YOUR TURN';scls='turn';}
+  else {sword=VM.await?'WORKING':'LISTENING';scls='idle';}
+  var msg='',blabel='Talk',btitle='Talk — reply to this session; tap again to send',bcls='';
+  if(kind==='idle'){msg=VM.await?'Working — I\'ll read the reply when it\'s done':'Ready — tap Talk to speak, or press `';}
+  else if(kind==='preparing'){msg='Summarizing + rendering voice…'+(VM.readNote?(' — '+esc(VM.readNote)):'');blabel='Skip — reply';btitle='Skip the readback and reply now';}
+  else if(kind==='speaking'){msg=VM.confirmA?'Confirming your answer…':(VM.floorQ?'Reading the question — tap Answer to interrupt':'Reading aloud — tap Reply to interrupt &amp; talk');blabel=(VM.floorQ||VM.confirmA)?'Answer':'Reply';btitle=(VM.floorQ||VM.confirmA)?'Answer now':'Stop the audio and reply now';}
+  else if(kind==='yourturn'&&VM.confirmA){var cl=(VM.confirmA.label||'').slice(0,28);msg='Say “yes” to send'+(cl?(' “'+esc(cl)+'”'):'')+', or a different option';blabel='Answer';btitle='Confirm or change by voice';}
+  else if(kind==='yourturn'&&VM.floorQ){msg='Question — say a number, the option, or your own answer';blabel='Answer';btitle='Answer the question by voice';}
+  else if(kind==='yourturn'){msg=VM.readNote?esc(VM.readNote):'Your turn — tap Talk (or press `)';}
+  else if(kind==='arming'){msg='Opening the mic…';blabel='…';bcls='dis';btitle='Opening the microphone…';}
+  else if(kind==='recording'){msg='<span style="color:var(--err);font-weight:800">● Listening…</span> speak now, then tap Send';blabel='Send';bcls='rec';btitle='Stop recording and send it';}
+  else if(kind==='sending'){msg='Transcribing + sending…';blabel='…';bcls='dis';btitle='Transcribing…';}
+  return {kind:kind,glyph:glyph,sword:sword,scls:scls,msg:msg,blabel:blabel,btitle:btitle,bcls:bcls};}
+// the FULL bar for the pane that holds the floor — reuses the GLOBAL handlers (this pane IS the active session)
+function vPaneFull(n){var v=vmStateView();
+  var repeat=(v.kind==='speaking'||v.kind==='yourturn'||(v.kind==='idle'&&VM.lastAudio))?'<button class="mini" title="Replay the last message" onclick="event.stopPropagation();vmRepeat()">Repeat</button>':'';
+  var cancel=(v.kind==='recording')?'<button class="mini" title="Discard this recording" onclick="event.stopPropagation();vmCancelRec()">Cancel</button>':'';
+  var done=(v.kind==='yourturn')?'<button class="mini" title="Nothing to add — done with this one" onclick="event.stopPropagation();vmDone()">Done</button>':'';
+  var dis=(v.bcls==='dis')?' disabled':'';
+  var big='<button class="vd-big'+(v.bcls?' '+v.bcls:'')+'"'+dis+' onclick="event.stopPropagation();vmBigTap()" title="'+v.btitle+'">'+v.blabel+'</button>';
+  var mute='<button class="mini" style="margin-left:auto" onclick="event.stopPropagation();voiceMuteToggle(\''+esc(n)+'\')" title="Mute '+esc(n)+' — stop reading just this session">mute</button>';
+  var banner='<div class="vd-banner vd-k-'+v.scls+'"><span class="vd-glyph">'+v.glyph+'</span><span class="vd-state">'+v.sword+'</span><span class="vd-name">'+esc(n)+'</span></div>';
+  return banner+'<div class="vd-detail">'+v.msg+'</div><div class="vd-row2">'+big+repeat+cancel+done+mute+'</div>';}
+// the slim strip for every non-floor pane — hover reveals a Talk button so you can proactively speak to it
+function vPaneSlim(n){var muted=voiceMuted(n);var ready=VM.ready[n];var waiting=voiceQueued(n)&&!ready;
+  var dotcls,label,click='';
+  if(muted){dotcls='muted';label='muted — not reading this one';}
+  else if(ready&&ready.kind==='question'){dotcls='q';label='has a question ▸ tap to answer';click=' onclick="vmPlayReady(\''+esc(n)+'\')"';}
+  else if(ready){dotcls='rdy';label='ready ▸ tap to hear';click=' onclick="vmPlayReady(\''+esc(n)+'\')"';}
+  else if(waiting){dotcls='wait';label='finished ▸ waiting its turn';click=' onclick="vmPlayReady(\''+esc(n)+'\')"';}
+  else {dotcls='idle';label='idle';}
+  var talk=muted?'':('<button class="vbar-talk mini" onclick="event.stopPropagation();vPaneTap(\''+esc(n)+'\')" title="Talk to '+esc(n)+' now">Talk</button>');
+  var mute='<button class="vbar-mute mini" onclick="event.stopPropagation();voiceMuteToggle(\''+esc(n)+'\')" title="'+(muted?('Un-mute '+esc(n)):('Mute '+esc(n)+' — stop reading just this session'))+'">'+(muted?'unmute':'mute')+'</button>';
+  return '<div class="vbar-strip'+(muted?' muted':'')+'"'+click+'><span class="vbar-dot '+dotcls+'"></span><span class="vbar-nm">'+esc(n)+'</span><span class="vbar-sub">'+label+'</span>'+talk+mute+'</div>';}
+// repaint every pane bar in place (called by vmDock; the single writer principle, extended per-pane)
+function vmPaintPanes(){var bars;try{bars=document.querySelectorAll('.vbar[data-vsess]');}catch(e){return;}if(!bars||!bars.length)return;
+  var on=!!(window.VM&&VM.on);try{if(wkMobile())on=false;}catch(e){}
+  try{document.body.classList.toggle('cf-voice-panes',on);}catch(e){}   // reserve a slim strip at each pane bottom so the terminal input is never covered
+  var act=on?vActiveSession():null;
+  for(var i=0;i<bars.length;i++){var el=bars[i],nm=el.getAttribute('data-vsess');
+    var pane=el.parentNode;
+    if(!on){el.className='vbar';el.innerHTML='';if(pane&&pane.classList)pane.classList.remove('vpane-live');continue;}
+    var isAct=(nm&&nm===act);
+    el.innerHTML=isAct?vPaneFull(nm):vPaneSlim(nm);
+    el.className='vbar on'+(isAct?' act':' slim');
+    if(pane&&pane.classList)pane.classList.toggle('vpane-live',!!(isAct&&(VM.state==='speaking'||REC.state==='recording'||VM.state==='yourturn')));}}
+// Talk from a pane bar: the active pane routes through the normal big-tap; a different idle pane starts a fresh
+// talk straight to THAT session (so a reply is NEVER ambiguous — this is the fix for "open a session first").
+function vPaneTap(n){try{voiceUnlockAudio();}catch(e){}
+  if(!(window.VM&&VM.on)){voiceModeToggle();return;}
+  if(n===vActiveSession()){vmBigTap();return;}
+  if(REC.state!=='idle'||VM.sending||VM.state==='preparing'||VM.state==='speaking'){vcToast('Finish with the current session first',2600);return;}
+  try{voiceStopAudio();}catch(e){}
+  recStart(n,vmRecDone);}
 
 // ---- the GLOBAL switch (per-TAB live state: first tap on a fresh load always activates) ----
 async function voiceModeToggle(){var on=!VM.on;
@@ -30004,13 +30100,14 @@ async function voiceModeToggle(){var on=!VM.on;
   try{var r=await(await fetch('/api/voice/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:on})})).json();
     VQ.mode=!!r.mode;VQ.enrolled=r.enrolled||[];VQ.muted=r.muted||[];VQ.queue=r.queue||[];}catch(e){}
   if(on){VM.on=true;VQ.on=true;VM.state='idle';VM.read={};VM.shelfKey='';VM.await='';VM.readNote='';VM.floor=null;
+    try{if(!wkMobile())(window.PANES||[]).forEach(function(p){voiceAutoEnroll(p);});}catch(e){}   // ONE switch = the WHOLE GROUP: enroll every open pane so each is read as it finishes (desktop). Mute opts one out.
     var f=voiceActiveSession();if(f)voiceAutoEnroll(f);
     vmDock();vmPollStart();
     vcToast('Voice mode ON — any session you use will be read to you when it finishes',4000);
   }else{VM.on=false;VQ.on=false;VM.state='off';vmGen();vmPollStop();
     voiceStopAudio();recStop(true);VM.floor=null;VM.floorQ=null;VM.confirmA=null;VM.sending=false;VM.await='';
     voiceDockHide();vcToast('Voice mode off',2000);}
-  try{voiceMarkTiles();}catch(e){}try{if(typeof render==='function')render();}catch(e){}}
+  try{voiceMarkTiles();}catch(e){}try{paintSessTools(window.SESSDATA?SESSDATA.length:null);}catch(e){}try{vmDock();}catch(e){}}   // update the global switch + pane bars in place -- NO full render() (that reloads the terminals)
 async function voiceAutoEnroll(n){if(!n||!VQ.mode||voiceMuted(n)||voiceQueued(n))return;
   try{var r=await(await fetch('/api/voice/enroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,on:true})})).json();
     VQ.enrolled=r.enrolled||[];VQ.queue=r.queue||VQ.queue;}catch(e){}vmDock();}
@@ -30019,7 +30116,7 @@ async function voiceMuteToggle(n){var mute=!voiceMuted(n);try{voiceUnlockAudio()
     VQ.muted=r.muted||[];VQ.enrolled=r.enrolled||[];VQ.queue=r.queue||VQ.queue;}catch(e){}
   vcToast(mute?('Muted “'+n+'” — I won\'t read this one to you'):('Un-muted “'+n+'”'),2800);
   if(mute&&VM.floor&&VM.floor.session===n){vmDone();}else if(!mute&&VQ.mode){voiceAutoEnroll(n);}
-  vmDock();try{voiceMarkTiles();}catch(e){}try{if(typeof render==='function')render();}catch(e){}}
+  vmDock();try{voiceMarkTiles();}catch(e){}try{paintSessTools(window.SESSDATA?SESSDATA.length:null);}catch(e){}}   // repaint bars + switch in place -- NO full render()
 // legacy aliases so existing onclicks / call sites keep working
 async function voiceConvoToggle(n){return voiceMuteToggle(n);}
 async function voiceQueueToggle(n){return voiceMuteToggle(n);}
@@ -30108,18 +30205,47 @@ window.VQ={on:false,mode:false,enrolled:[],muted:[],queue:[],jumpTo:null};
   +'#vcDock .vd-scope{color:var(--mut);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto}'
   +'#vcDock .vd-row2{display:flex;align-items:center;gap:8px}'
   +'#vcDock .vd-msg{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--mut)}'
-  +'#vcDock .vd-big{flex:0 0 auto;background:var(--accent);color:var(--bg-warm);border:none;border-radius:22px;padding:11px 22px;font-size:15px;font-weight:700;cursor:pointer;animation:vqpulse 1.6s ease-in-out infinite}'
-  +'#vcDock .vd-big.rec,#vcDock .vd-big.dis{animation:none}#vcDock .vd-big.dis{opacity:.5;pointer-events:none}'
+  +'#vcDock .vd-big{flex:0 0 auto;background:var(--accent);color:var(--bg-warm);border:none;border-radius:24px;padding:13px 30px;font-size:16px;font-weight:800;cursor:pointer;animation:vqpulse 1.6s ease-in-out infinite}'
+  +'#vcDock .vd-big.rec,#vcDock .vd-big.dis{animation:none}#vcDock .vd-big.rec{background:var(--err)}#vcDock .vd-big.dis{opacity:.5;pointer-events:none}'
   +'#vcDock .vd-shelf{background:rgba(var(--accent-rgb),.14);border:1px solid var(--accent);border-radius:10px;color:var(--accent);font-weight:700;font-size:13px;padding:9px 12px;cursor:pointer;text-align:center}#vcDock .vd-shelf.pop{animation:vqpop .35s ease-out}@keyframes vqpop{0%{transform:scale(.94);opacity:.2}100%{transform:scale(1);opacity:1}}'
   +'#vcDock .vd-shelf.flash{animation:vqflash 1s ease-in-out infinite}@keyframes vqflash{0%,100%{background:rgba(var(--accent-rgb),.16);box-shadow:0 0 0 0 rgba(var(--accent-rgb),.5)}50%{background:rgba(var(--accent-rgb),.42);box-shadow:0 0 16px 2px rgba(var(--accent-rgb),.6)}}'
   +'#stgVoice.vflash{animation:vqflash 1s ease-in-out infinite;border-radius:8px}'
-  +'body.cf-vdock #stage{padding-bottom:104px}'
+  +'body.cf-vdock #stage{padding-bottom:150px}'
   +'.vd-glyph{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:20px;height:16px}'
   +'.vd-spin{display:inline-block;width:15px;height:15px;border:2px solid rgba(var(--accent-rgb),.3);border-top-color:var(--accent);border-radius:50%;animation:vdspin .8s linear infinite}@keyframes vdspin{to{transform:rotate(360deg)}}'
   +'.vd-eq{display:inline-flex;align-items:flex-end;gap:2px;height:14px}.vd-eq i{width:3px;background:var(--accent);border-radius:2px;animation:vdeq .9s ease-in-out infinite}.vd-eq i:nth-child(2){animation-delay:.15s}.vd-eq i:nth-child(3){animation-delay:.3s}.vd-eq i:nth-child(4){animation-delay:.45s}@keyframes vdeq{0%,100%{height:4px}50%{height:14px}}'
   +'.vd-mic{width:12px;height:12px;border-radius:50%;background:var(--accent)}.vd-mic.rec{width:15px;height:15px;background:var(--err);box-shadow:0 0 10px var(--err);animation:vdblink .8s steps(1) infinite}@keyframes vdblink{0%,58%{opacity:1}59%,100%{opacity:.25}}.vd-idle{width:9px;height:9px;border-radius:50%;background:var(--mut)}'
+  +'#vcDock .vd-banner{display:flex;align-items:center;gap:9px;min-width:0;padding:8px 11px;border-radius:11px;background:rgba(var(--krgb,var(--accent-rgb)),.12);border:1px solid rgba(var(--krgb,var(--accent-rgb)),.42)}'
+  +'#vcDock .vd-banner .vd-glyph{transform:scale(1.3);transform-origin:left center}'
+  +'#vcDock .vd-state{font-weight:900;font-size:14px;letter-spacing:.07em;color:var(--kcol,var(--accent));white-space:nowrap;flex:0 0 auto}'
+  +'#vcDock .vd-detail{font-size:12.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:1px 3px 0}'
+  +'#vcDock .vd-k-idle{--kcol:var(--mut);--krgb:var(--accent-rgb)}#vcDock .vd-k-work{--kcol:var(--warn);--krgb:var(--warn-rgb)}#vcDock .vd-k-read{--kcol:var(--accent);--krgb:var(--accent-rgb)}#vcDock .vd-k-turn{--kcol:var(--ok);--krgb:var(--ok-rgb)}#vcDock .vd-k-rec{--kcol:var(--err);--krgb:var(--err-rgb)}'
   +'#vcDock.rec-on{border-top-color:var(--err)}@media(min-width:821px){#vcDock.rec-on{border-color:var(--err)}}#vcDock.rec-on .vd-name{color:var(--err)}'
-  +'@media(min-width:821px){#vcDock{left:50%;right:auto;transform:translateX(-50%);max-width:680px;border:2px solid var(--accent);border-radius:14px;bottom:52px}}';
+  +'@media(min-width:821px){#vcDock{left:50%;right:auto;transform:translateX(-50%);max-width:680px;border:2px solid var(--accent);border-radius:14px;bottom:52px}}'
+  +'.vbar{position:absolute;left:0;right:0;bottom:0;z-index:45;display:none;flex-direction:column;gap:6px;background:var(--card);border-top:2px solid var(--accent);padding:7px 10px;box-shadow:0 -6px 18px rgba(0,0,0,.42)}'
+  +'.vbar.on{display:flex}'
+  +'.vbar.slim{gap:0;padding:0;background:transparent;border-top:0;box-shadow:none}'
+  +'.vbar.slim .vbar-strip{display:flex;align-items:center;gap:8px;padding:6px 11px;background:var(--card);border-top:1px solid var(--line);opacity:.92}'
+  +'.vbar.slim .vbar-strip:hover{opacity:1}'
+  +'.vbar-dot{width:9px;height:9px;border-radius:50%;background:var(--mut);flex:0 0 auto}'
+  +'.vbar-dot.wait{background:var(--warn);animation:vdblink 1s steps(1) infinite}.vbar-dot.rdy{background:var(--ok);box-shadow:0 0 8px var(--ok)}.vbar-dot.q{background:var(--accent);box-shadow:0 0 8px var(--accent)}'
+  +'.vbar-nm{font-weight:700;color:var(--accent);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:42%}'
+  +'.vbar-sub{font-size:11.5px;color:var(--mut);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
+  +'.vbar-talk{opacity:0;transition:opacity .12s;font-size:11px;padding:4px 11px;flex:0 0 auto}'
+  +'.vbar-mute{opacity:.5;transition:opacity .12s;font-size:11px;padding:4px 11px;flex:0 0 auto}'
+  +'.vbar.slim .vbar-strip:hover .vbar-talk,.vbar.slim .vbar-strip:hover .vbar-mute{opacity:1}'
+  +'.vbar-strip.muted{opacity:.62}.vbar-strip.muted .vbar-mute{opacity:1}.vbar-dot.muted{background:var(--dim)}'
+  +'.vbar .vd-banner{display:flex;align-items:center;gap:9px;min-width:0;padding:6px 9px;border-radius:9px;background:rgba(var(--krgb,var(--accent-rgb)),.14);border:1px solid rgba(var(--krgb,var(--accent-rgb)),.45)}'
+  +'.vbar .vd-state{font-weight:900;font-size:13px;letter-spacing:.06em;color:var(--kcol,var(--accent));white-space:nowrap;flex:0 0 auto}'
+  +'.vbar .vd-name{font-weight:800;color:var(--accent);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto}'
+  +'.vbar .vd-detail{font-size:12px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 2px}'
+  +'.vbar .vd-row2{display:flex;align-items:center;gap:8px}'
+  +'.vbar .vd-big{flex:0 0 auto;background:var(--accent);color:var(--bg-warm);border:none;border-radius:22px;padding:10px 24px;font-size:15px;font-weight:800;cursor:pointer;animation:vqpulse 1.6s ease-in-out infinite}'
+  +'.vbar .vd-big.rec,.vbar .vd-big.dis{animation:none}.vbar .vd-big.rec{background:var(--err)}.vbar .vd-big.dis{opacity:.5;pointer-events:none}'
+  +'.vbar .vd-k-idle{--kcol:var(--mut);--krgb:var(--accent-rgb)}.vbar .vd-k-work{--kcol:var(--warn);--krgb:var(--warn-rgb)}.vbar .vd-k-read{--kcol:var(--accent);--krgb:var(--accent-rgb)}.vbar .vd-k-turn{--kcol:var(--ok);--krgb:var(--ok-rgb)}.vbar .vd-k-rec{--kcol:var(--err);--krgb:var(--err-rgb)}'
+  +'.vbar.act{border-top-color:var(--kcol,var(--accent))}'
+  +'.vpane-live{box-shadow:0 0 0 2px var(--accent),0 0 22px rgba(var(--accent-rgb),.5)!important}'
+  +'body.cf-voice-panes .wkpane,body.cf-voice-panes .focusonly .bigsess{padding-bottom:32px}';
   document.head.appendChild(s);}catch(e){}})();
 async function vqFetch(){try{var s=await(await fetch('/api/voice/queue')).json();VQ.mode=!!s.mode;VQ.enrolled=s.enrolled||[];VQ.muted=s.muted||[];VQ.queue=s.queue||[];return s;}catch(e){return {mode:VQ.mode,enrolled:VQ.enrolled,muted:VQ.muted,queue:VQ.queue};}}
 function voiceQueued(n){return (VQ.enrolled||[]).indexOf(n)>=0;}
@@ -30130,7 +30256,13 @@ async function voiceQueueBadgePoll(){if(VM.on)return;await vqFetch();try{voiceMa
 function vqFocus(n){
   try{if(typeof wkMobile==='function'&&wkMobile()){if(typeof stageShow==='function')stageShow(n);return;}}catch(e){}   // mobile: bring it up full-screen in the Stage
   // desktop: bring it up if minimized (not in the workspace), maximize/front it, land on the sessions lens, and the render glows it
-  try{if(typeof PANES!=='undefined'&&PANES.indexOf(n)<0){panesSet([n].concat(PANES).slice(0,4));}else{window.SESSBIG=n;}if(typeof gotoLens==='function')gotoLens('sessions');if(typeof render==='function')render();}catch(e){}
+  try{
+    var isPane=(typeof PANES!=='undefined'&&PANES.indexOf(n)>=0);
+    var onSess=false;try{onSess=document.body.classList.contains('cf-sessions');}catch(e){}
+    if(isPane&&onSess){window.SESSBIG=n;try{vmDock();}catch(e){}return;}   // ALREADY an open pane on the sessions lens -> DON'T call render() (that rebuilds every terminal iframe = the "loading sessions" flash). Just repaint the voice bars.
+    if(!isPane)panesSet([n].concat(PANES).slice(0,4));else window.SESSBIG=n;   // minimized -> promote it into a pane (one render, real layout change)
+    if(typeof gotoLens==='function')gotoLens('sessions');if(typeof render==='function')render();
+  }catch(e){}
 }
 function voiceMarkTiles(){try{var v=document.getElementById('stgVoice');if(v){v.style.color=(window.VM&&VM.on)?'var(--accent)':'';v.classList.toggle('vflash',!!(window.VM&&VM.on&&typeof vmReadyList==='function'&&vmReadyList().length));}}catch(e){}
   try{document.querySelectorAll('#sessbar .sb-tile[data-name]').forEach(function(t){var nm=t.getAttribute('data-name');t.classList.toggle('sb-voice',!!(window.VM&&VM.on&&voiceQueued(nm)&&!voiceMuted(nm)));});}catch(e){}}
@@ -30149,7 +30281,7 @@ function renderFocus(s){
   var big=s.find(function(x){return x.name==SESSBIG;});
   // One big terminal + a visible attach bar (mobile/fallback) + a drag overlay (covers the iframe on dragover).
   var h='<div class="focusonly">'
-    +'<div class="bigsess'+((window.VM&&VM.floor&&VM.floor.session===big.name)?' vq-active':'')+'" data-ccsess="'+esc(big.name)+'">'+bigHead(big)+ccDropBar(big.name)+'<iframe class="stframe" src="/term?name='+encodeURIComponent(big.name)+'"></iframe>'+ccDropOverlay()+'</div>'
+    +'<div class="bigsess'+((window.VM&&VM.floor&&VM.floor.session===big.name)?' vq-active':'')+'" data-ccsess="'+esc(big.name)+'">'+bigHead(big)+ccDropBar(big.name)+'<iframe class="stframe" src="/term?name='+encodeURIComponent(big.name)+'"></iframe>'+ccDropOverlay()+'<div class="vbar" data-vsess="'+esc(big.name)+'"></div></div>'
     +'<div class="termgrip" id="termGrip">'
       +'<button class="termgrip-b" type="button" title="Shorter" onclick="termStep(-90)">&minus;</button>'
       +'<span class="termgrip-bar" id="termBar" title="Drag up/down to resize (remembered on this device)"><i></i><b id="termGripN"></b></span>'
@@ -30183,9 +30315,11 @@ function renderWorkspace(s){
     var grow=PANEW[name]||1;
     h+='<div class="wkpane bigsess'+((window.VM&&VM.floor&&VM.floor.session===name)?' vq-active':'')+'" data-ccsess="'+esc(name)+'" data-pane="'+esc(name)+'" style="flex:'+grow+' 1 0">'
       + paneHead(x) + ccDropBar(name) + '<iframe class="stframe" src="/term?name='+encodeURIComponent(name)+'"></iframe>' + ccDropOverlay()
+      + '<div class="vbar" data-vsess="'+esc(name)+'"></div>'
       +'</div>';
   });
   h+='</div><div id="wkdrop" class="wkdrop">&#11014; Drop to add this session to the workspace</div>';
+  try{setTimeout(function(){try{vmDock();}catch(e){}},0);}catch(e){}   // paint the per-pane voice bars once the panes exist
   return h;
 }
 // MOBILE Sessions lens = a manager, not a terminal. Each row opens the full-screen Stage (the actual
@@ -31976,9 +32110,7 @@ function stageMenu(ev){
     + mi('&#128206;','Give Claude a file','closeStageMenu();ccPickFile(\''+nn+'\')')
     + mi('&#128309;','Third-party review','closeStageMenu();adviseOpen(\''+nn+'\')')
     + '<div class="stg-mi-sep"></div>'
-    + mi('&#128266;','Read the last reply aloud','closeStageMenu();voiceSpeakLast(\''+nn+'\')')
-    + mi('&#127908;','Dictate a message','closeStageMenu();voiceMic(\''+nn+'\')')
-    + mi('&#127908;',(window.VQ&&VQ.on)?'Voice mode: ON — tap to turn off':'Voice mode: turn ON (talk to your sessions)','closeStageMenu();voiceModeToggle()')
+    + mi('&#127908;',(window.VM&&VM.on)?'Voice conversation: ON — tap to end':'Start voice conversation','closeStageMenu();voiceModeToggle()')
     + mi('&#9881;','Voice settings','closeStageMenu();voiceSettings()')
     + ((window.VQ&&VQ.on)?mi('&#128172;',(voiceMuted(n)?'Un-mute this session':'Mute this session (don’t read it)'),'closeStageMenu();voiceMuteToggle(\''+nn+'\')'):'')
     + '<div class="stg-mi-sep"></div>'

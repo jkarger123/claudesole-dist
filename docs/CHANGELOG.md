@@ -3,6 +3,26 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.221 -- 2026-07-26  (Voice: DESKTOP per-pane bars + one-switch controls + latency fixes)
+Rebuilt the DESKTOP voice experience so the bar lives IN each session pane (mobile unchanged). Full detail:
+`command-center/voice/VOICE_SYSTEM.md` §9.
+- **Bar in each pane, not one global bar.** `vmDock()` short-circuits on desktop to `vmPaintPanes()`: the pane
+  holding the floor shows the full color-coded state banner (SUMMARIZING/READING/YOUR TURN/RECORDING) + Talk;
+  every other pane shows a slim strip (idle / finished-waiting / ready / muted) that expands on hover. Absolute
+  bottom bar; `body.cf-voice-panes` reserves a strip so it never covers the terminal input. Mobile keeps the
+  single global `#vcDock`.
+- **Fixed "open a session first."** `voiceTalkTarget()` prefers the active floor session; a pane's Talk records
+  straight to THAT session (`vPaneTap`). Each pane bar owns its session, so a reply is never ambiguous.
+- **Auto-drive on desktop** (`voiceAutoDrive = handsfree || voice-on&&!mobile`): a finished session auto-brings-up
+  + reads, one at a time (grace-queued); a minimized one is promoted into a pane.
+- **ONE `🎤 Voice` switch** in the sessions top bar (whole group on/off, enrolls all open panes) + a **mute** per
+  pane -- replaces the repeated per-header button (`voiceBtns` now empty). Toggling repaints in place (no reload).
+- **Layout:** the sessions lens fills the viewport (no scrollbar; `#grid` flex-column `align-items:stretch`), panes
+  fit side-by-side, and an already-open pane finishing no longer re-renders (killed the "loading sessions" flash).
+- **Latency fixes** ("reading is slow -- never reads" was a pre-render stampede): `vmPoll` caps concurrent
+  background pre-renders to 2; `vc_summarize` runs `claude -p --model haiku` (input trimmed 16k->6k); default
+  readback timeout 15s->30s. Verified headless (3 panes fit; `speak-last` ~5-6s isolated).
+
 ## 0.99.220 -- 2026-07-26  (Voice: record as long as you talk -- kill the 2-min auto-send + no talk-over)
 Follow-on from 0.99.219, same HA session: the dock's 2-MINUTE recording cap force-stopped + AUTO-SENT a long
 dictation mid-sentence (proven: the persisted transcript logged dur=120.0s). A fixed total-time cap that sends
