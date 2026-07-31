@@ -3,6 +3,26 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.223 -- 2026-07-31  (Sessions workspace: macOS window controls, instant taskbar, inline rename)
+A run of session-workspace UX fixes on top of the identity bar (0.99.222). All in the PAGE frontend + one small
+API (`/api/session-rename`).
+- **macOS-style pane window controls.** The pane header's right side is now traffic-light dots via palette tokens:
+  maximize=`--ok` (blow up), minimize=`--warn` (push down), close=`--err` (graceful end, writes handoff) -- with the
+  `+ / – / ×` glyph on group hover. Force-**Kill** is a separate serious danger button set apart with a gap. Same
+  controls added to the taskbar hover-preview. Protected singletons (Chief/product/loops) show only min/max.
+- **Instant, predictable taskbar (Tier-1 incremental workspace).** `wkAddPane`/`wkRemovePane` mutate ONE pane by
+  surgical DOM insert/remove, so the OTHER panes' terminal iframes are never destroyed/reloaded (the old whole-`#grid`
+  innerHTML rebuild reconnected every terminal at once = the flash). Fail-safe: any error falls back to a full render.
+  Clicking a taskbar tile is now a Windows-style TOGGLE (bring up / minimize) with a 260ms accidental-double-click
+  guard; a brought-up pane scrolls into view + briefly glows.
+- **Hover preview dwell.** The taskbar hover preview now requires a ~3s dwell before it pops (no more flashing as you
+  sweep the bar); once one is open, sweeping to neighbors is instant. Tracked via an explicit `SB.popOpen` flag (the
+  earlier `style.display` sniff wrongly popped the first hover after a fresh load).
+- **Inline session rename.** Double-click a session's name in the pane header to rename it in place (Enter/Escape).
+  It sets a DISPLAY label only -- keyed by the real tmux name, which never changes -- so nothing that relies on the
+  name (terminal, transcripts, PANES, attention/voice, APIs) breaks. Persisted per-node (`_session_labels.json`);
+  empty reverts to auto. Protected sessions are refused (frontend affordance hidden + backend guard), like close/kill.
+
 ## 0.99.222 -- 2026-07-31  (Sessions: Identity-bar top header -- declutter + meaningful state dot)
 Reworked the session pane top bar (`bigHead`/`paneHead` in PAGE) into an "identity bar": name + live status +
 pane controls only, since every session ACTION already lives in the terminal's own toolbar one row down. No

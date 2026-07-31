@@ -2725,6 +2725,22 @@ def _load_agent_titles():
     try: return json.load(open(_AGENT_TITLES_FILE))
     except Exception: return {}
 _AGENT_TITLES = _load_agent_titles()
+# USER-set friendly names, keyed by the REAL tmux session name. The name is the identity (iframe /term?name=,
+# PANES, attention/voice keys, transcripts) and NEVER changes -- this is purely a display label, so a rename
+# breaks nothing that keys on the name. Persisted per-node; not a framework path, so it stays local.
+SESSLABELS_FILE = os.path.join(STATE_DIR, "_session_labels.json")
+_USER_LABELS = load(SESSLABELS_FILE, {}) or {}
+def session_rename(name, label):
+    """Set (or clear, with an empty label) a user display label for a session. Protected/system sessions
+    (Chief, product, Ralph loops -- the same set that can't be closed) are refused. Never touches tmux."""
+    name = (name or "").strip()
+    if not name: return {"ok": False, "error": "no session"}
+    if _protected(name) or name in _FRIENDLY: return {"ok": False, "error": "protected session -- cannot be renamed"}
+    label = re.sub(r"\s+", " ", (label or "").strip())[:60]
+    if label: _USER_LABELS[name] = label
+    else: _USER_LABELS.pop(name, None)
+    save(SESSLABELS_FILE, _USER_LABELS)
+    return {"ok": True, "name": name, "label": label or _session_label(name)}
 def _set_agent_title(name, title):
     title = re.sub(r"\s+", " ", (title or "").strip()).strip("\"'[]").strip()[:48]
     if not title or _AGENT_TITLES.get(name) == title: return False
@@ -2746,6 +2762,7 @@ def _session_label(name):
     _svl = _service_labels()
     if name in _svl: return _svl[name]                     # this deployment's configured service sessions (from cc.config)
     if name == globals().get("CHIEF"): return "Chief of Staff"
+    if name in _USER_LABELS: return _USER_LABELS[name]      # a USER-set friendly name wins over auto-derived/agent titles
     if name in _AGENT_TITLES: return _AGENT_TITLES[name]   # the agent named this session itself
     if name in _SESSLABEL: return _SESSLABEL[name]
     if name.startswith("ralph-") and name.endswith("-live"): return "Ralph: " + name[6:-5] + " (live)"
@@ -12488,17 +12505,23 @@ def _session_finished(name):
 
 VOICE_DEBUG_FILE = os.path.join(STATE_DIR, "_voice_debug.jsonl")
 def _voice_dbg(rec):
-    """Append a one-line trace of a voice readback so we can SEE what/why it generated (per operator request):
-    which session, which transcript file it RESOLVED to, whether it judged finished/busy, and the text+summary
-    heads. Keeps the last ~300 lines. Read via GET /api/voice/debug."""
+    """Append a one-line trace of a voice event so we can SEE what/why it happened (per operator request): which
+    session, which transcript it RESOLVED to, finished/busy, text/summary heads -- AND (src:"client") the browser's
+    conversation-loop timeline (state transitions, reply-await polls, present outcomes). Both streams merge here into
+    ONE time-ordered log so the "worked twice then never read the summary" cases are diagnosable. `t` = epoch ms for
+    stable cross-source ordering. Keeps the last ~400 lines. Read via GET /api/voice/debug (client posts a batch)."""
+    _voice_dbg_many([rec])
+def _voice_dbg_many(recs):
     try:
-        rec["ts"] = time.strftime("%H:%M:%S")
-        line = json.dumps(rec, ensure_ascii=False)
         old = []
         try:
             with open(VOICE_DEBUG_FILE, errors="ignore") as f: old = f.read().splitlines()
         except Exception: pass
-        old.append(line); old = old[-300:]
+        for rec in recs:
+            if not isinstance(rec, dict): continue
+            rec.setdefault("ts", time.strftime("%H:%M:%S")); rec.setdefault("t", int(time.time() * 1000))
+            old.append(json.dumps(rec, ensure_ascii=False))
+        old = old[-400:]
         with open(VOICE_DEBUG_FILE, "w") as f: f.write("\n".join(old) + "\n")
     except Exception: pass
 
@@ -18654,14 +18677,15 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(vq_state()))
         if u.path == "/api/voice/usage":    # VOICE cost meter: this month's Deepgram seconds + TTS chars -> $ estimate
             return self._s(200, json.dumps(voice.usage_summary())) if voice else self._s(200, json.dumps({"ok": False}))
-        if u.path == "/api/voice/debug":    # VOICE trace: what/why each readback generated (session, resolved transcript, text+summary heads)
+        if u.path == "/api/voice/debug":    # VOICE trace: merged client(loop)+server(readback) timeline -> diagnose "why did/didn't it read"
             rows = []
             try:
                 with open(VOICE_DEBUG_FILE, errors="ignore") as f:
-                    for ln in f.read().splitlines()[-80:]:
+                    for ln in f.read().splitlines()[-200:]:
                         try: rows.append(json.loads(ln))
                         except Exception: pass
             except Exception: pass
+            rows.sort(key=lambda r: r.get("t", 0))   # epoch-ms order so batched client posts interleave correctly with server events
             return self._s(200, json.dumps({"ok": True, "rows": rows}))
         if u.path == "/api/google/gmail-thread":  return self._s(200, json.dumps(gmail_thread(q.get("id", [""])[0])))
         if u.path == "/api/google/gmail-att":
@@ -18998,6 +19022,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/handoff-go":        return self._s(200, json.dumps(handoff_go(body), default=str))   # M1: propose+accept in one (concierge/Chief completes the swap)
         if u.path == "/api/handoff-decline":   return self._s(200, json.dumps(handoff_decline(body.get("id", ""), body.get("reason", "")), default=str))
         if u.path == "/api/session-model":     return self._s(200, json.dumps(session_set_model(body.get("name", ""), body.get("model", ""))))
+        if u.path == "/api/session-rename":    return self._s(200, json.dumps(session_rename(body.get("name", ""), body.get("label", ""))))
         if u.path == "/api/session-hold":      return self._s(200, json.dumps(session_hold(body.get("name", ""), body.get("mode", "pin"), body.get("days", 2), body.get("by", "operator")), default=str))
         if u.path == "/api/session-active":    return self._s(200, json.dumps(sessions_active(body.get("sessions") or []), default=str))
         if u.path == "/api/session-archive":   return self._s(200, json.dumps(_archive_session(body.get("name", ""), "manual"), default=str))
@@ -19281,6 +19306,13 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/voice/config-set":   # VOICE settings popover: provider / read-mode / voice_id / threshold
             if not voice: return self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
             return self._s(200, json.dumps({"ok": True, "config": voice.cfg_set(body or {})}))
+        if u.path == "/api/voice/debug":   # VOICE trace INGEST: the browser posts its conversation-loop timeline (batched) so client+server events merge into ONE log
+            evs = body.get("events") or []
+            if isinstance(evs, list) and evs:
+                clean = [e for e in evs[-60:] if isinstance(e, dict)]
+                for e in clean: e["src"] = "client"
+                _voice_dbg_many(clean)
+            return self._s(200, json.dumps({"ok": True}))
         if u.path == "/api/granola-apply": return self._s(200, json.dumps(granola.gr_apply(body.get("id", ""), body.get("edited"))))
         if u.path == "/api/granola-skip":  return self._s(200, json.dumps(granola.gr_skip(body.get("id", ""))))
         if u.path == "/api/substack-sync":  # RSS fetch across publications -> background (network)
@@ -21116,6 +21148,8 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .sttitle{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;overflow:hidden;line-height:1.15}
 .sttitle .stname{flex:0 0 auto;font-size:13px}
 .stloc{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 10px/1.3 ui-monospace,Menlo,monospace;color:var(--dim);margin-top:1px}
+.stname.rename{cursor:text}   /* double-click to rename (display label only) */
+.stname-edit{font-weight:600;font-size:13px;line-height:1.3;color:var(--ink);background:var(--card);border:1px solid var(--accent);border-radius:4px;padding:0 5px;width:100%;min-width:70px;box-sizing:border-box;outline:none}
 /* Session attention (opt-in): CSS state dot + tile ring. All colors from palette vars. */
 .stdot.dot{width:11px;height:11px;border-radius:50%;position:relative;display:inline-block;background:var(--dim)}
 .stdot.dot::after{content:"";position:absolute;inset:-3px;border-radius:50%;pointer-events:none}
@@ -21141,7 +21175,21 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .stile.attnflash{animation:attnFlash .9s ease}
 @keyframes attnFlash{0%,100%{outline:0 solid transparent;outline-offset:2px}30%{outline:2px solid var(--accent);outline-offset:2px}}
 @media(prefers-reduced-motion:reduce){.stdot.dot::after,.attnchip .adot,.stile.attnflash{animation:none}}
-.stbtns{display:flex;gap:3px;flex:0 0 auto}.stbtns .mini{padding:2px 6px}
+.stbtns{display:flex;gap:3px;flex:0 0 auto;align-items:center}.stbtns .mini{padding:2px 6px}
+/* macOS-style pane window controls: maximize(green)/minimize(amber)/close-graceful(red) as theme-token traffic
+   lights (grouped, flush right); the force-kill sits APART as a serious danger button. Palette tokens ->
+   theme-aware + ui_lint-clean. Glyph (+ / – / ×) reveals on group hover, like macOS. */
+.winbtns{display:flex;align-items:center;gap:6px;flex:0 0 auto;margin-left:9px}
+.winbtn{width:13px;height:13px;border-radius:50%;border:0;padding:0;cursor:pointer;position:relative;display:inline-flex;align-items:center;justify-content:center;-webkit-appearance:none;transition:filter .12s}
+.winbtn:hover{filter:brightness(1.12)}
+.winbtn::before{content:attr(data-g);font:700 9px/1 ui-monospace,Menlo,monospace;color:rgba(0,0,0,.55);opacity:0;transition:opacity .12s}
+.winbtns:hover .winbtn::before{opacity:1}
+.winbtn-max{background:var(--ok)}.winbtn-min{background:var(--warn)}.winbtn-close{background:var(--err)}
+.killbtn{flex:0 0 auto;padding:2px 9px;border-radius:6px;font-weight:700;font-size:11px;letter-spacing:.3px;line-height:1.4;color:var(--err);background:transparent;border:1px solid var(--err);cursor:pointer}
+.killbtn:hover{background:var(--err);color:var(--card)}
+/* Brief glow when a session is brought up into the workspace from the taskbar -- makes a single click obviously land. */
+@keyframes paneJustUp{0%{box-shadow:0 0 0 2px var(--accent),0 0 24px rgba(var(--accent-rgb),.55)}100%{box-shadow:0 0 0 0 rgba(var(--accent-rgb),0)}}
+.pane-justup{animation:paneJustUp 1.15s ease-out}
 .snap{flex:1;margin:0;padding:8px;overflow:hidden;font:10.5px/1.32 ui-monospace,Menlo,monospace;color:var(--near);background:var(--bg);white-space:pre-wrap;word-break:break-word}
 .stframe{flex:1;border:0;width:100%;background:var(--bg)}
 /* session launch-location chip: shows WHERE a session is running (path under the project) */
@@ -24009,8 +24057,14 @@ try{PANEW=JSON.parse(localStorage.getItem('hpcc_panew')||'{}')||{};}catch(e){PAN
 function panesSet(arr){PANES=arr.slice();SESSBIG=PANES[0]||null;try{localStorage.setItem('hpcc_panes',JSON.stringify(PANES));}catch(e){}}
 function panesSaveW(){try{localStorage.setItem('hpcc_panew',JSON.stringify(PANEW));}catch(e){}}
 function wkMobile(){return !!(window.matchMedia&&window.matchMedia('(max-width:820px)').matches);}
-function paneUp(name){ if(wkMobile()){panesSet([name]);} else if(PANES.indexOf(name)<0){panesSet(PANES.concat([name]));} loadSessions(true); }
-function paneDown(name){ var up=PANES.filter(function(n){return n!=name;});
+function paneUp(name){
+  try{ if(wkAddPane(name)) return; }catch(e){}                   // TIER-1: surgical insert (or front-if-already-up), no iframe reloads; any error -> safe full render below
+  if(wkMobile()){panesSet([name]);} else if(PANES.indexOf(name)<0){panesSet(PANES.concat([name]));}   // fallback: full render (not mounted / focus view)
+  loadSessions(true); wkFocusPane(name);
+}
+function paneDown(name){
+  try{ if(wkRemovePane(name)) return; }catch(e){}                // TIER-1: surgical remove of just this pane, others untouched; any error -> safe full render below
+  var up=PANES.filter(function(n){return n!=name;});
   if(!up.length){ var nx=(SESSDATA.find(function(x){return x.name!=name&&!x.protected;})||SESSDATA.find(function(x){return x.name!=name;})); up=nx?[nx.name]:[]; }
   panesSet(up); loadSessions(true); }
 function paneToggle(name){ (PANES.indexOf(name)>=0 && !wkMobile()) ? paneDown(name) : paneUp(name); }
@@ -29691,10 +29745,21 @@ function voiceEarcon(){try{var AC=window.AudioContext||window.webkitAudioContext
 // (off/idle/preparing/speaking/yourturn); vmDock() is the ONLY writer of #vcDock. Every async continuation
 // carries the gen it was born under and bails if the world moved on. Buttons carry no state: every tap hits a
 // dispatcher that re-reads live state, so a repaint mid-tap can never misroute a tap.
-window.VM={on:false,state:'off',gen:0,floor:null,await:'',awaitBase:'',sending:false,lastAudio:'',read:{},shelfKey:'',pollT:null,readNote:'',ready:{},_rendering:{},yourturnAt:0,floorQ:null,confirmA:null};
+window.VM={on:false,state:'off',gen:0,floor:null,await:'',awaitBase:'',sending:false,lastAudio:'',read:{},shelfKey:'',pollT:null,readNote:'',ready:{},_rendering:{},yourturnAt:0,floorQ:null,confirmA:null,_trace:[],_traceOut:[],_traceSeq:0,_traceFT:null};
+// ---- TROUBLESHOOTING: a compact timeline of the voice conversation loop (state moves, reply-await polls, present
+// outcomes) posted (batched) to the server so it merges with the readback log into ONE trace. This is what you read
+// when "it worked twice then never read the summary" -- GET /api/voice/debug or the "Voice trace" button in settings.
+function vmTrace(ev,obj){try{var r={ev:ev,t:Date.now(),seq:++VM._traceSeq};if(obj)for(var k in obj){var v=obj[k];r[k]=(typeof v==='string')?v.slice(0,120):v;}
+  VM._trace.push(r);if(VM._trace.length>240)VM._trace.splice(0,VM._trace.length-240);
+  VM._traceOut.push(r);vmTraceFlush();}catch(e){}}
+function vmTraceFlush(force){try{if(force){if(VM._traceFT){clearTimeout(VM._traceFT);VM._traceFT=null;}return vmTraceSend();}
+  if(VM._traceFT)return;VM._traceFT=setTimeout(function(){VM._traceFT=null;vmTraceSend();},3500);}catch(e){}}   // coalesce bursts into one POST every ~3.5s
+function vmTraceSend(){try{var batch=VM._traceOut;if(!batch||!batch.length)return;VM._traceOut=[];
+  fetch('/api/voice/debug',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({events:batch})}).catch(function(){VM._traceOut=batch.slice(-80).concat(VM._traceOut||[]);});}catch(e){}}
 window.REC={state:'idle',gen:0,mr:null,stream:null,chunks:[],mime:'audio/webm',target:null,discard:false,onDone:null,t0:0,capT:null};
 function vmGen(){return ++VM.gen;}
-function vmSet(st){if(st==='yourturn'&&VM.state!=='yourturn'){try{VM.yourturnAt=Date.now();}catch(e){VM.yourturnAt=0;}}VM.state=st;vmDock();}
+function vmSet(st){var prev=VM.state;if(st==='yourturn'&&prev!=='yourturn'){try{VM.yourturnAt=Date.now();}catch(e){VM.yourturnAt=0;}}VM.state=st;
+  if(st!==prev){try{vmTrace('state',{from:prev,to:st,sess:(VM.floor&&VM.floor.session)||VM.await||''});}catch(e){}}vmDock();}
 
 // ---- THE RECORDER (single owner of the microphone) ----
 function recStart(target,onDone){                 // -> false if refused (already busy / no STT key)
@@ -29772,10 +29837,13 @@ async function vmRecDone(res){
   try{await fetch('/api/voice/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:res.target,text:text})});}
   catch(e){vcToast('Send failed — transcript saved, recover it in Voice ▸ Recent dictations',6000);vmDock();return;}
   vcToast('Sent to '+res.target+': '+text.slice(0,50),2800);
+  try{vmTrace('sent',{sess:res.target,len:(text||'').length});}catch(e){}
   if(!VM.on){vmDock();return;}                                         // voice mode ended mid-transcription -> delivered, just don't start a reply-read cycle
   if(VM.floor){vmAck(VM.floor.session);VM.floor=null;}                // you replied -> the floor item is dealt with
   VM.await=res.target;VM.readNote='';
   try{var b=await(await fetch('/api/voice/state?session='+encodeURIComponent(res.target))).json();VM.awaitBase=(b&&b.msg_fp)||'';}catch(e){VM.awaitBase='';}   // baseline so the fast-poll only fires on a NEW reply
+  try{vmTrace('await-armed',{sess:res.target,base:(VM.awaitBase||'').slice(0,8)});}catch(e){}   // now waiting for THIS session's reply; the fast-poll below fires when msg_fp changes
+  VM._awKey=null;   // reset the await-poll counter for the new wait
   vmSet('idle');vmPollNow();}                                         // the fast-poll (or the server watcher) presents the REPLY
 function vmDone(){voiceStopAudio();vmGen();
   if(VM.floor){vmAck(VM.floor.session);VM.floor=null;}
@@ -29789,26 +29857,28 @@ function vmAck(n){try{fetch('/api/voice/queue-ack',{method:'POST',headers:{'Cont
 
 // ---- presentation: read the floor item WITHOUT yanking the screen ----
 async function vmPresent(item){var gen=vmGen();
-  if(REC.state==='recording'||REC.state==='stopping'||VM.sending){vmDock();return;}   // you're talking -> NEVER read a new reply over you; it stays queued and presents after you send
+  try{vmTrace('present',{sess:item.session,kind:item.kind||'done',fp:(item.fp||'').slice(0,8)});}catch(e){}
+  if(REC.state==='recording'||REC.state==='stopping'||VM.sending){try{vmTrace('present-skip',{sess:item.session,why:'talking'});}catch(e){}vmDock();return;}   // you're talking -> NEVER read a new reply over you; it stays queued and presents after you send
   if(voiceAutoDrive()){try{vqFocus(item.session);}catch(e){}}   // auto-drive (desktop voice-on / driving): BRING UP the session that's talking
   VM.floor=item;VM.await='';VM.readNote='';VM.floorQ=null;vmSet('preparing');
   if(item.kind==='question'){return vmPresentQuestion(item,gen);}   // a multiple-choice question -> read it + let you answer by voice
-  if(item.fp&&VM.read[item.session]===item.fp){vmAck(item.session);VM.floor=null;vmSet('idle');return;}   // PER-SESSION dedup: this session's THIS message was already read -> drop it (never re-read / ping-pong)
+  if(item.fp&&VM.read[item.session]===item.fp){try{vmTrace('present-skip',{sess:item.session,why:'dedup'});}catch(e){}vmAck(item.session);VM.floor=null;vmSet('idle');return;}   // PER-SESSION dedup: this session's THIS message was already read -> drop it (never re-read / ping-pong)
   var pre=VM.ready[item.session];   // already pre-rendered as a background session -> play instantly, no re-summarize/re-bill
-  if(pre&&pre.fp===item.fp){vmMarkRead(item.session,pre.fp);VM.lastAudio=pre.file;delete VM.ready[item.session];vmSet('speaking');voicePlay(pre.file,function(){if(gen!==VM.gen)return;vmSet('yourturn');});return;}
+  if(pre&&pre.fp===item.fp){try{vmTrace('present-play',{sess:item.session,src:'prerender'});}catch(e){}vmMarkRead(item.session,pre.fp);VM.lastAudio=pre.file;delete VM.ready[item.session];vmSet('speaking');voicePlay(pre.file,function(){if(gen!==VM.gen)return;vmSet('yourturn');});return;}
   var tries=0;
   while(true){var r=null,timedout=false;
     try{r=await(await voiceFetchT('/api/voice/speak-last',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:item.session})},voiceReadTimeoutMs())).json();}catch(e){timedout=(e&&e.message==='timeout');r=null;}
     if(gen!==VM.gen)return;                                           // barged / jumped / stopped meanwhile -> this read is dead
     if(r&&r.ok)break;
-    if(r&&r.busy){VM.floor=null;VM.readNote='';vmSet('idle');return;}   // it started working again -> don't read a mid-step msg; the self-cleaning queue drops it until it truly finishes
+    if(r&&r.busy){try{vmTrace('present-skip',{sess:item.session,why:'busy'});}catch(e){}VM.floor=null;VM.readNote='';vmSet('idle');return;}   // it started working again -> don't read a mid-step msg; the self-cleaning queue drops it until it truly finishes
     if(r&&r.empty){vmSkipEmpty(item);return;}                         // EMPTY is first-class: silent skip, NO retry, nothing spoken
-    if(timedout){VM.readNote='reading is slow — tap the name to view it, or just reply';vmSet('yourturn');return;}   // NO-HANG: TTS render took too long -> don't freeze
-    tries++;if(tries>2){VM.readNote='couldn\'t read aloud — tap the name to view it';vmSet('yourturn');return;}
+    if(timedout){try{vmTrace('present-timeout',{sess:item.session,tries:tries});}catch(e){}VM.readNote='reading is slow — tap the name to view it, or just reply';vmSet('yourturn');return;}   // NO-HANG: TTS render took too long -> don't freeze
+    tries++;if(tries>2){try{vmTrace('present-skip',{sess:item.session,why:'failread'});}catch(e){}VM.readNote='couldn\'t read aloud — tap the name to view it';vmSet('yourturn');return;}
     VM.readNote='retrying ('+tries+')';vmDock();
     await new Promise(function(x){setTimeout(x,2000);});
     if(gen!==VM.gen)return;
   }
+  try{vmTrace('present-play',{sess:item.session,src:'live',tries:tries});}catch(e){}
   vmMarkRead(item.session,r.fp||'');VM.lastAudio=r.file;VM.readNote='';
   vmSet('speaking');
   voicePlay(r.file,function(){if(gen!==VM.gen)return;vmSet('yourturn');});}
@@ -29891,17 +29961,27 @@ function vmConfirmResponse(text){var a=VM.confirmA;if(!a)return;var t=(text||'')
   if(no){VM.confirmA=null;VM.floorQ={session:a.session,options:a.options,question:a.question};   // cancel -> back to answering
     var g2=vmGen();vmSet('speaking');voiceSay('Okay. Say your answer.',function(){if(g2!==VM.gen)return;vmSet('yourturn');if(voiceHandsfreeOn())vmTalk();});return;}
   var g3=vmGen();vmSet('speaking');voiceSay('Say yes to send '+(a.label||'that')+', or say a different option.',function(){if(g3!==VM.gen)return;vmSet('yourturn');if(voiceHandsfreeOn())vmTalk();});}
-function vmSkipEmpty(item){vcToast('Nothing to read from “'+item.session+'” — skipped',2600);
+function vmSkipEmpty(item){try{vmTrace('present-skip',{sess:item.session,why:'empty'});}catch(e){}vcToast('Nothing to read from “'+item.session+'” — skipped',2600);
   vmAck(item.session);VM.floor=null;vmSet('idle');}
 
 // ---- the poller: THE one scheduler (server queue -> floor). Runs only while VM.on. Fast while awaiting a reply. ----
 async function vmPoll(){if(!VM.on)return;
   // FAST PATH: the reply to a message you just SENT by voice -> auto-play (it's a focus interaction you asked for)
   if(VM.state==='idle'&&VM.await&&REC.state==='idle'&&!VM.sending){
-    try{var st=await(await fetch('/api/voice/state?session='+encodeURIComponent(VM.await))).json();
+    var aw=VM.await;
+    try{var st=await(await fetch('/api/voice/state?session='+encodeURIComponent(aw))).json();
       if(!VM.on)return;
-      if(st&&st.ok&&!st.busy&&st.msg_fp&&st.msg_fp!==VM.awaitBase&&st.msg_fp!==VM.read[VM.await]){var aw=VM.await;VM.await='';vmPresent({session:aw,fp:st.msg_fp,scope:''});return;}
-    }catch(e){}
+      if(st&&st.ok){
+        // TRACE the reply-await: how many polls we've waited, when busy flips, and whether a new reply landed --
+        // this is what shows WHY a "finished" session never got read (never changed / deduped / stayed busy).
+        var chg=(st.msg_fp&&st.msg_fp!==VM.awaitBase), ded=(chg&&st.msg_fp===VM.read[aw]);
+        if(VM._awKey!==aw){VM._awKey=aw;VM._awBusy=null;VM._awN=0;}
+        VM._awN++;
+        if(!!st.busy!==VM._awBusy){VM._awBusy=!!st.busy;try{vmTrace('await-busy',{sess:aw,busy:!!st.busy,polls:VM._awN});}catch(e){}}
+        if(chg){try{vmTrace('await-fire',{sess:aw,busy:!!st.busy,dedup:!!ded,polls:VM._awN,newfp:(st.msg_fp||'').slice(0,8)});}catch(e){}}
+        if(!st.busy&&chg&&!ded){VM.await='';VM._awKey=null;vmPresent({session:aw,fp:st.msg_fp,scope:''});return;}
+      }
+    }catch(e){try{vmTrace('await-err',{sess:aw});}catch(_){}}
   }
   await vqFetch();
   if(!VM.on)return;
@@ -30109,9 +30189,11 @@ async function voiceModeToggle(){var on=!VM.on;
   if(on){VM.on=true;VQ.on=true;VM.state='idle';VM.read={};VM.shelfKey='';VM.await='';VM.readNote='';VM.floor=null;
     try{if(!wkMobile())(window.PANES||[]).forEach(function(p){voiceAutoEnroll(p);});}catch(e){}   // ONE switch = the WHOLE GROUP: enroll every open pane so each is read as it finishes (desktop). Mute opts one out.
     var f=voiceActiveSession();if(f)voiceAutoEnroll(f);
+    try{vmTrace('mode',{on:true,focus:f||'',handsfree:voiceHandsfreeOn(),autodrive:voiceAutoDrive(),panes:(window.PANES||[]).length});}catch(e){}
     vmDock();vmPollStart();
     vcToast('Voice mode ON — any session you use will be read to you when it finishes',4000);
-  }else{VM.on=false;VQ.on=false;VM.state='off';vmGen();vmPollStop();
+  }else{try{vmTrace('mode',{on:false});vmTraceFlush(true);}catch(e){}
+    VM.on=false;VQ.on=false;VM.state='off';vmGen();vmPollStop();
     voiceStopAudio();recStop(true);VM.floor=null;VM.floorQ=null;VM.confirmA=null;VM.sending=false;VM.await='';
     voiceDockHide();vcToast('Voice mode off',2000);}
   try{voiceMarkTiles();}catch(e){}try{paintSessTools(window.SESSDATA?SESSDATA.length:null);}catch(e){}try{vmDock();}catch(e){}}   // update the global switch + pane bars in place -- NO full render() (that reloads the terminals)
@@ -30166,7 +30248,7 @@ function voiceSettings(){var c=window.VCFG||{};function opt(v,cur){return '<opti
    +'<label>Answering a multiple-choice question by voice<br><select id="vcAns" class="cc-in" style="width:100%;margin-top:4px">'+[['correct','Read my choice back &amp; let me correct it'],['confirm','Say my choice back, then send'],['quiet','Just send it (no readback)']].map(function(o){return '<option value="'+o[0]+'"'+(voiceAnswerMode()===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+'</select><span class="sub">after you speak an answer, whether it confirms out loud + lets you change it before sending.</span></label>'
    +'<span class="sub">In Voice mode, tap Talk (or press the backtick key <b>`</b> on desktop) to reply — tap again to send. It replies to whatever session is on screen.</span>'
    +'</div>'
-   +'<div style="display:flex;gap:8px;justify-content:space-between;align-items:center;margin-top:16px"><button class="btn" onclick="voiceRecent()" title="Recover a dictation that was transcribed but not delivered">&#128266; Recent dictations</button><span style="display:flex;gap:8px"><button class="btn" onclick="document.getElementById(\'vcSet\').remove()">Cancel</button><button class="btn go" onclick="voiceSettingsSave()">Save</button></span></div></div>';
+   +'<div style="display:flex;gap:8px;justify-content:space-between;align-items:center;margin-top:16px"><span style="display:flex;gap:8px"><button class="btn" onclick="voiceRecent()" title="Recover a dictation that was transcribed but not delivered">&#128266; Recent dictations</button><button class="btn" onclick="voiceTraceView()" title="Voice trace — the conversation-loop timeline (state moves, reply-await polls, read outcomes). Use it to see why a readback did or didn\'t trigger.">&#129658; Voice trace</button></span><span style="display:flex;gap:8px"><button class="btn" onclick="document.getElementById(\'vcSet\').remove()">Cancel</button><button class="btn go" onclick="voiceSettingsSave()">Save</button></span></div></div>';
   m.addEventListener('mousedown',function(e){if(e.target===m)m.remove();});document.body.appendChild(m);}
 async function voiceRecent(){
   var d={};try{d=await(await fetch('/api/voice/transcripts?n=30')).json();}catch(e){}
@@ -30190,6 +30272,32 @@ async function voiceResend(ts){var items=window._vcRecItems||[];var it=items.fil
   var tgt=(typeof voiceTalkTarget==='function'&&voiceTalkTarget())||it.session;if(!tgt){vcToast('Open a session first',2400);return;}
   try{await fetch('/api/voice/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:tgt,text:it.text})});vcToast('Sent to '+tgt+': '+String(it.text).slice(0,50),3000);}
   catch(e){vcToast('Send failed',3000);}}
+// ---- Voice TRACE viewer: the merged client(loop)+server(readback) timeline. Read this to diagnose "it worked a
+// couple times then finished but never read the summary" -- each row is a state move / reply-await poll / read outcome.
+function _vtTime(r){try{if(r.t){var d=new Date(r.t);var p=function(n,w){n=String(n);while(n.length<(w||2))n='0'+n;return n;};return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())+'.'+p(d.getMilliseconds(),3);}}catch(e){}return r.ts||'';}
+function _vtRow(r){var skip={ev:1,ts:1,t:1,src:1,seq:1};var kv=[];for(var k in r){if(skip[k])continue;var v=r[k];if(v===''||v===null||v===undefined)continue;kv.push(k+'='+(typeof v==='object'?JSON.stringify(v):String(v)).slice(0,60));}
+  var cli=(r.src==='client');var ev=r.ev||'?';
+  var col=/skip|err|timeout|busy/.test(ev)?'var(--err)':(/play|fire|sent|read\b/.test(ev)?'var(--ok)':(/state|await|mode|present/.test(ev)?'var(--accent)':'var(--mut)'));
+  return '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid rgba(127,127,127,.12);font-family:ui-monospace,Menlo,monospace;font-size:11px;white-space:nowrap;overflow:hidden">'
+    +'<span style="color:var(--mut);flex:0 0 auto">'+esc(_vtTime(r))+'</span>'
+    +'<span style="flex:0 0 34px;color:var(--mut);opacity:.7">'+(cli?'cli':'srv')+'</span>'
+    +'<span style="flex:0 0 118px;font-weight:700;color:'+col+'">'+esc(ev)+'</span>'
+    +'<span style="flex:1 1 auto;color:var(--ink);overflow:hidden;text-overflow:ellipsis">'+esc(kv.join('  '))+'</span></div>';}
+async function voiceTraceView(){try{vmTraceFlush(true);}catch(e){}
+  var m=document.getElementById('vcTrc');if(m)m.remove();m=document.createElement('div');m.id='vcTrc';m.style.cssText='position:fixed;inset:0;z-index:10090;display:flex;align-items:center;justify-content:center;background:rgba(8,8,12,.7);backdrop-filter:blur(6px)';
+  m.innerHTML='<div style="background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;width:min(760px,96vw);max-height:86vh;display:flex;flex-direction:column;box-shadow:0 18px 50px rgba(0,0,0,.55)">'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><h3 style="margin:0;flex:1">Voice trace</h3>'
+    +'<button class="mini" onclick="voiceTraceView()" title="Reload the latest events">&#8635; Refresh</button>'
+    +'<button class="mini" onclick="voiceTraceCopy()" title="Copy the raw trace (JSON lines) to share">Copy</button>'
+    +'<button class="mini" onclick="document.getElementById(\'vcTrc\').remove()">Close</button></div>'
+    +'<div class="sub" style="margin-bottom:8px">The voice conversation loop, newest at the bottom. <b>cli</b> = the browser, <b>srv</b> = the readback engine. Look for a reply cycle that ran <code>sent → await-armed</code> but never reached <code>await-fire</code> / <code>present-play</code> — that’s a summary that never got read.</div>'
+    +'<div id="vcTrcBody" style="flex:1 1 auto;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px">Loading…</div></div>';
+  m.addEventListener('mousedown',function(e){if(e.target===m)m.remove();});document.body.appendChild(m);
+  setTimeout(async function(){var d={};try{d=await(await fetch('/api/voice/debug')).json();}catch(e){}
+    var rows=(d&&d.rows)||[];window._vcTrcRows=rows;var b=document.getElementById('vcTrcBody');if(!b)return;
+    b.innerHTML=rows.length?rows.map(_vtRow).join(''):'<div class="sub" style="padding:14px">No voice events yet. Turn Voice mode on and have a conversation — events land here.</div>';
+    try{b.scrollTop=b.scrollHeight;}catch(e){}},280);}
+function voiceTraceCopy(){try{var rows=window._vcTrcRows||[];var txt=rows.map(function(r){return JSON.stringify(r);}).join('\n');navigator.clipboard.writeText(txt);vcToast('Copied '+rows.length+' trace rows',1800);}catch(e){vcToast('Copy failed',2200);}}
 async function voiceSettingsSave(){var prov=(document.getElementById('vcProv')||{}).value,mode=(document.getElementById('vcMode')||{}).value,thr=parseInt((document.getElementById('vcThr')||{}).value||'600',10)||600,rate=parseFloat((document.getElementById('vcRate')||{}).value||'1.15')||1.15,ann=(document.getElementById('vcAnn')||{}).checked,ear=(document.getElementById('vcEar')||{}).checked,hf=(document.getElementById('vcHf')||{}).checked;
   var grace=Math.round((parseFloat((document.getElementById('vcGrace')||{}).value||'12')||12)*1000);
   var ansm=(document.getElementById('vcAns')||{}).value||'correct';
@@ -30276,13 +30384,46 @@ function voiceMarkTiles(){try{var v=document.getElementById('stgVoice');if(v){v.
 try{voiceQueueBadgePoll();setInterval(voiceQueueBadgePoll,5000);}catch(e){}
 // Session title block: NAME prominent on the first line, its launch location in tiny text directly under it
 // (so a couple of open panes never truncate the name -- the most important part -- behind the path).
-function sttitle(x){var raw=(x&&(x.cwd||x.loc))||'';var loc=raw.replace(/^\/(Users|home)\/[^/]+\//,'~/');return '<span class="sttitle"><span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+(loc?'<span class="stloc" title="launched from '+esc(raw)+'">📍 '+esc(loc)+'</span>':'')+'</span>';}
+function sttitle(x){var raw=(x&&(x.cwd||x.loc))||'';var loc=raw.replace(/^\/(Users|home)\/[^/]+\//,'~/');
+  var ed=!!(x&&!x.protected);   // protected singletons (Chief/product/loops) can't be renamed, like they can't be killed
+  var nm='<span class="stname'+(ed?' rename':'')+'" title="'+esc(x.name)+(ed?' — double-click to rename':'')+'"'+(ed?(' ondblclick="sessRename(event,\''+esc(x.name)+'\')"'):'')+'>'+esc(x.label||x.name)+'</span>';
+  return '<span class="sttitle">'+nm+(loc?'<span class="stloc" title="launched from '+esc(raw)+'">📍 '+esc(loc)+'</span>':'')+'</span>';}
+// Inline rename: double-click the pane-header name -> edit in place -> saves a DISPLAY label (the real tmux name is
+// untouched, so nothing keyed on it breaks) and updates the header + taskbar tile WITHOUT re-rendering the terminal.
+function sessRename(ev,name){
+  try{ev.stopPropagation();ev.preventDefault();}catch(e){}
+  var span=(ev.target&&ev.target.closest)?ev.target.closest('.stname'):null; if(!span||span._editing)return;
+  span._editing=true; var cur=span.textContent;
+  var inp=document.createElement('input'); inp.type='text'; inp.className='stname-edit'; inp.maxLength=60; inp.value=cur;
+  span.textContent=''; span.appendChild(inp); try{inp.focus();inp.select();}catch(e){}
+  var fin=false;
+  function done(commit){ if(fin)return; fin=true; var val=(inp.value||'').trim(); span._editing=false; span.textContent=(commit&&val)?val:cur;
+    if(commit&&val&&val!==cur){
+      fetch('/api/session-rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,label:val})})
+        .then(function(r){return r.json();}).then(function(d){
+          if(d&&d.ok){ var shown=d.label||val; span.textContent=shown;
+            try{(SESSDATA||[]).forEach(function(s){if(s.name===name)s.label=shown;});}catch(e){}
+            try{if(window.SB&&SB.list)SB.list.forEach(function(s){if(s.name===name)s.label=shown;});}catch(e){}
+            try{sbRelabel(name,shown);}catch(e){}
+          } else { span.textContent=cur; if(typeof toast==='function')toast((d&&d.error)||'Rename failed',4000); }
+        }).catch(function(){span.textContent=cur;});
+    }
+  }
+  inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){e.preventDefault();done(true);} else if(e.key==='Escape'){e.preventDefault();done(false);} });
+  inp.addEventListener('blur',function(){done(true);});
+  ['click','mousedown','dblclick'].forEach(function(ev2){ inp.addEventListener(ev2,function(e){e.stopPropagation();}); });
+}
+function sbRelabel(name,shown){ try{ document.querySelectorAll('#sessbar .sb-tile').forEach(function(t){ if(t.getAttribute('data-n')===name){ var l=t.querySelector('.sb-lbl'); if(l)l.textContent=shown; } }); }catch(e){} }
 // Identity bar: smart state dot + name/loc + read-only status (ctx% · tokens · model) + pane controls only.
 // Every session ACTION (file / review / skill / model / compact / end / kill) lives in the terminal's own
 // toolbar one row down -- no duplication. See sttitle() + the Attention state dot (attnDotHTML).
 function bigHead(x){return '<div class="sthead">'+attnDotHTML(x)+sttitle(x)+ctxChip(x.name)+modelChip(x.name,x.model)
   +'<span class="stbtns">'
-  +'<button class="mini" title="blow up the session — full-screen in-app on mobile, new tab on desktop" onclick="termPopout(\''+esc(x.name)+'\')">↗</button>'
+  +(x.protected?'':'<button class="killbtn" title="Force-kill this session — NO handoff, NO resume notes" onclick="endSess(\''+esc(x.name)+'\',true)">Kill</button>')
+  +'<span class="winbtns">'
+  +'<button class="winbtn winbtn-max" data-g="+" title="Blow up — full-screen in-app on mobile, new tab on desktop" onclick="termPopout(\''+esc(x.name)+'\')"></button>'
+  +(x.protected?'':'<button class="winbtn winbtn-close" data-g="×" title="End gracefully — Claude writes a handoff + resume pointer, then closes" onclick="endSess(\''+esc(x.name)+'\',false)"></button>')
+  +'</span>'
   +'</span></div>';}
 function renderFocus(s){
   if(!SESSBIG||!s.find(function(x){return x.name==SESSBIG;}))SESSBIG=s[0].name;
@@ -30301,9 +30442,57 @@ function renderFocus(s){
 // ===== WORKSPACE: split-pane columns. Drag a session up from the dock; resize the splitter; push panes down. =====
 function paneHead(x){return '<div class="sthead">'+attnDotHTML(x)+sttitle(x)+ctxChip(x.name)+modelChip(x.name,x.model)
   +'<span class="stbtns">'
-  +'<button class="mini panedown" title="push this session back down to the taskbar" onclick="paneDown(\''+esc(x.name)+'\')">&#11015;</button>'
-  +'<button class="mini" title="blow up the session — full-screen in-app on mobile, new tab on desktop" onclick="termPopout(\''+esc(x.name)+'\')">↗</button>'
+  +(x.protected?'':'<button class="killbtn" title="Force-kill this session — NO handoff, NO resume notes" onclick="endSess(\''+esc(x.name)+'\',true)">Kill</button>')
+  +'<span class="winbtns">'
+  +'<button class="winbtn winbtn-max" data-g="+" title="Blow up — full-screen in-app on mobile, new tab on desktop" onclick="termPopout(\''+esc(x.name)+'\')"></button>'
+  +'<button class="winbtn winbtn-min" data-g="–" title="Push down to the taskbar" onclick="paneDown(\''+esc(x.name)+'\')"></button>'
+  +(x.protected?'':'<button class="winbtn winbtn-close" data-g="×" title="End gracefully — Claude writes a handoff + resume pointer, then closes" onclick="endSess(\''+esc(x.name)+'\',false)"></button>')
+  +'</span>'
   +'</span></div>';}
+// ---- TIER-1 incremental workspace: add/remove ONE pane by surgical DOM mutation, so the OTHER panes' terminal
+// iframes are NEVER destroyed/recreated (the old whole-#grid innerHTML rebuild reloaded every terminal at once =
+// the "clunky, everything flashes" feel). wkAddPane/wkRemovePane return false when they can't do it incrementally
+// (mobile / not the workspace view / no #wkspace mounted) so the caller falls back to a full render. ------------
+function wkSplitHTML(l,r){ return '<div class="pane-split" data-l="'+esc(l)+'" data-r="'+esc(r)+'" title="drag to resize"></div>'; }
+function wkPaneHTML(x){ var name=x.name, grow=PANEW[name]||1;
+  return '<div class="wkpane bigsess'+((window.VM&&VM.floor&&VM.floor.session===name)?' vq-active':'')+'" data-ccsess="'+esc(name)+'" data-pane="'+esc(name)+'" style="flex:'+grow+' 1 0">'
+    + paneHead(x) + ccDropBar(name) + '<iframe class="stframe" src="/term?name='+encodeURIComponent(name)+'"></iframe>' + ccDropOverlay()
+    + '<div class="vbar" data-vsess="'+esc(name)+'"></div>'
+    +'</div>'; }
+// scroll the pane into view + a brief accent glow so a brought-up pane obviously landed
+function wkFocusPane(name){ setTimeout(function(){ try{ document.querySelectorAll('.wkpane[data-ccsess],.bigsess[data-ccsess]').forEach(function(el){
+  if(el.getAttribute('data-ccsess')===name){ try{el.scrollIntoView({behavior:'smooth',block:'nearest',inline:'center'});}catch(e){}
+    el.classList.add('pane-justup'); setTimeout(function(){el.classList.remove('pane-justup');},1200);} }); }catch(e){} },60); }
+function wkAddPane(name){
+  if(wkMobile()) return false;
+  if(typeof LENS!=='undefined' && LENS!=='sessions') return false;
+  var wk=document.getElementById('wkspace'); if(!wk) return false;
+  var present=false, last=null;
+  wk.querySelectorAll('.wkpane').forEach(function(p){ var n=p.getAttribute('data-ccsess'); last=n; if(n===name)present=true; });
+  if(present){ wkFocusPane(name); return true; }                              // already up -> just front + glow (no rebuild)
+  var x=(SESSDATA||[]).find(function(y){return y.name===name;})||{name:name,label:name};
+  wk.insertAdjacentHTML('beforeend',(last!=null?wkSplitHTML(last,name):'')+wkPaneHTML(x));   // append ONE pane; existing iframes untouched
+  var order=[]; wk.querySelectorAll('.wkpane').forEach(function(p){order.push(p.getAttribute('data-ccsess'));});
+  panesSet(order);                                                            // sync PANES to the DOM order
+  try{wkWire();}catch(e){} try{ccWireDropzones();}catch(e){} try{vmDock();}catch(e){}   // idempotent -> wires ONLY the new pane's splitter/dropzone/voicebar
+  wkFocusPane(name);
+  return true;
+}
+function wkRemovePane(name){
+  if(wkMobile()) return false;
+  var wk=document.getElementById('wkspace'); if(!wk) return false;
+  var els=wk.querySelectorAll('.wkpane'); if(els.length<=1) return false;     // removing the last pane -> let the full path pick the next / auto-one-big
+  var target=null; els.forEach(function(p){ if(p.getAttribute('data-ccsess')===name) target=p; });
+  if(!target) return false;
+  var prev=target.previousElementSibling, next=target.nextElementSibling;     // drop ONE adjacent splitter so the layout stays valid
+  if(prev&&prev.classList&&prev.classList.contains('pane-split')) prev.remove();
+  else if(next&&next.classList&&next.classList.contains('pane-split')) next.remove();
+  target.remove();
+  var order=[]; wk.querySelectorAll('.wkpane').forEach(function(p){order.push(p.getAttribute('data-ccsess'));});
+  delete PANEW[name]; panesSet(order); panesSaveW();
+  try{wkMarkDock();}catch(e){} try{vmDock();}catch(e){}
+  return true;
+}
 function renderWorkspace(s){
   // reconcile PANES with live sessions; never empty (auto-show one big)
   var up=PANES.filter(function(n){return s.find(function(x){return x.name==n;});});
@@ -30314,12 +30503,8 @@ function renderWorkspace(s){
   var h='<div class="wkspace" id="wkspace">';
   panes.forEach(function(name,idx){
     var x=s.find(function(y){return y.name==name;})||{name:name,label:name};
-    if(idx>0) h+='<div class="pane-split" data-l="'+esc(panes[idx-1])+'" data-r="'+esc(name)+'" title="drag to resize"></div>';
-    var grow=PANEW[name]||1;
-    h+='<div class="wkpane bigsess'+((window.VM&&VM.floor&&VM.floor.session===name)?' vq-active':'')+'" data-ccsess="'+esc(name)+'" data-pane="'+esc(name)+'" style="flex:'+grow+' 1 0">'
-      + paneHead(x) + ccDropBar(name) + '<iframe class="stframe" src="/term?name='+encodeURIComponent(name)+'"></iframe>' + ccDropOverlay()
-      + '<div class="vbar" data-vsess="'+esc(name)+'"></div>'
-      +'</div>';
+    if(idx>0) h+=wkSplitHTML(panes[idx-1],name);
+    h+=wkPaneHTML(x);
   });
   h+='</div><div id="wkdrop" class="wkdrop">&#11014; Drop to add this session to the workspace</div>';
   try{setTimeout(function(){try{vmDock();}catch(e){}},0);}catch(e){}   // paint the per-pane voice bars once the panes exist
@@ -31856,7 +32041,7 @@ setupNavDnD();renderNav();navSeedGoogle();
 setInterval(function(){try{paintNavNotif();}catch(e){}},3000);   // keep collapsed-category glow/count current with the badge pollers
 // ===== Global sessions taskbar (desktop): live dock of ALL project sessions + gold "done" pulse + hover preview =====
 var SB={prev:{},done:{},hover:null,popHover:false,pvTimer:null,baseTitle:document.title};
-SB.protected={}; SB.holdT=null;
+SB.protected={}; SB.holdT=null; SB.showT=null; SB.popOpen=false;
 function sbDesktop(){return window.matchMedia('(min-width:901px)').matches;}
 async function sbPoll(){
   var bar=document.getElementById('sessbar'); if(!bar)return;
@@ -31921,24 +32106,45 @@ function sbRender(list){
 }
 function sbAck(name){ if(SB.done[name]){ delete SB.done[name]; var sel='.sb-tile[data-n="'+((window.CSS&&CSS.escape)?CSS.escape(name):name)+'"]'; var t=document.querySelector(sel); if(t)t.classList.remove('done'); } }
 // --- taskbar blow-up panel: a FULL interactive terminal + actions (b3) ---
-function sbHover(name,el){ if(window.SBRE&&SBRE.active)return; SB.hover=name; sbAck(name); clearTimeout(SB.holdT); sbShowPanel(name,el); }
+function sbHover(name,el){
+  if(window.SBRE&&SBRE.active)return;
+  SB.hover=name; sbAck(name); clearTimeout(SB.holdT); clearTimeout(SB.showT);
+  // If a preview is ALREADY open, sweeping to another tile swaps instantly (like Windows taskbar thumbnails).
+  // Use an explicit flag, NOT the inline display (which is '' -- not 'none' -- on a fresh load, so the first hover
+  // wrongly popped instantly).
+  if(SB.popOpen){ sbShowPanel(name,el); return; }
+  // Otherwise require a ~3s DWELL before popping the live preview (so it doesn't flash as you move across the bar).
+  SB.showT=setTimeout(function(){
+    if(SB.hover!==name)return;
+    var cur=el; if(!document.body.contains(cur)){ cur=null; document.querySelectorAll('#sessbar .sb-tile').forEach(function(t){ if(t.getAttribute('data-n')===name) cur=t; }); }
+    if(cur) sbShowPanel(name,cur);
+  },3000);
+}
 function sbLeave(){ SB.hover=null;
+  clearTimeout(SB.showT);
   clearTimeout(SB.holdT);
   SB.holdT=setTimeout(function(){
-    if(!SB.hover && !SB.popHover){ var p=document.getElementById('sessprev'); if(p)p.style.display='none'; clearInterval(SB.pvTimer); }
+    if(!SB.hover && !SB.popHover){ var p=document.getElementById('sessprev'); if(p)p.style.display='none'; SB.popOpen=false; clearInterval(SB.pvTimer); }
   },260); }
 function sbProtected(name){ var s=(SB.list||[]).find(function(x){return x.name===name;}); return s?!!s.protected:false; }
 function sbShowPanel(name,anchor){
   var p=document.getElementById('sessprev'); if(!p)return;
   var prot=sbProtected(name);
   var r=anchor.getBoundingClientRect(), w=Math.min(880,window.innerWidth*0.86);
-  p.style.display='flex';
+  p.style.display='flex'; SB.popOpen=true;
   p.style.left=Math.max(8,Math.min(r.left,window.innerWidth-w-8))+'px';
   p.style.bottom=(window.innerHeight-r.top+8)+'px';
   p.onmouseenter=function(){SB.popHover=true;clearTimeout(SB.holdT);};
   p.onmouseleave=function(){SB.popHover=false;sbLeave();};
-  // The embedded terminal already has end/kill (and copy/compact/dashboard) -- don't duplicate them here.
-  var acts='<button class="mini" title="usage / cost for this session" onclick="sbUsage(\''+esc(name)+'\')">Usage</button>';
+  // Mac-style window controls in the hover popup (per operator request), consistent with the pane header:
+  // maximize(green)=open big, close(red)=graceful end, + the serious Kill set apart. NO minimize here -- the
+  // session is already in the taskbar. close/kill guard on protected singletons (Chief/loops can't be ended).
+  var acts='<button class="mini" title="usage / cost for this session" onclick="sbUsage(\''+esc(name)+'\')">Usage</button>'
+    +(prot?'':'<button class="killbtn" title="Force-kill this session — NO handoff, NO resume notes" onclick="sbKill(\''+esc(name)+'\')">Kill</button>')
+    +'<span class="winbtns">'
+    +'<button class="winbtn winbtn-max" data-g="+" title="Open big in the Sessions tab" onclick="sbOpen(\''+esc(name)+'\')"></button>'
+    +(prot?'':'<button class="winbtn winbtn-close" data-g="×" title="End gracefully — Claude writes a handoff + resume pointer, then closes" onclick="sbEnd(\''+esc(name)+'\')"></button>')
+    +'</span>';
   // Only rebuild the shell when the panel is for a NEW session (so the iframe keeps its scroll/focus on re-hover).
   if(p.dataset.name!==name){
     p.dataset.name=name;
@@ -31946,10 +32152,10 @@ function sbShowPanel(name,anchor){
     var _loc=(_s.loc||_s.cwd)?'<span class="locchip" title="launched from '+e2(_s.cwd||_s.loc)+'">📍 '+e2(_s.loc||_s.cwd)+'</span>':'';
     p.innerHTML='<div class="sb-pvh">'+_loc+'<b title="'+e2(name)+'">'+e2(_s.label||name)+'</b>'+modelChip(name,_s.model)
       +'<span class="sb-pvbusy" id="sbPvBusy"></span>'
-      +'<span class="sb-acts">'+acts+'<button class="mini go" title="open big in the Sessions tab" onclick="sbOpen(\''+esc(name)+'\')">⤢ Focus</button></span></div>'
+      +'<span class="sb-acts">'+acts+'</span></div>'
       +'<iframe class="sb-pvframe" id="sbPvFrame" src="/term?name='+encodeURIComponent(name)+'" allow="clipboard-read; clipboard-write"></iframe>';
   } else {
-    var a=p.querySelector('.sb-acts'); if(a) a.innerHTML=acts+'<button class="mini go" title="open big in the Sessions tab" onclick="sbOpen(\''+esc(name)+'\')">⤢ Focus</button>';
+    var a=p.querySelector('.sb-acts'); if(a) a.innerHTML=acts;
   }
   sbRefreshBusy(name);
   clearInterval(SB.pvTimer);
@@ -31962,7 +32168,10 @@ function sbRefreshBusy(name){
   bz.style.background=busy?'rgba(var(--accent-rgb),.2)':'#0008';
   bz.style.color=busy?'var(--accent)':'var(--dim)';
 }
-function sbHide(){ var p=document.getElementById('sessprev'); if(p){p.style.display='none';p.dataset.name='';} clearInterval(SB.pvTimer); SB.hover=null; SB.popHover=false; }
+function sbHide(){ var p=document.getElementById('sessprev'); if(p){p.style.display='none';p.dataset.name='';} SB.popOpen=false; clearInterval(SB.pvTimer); SB.hover=null; SB.popHover=false; }
+// Taskbar-popup window controls: hide the preview first, then act (endSess handles its own force-kill confirm).
+function sbEnd(name){ sbHide(); endSess(name,false); }
+function sbKill(name){ sbHide(); endSess(name,true); }
 // --- actions ---
 function sbUsage(name){ sbHide(); if(typeof openInSessions==='function') openInSessions(name); if(typeof gotoLens==='function') gotoLens('usage'); }
 function sbNewTab(name){ window.open('/term?name='+encodeURIComponent(name),'_blank'); }
@@ -31981,7 +32190,24 @@ async function sbKill(name){
     if(r&&r.protected&&typeof toast==='function')toast(r.error||'Protected session — cannot be killed.',6000); }catch(e){}
   sbHide(); setTimeout(sbPoll,700);
 }
-function sbClick(name){ sbAck(name); if(wkMobile()){ stageOpen(name); return; } if(LENS==='sessions'){ paneToggle(name); } else { sbOpen(name); } }
+// Reliable single-click open from the taskbar: hide the preview, then paneUp -- which now does a TIER-1 surgical
+// insert (no other terminal reloads) and fronts+glows the pane, or fronts it if already up. NEVER toggles down
+// (that was the "keep clicking cancels it out" bug); minimizing is the pane's own yellow control.
+function sbBringUp(name){ try{sbHide();}catch(e){} paneUp(name); }
+// Taskbar click = TOGGLE (Windows-style): bring the session up if it's minimized, minimize it if it's already up.
+// Safe to toggle now that add/remove are instant (Tier-1). One guard: a fast ACCIDENTAL double-click (<260ms) never
+// toggles OFF -- it just keeps the session up -- so a double-tap can't net to "nothing happened".
+var _sbClickAt={};
+function sbClick(name){
+  sbAck(name);
+  if(wkMobile()){ stageOpen(name); return; }
+  if(LENS!=='sessions'){ sbOpen(name); return; }
+  try{sbHide();}catch(e){}
+  var now=Date.now(), fast=(now-(_sbClickAt[name]||0))<260; _sbClickAt[name]=now;
+  var isUp=(typeof PANES!=='undefined' && PANES.indexOf(name)>=0);
+  if(isUp && !fast){ paneDown(name); }        // deliberate re-click on an open session -> minimize
+  else { paneUp(name); }                       // bring it up (an accidental double-click just keeps it up)
+}
 function sbDragStart(ev,name){ window.WKDRAG=name; try{ev.dataTransfer.setData('application/x-cc-pane',name);ev.dataTransfer.effectAllowed='copy';}catch(_){}
   document.body.classList.add('wk-dragging'); if(LENS!=='sessions')gotoLens('sessions'); }
 function sbDragEnd(){ document.body.classList.remove('wk-dragging'); window.WKDRAG=null; }
@@ -32026,7 +32252,7 @@ function sbReorderCommit(){
   var names=[].slice.call(bar.querySelectorAll('.sb-tile')).map(function(z){return z.getAttribute('data-n');});
   sbOrderSet(names); if(typeof toast==='function')toast('Session order saved',2000);
 }
-function sbOpen(name){ sbAck(name); var p=document.getElementById('sessprev'); if(p)p.style.display='none'; if(typeof openInSessions==='function') openInSessions(name); }
+function sbOpen(name){ sbAck(name); var p=document.getElementById('sessprev'); if(p)p.style.display='none'; SB.popOpen=false; if(typeof openInSessions==='function') openInSessions(name); }
 // ===== Mobile Session Stage: full-screen in-app session overlay (no /term navigation, no reload) =========
 // A bounded LRU pool of persistent /term iframes lives at body level (outside #grid, which loadSessions
 // rebuilds) -> switching sessions is instant and never reconnects. Everything is gated to wkMobile();
