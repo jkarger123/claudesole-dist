@@ -21112,6 +21112,10 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 .stile.big{height:580px;grid-column:1/-1;border-color:var(--accent);box-shadow:var(--glow)}
 .sthead{display:flex;align-items:center;gap:7px;padding:7px 9px;background:var(--card2);cursor:pointer;border-bottom:1px solid var(--line);flex:0 0 auto}
 .stdot{flex:0 0 auto}.stname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;font-size:12.5px}
+/* Session header title stack: NAME on top (priority width), location tiny underneath -- so the name never gets pre-empted by the path. */
+.sttitle{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;overflow:hidden;line-height:1.15}
+.sttitle .stname{flex:0 0 auto;font-size:13px}
+.stloc{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 10px/1.3 ui-monospace,Menlo,monospace;color:var(--dim);margin-top:1px}
 /* Session attention (opt-in): CSS state dot + tile ring. All colors from palette vars. */
 .stdot.dot{width:11px;height:11px;border-radius:50%;position:relative;display:inline-block;background:var(--dim)}
 .stdot.dot::after{content:"";position:absolute;inset:-3px;border-radius:50%;pointer-events:none}
@@ -21145,7 +21149,7 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 /* mobile: the location chip ate the whole header bar and pushed the ↗ open-in-new-tab / end / kill buttons
    off-screen. Drop it on phones (location is still in the Sessions list + the title tooltip); keep the title
    (truncated) and the action buttons always reachable. */
-@media(max-width:820px){.sthead .locchip{display:none}.sthead{gap:5px;padding:6px 7px}.sthead .stbtns{margin-left:auto}.sthead .stbtns .mini{padding:5px 9px;min-height:34px}}
+@media(max-width:820px){.sthead .locchip,.sthead .stloc{display:none}.sthead{gap:5px;padding:6px 7px}.sthead .stbtns{margin-left:auto}.sthead .stbtns .mini{padding:5px 9px;min-height:34px}}
 /* History lens: header + card list span the FULL grid width (don't get trapped in a 330px grid cell), and
    the list lays cards out in its own wide-column grid so big monitors get multiple roomy cards. */
 .histhead{grid-column:1/-1;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px}
@@ -29583,7 +29587,10 @@ function cxShowDetail(){
 // Upload the dropped/picked file, then the server types its absolute path into the tmux session so Claude
 // reads it. The terminal iframe swallows drag events, so the .ccdrop overlay only becomes pointer-active
 // while a file is being dragged (a document-level dragenter shows it), then catches the drop over the iframe.
-function ccDropBar(name){return '<div class="ccdropbar" onclick="ccPickFile(\''+esc(name)+'\')" title="Upload a file/image and hand its path to Claude in this session (Claude reads it by path)">📎 <b>Attach a file</b>&nbsp;— drag one onto this terminal, or tap here</div>';}
+// Drop STRIP retired (identity-bar cleanup): it duplicated the terminal toolbar's "📎 file" and the drag-drop
+// overlay (ccDropOverlay, which still shows on dragover). Dragging a file onto the terminal + the toolbar upload
+// both still work -- this just reclaims the always-on row. Returns '' so both call sites collapse it.
+function ccDropBar(name){return '';}
 function ccDropOverlay(){return '<div class="ccdrop"><div class="ccdico">📎</div><div>Drop to give Claude this file</div><div class="ccdsub">it uploads, then its path is typed into the session</div></div>';}
 function ccMaxMb(){return (window.CC&&window.CC.maxUploadMb)||50;}
 function ccPickFile(name){var inp=document.createElement('input');inp.type='file';inp.style.display='none';
@@ -30267,14 +30274,15 @@ function vqFocus(n){
 function voiceMarkTiles(){try{var v=document.getElementById('stgVoice');if(v){v.style.color=(window.VM&&VM.on)?'var(--accent)':'';v.classList.toggle('vflash',!!(window.VM&&VM.on&&typeof vmReadyList==='function'&&vmReadyList().length));}}catch(e){}
   try{document.querySelectorAll('#sessbar .sb-tile[data-name]').forEach(function(t){var nm=t.getAttribute('data-name');t.classList.toggle('sb-voice',!!(window.VM&&VM.on&&voiceQueued(nm)&&!voiceMuted(nm)));});}catch(e){}}
 try{voiceQueueBadgePoll();setInterval(voiceQueueBadgePoll,5000);}catch(e){}
-function bigHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)+skillChip(x.name)
+// Session title block: NAME prominent on the first line, its launch location in tiny text directly under it
+// (so a couple of open panes never truncate the name -- the most important part -- behind the path).
+function sttitle(x){var raw=(x&&(x.cwd||x.loc))||'';var loc=raw.replace(/^\/(Users|home)\/[^/]+\//,'~/');return '<span class="sttitle"><span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+(loc?'<span class="stloc" title="launched from '+esc(raw)+'">📍 '+esc(loc)+'</span>':'')+'</span>';}
+// Identity bar: smart state dot + name/loc + read-only status (ctx% · tokens · model) + pane controls only.
+// Every session ACTION (file / review / skill / model / compact / end / kill) lives in the terminal's own
+// toolbar one row down -- no duplication. See sttitle() + the Attention state dot (attnDotHTML).
+function bigHead(x){return '<div class="sthead">'+attnDotHTML(x)+sttitle(x)+ctxChip(x.name)+modelChip(x.name,x.model)
   +'<span class="stbtns">'
-  +'<button class="mini" title="give Claude a file (upload + hand the path to this session)" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
-  +'<button class="mini" title="Third-party review — an independent external GPT (a different AI vendor) reviews this session\'s recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." onclick="adviseOpen(\''+esc(x.name)+'\')">🔵</button>'
-  +voiceBtns(x.name)
   +'<button class="mini" title="blow up the session — full-screen in-app on mobile, new tab on desktop" onclick="termPopout(\''+esc(x.name)+'\')">↗</button>'
-  +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
-  +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
   +'</span></div>';}
 function renderFocus(s){
   if(!SESSBIG||!s.find(function(x){return x.name==SESSBIG;}))SESSBIG=s[0].name;
@@ -30291,15 +30299,10 @@ function renderFocus(s){
   return h;
 }
 // ===== WORKSPACE: split-pane columns. Drag a session up from the dock; resize the splitter; push panes down. =====
-function paneHead(x){return '<div class="sthead"><span class="stdot">'+(x.attached?'🟢':'⚪')+'</span>'+locTag(x)+'<span class="stname" title="'+esc(x.name)+'">'+esc(x.label||x.name)+'</span>'+ctxChip(x.name)+modelChip(x.name,x.model)+skillChip(x.name)
+function paneHead(x){return '<div class="sthead">'+attnDotHTML(x)+sttitle(x)+ctxChip(x.name)+modelChip(x.name,x.model)
   +'<span class="stbtns">'
   +'<button class="mini panedown" title="push this session back down to the taskbar" onclick="paneDown(\''+esc(x.name)+'\')">&#11015;</button>'
-  +'<button class="mini" title="give Claude a file" onclick="ccPickFile(\''+esc(x.name)+'\')">📎</button>'
-  +'<button class="mini" title="Third-party review — an independent external GPT (a different AI vendor) reviews this session\'s recent work and gives a skeptical second opinion. It reads only; Claude holds the pen." onclick="adviseOpen(\''+esc(x.name)+'\')">🔵</button>'
-  +voiceBtns(x.name)
   +'<button class="mini" title="blow up the session — full-screen in-app on mobile, new tab on desktop" onclick="termPopout(\''+esc(x.name)+'\')">↗</button>'
-  +(x.protected?'':('<button class="mini" title="end (handoff)" onclick="endSess(\''+esc(x.name)+'\',false)">⏏</button>'
-  +'<button class="mini danger" title="force kill" onclick="endSess(\''+esc(x.name)+'\',true)">✕</button>'))
   +'</span></div>';}
 function renderWorkspace(s){
   // reconcile PANES with live sessions; never empty (auto-show one big)
@@ -30459,6 +30462,8 @@ function refreshAttnChip(){var c=attnCounts();var chip=document.getElementById('
 function paintAttnOne(name){if(!ATTN_ON)return;var s=ATTN[name]||'idle';var el=document.getElementById('atile_'+attnCssid(name));
   if(el){el.classList.remove('attn-wait','attn-perm','attn-err','attn-done');var c=({waiting:'attn-wait',permission:'attn-perm',error:'attn-err',done:'attn-done'})[s];if(c)el.classList.add(c);
     var dot=el.querySelector('.stdot');if(dot){dot.className='stdot dot st-'+s;dot.title=attnLabel(s);}}
+  // also live-update the workspace/focus PANE header dot (identity bar) for this session -- panes are keyed by data-ccsess
+  try{document.querySelectorAll('.bigsess[data-ccsess],.wkpane[data-ccsess]').forEach(function(p){if(p.getAttribute('data-ccsess')===name){var hd=p.querySelector(':scope > .sthead > .stdot');if(hd){hd.className='stdot dot st-'+s;hd.title=attnLabel(s);}}});}catch(e){}
   refreshAttnChip();}
 function paintAttn(){if(!ATTN_ON)return;(SESSDATA||[]).forEach(function(x){paintAttnOne(x.name);});}
 function attnJump(){var need=(SESSDATA||[]).filter(function(x){var s=ATTN[x.name];return s=='waiting'||s=='permission'||s=='error';});

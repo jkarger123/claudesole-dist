@@ -44,7 +44,7 @@
 - `native-app/` -- A thin bare-Swift + WKWebView iPhone app that wraps the live ClaudeFather dashboard and adds the four native powers a web page can't have on iOS (background aud
 - `update/` -- This folder is the home + documentation of how a ClaudeFather node gets new framework code, reliably,
 - `vault/` -- This folder is the documentation home for ClaudeFather's credential system: the per-install vault, the
-- `voice/` -- >> Resume here: read _handoffs/20260725-1539__voice.md first -- it is the latest handoff.
+- `voice/` -- >> Resume here: read _handoffs/20260726-1823__voice.md first -- it is the latest handoff.
 <!-- /CC:CHILDREN -->
 
 The ClaudeFather platform's web control plane: a single **stdlib-Python HTTP server** (`server.py`,

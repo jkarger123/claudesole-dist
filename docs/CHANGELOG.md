@@ -3,6 +3,23 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.222 -- 2026-07-31  (Sessions: Identity-bar top header -- declutter + meaningful state dot)
+Reworked the session pane top bar (`bigHead`/`paneHead` in PAGE) into an "identity bar": name + live status +
+pane controls only, since every session ACTION already lives in the terminal's own toolbar one row down. No
+duplication across the (previously three) stacked bars.
+- **Meaningful state dot.** The pane header dot now uses the Attention state dot (`attnDotHTML`) --
+  green=working / blue=waiting on you / amber=permission / red=stalled / dim=idle -- instead of the old
+  "is the tmux session attached" (which was almost never green and confused operators). Live-updates via
+  `paintAttnOne` (extended to also repaint the pane header dot, not just the dock tiles).
+- **Name prominent, location tiny underneath.** New `sttitle()` stacks the session name over its launch location
+  (`.sttitle`/`.stloc`); the name gets priority width, so a couple of open split panes no longer truncate it
+  behind the path. Home is tilde-shortened (`~/...`).
+- **Deduped the header.** Removed skill (✦), file (📎), review (🔵), and end/kill from the pane header -- all
+  still present in the terminal's own toolbar. Kept push-down (⬇, split view) + pop-out (↗). Context/tokens/model
+  stay as a compact read-only cluster.
+- **Retired the "Attach a file" drop strip** (`ccDropBar` now returns ''): it duplicated the toolbar 📎 and the
+  drag-drop overlay (`ccDropOverlay`, still appears on dragover). Reclaims a full always-on row.
+
 ## 0.99.221 -- 2026-07-26  (Voice: DESKTOP per-pane bars + one-switch controls + latency fixes)
 Rebuilt the DESKTOP voice experience so the bar lives IN each session pane (mobile unchanged). Full detail:
 `command-center/voice/VOICE_SYSTEM.md` §9.
