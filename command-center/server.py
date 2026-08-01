@@ -9818,6 +9818,7 @@ def attention_summary():
             "items": items, "fresh": fresh, "states": states}
 
 _SCROLLED = set()   # sessions a browser put into copy-mode via touch-scroll -> any keystroke snaps to live
+_TERM_LAST_KEY = {}  # session -> ts of last browser keystroke; gates the desktop-scroll copy-mode check to post-pause keys only
 
 def term_scroll(name, action="up", n=3):
     """Drive a session's tmux copy-mode scroll from the browser -- the same history scroll a desktop
@@ -18270,11 +18271,26 @@ class H(BaseHTTPRequestHandler):
                             if mm.get("type") == "resize": set_winsize(master, int(mm["rows"]), int(mm["cols"]))
                         except Exception: pass
                     elif op == 2:
-                        # a real keystroke from ANY client snaps the shared pane out of touch-scroll
-                        # copy-mode first, so the desktop can type immediately after a phone scrolled.
+                        # A real keystroke from ANY client must land at the LIVE prompt -- never get swallowed by
+                        # tmux COPY-MODE. A pane enters copy-mode two ways: (a) the touch-scroll API (tracked in
+                        # _SCROLLED -> fast in-memory path), and (b) a DESKTOP trackpad/wheel scroll via tmux's own
+                        # `mouse on` binding, which the server never sees. (b) was the gap that let a scrolled pane
+                        # silently eat typed keys -- and a user mashing Ctrl to escape then exited the app (this is
+                        # what killed a live Chief of Staff). Fix: on the first keystroke after a typing PAUSE (the
+                        # only moment a scroll could have happened), check pane_in_mode and cancel copy-mode so the
+                        # key lands live. Gating on the pause keeps steady-state fast typing free of any per-key tmux
+                        # call (a burst confirms the pane is live on its first char); the keystroke is ALWAYS written
+                        # regardless, so this can never block normal typing.
+                        _now = time.time()
                         if name in _SCROLLED:
                             _SCROLLED.discard(name)
                             sh([TMUX, "send-keys", "-t", name, "-X", "cancel"])
+                        elif _now - _TERM_LAST_KEY.get(name, 0) > 0.2:
+                            try:
+                                if sh([TMUX, "display-message", "-p", "-t", name, "#{pane_in_mode}"])[1].strip() == "1":
+                                    sh([TMUX, "send-keys", "-t", name, "-X", "cancel"])   # snap out of a desktop-scroll copy-mode
+                            except Exception: pass
+                        _TERM_LAST_KEY[name] = _now
                         try: os.write(master, payload)
                         except OSError: break
         finally:

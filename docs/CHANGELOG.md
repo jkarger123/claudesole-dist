@@ -3,6 +3,22 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.226 -- 2026-08-01  (Browser terminal: typed keys can no longer be eaten by a desktop-scroll copy-mode)
+Fixes a real incident: typing into the inline Sessions terminal did "bizarre stuff" + pasted the clipboard, and
+the escape-Ctrl exited Claude Code -- which KILLED a live Chief of Staff session. Root cause: a DESKTOP
+trackpad/wheel scroll puts the tmux pane into copy-mode (via `set -g mouse on`), where keystrokes are copy-mode
+commands, not input. The browser terminal (`/ws` handler) only snapped out of copy-mode for the mobile
+touch-scroll path (`_SCROLLED`), never for a desktop scroll -- so typed keys were silently swallowed.
+- **Fix (`handle_ws`, op==2):** on the first keystroke after a typing PAUSE (the only moment a scroll can have
+  happened), check `#{pane_in_mode}` and `send-keys -X cancel` to snap the pane live before delivering the key.
+  Gated on the pause via `_TERM_LAST_KEY`, so steady-state fast typing triggers ZERO extra tmux calls (a burst
+  confirms the pane is live on its first char); the keystroke is ALWAYS written, so this can never block typing.
+- Verified with a high-fidelity PTY+tmux test (control: copy-mode eats the key; fixed: cancel-first lands it live)
+  + a gate simulation (fast bursts add ~0 checks; only post-pause/post-scroll keys check). Reuses the exact
+  cancel->write pattern the touch-scroll path already shipped.
+- Follow-up still parked (separate change): chief watchdog should respawn-with-`--resume` so an accidental exit
+  restores the SAME conversation, not a blank one.
+
 ## 0.99.225 -- 2026-07-31  (Google Workspace: re-consent clears the DOWN flag + multi-account docs sharpened)
 Small, surgical follow-up to the v0.99.224 Google overhaul, from a live multi-account setup session (consolidated
 two accounts onto one External-Production app + stood a third up on its own Internal app):
