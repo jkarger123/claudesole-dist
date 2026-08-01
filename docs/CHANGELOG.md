@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.227 -- 2026-08-01  (Sessions taskbar: a session you're actively attached to always shows in the overseer's "Mine")
+Fix for a regression from v0.99.224 (which made the unscoped overseer's taskbar default to "Mine" = only its OWN
+control-plane infra): a voice/work session the operator opened in the SHARED ROOT was tagged `mine:False` and thus
+HIDDEN from the Mission Control taskbar -- "my open voice session isn't showing." An attached session is one you're
+in RIGHT NOW, so it should never be hidden from your own taskbar.
+- **Fix (`sbPoll` taskbar filter):** the "Mine" filter is now `s.mine || (s.attached && s.kind!=='chief')`. An
+  attached WORK/loop session always shows; OTHER nodes' persistently-attached chiefs are excluded so they don't
+  re-clutter Mine (the overseer's own chief is already `s.mine`). Background loops you're NOT in stay decluttered.
+  `/api/session-bar` already carries `attached` (server.py ~9589), so this is a one-line frontend change.
+- Verified against the overseer's LIVE session-bar data: the operator's attached voice session moves into "Mine";
+  the three foreign chiefs stay out. (After the restart, hard-refresh the dashboard tab to load the new JS.)
+
 ## 0.99.226 -- 2026-08-01  (Browser terminal: typed keys can no longer be eaten by a desktop-scroll copy-mode)
 Fixes a real incident: typing into the inline Sessions terminal did "bizarre stuff" + pasted the clipboard, and
 the escape-Ctrl exited Claude Code -- which KILLED a live Chief of Staff session. Root cause: a DESKTOP

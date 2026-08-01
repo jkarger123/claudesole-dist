@@ -32090,7 +32090,7 @@ async function sbPoll(){
   window.SB_UNSCOPED=!!r.unscoped;   // an overseer that sees every node's sessions -> offer the Mine/All toggle
   if(window.SB_SCOPE===undefined){ try{window.SB_SCOPE=localStorage.getItem('cc_sb_scope2')||(r.unscoped?'mine':'all');}catch(e){window.SB_SCOPE=r.unscoped?'mine':'all';} }  // v2 key: re-default the overseer to Mine now that Mine means "MC's own"
   var full=r.sessions||[];
-  var list=(window.SB_UNSCOPED && window.SB_SCOPE==='mine') ? full.filter(function(s){return s.mine;}) : full;
+  var list=(window.SB_UNSCOPED && window.SB_SCOPE==='mine') ? full.filter(function(s){return s.mine||(s.attached&&s.kind!=='chief');}) : full;  // an ATTACHED WORK session is one you're actively in right now -> always show it even in the overseer's "Mine" view (else a voice/work session you opened in the shared root vanishes from the taskbar). Exclude kind==='chief' so OTHER nodes' persistently-attached chiefs don't re-clutter Mine (the overseer's OWN chief is already s.mine); background loops you're NOT in stay decluttered.
   var names={};
   SB.list=list;
   list.forEach(function(s){ names[s.name]=1;
