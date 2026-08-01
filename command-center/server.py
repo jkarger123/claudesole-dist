@@ -32113,7 +32113,7 @@ function sbAlignToggle(){ window.SB_ALIGN=(window.SB_ALIGN==='center')?'left':'c
 function sbViewing(n){ return (LENS==='sessions' && SESSBIG===n) || (window.STG&&STG.open&&STG.cur===n); }   // open big in the Sessions tab, OR on the mobile Stage
 function sbRender(list){
   var bar=document.getElementById('sessbar'); if(!bar)return;
-  if(window.SB_ALIGN===undefined){ try{window.SB_ALIGN=localStorage.getItem('cc_sb_align')||'left';}catch(e){window.SB_ALIGN='left';} }   // per-device taskbar alignment (left|center), remembered
+  if(window.SB_ALIGN===undefined){ try{window.SB_ALIGN=localStorage.getItem('cc_sb_align')||'center';}catch(e){window.SB_ALIGN='center';} }   // per-device taskbar alignment (left|center), remembered; DEFAULT center (mobile still left via the @media override)
   bar.classList.toggle('sb-center', window.SB_ALIGN==='center');   // re-applied every render so it survives a DOM rebuild
   sbReorderWire();
   if(LENS==='sessions' && SESSBIG && SB.done[SESSBIG]) delete SB.done[SESSBIG];   // viewing it = acknowledged

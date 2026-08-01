@@ -3,6 +3,11 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.231 -- 2026-08-01  (Sessions taskbar: Center is the default alignment on desktop)
+The desktop taskbar now defaults to CENTER when no per-device preference is stored (`cc_sb_align` unset ->
+'center'). Anyone who explicitly chose Left keeps Left; mobile stays left-aligned regardless via the
+`@media(max-width:820px)` override. One-line default flip in `sbRender`.
+
 ## 0.99.230 -- 2026-08-01  (Sessions taskbar: Left/Center toggle is desktop-only)
 The v0.99.229 Left/Center alignment toggle is now hidden on mobile (the mobile session dock has its own fixed
 layout). In the taskbar's `@media(max-width:820px)` block: `#sbAlignBtn{display:none}` + `#sessbar.sb-center{
