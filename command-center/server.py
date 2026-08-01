@@ -21944,6 +21944,8 @@ body.ss-tut-on #sessbar{z-index:9995!important;box-shadow:0 -6px 40px 8px rgba(v
   /* CONSTANT bottom session dock across EVERY mobile lens (like the desktop taskbar). Tap a tile = switch session. */
   #sessbar{display:flex!important;height:auto;min-height:46px;padding-top:5px;padding-bottom:calc(5px + env(safe-area-inset-bottom));z-index:60}
   #sessbar .sb-tile{height:36px;max-width:150px}
+  #sbAlignBtn{display:none!important}                                 /* Left/Center alignment toggle is desktop-only (the mobile dock has its own fixed layout) */
+  #sessbar.sb-center{justify-content:flex-start}                      /* ...and never apply a carried-over center pref on mobile (the button is hidden, so it couldn't be undone there) */
   #main{padding-bottom:var(--cf-dock-h)}                             /* reserve the dock's space so no lens hides content behind it */
   /* sessions lens: drop the usage strip + hint and maximize the focus terminal between the nav and the dock */
   body.cf-sessions #tkstripwrap, body.cf-sessions .cf-sesshint{display:none!important}

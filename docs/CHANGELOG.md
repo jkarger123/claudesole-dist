@@ -3,6 +3,12 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.230 -- 2026-08-01  (Sessions taskbar: Left/Center toggle is desktop-only)
+The v0.99.229 Left/Center alignment toggle is now hidden on mobile (the mobile session dock has its own fixed
+layout). In the taskbar's `@media(max-width:820px)` block: `#sbAlignBtn{display:none}` + `#sessbar.sb-center{
+justify-content:flex-start}` (so a center pref carried over from a desktop browser can't leave the mobile dock
+centered with no visible button to undo it). CSS-only.
+
 ## 0.99.229 -- 2026-08-01  (Sessions taskbar: per-device Left/Center alignment toggle)
 Adds a small "⇤ Left / ⇔ Center" toggle to the Sessions taskbar (next to the Mine/All toggle). Flips the tile row
 between left-aligned (default) and centered; the choice is remembered PER DEVICE (localStorage `cc_sb_align`) and
