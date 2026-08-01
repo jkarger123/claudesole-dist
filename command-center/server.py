@@ -9587,6 +9587,7 @@ def session_bar():
               "loc": s.get("loc", ""), "cwd": s.get("cwd", ""), "busy": busy.get(s["name"], False),
               "attn": (_attn_state_for(s["name"]) if _attn_on else None),
               "chief": s.get("chief", False), "attached": s.get("attached", False),
+              "in_root": _session_in_project(s.get("cwd", "")),   # cwd is under THIS node's own project root (vs another project's tree) -- lets the overseer's "Mine" show an attached session you opened in ITS root without pulling in other projects' shared-tmux sessions
               "protected": bool(s.get("protected", False))} for s in sess]
     return {"sessions": local + _remote_sessions(),   # local (drivable) + fleet (read-only, deep-link) tiles
             "unscoped": (not SCOPE_SESSIONS), "instance": INSTANCE_ID}
@@ -32090,7 +32091,7 @@ async function sbPoll(){
   window.SB_UNSCOPED=!!r.unscoped;   // an overseer that sees every node's sessions -> offer the Mine/All toggle
   if(window.SB_SCOPE===undefined){ try{window.SB_SCOPE=localStorage.getItem('cc_sb_scope2')||(r.unscoped?'mine':'all');}catch(e){window.SB_SCOPE=r.unscoped?'mine':'all';} }  // v2 key: re-default the overseer to Mine now that Mine means "MC's own"
   var full=r.sessions||[];
-  var list=(window.SB_UNSCOPED && window.SB_SCOPE==='mine') ? full.filter(function(s){return s.mine||(s.attached&&s.kind!=='chief');}) : full;  // an ATTACHED WORK session is one you're actively in right now -> always show it even in the overseer's "Mine" view (else a voice/work session you opened in the shared root vanishes from the taskbar). Exclude kind==='chief' so OTHER nodes' persistently-attached chiefs don't re-clutter Mine (the overseer's OWN chief is already s.mine); background loops you're NOT in stay decluttered.
+  var list=(window.SB_UNSCOPED && window.SB_SCOPE==='mine') ? full.filter(function(s){return s.mine||(s.in_root&&s.kind!=='loop');}) : full;  // "Mine" on the unscoped overseer = its own infra (s.mine) PLUS any non-loop session under THIS node's OWN project root (s.in_root). So voice/work sessions you run in this root show persistently, while sessions from OTHER projects that merely share the tmux server (their cwd is outside this root, including their chiefs) are excluded by cwd, and background Ralph loops stay decluttered (they have their own lens).
   var names={};
   SB.list=list;
   list.forEach(function(s){ names[s.name]=1;

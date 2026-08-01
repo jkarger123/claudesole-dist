@@ -3,6 +3,18 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.228 -- 2026-08-01  (Sessions taskbar: overseer "Mine" = its own-root sessions, by cwd -- corrects v0.99.227)
+v0.99.227 keyed "Mine" on `attached`, which was both TRANSIENT (a session vanished when the browser detached) and
+TOO BROAD (other projects' sessions sharing the co-located tmux server show as "attached", so carsearch/text2tune/
+computerfleet work + their chiefs leaked into Mission Control's taskbar). Correct signal is the session's **cwd**:
+- **Fix:** `/api/session-bar` now emits `in_root` per session (`_session_in_project(cwd)` = cwd under THIS node's
+  own project root), and the taskbar "Mine" filter is `s.mine || (s.in_root && s.kind!=='loop')`. So the overseer
+  shows its own infra PLUS any non-loop session running under its OWN root (voice/work you run there) -- persistently,
+  not just while attached -- while sessions from OTHER projects that merely share the tmux server are excluded by
+  cwd, and background Ralph loops stay decluttered (they have their own lens). Tenant-neutral (no hardcoded names).
+- Verified on the overseer's LIVE data: Mine shows exactly its chief + voice + voice-dock + native-app + lifeline
+  (5); all 23 shared-tmux Ralph loops and every other-project session (incl. their chiefs) are excluded.
+
 ## 0.99.227 -- 2026-08-01  (Sessions taskbar: a session you're actively attached to always shows in the overseer's "Mine")
 Fix for a regression from v0.99.224 (which made the unscoped overseer's taskbar default to "Mine" = only its OWN
 control-plane infra): a voice/work session the operator opened in the SHARED ROOT was tagged `mine:False` and thus
