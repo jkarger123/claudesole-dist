@@ -21856,6 +21856,7 @@ code{background:#000;border:1px solid var(--line);border-radius:6px;padding:2px 
 #sessbar{position:fixed;left:0;right:0;bottom:0;height:38px;display:flex;align-items:center;gap:6px;
   padding:0 10px;background:var(--bg);border-top:1px solid var(--line);z-index:60;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
 #sessbar::-webkit-scrollbar{height:5px}#sessbar::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+#sessbar.sb-center{justify-content:safe center}   /* per-device Left/Center toggle (sbAlignToggle); 'safe' falls back to left when the tiles overflow so none get clipped */
 #sessbar .sb-title{flex:0 0 auto;font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);margin-right:4px}
 #sessbar .sb-empty{color:var(--dim);font-size:11px}
 .sb-tile{display:flex;align-items:center;gap:7px;flex:0 0 auto;max-width:210px;height:26px;padding:0 10px;border-radius:7px;
@@ -32106,9 +32107,12 @@ async function sbPoll(){
   sbRender(list);
 }
 function sbScopeToggle(){ window.SB_SCOPE=(window.SB_SCOPE==='mine')?'all':'mine'; try{localStorage.setItem('cc_sb_scope2',window.SB_SCOPE);}catch(e){} SB._sig=''; sbPoll(); }
+function sbAlignToggle(){ window.SB_ALIGN=(window.SB_ALIGN==='center')?'left':'center'; try{localStorage.setItem('cc_sb_align',window.SB_ALIGN);}catch(e){} var bar=document.getElementById('sessbar'); if(bar) bar.classList.toggle('sb-center', window.SB_ALIGN==='center'); var b=document.getElementById('sbAlignBtn'); if(b) b.textContent=(window.SB_ALIGN==='center'?'⇔ Center':'⇤ Left'); }   // per-device taskbar Left/Center; no re-fetch -- just flips the class + button label
 function sbViewing(n){ return (LENS==='sessions' && SESSBIG===n) || (window.STG&&STG.open&&STG.cur===n); }   // open big in the Sessions tab, OR on the mobile Stage
 function sbRender(list){
   var bar=document.getElementById('sessbar'); if(!bar)return;
+  if(window.SB_ALIGN===undefined){ try{window.SB_ALIGN=localStorage.getItem('cc_sb_align')||'left';}catch(e){window.SB_ALIGN='left';} }   // per-device taskbar alignment (left|center), remembered
+  bar.classList.toggle('sb-center', window.SB_ALIGN==='center');   // re-applied every render so it survives a DOM rebuild
   sbReorderWire();
   if(LENS==='sessions' && SESSBIG && SB.done[SESSBIG]) delete SB.done[SESSBIG];   // viewing it = acknowledged
   // ORDER: your saved drag-order first (persisted per device), then any new sessions alphabetically.
@@ -32124,7 +32128,8 @@ function sbRender(list){
   var sig=(window.SB_SCOPE||'')+'#'+list.map(function(s){return s.name+':'+(s.label||'')+':'+(s.node||'');}).join('|');
   if(sig!==SB._sig){
     var tog=window.SB_UNSCOPED?('<button class="sb-tog" onclick="sbScopeToggle()" title="Switch between this overseer\'s own sessions and every node\'s sessions" style="margin:0 8px 0 4px;background:var(--card2,#1a1a22);border:1px solid var(--line,#2a2a33);color:var(--mut,#aab);border-radius:7px;padding:2px 9px;font-size:11px;cursor:pointer">'+(window.SB_SCOPE==='mine'?'◉ Mine':'◈ All nodes')+'</button>'):'';
-    var h='<span class="sb-title">Sessions</span>'+tog;
+    var alignBtn='<button id="sbAlignBtn" class="sb-tog" onclick="sbAlignToggle()" title="Align the taskbar tiles Left or Center (remembered on this device)" style="margin:0 8px 0 0;background:var(--card2,#1a1a22);border:1px solid var(--line,#2a2a33);color:var(--mut,#aab);border-radius:7px;padding:2px 9px;font-size:11px;cursor:pointer">'+(window.SB_ALIGN==='center'?'⇔ Center':'⇤ Left')+'</button>';
+    var h='<span class="sb-title">Sessions</span>'+tog+alignBtn;
     h+= list.length ? list.map(function(s){
       if(s.remote) return '<div class="sb-tile sb-remote" data-n="'+e2(s.name)+'" onclick="window.open(\''+esc(s.url)+'\',\'_blank\')" title="'+e2(sbLbl(s))+' — remote node; opens its dashboard in a new tab (a remote terminal can not be attached here)" style="opacity:.82;border-style:dashed">'
         +'<span class="sb-dot"></span><span class="sb-lbl">'+e2(sbLbl(s))+' ↗</span></div>';

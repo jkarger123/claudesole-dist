@@ -3,6 +3,15 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.229 -- 2026-08-01  (Sessions taskbar: per-device Left/Center alignment toggle)
+Adds a small "⇤ Left / ⇔ Center" toggle to the Sessions taskbar (next to the Mine/All toggle). Flips the tile row
+between left-aligned (default) and centered; the choice is remembered PER DEVICE (localStorage `cc_sb_align`) and
+re-applied on every render + reload.
+- CSS: `#sessbar.sb-center{justify-content:safe center}` -- the `safe` keyword falls back to left-align when the
+  tiles overflow the bar, so none ever get clipped/unreachable.
+- JS: `sbAlignToggle()` flips the class + button label with no re-fetch; `sbRender` reads the saved pref and applies
+  the class each render. Verified: preship PAGE-JS gate + ui_lint clean; all pieces present in the served page.
+
 ## 0.99.228 -- 2026-08-01  (Sessions taskbar: overseer "Mine" = its own-root sessions, by cwd -- corrects v0.99.227)
 v0.99.227 keyed "Mine" on `attached`, which was both TRANSIENT (a session vanished when the browser detached) and
 TOO BROAD (other projects' sessions sharing the co-located tmux server show as "attached", so carsearch/text2tune/
