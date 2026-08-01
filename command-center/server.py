@@ -855,6 +855,18 @@ def _google_vault_resync():
                 return []
         except Exception:
             return []
+        # RE-CONSENT CLEARS RED: a fresh token FILE just landed for these accounts (an authoritative re-mint), so a
+        # stale `ok:False`/`invalid_grant` left over from the DEAD token is now wrong. Neutralize it (ok=None +
+        # re-arm the alert) so Doctor + the Accounts panel stop showing the account DOWN the instant it's
+        # re-consented, instead of waiting for the next liveness sweep; the existing LIVE probes then confirm it
+        # green/red authoritatively. We deliberately do NOT probe here: this also runs inside
+        # `_google_access_token`'s failure-heal, which already holds `_GOOGLE_LOCK`, so re-entering the refresh path
+        # would deadlock -- the passive clear is enough to kill the false alarm.
+        for acct in changed:
+            h = _google_health.get(acct)
+            if h and h.get("ok") is False:
+                h.update(ok=None, reason="", since=0, alerted=0); _google_health[acct] = h
+        _google_save_health()
     return changed
 
 def _google_access_token(acct=None, force=False):

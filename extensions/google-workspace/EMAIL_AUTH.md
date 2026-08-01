@@ -24,9 +24,12 @@ WORKSPACE block ~line 748 + the vault block ~line 5700). This extension only *mi
 ## The design — 4 mechanisms
 
 ### 1. Fleet distribution (available to any approved node)
-- The vault holds ONE key `google_tokens` = `{account_email: token_dict}` (scope `["*"]`), plus a new
-  **`_google_approvals.json`** state map `{account: ["*"] | [node,...]}` (default `["*"]`), living with the
-  **authority** (the node whose local vault holds the real refresh token — normally Mission Control).
+- The vault holds ONE key `google_tokens` = `{account_email: token_dict}` (scope `["*"]`), plus a second
+  **shared-vault key `google_approvals`** = `{account: ["*"] | [node,...]}` map (default `["*"]`), living with the
+  **authority** (the node whose local vault holds the real refresh token — normally Mission Control). Read/write
+  it via `_google_approvals()` / `_google_approve(acct, nodes)` (→ `vault_set("google_approvals", …, scope=["*"])`);
+  the operator surface is the `/api/google-approve` route + the Accounts-lens control. (It is a VAULT KEY, not a
+  `_google_approvals.json` file on disk.)
 - New route **`/api/google-lease`** (mesh-authed, in `AUTH_MESH_INGRESS`): a node POSTs `{node}`; the authority
   returns ONLY the accounts whose approval list includes that node (`google_lease(node, authed)`), audited via
   the vault audit log. Node side: `_google_tokens_remote()` leases from `VAULT_URL/api/google-lease`, RAM-cached

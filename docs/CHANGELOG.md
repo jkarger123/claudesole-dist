@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.225 -- 2026-07-31  (Google Workspace: re-consent clears the DOWN flag + multi-account docs sharpened)
+Small, surgical follow-up to the v0.99.224 Google overhaul, from a live multi-account setup session (consolidated
+two accounts onto one External-Production app + stood a third up on its own Internal app):
+- **Re-consent now clears the stale RED.** `_google_vault_resync()` neutralizes an account's leftover
+  `invalid_grant`/`ok:False` health the instant a freshly re-minted token FILE lands (sets `ok:None`, clears the
+  reason, re-arms the alert) -- so Doctor + the Accounts panel stop showing a just-re-consented account as DOWN
+  instead of waiting for the next liveness sweep; the existing LIVE probes then confirm it green. Deliberately does
+  NOT probe there (that path holds `_GOOGLE_LOCK` via the failure-heal -> would deadlock).
+- **Docs sharpened** (extensions/google-workspace): AUTH_MODEL.md gains a "Fleet visibility" note (a new account is
+  available to EVERY node by default -> scope it via the Accounts lens / `/api/google-approve`) + a
+  "consolidating / re-homing an account onto a different app" procedure; SETUP.md gets the same scoping note;
+  EMAIL_AUTH.md corrected to say approvals live in the shared-vault key `google_approvals` (not a JSON file).
+
 ## 0.99.224 -- 2026-07-31  (Google Workspace: multi-account, durable-by-design, setup wizard + Sessions "Mine" fix)
 Two things: a Google-Workspace-extension overhaul (v2.3.0) so accounts stop falling off + one app serves many
 emails, and a fix to what "Mine" means on the unscoped overseer.

@@ -62,6 +62,16 @@ Corollary: publishing/durability is a property of the **app**, so publishing **o
 BYO-app is not a burden to hide — for a sovereignty product it's a **feature**: each operator's Google data stays
 entirely inside *their* project and *their* server, no third party in the trust path.
 
+**Fleet visibility — a new account is available to EVERY node by default; SCOPE it if it shouldn't be.** Once an
+account is vaulted, `_google_approved_for` **defaults to open** (`["*"]`), so every Mission-Control-approved node
+can lease + read that inbox. That is right for a shared ops account, but WRONG for a *personal* inbox — you rarely
+want one person's Gmail visible on unrelated project nodes. Scope each account to just the nodes that should drive
+it: the **Accounts lens** approved-nodes control, or `POST /api/google-approve {account, nodes:["<node>", …]}`
+(server-side `_google_approve` → shared-vault key `google_approvals`). A scoping change is enforced authoritatively
+at once, but each node RAM-caches its lease for `vault_lease_ttl` (default **600s**), so other nodes converge
+within ~10 min. (Example: a personal assistant account scoped to `["afp"]` disappears from every other node's
+Accounts view on its next lease refresh.)
+
 ## 5. How we make BYO painless (so no one "sets up apps" the hard way)
 The extension is **client-agnostic**: it takes whatever client the operator configures and mints per-email tokens
 against it. Setup is a guided ~5-minute task, branched by account type:
@@ -88,6 +98,15 @@ live** (mint → real Gmail/Calendar/Drive read) before declaring success.
   override with `DROP_SCOPES=`.
 - **Client resolution** (client-agnostic): `CLIENT_JSON=<path>` env wins; else `google_oauth.<account-localpart>.json`
   if present (per-account override for mixed/transition setups); else `google_oauth.json` (the one configured app).
+- **Consolidating / re-homing an account onto a different app** (e.g. moving a fleet off an old client, or an
+  account that was minted against a now-retired app and can't be revived): re-mint it against the target client.
+  Because each `tokens/<email>.json` **embeds its own client**, runtime refresh of *other* accounts is unaffected —
+  you only re-consent the one you're moving. To make the target app the fleet DEFAULT for future mints too, repoint
+  the shared default: `cp google_oauth.json google_oauth.json.old-<proj#>.$(date +%s).bak` then copy the target
+  client over `google_oauth.json` (chmod 600) — reversible via the backup. Then re-mint the stale account (no
+  per-account override needed once the default is the target), `_google_vault_resync()`, and re-probe
+  `/api/google-accounts` to clear its health flag. (Done live 2026-07-31: two accounts consolidated onto one
+  External-Production app; a third stood up on its own Internal app via a per-account override.)
 - **Remote operator with no browser on the box:** run the minter locally; the operator opens the printed URL in
   ANY browser, approves, lands on `http://localhost:8765/?...code=...` ("can't reach" is expected), copies that
   whole address, and you deliver it by `curl`-ing it **on the box**. No SSH tunnel, no `--remote`. (SETUP.md §remote.)

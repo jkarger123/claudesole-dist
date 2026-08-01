@@ -38,7 +38,13 @@ bottom of this doc): run the minter here, open the printed URL in a browser anyw
 **Multiple accounts / other emails?** Repeat "Mint the headless token" per email against the **SAME** app — one
 app, many `tokens/<email>.json`, no new project. The minter is client-agnostic (`_resolve_client` in
 `mint_token.py`): it uses `CLIENT_JSON` env → a per-account `google_oauth.<localpart>.json` → the shared
-`google_oauth.json`.
+`google_oauth.json`. (A different-org account that needs its OWN app — e.g. a Workspace Internal app in another
+domain — just gets a per-account `google_oauth.<localpart>.json` client override; everything else is identical.)
+
+> **Scope each account to the right nodes (privacy).** A newly-vaulted account defaults to visible on **every**
+> fleet node. That's fine for a shared ops account but usually wrong for a *personal* inbox. In the **Accounts
+> lens**, set each account's approved-nodes (All / pick), or `POST /api/google-approve {account, nodes:[…]}`.
+> Nodes converge within ~10 min (the `vault_lease_ttl` RAM cache). See AUTH_MODEL.md §4 "Fleet visibility."
 
 **Finish = VALIDATE.** After minting, run `verify.py` (below) — it must print **ALL THREE SURFACES OK** (real
 Gmail + Calendar + Drive read). Green on Path W, or on Path P with the app in **Production**, means you're durable. Done.
