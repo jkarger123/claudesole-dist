@@ -2730,6 +2730,16 @@ _AGENT_TITLES = _load_agent_titles()
 # breaks nothing that keys on the name. Persisted per-node; not a framework path, so it stays local.
 SESSLABELS_FILE = os.path.join(STATE_DIR, "_session_labels.json")
 _USER_LABELS = load(SESSLABELS_FILE, {}) or {}
+# Which instance LAUNCHED each session (recorded on THIS node). Co-located nodes share the tmux server AND the
+# project root, so the unscoped overseer can't use cwd to tell whose session it is -- an explicit launch-owner can.
+# Each node records only its OWN launches (in its own STATE_DIR), which is exactly what "Mine" needs.
+SESSOWNERS_FILE = os.path.join(STATE_DIR, "_session_owners.json")
+_SESSION_OWNERS = load(SESSOWNERS_FILE, {}) or {}
+def _session_owner_set(name):
+    try:
+        if name and _SESSION_OWNERS.get(name) != INSTANCE_ID:
+            _SESSION_OWNERS[name] = INSTANCE_ID; save(SESSOWNERS_FILE, _SESSION_OWNERS)
+    except Exception: pass
 def session_rename(name, label):
     """Set (or clear, with an empty label) a user display label for a session. Protected/system sessions
     (Chief, product, Ralph loops -- the same set that can't be closed) are refused. Never touches tmux."""
@@ -2847,25 +2857,25 @@ def tmux_sessions():
             if _is_server_session(nm): continue            # the CC web-server processes -- never a session you touch
             cwd = cwds.get(nm, "")
             is_chief = (nm == globals().get("CHIEF"))
-            mine = is_chief or _session_in_project(cwd)     # belongs to THIS console (its chief + its project work)
-            if not mine and nm.startswith("ralph-"):        # a Ralph loop -> owned by the node whose PROJECT it runs
-                _base = nm[len("ralph-"):]
-                if _base.endswith("-live"): _base = _base[:-5]   # the live-view tab shares its runner's loop -> same owner
-                _ln = _rname(_base)                         # ON (loop.json records that cwd). RALPHDIR is CC_HOME/
-                _lcwd = _rjson(os.path.join(RALPHDIR, _ln, "loop.json")).get("cwd", "") if _ln else ""  # data/ralph,
-                mine = bool(_lcwd and _session_in_project(_lcwd))    # SHARED across co-located trio nodes, so the old
-                                                            # dir-exists test claimed EVERY node's loop -> it leaked
-                                                            # onto every trio node's taskbar. cwd-in-project scopes it.
-            if not mine and nm.startswith("ext-"):          # this node's OWN extension-setup session runs in the
-                mine = True                                 # extension dir (under the install root, NOT under PROJECT)
-                                                            # -> a scoped node (PROJECT != CC_HOME, e.g. AFP) would
-                                                            # otherwise hide it, so the Setup button opened an invisible
-                                                            # session and the pane fell back to the existing one.
-            if not mine and nm == _admin_session_name():    # THIS node's canonical Admin shell -- a PLAIN shell you cd
-                mine = True                                 # around in (sudo/bootstrap/etc.), so its cwd routinely leaves
-                                                            # PROJECT. Scope it by NAME, not cwd, or on a scoped node the
-                                                            # Admin button opens an INVISIBLE session (loadSessions drops
-                                                            # the unscoped pane) -- exactly the "click does nothing" bug.
+            _own = _SESSION_OWNERS.get(nm)                  # the instance that LAUNCHED it (recorded on this node)
+            if _own is not None:
+                mine = (_own == INSTANCE_ID)                # explicit launch-ownership wins over any cwd heuristic
+            elif not SCOPE_SESSIONS:
+                # UNSCOPED overseer (Mission Control): it shares the tmux server AND the project root with the
+                # tenant nodes, so cwd-in-project is NOT an ownership signal -- it wrongly swept the fleet's in-root
+                # work + Ralph loops (started by other nodes) into MC's "Mine". A session it did NOT launch is
+                # "mine" only if it's the overseer's OWN infra: its chief, admin shell, extension-setup, or lifeline.
+                mine = is_chief or nm.startswith("ext-") or (nm == _admin_session_name()) or (nm == "lifeline")
+            else:
+                mine = is_chief or _session_in_project(cwd)     # SCOPED node (unchanged): its chief + its project work
+                if not mine and nm.startswith("ralph-"):        # a Ralph loop -> owned by the node whose PROJECT it runs
+                    _base = nm[len("ralph-"):]
+                    if _base.endswith("-live"): _base = _base[:-5]   # the live-view tab shares its runner's loop -> same owner
+                    _ln = _rname(_base)
+                    _lcwd = _rjson(os.path.join(RALPHDIR, _ln, "loop.json")).get("cwd", "") if _ln else ""
+                    mine = bool(_lcwd and _session_in_project(_lcwd))
+                if not mine and nm.startswith("ext-"): mine = True          # this node's OWN extension-setup session
+                if not mine and nm == _admin_session_name(): mine = True    # this node's canonical Admin shell (by name)
             if SCOPE_SESSIONS and not mine: continue        # a scoped node never shows another project's sessions
             kind = _session_kind(nm)
             lbl = _session_label(nm); node = ""
@@ -5146,6 +5156,7 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
         # bare `claude` -> claude.exe = "Access is denied" over SSH; use the claude.cmd full path
         inner = 'ssh -t %s "cd /d %s%s && \\"%%APPDATA%%\\npm\\claude.cmd\\" --dangerously-skip-permissions"' % (alias, mroot, sub)
         sh([TMUX, "new-session", "-d", "-s", name, inner])
+    _session_owner_set(name)   # this instance launched it -> "mine" even on the unscoped overseer (shared root)
     # Auto-accept the "trust this folder?" safety prompt that Claude shows on first launch in a new dir
     # (--dangerously-skip-permissions does NOT bypass it). The default highlighted choice is "Yes, I
     # trust", so a single Enter accepts it. Only fires if the prompt is actually on screen. Works for
@@ -32049,7 +32060,7 @@ async function sbPoll(){
   // widths now; the hover-blowup preview stays desktop-only (event-driven; #sessprev is display:none on mobile).
   var r; try{ r=await(await fetch('/api/session-bar')).json(); }catch(e){ return; }
   window.SB_UNSCOPED=!!r.unscoped;   // an overseer that sees every node's sessions -> offer the Mine/All toggle
-  if(window.SB_SCOPE===undefined){ try{window.SB_SCOPE=localStorage.getItem('cc_sb_scope')||(r.unscoped?'mine':'all');}catch(e){window.SB_SCOPE=r.unscoped?'mine':'all';} }
+  if(window.SB_SCOPE===undefined){ try{window.SB_SCOPE=localStorage.getItem('cc_sb_scope2')||(r.unscoped?'mine':'all');}catch(e){window.SB_SCOPE=r.unscoped?'mine':'all';} }  // v2 key: re-default the overseer to Mine now that Mine means "MC's own"
   var full=r.sessions||[];
   var list=(window.SB_UNSCOPED && window.SB_SCOPE==='mine') ? full.filter(function(s){return s.mine;}) : full;
   var names={};
@@ -32065,7 +32076,7 @@ async function sbPoll(){
   Object.keys(SB.prev).forEach(function(n){ if(!names[n]) delete SB.prev[n]; });
   sbRender(list);
 }
-function sbScopeToggle(){ window.SB_SCOPE=(window.SB_SCOPE==='mine')?'all':'mine'; try{localStorage.setItem('cc_sb_scope',window.SB_SCOPE);}catch(e){} SB._sig=''; sbPoll(); }
+function sbScopeToggle(){ window.SB_SCOPE=(window.SB_SCOPE==='mine')?'all':'mine'; try{localStorage.setItem('cc_sb_scope2',window.SB_SCOPE);}catch(e){} SB._sig=''; sbPoll(); }
 function sbViewing(n){ return (LENS==='sessions' && SESSBIG===n) || (window.STG&&STG.open&&STG.cur===n); }   // open big in the Sessions tab, OR on the mobile Stage
 function sbRender(list){
   var bar=document.getElementById('sessbar'); if(!bar)return;

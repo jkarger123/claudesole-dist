@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "8c193a327bf81d9d798def52caa98fa14589ab162353bddb27de3c95caecba0a",
+      "claudesole.manifest.json": "a4a7f5d73671d0131c034c1bbe4e6bbf58ead58f24d1b46933a51d482c65821f",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/campaign_runner.py": "0a385adb090626c76c1f3baf4a1ed944cd0a80983ef752686e471003a012e339",
       "command-center/cc-advise": "e449156a34ddcb9068fc1c89223a2d3f8574b6dba15f2e3d3fe748bf2f49a70f",
@@ -71,7 +71,7 @@
       "command-center/residue_lint.py": "0b1c757909a27470095d5ea8b48641a9e9e0248ec1729f3598596f2129fd1d6f",
       "command-center/rollback_guard.py": "603ae76f8f854b46e0dd152a123e11cc85c760a8c82e7865ab5eeaf75b2ac800",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "b964f8c08bb8d2b9869b22fefbfe8967a9b3924f160f39c930a563deb8250d46",
+      "command-center/server.py": "4dbf26b634b5309df91610839b4f684a07f4c792bb905ab2e658e033429e60af",
       "command-center/skill_scan.py": "809f29a7c954dc1df44934152ac6054fa1873c8ca92ed04c6cb00b525cfa9b8c",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/static/phosphor/fill.css": "555980683a582c1910a954648b4ae38f58d76e797f02bfdc2c5e817901e6d4fc",
@@ -128,9 +128,9 @@
       "extensions/github/mcp.json": "9e6454b25c37e446c09092862a5d06d8575f7544e88d756e6559beae6540902f",
       "extensions/google-workspace/bin/enable-services.sh": "91d010752885e98af080016bdecfd07fe38c59f7c5181d064c2e3a8f438fd3f2",
       "extensions/google-workspace/bin/gauth.sh": "5c34b104831b7e1d0ddd01b8ed29b429579d74d3e262f0306d22f368a4450842",
-      "extensions/google-workspace/bin/mint_token.py": "1568890b84f21a8afe18cde8890b0bd915f8dd9851265d50ed1017870c048999",
+      "extensions/google-workspace/bin/mint_token.py": "22c9059eb3d7ccb2120920606066f5dd9a91daebc0606cebfd482096efa5567c",
       "extensions/google-workspace/bin/verify.py": "a951ea920dc0a43fa35e89d0bdfa5c99611ecec53f85e70019719564e3815cbc",
-      "extensions/google-workspace/extension.json": "af0ac7b0e15f11963fa77dde6a88fc0094b8257ee614b69f68d913bda72d8015",
+      "extensions/google-workspace/extension.json": "280cfde3c80207558a2d38c5cbb92f67af263338cb4ee6e96535a9c91ba07198",
       "extensions/google-workspace/mcp.json": "02e1cce269301280812970037bd884e043c137689dfe666080abf40e2e2da005",
       "extensions/granola/extension.json": "f700ea7308afc87f17115b33db034361353268ead36eabcddb53625c1123347e",
       "extensions/incident-commander/extension.json": "bbddd7eae7d741ed11444633e98ee480c458ee96d83f97d66a18d21d6b370714",
@@ -175,9 +175,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1785525649,
+    "generated": 1785553348,
     "v": 1,
-    "version": "0.99.223"
+    "version": "0.99.224"
   },
-  "sig": "A+oTfZKqBPrcn5oQTe7hOJfaoZJcN2vRgUgW9yvRCv/PAPBybZ3pPyHbzubkub+A4qlKB0Vgab6TCwZK4CYuDQ=="
+  "sig": "Die3jXwVNB8jqX8nOXyO7D0lntE21V9rIByecvgnx8d2lPhCtyWGl1J6wsqDTVbcq3P5quvY4ATgUHwmcREjCw=="
 }

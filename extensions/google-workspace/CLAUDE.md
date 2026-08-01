@@ -4,8 +4,16 @@
 **>> Resume here:** read `_handoffs/20260719-2212__google-workspace.md` first -- it is the latest handoff.
 <!-- /LATEST-HANDOFF -->
 
+> **▶▶ READ `AUTH_MODEL.md` FIRST for anything auth-related** — the canonical model: app(OAuth client) ≠
+> account(email); ONE app authorizes MANY emails; Testing = flat 7-day token death (keep-alive can't stop it),
+> Production/Internal = durable; the fleet-vs-customer trust rule (fleet shares one app; customers BYO). If this
+> file and AUTH_MODEL.md ever disagree, AUTH_MODEL.md wins.
+
 A ClaudeFather **integration extension** (`extension.json` id `google-workspace`). It does two things:
-1. **Mints + stores a headless Google OAuth refresh token** for one controlled account (Path B).
+1. **Mints + stores headless Google OAuth refresh tokens** for one OR MORE controlled accounts (Path B;
+   **multi-account** — one app, per-email `tokens/<email>.json`). Client resolution is client-agnostic
+   (`_resolve_client` in `mint_token.py`): `CLIENT_JSON` env → per-account `google_oauth.<localpart>.json` →
+   the shared `google_oauth.json`.
 2. That stored token is consumed by (a) the **dashboard** server-side to render LIVE Gmail/Calendar/Drive
    lenses + VoiceMatch + Tasks, and (b) the **Google power-agent** (`agents/google`) via a self-hosted MCP.
 
@@ -27,7 +35,9 @@ Two separate runtimes read it; neither is part of this extension's code:
 
 ## Path B vs Path A (the fork that matters -- see SETUP.md)
 - **Path B (DEFAULT for headless ClaudeFathers).** Self-hosted MCP + stored refresh token. Acts for ANY account
-  you control, **no re-auth ever**, CAN send. This is what the dashboard + agent both use. This whole extension is Path B.
+  you control, CAN send, and — **when the app is Production or Internal** — stays alive indefinitely (the
+  keep-alive beats the only remaining expiry, the 6-month-idle rule). This is what the dashboard + agent both use;
+  the whole extension is Path B. (A *Testing* app's tokens die every ~7 days regardless — see AUTH_MODEL.md §2.)
 - **Path A.** Claude's first-party connectors -- browser OAuth, operator-Claude-login-bound, read/draft only,
   cannot act for a separate account. Only for interactive, own-account use.
 
@@ -75,10 +85,15 @@ Two separate runtimes read it; neither is part of this extension's code:
 - **macOS has no `timeout`** -- never use it in setup scripts.
 - **Refresh flow needs** `access_type=offline` + `prompt=consent` (+ `OAUTHLIB_RELAX_TOKEN_SCOPE=1`, Google
   reorders/adds openid scopes). The minter sets these.
-- **~7-day testing-token lapse** for a PERSONAL Gmail account in Console "Testing" mode: an idle refresh token
-  can die after ~7 days. Regular use keeps it alive; re-mint by re-running `bin/gauth.sh`. Workspace/Internal accounts are exempt.
-- Stay in Console **"Testing"** mode (don't Publish) and add the controlled account as a **Test user** -- it
-  must be the EXACT account the agent drives, or auth silently fails.
+- **~7-day testing-token DEATH (the #1 "it fell off" cause).** A refresh token minted while the app is in Console
+  **"Testing"** dies a **flat ~7 days after issuance** — NOT inactivity. Refreshing does NOT reset it (a refresh
+  returns a new *access* token, the same *refresh* token), so the keep-alive **cannot** save it. The ONLY fixes are
+  **publish the app to Production** (personal `@gmail`) or use an **Internal** app (Workspace org). (The old "regular
+  use keeps it alive" note was wrong — that applies to Production's separate 6-month-idle rule.) See AUTH_MODEL.md §2.
+- **Publish to Production (or use Internal) for anything durable.** Testing mode is for first-run dev only. For a
+  personal `@gmail`, PUBLISH the External consent screen to Production (unverified is fine, ≤100 users). For a
+  Workspace org, an Internal app (or a service account with domain-wide delegation) is durable with zero
+  verification. The consented account must be the EXACT account the agent drives, or auth silently fails.
 
 ## How to extend it
 - **New Google surface in the dashboard:** add a REST helper + `/api/google/<thing>` route in server.py's

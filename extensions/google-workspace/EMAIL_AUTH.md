@@ -9,10 +9,14 @@ WORKSPACE block ~line 748 + the vault block ~line 5700). This extension only *mi
 + distribution live in the engine so every deployment gets them.
 
 ## The two failures this closes
-1. **Token death.** A personal `@gmail` OAuth token in Cloud Console **"Testing"** mode has its refresh token
-   killed after **~7 days idle** (and Google's 6-month inactivity rule applies even in Production). Refreshes
-   were **lazy/on-demand only**, so an idle account silently crossed the cliff and only failed at first use —
-   and `_google_access_token` returned `None` **silently** with no detection/alert/heal.
+1. **Token death.** A personal `@gmail` OAuth token minted while the app is in Cloud Console **"Testing"** mode
+   has its refresh token **killed a flat ~7 days after issuance** — NOT inactivity, and **refreshing/keep-alive
+   does not prevent it** (see AUTH_MODEL.md §2; the real fix is publishing the app to Production, or an Internal
+   app). Separately, Google's **6-month idle** rule applies even in Production — THAT one the keep-alive defeats.
+   Before the keep-alive, refreshes were **lazy/on-demand only**, so an idle account silently crossed the 6-month
+   cliff and only failed at first use — and `_google_access_token` returned `None` **silently** with no
+   detection/alert/heal. (The keep-alive + loud `invalid_grant` alert fix the *detection*; only Production/Internal
+   fixes the *7-day* cause.)
 2. **Single-node lockup.** Tokens lived in each node's **local** vault/disk; `_google_token_load` /
    `_google_accounts` / `_vault_materialize_google` read `_vault_local` ONLY — never the overseer lease that
    `_deploy_env` already uses. An account minted at MC was invisible to afp + every separate-install node.

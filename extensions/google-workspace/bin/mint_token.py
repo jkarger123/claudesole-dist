@@ -21,7 +21,19 @@ os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 HERE = os.path.dirname(os.path.abspath(__file__))
 ACCOUNT = os.environ.get("ACCOUNT", "")
 SECRETS = os.environ.get("SECRETS_DIR") or os.path.normpath(os.path.join(HERE, "..", "secrets"))
-CLIENT = os.path.join(SECRETS, "google_oauth.json")
+def _resolve_client(secrets_dir, account):
+    """Client-agnostic client-JSON resolution (see AUTH_MODEL.md sec.7). One app can serve many accounts, so the
+    default is the ONE shared `google_oauth.json`. Overrides, in order: (1) CLIENT_JSON / GOOGLE_CLIENT_SECRET_PATH
+    env = explicit; (2) a per-account `google_oauth.<localpart>.json` = for mixed/transition setups where an
+    account lives in a DIFFERENT Cloud project (e.g. an account minted before we consolidated onto one app)."""
+    env = os.environ.get("CLIENT_JSON") or os.environ.get("GOOGLE_CLIENT_SECRET_PATH")
+    if env and os.path.exists(env): return env
+    lp = (account or "").split("@")[0].strip()
+    if lp:
+        per = os.path.join(secrets_dir, "google_oauth.%s.json" % lp)
+        if os.path.exists(per): return per
+    return os.path.join(secrets_dir, "google_oauth.json")
+CLIENT = _resolve_client(SECRETS, ACCOUNT)
 CREDS_DIR = os.path.join(SECRETS, "tokens")
 PORT = int(os.environ.get("PORT", "8765"))
 PERMS = os.environ.get("PERMS", "gmail:drafts calendar:full drive:full sheets:full docs:full forms:full").split()

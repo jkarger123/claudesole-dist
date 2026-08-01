@@ -3,6 +3,28 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.224 -- 2026-07-31  (Google Workspace: multi-account, durable-by-design, setup wizard + Sessions "Mine" fix)
+Two things: a Google-Workspace-extension overhaul (v2.3.0) so accounts stop falling off + one app serves many
+emails, and a fix to what "Mine" means on the unscoped overseer.
+- **Google auth, understood + durable.** New canonical `extensions/google-workspace/AUTH_MODEL.md`: app(OAuth
+  client) != account(email); ONE app authorizes MANY emails; **Testing = flat ~7-day token death that the
+  keep-alive canNOT stop** (refreshing doesn't reset it) -> the real fix is **publish to Production** (personal
+  `@gmail`) or an **Internal** app (Workspace). Corrected the false "regular use keeps a Testing token alive" /
+  "no re-auth ever" / "stay in Testing, don't publish" guidance across `CLAUDE.md`/`SETUP.md`/`EMAIL_AUTH.md`.
+- **Multi-account, client-agnostic minter.** `mint_token.py` `_resolve_client()`: `CLIENT_JSON` env -> per-account
+  `google_oauth.<localpart>.json` -> shared `google_oauth.json`. Closes the hardcoded-CLIENT gap (an account in a
+  different Cloud project auto-resolves its own client; no more isolated-dir workaround). One app, many
+  `tokens/<email>.json`.
+- **Setup wizard.** `SETUP.md` now opens with a branching decision-tree the setup agent runs: Workspace ->
+  Internal (or service-account/domain-wide-delegation); personal -> External + Publish-to-Production; then mint ->
+  `verify.py` "ALL THREE SURFACES OK". Includes the trust-domain rule (your fleet shares one app; independent
+  operators BYO app -- never ship a shared client secret to another install).
+- **Sessions "Mine" on the overseer.** Sessions now carry an explicit launch-owner (recorded per node). The
+  unscoped overseer no longer treats "cwd under the shared project root" as ownership (which swept the fleet's
+  in-root work + Ralph loops into its "Mine"); a session it did not launch is "Mine" only if it's the overseer's
+  own infra (chief/admin/ext/lifeline). Scoped nodes unchanged. Overseer taskbar defaults to Mine (localStorage
+  key bumped so it re-defaults now that Mine is meaningful).
+
 ## 0.99.223 -- 2026-07-31  (Sessions workspace: macOS window controls, instant taskbar, inline rename)
 A run of session-workspace UX fixes on top of the identity bar (0.99.222). All in the PAGE frontend + one small
 API (`/api/session-rename`).

@@ -6,6 +6,47 @@ authorized (both the Cloud APIs ENABLED and the OAuth scopes granted -- two sepa
 ASCII only. Be patient + concrete. Verified end-to-end on a real install (2026-06-23); the exact
 wiring + tools below are what actually worked -- prefer them over improvising.
 
+## ▶▶ SETUP WIZARD — start here (pick your path; this decides whether it STAYS working)
+You are creating **your OWN** Google app — ClaudeFather never shares one app across unrelated installs (see
+`AUTH_MODEL.md` §4: your Google data stays in *your* project, on *your* server). It's a ~5-minute one-time task.
+Route by account type; this fork decides token durability:
+
+**Q1 — What account will the agent drive?**
+
+- **▸ A Google Workspace account** (`you@yourcompany.com` — a domain you/your org control) → **PATH W (durable, no verification):**
+  - **W1 (recommended) — Internal OAuth app.** In your Workspace's Cloud project → OAuth consent screen → User
+    type **Internal** → create a **Desktop** OAuth client → download the JSON. Internal apps have **no 7-day death,
+    no verification, no user cap** — set-and-forget. Then go to "Mint the headless token."
+  - **W2 (no per-user consent) — service account + domain-wide delegation.** Create a service account, enable
+    domain-wide delegation, and in the **Admin console** authorize its client ID for the scopes. The agent then
+    acts as any user in the domain with no consent screen — best when an admin wants central control. (Confirm
+    before choosing; it needs Admin-console access.)
+- **▸ A personal `@gmail`** (no Workspace domain) → **PATH P (must publish to Production):**
+  - Cloud project → OAuth consent screen → User type **External** → create a **Desktop** OAuth client → download
+    the JSON → **then PUBLISH the app to Production** (consent screen → "PUBLISH APP" → confirm). Publishing
+    **unverified is fine** (≤100 users; one "unverified app → continue" click at consent). **Do NOT leave it in
+    Testing** — Testing tokens die a flat ~7 days after issuance and nothing on our side stops it (`AUTH_MODEL.md`
+    §2). Then go to "Mint the headless token."
+
+**Q2 — Draft-only or send?** Draft-first is the safe default (`gmail:drafts`). Auto-send is a one-flag opt-in
+(`PERMS="gmail:send …"`) — confirm before enabling.
+
+**Q3 — Browser on this host, or remote?** Remote (SSH/Tailscale) → use the **tunnel-less recipe** (near the
+bottom of this doc): run the minter here, open the printed URL in a browser anywhere, paste the
+`http://localhost:8765/...` redirect back.
+
+**Multiple accounts / other emails?** Repeat "Mint the headless token" per email against the **SAME** app — one
+app, many `tokens/<email>.json`, no new project. The minter is client-agnostic (`_resolve_client` in
+`mint_token.py`): it uses `CLIENT_JSON` env → a per-account `google_oauth.<localpart>.json` → the shared
+`google_oauth.json`.
+
+**Finish = VALIDATE.** After minting, run `verify.py` (below) — it must print **ALL THREE SURFACES OK** (real
+Gmail + Calendar + Drive read). Green on Path W, or on Path P with the app in **Production**, means you're durable. Done.
+
+> The sections below are the detailed reference the wizard steps into (Cloud Console specifics, the mint command,
+> verify, the remote-auth recipe, gotchas). The Path A/B fork just below is a *separate* choice — the auth
+> *mechanism* (self-hosted MCP vs Claude connectors) — orthogonal to the account-type paths above.
+
 ## What it does
 Connects Gmail, Google Calendar, and Google Drive, then layers a **Google power-agent** on top that uses the
 WHOLE surface (not just read): inbox triage with labels + reply drafts, free/busy scheduling, Drive search +
@@ -17,9 +58,10 @@ A ClaudeFather runs agents + cron with **no human at a browser**, often to act f
 account** (not the operator's personal Google login). That shapes the choice:
 
 - **Path B -- self-hosted MCP server (DEFAULT for ClaudeFathers).** A Google Cloud OAuth client + a one-time
-  headless auth mints a **refresh token the server reuses forever** (no re-auth). It can act for ANY account
-  you control and can **send email**. This is what matches "the agent does this for me without auth every
-  time." Use Path B for any dedicated/service account or any headless/cron use. The rest of this doc is Path B.
+  headless auth mints a **refresh token the server reuses** (no re-auth) — indefinitely **when the app is
+  Production or Internal** (a Testing app dies every ~7 days, see the wizard/`AUTH_MODEL.md` §2). It can act for
+  ANY account you control and can **send email**. This is what matches "the agent does this for me without auth
+  every time." Use Path B for any dedicated/service account or headless/cron use. The rest of this doc is Path B.
 - **Path A -- Claude's first-party connectors.** Browser OAuth, no local keys -- but tied to the **operator's
   Claude login**, so it **cannot act for a separate account** and **cannot send email**. Only pick A if the
   user just wants read/draft against their OWN logged-in account, interactively.
@@ -48,11 +90,16 @@ account** (not the operator's personal Google login). That shapes the choice:
    After clicking Enable, Google takes ~2-3 min to propagate. If a call still 403s `SERVICE_DISABLED` after that,
    the API isn't enabled in the project yet -- that is a DIFFERENT problem from a missing OAuth scope (which needs
    a re-mint). Don't conflate them: `SERVICE_DISABLED` -> enable the API (URL above); missing scope -> re-mint.
-3. **OAuth consent screen -> External**, and **stay in "Testing"** -- do NOT "Publish to production"
-   (publishing forces Google verification for the sensitive Gmail/Drive scopes).
-4. **Add the controlled account as a Test user** -- it MUST be the exact account the agent will drive
-   (a common mistake is adding a different address; then auth silently fails). Workspace/Internal accounts
-   skip the test-user step and avoid the token-lapse note below.
+3. **OAuth consent screen — pick by account type (this decides whether tokens survive; see AUTH_MODEL.md):**
+   - **Google Workspace org account** (e.g. `you@yourcompany.com`): choose **Internal**. Durable forever, no
+     verification, no user cap, no 7-day death. Easiest and best — done.
+   - **Personal `@gmail`**: choose **External**, then **PUBLISH the app to Production.** Do NOT leave it in
+     "Testing" — a Testing app's refresh tokens die a flat ~7 days after issuance and the keep-alive can't stop it.
+     Publishing unverified is fine (≤100 users); you'll just see an "unverified app" warning at consent, which is
+     harmless for your own app. (Full Google verification is only needed to remove that warning / exceed 100 users.)
+4. **If you chose External/Testing for initial dev, add the controlled account as a Test user** — it MUST be the
+   exact account the agent will drive (a common mistake is adding a different address; then auth silently fails).
+   But move to Production before relying on it (see step 3). Internal accounts skip the test-user step entirely.
 5. **Credentials -> Create OAuth client ID -> Desktop app -> download the JSON.**
 6. Place it at `extensions/google-workspace/secrets/google_oauth.json` (`chmod 600`; the dir is gitignored).
 7. Heads-up the user: during consent they'll see an **"unverified app" warning** -> Advanced ->
@@ -183,9 +230,11 @@ loud, and a narrow token can't clobber a good one.
 - **macOS has no `timeout`** by default -- don't use it in setup scripts.
 - **Refresh token:** the flow needs `access_type=offline` + `prompt=consent` (the minter sets these); set
   `OAUTHLIB_RELAX_TOKEN_SCOPE=1` during the flow (Google reorders/adds openid scopes).
-- **~7-day testing-token lapse (personal Gmail in Testing mode):** an idle refresh token can expire after
-  ~7 days. Regular use keeps it alive; to re-mint, just re-run `bin/gauth.sh`. Workspace/Internal accounts
-  don't have this.
+- **~7-day testing-token DEATH (personal Gmail in Testing mode):** a refresh token minted while the app is in
+  "Testing" dies a **flat ~7 days after issuance** — NOT inactivity, and **refreshing/keep-alive does NOT prevent
+  it**. The fix is to **publish the app to Production** (personal `@gmail`) or use an **Internal** app (Workspace);
+  re-running `bin/gauth.sh` only buys another 7 days until you do. Workspace/Internal apps never have this. (See
+  `AUTH_MODEL.md` §2 — the old "regular use keeps it alive" claim was wrong.)
 
 ## Safety
 - READ-FIRST, DRAFT-FIRST. Sending email requires the explicit `gmail:send` opt-in; even then, CONFIRM
