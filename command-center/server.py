@@ -2605,7 +2605,16 @@ def _session_compacting(name):
         return (json.loads(open(p).read() or "{}") or {}).get("state") == "running"
     except Exception:
         return False
-def _mesh_deliver(session, text):
+def _voice_trace_deliver(session, outcome, why="", chars=0):
+    """Record the ACTUAL outcome of a voice message's async delivery (ok / drop / timeout) to the voice debug log.
+    _deliver_worker runs long after /api/voice/send returned, so this is the only place the true fate of a spoken
+    message is known. Defined here (near the worker) but calls the global _voice_dbg, which is resolved at call time."""
+    try:
+        _voice_dbg({"ev": "deliver-" + outcome, "sess": session, "chars": chars, "why": why})
+    except Exception:
+        pass
+
+def _mesh_deliver(session, text, voice=False):
     """Inject `text` into a chief as a CLEAN, SEPARATE turn. Waits (in the background) until the chief is idle
     at a prompt before typing -- so a message sent while the chief is busy is NEVER merged into the in-flight
     turn (Claude Code records mid-turn input as a queue-operation that gets folded into that turn's reply,
@@ -2618,7 +2627,7 @@ def _mesh_deliver(session, text):
     # -> self-heal restart, on a loop. Now N pending messages = ONE worker thread, not N.
     with _DELIVER_GUARD:
         st = _DELIVER_QUEUES.setdefault(session, {"q": [], "worker": None})
-        st["q"].append(text)
+        st["q"].append((text, bool(voice)))   # (text, voice_flag) -- voice sends get their delivery OUTCOME traced
         if len(st["q"]) > _DELIVER_MAX_Q:
             st["q"] = st["q"][-_DELIVER_MAX_Q:]   # keep newest; the inbox backstops the dropped ones
         if st["worker"] is None or not st["worker"].is_alive():
@@ -2636,9 +2645,11 @@ def _deliver_worker(session):
             if not st or not st["q"]:
                 if st: st["worker"] = None
                 return
-            text = st["q"].pop(0)
+            _item = st["q"].pop(0)
+        text, _vflag = _item if isinstance(_item, tuple) else (_item, False)   # tolerate any legacy plain-string items
         for _ in range(1800):   # up to ~30 min for THIS message, polling ~1s
             if sh([TMUX, "has-session", "-t", session])[0] != 0:   # session gone -> drop it + the rest
+                if _vflag: _voice_trace_deliver(session, "drop", why="session gone", chars=len(text))   # a voice message just died -> record WHY so it's never a silent abyss
                 with _DELIVER_GUARD:
                     st = _DELIVER_QUEUES.get(session)
                     if st: st["q"] = []; st["worker"] = None
@@ -2652,8 +2663,13 @@ def _deliver_worker(session):
                 time.sleep(1); continue
             sh([TMUX, "send-keys", "-t", session, "-l", text]); time.sleep(0.4)
             sh([TMUX, "send-keys", "-t", session, "Enter"])
+            if _vflag: _voice_trace_deliver(session, "ok", chars=len(text))   # ACTUALLY typed into the session -> confirmed delivery
             break   # delivered -> loop back for the next queued message
-        # if it never freed in ~30 min, this message is dropped (stale; the Comms inbox is the durable backstop)
+        else:
+            # the for-loop never broke -> it never freed in ~30 min, so THIS message was dropped (stale). The Comms
+            # inbox is the durable backstop, but for a VOICE turn that silent drop is exactly the failure the operator
+            # hit -- record it so the debug log shows a spoken message that queued but never landed.
+            if _vflag: _voice_trace_deliver(session, "timeout", why="session busy ~30 min", chars=len(text))
 
 # ---- shell / ssh / tmux ------------------------------------------------------
 def sh(cmd, timeout=15):
@@ -5127,6 +5143,10 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
     if target == "studio":
         try: wd = projpath(rel) if rel else (comp_dir(cid) if cid else PROJECT)
         except Exception: wd = PROJECT
+        if not os.path.isdir(wd): wd = PROJECT   # NEVER strand a session at $HOME: a bad/nonexistent rel (e.g. 'mobile'
+        #                                          instead of 'command-center/mobile') would make `tmux new-session -c`
+        #                                          silently fall back to the home dir -> wrong cwd, wrong voice label,
+        #                                          broken cc-* scope resolution. Clamp to the project root instead.
         # SYSTEM-LEVEL context (no forced turn): files/placement + locked-core awareness + a focus-routed,
         # budgeted context brief about the subject this session opens into -> the agent rides in already knowing
         # the client/module (people, recent calls/emails, decisions). Subject = the module/client name.
@@ -12546,7 +12566,7 @@ def _voice_dbg_many(recs):
             if not isinstance(rec, dict): continue
             rec.setdefault("ts", time.strftime("%H:%M:%S")); rec.setdefault("t", int(time.time() * 1000))
             old.append(json.dumps(rec, ensure_ascii=False))
-        old = old[-400:]
+        old = old[-1200:]   # deeper history: input+output tracing writes ~10 events/dictation, so keep more turns visible
         with open(VOICE_DEBUG_FILE, "w") as f: f.write("\n".join(old) + "\n")
     except Exception: pass
 
@@ -12632,6 +12652,19 @@ def vq_mute(session, on):
             m.pop(session, None)
         _vq_save(d)
     return vq_state()
+def _voice_enrollable_sessions():
+    """Scoped sessions worth reading aloud when they finish: this node's OWN chiefs + work sessions. Excludes Ralph
+    loops (own lens + noisy), services, and admin shells. Names only -- NO transcript reads -- so vq_mode stays fast."""
+    out = []
+    try:
+        for s in tmux_sessions():
+            if not s.get("mine"): continue
+            if s.get("kind") in ("loop", "service"): continue
+            if s.get("is_admin"): continue
+            nm = s.get("name")
+            if nm: out.append(nm)
+    except Exception: pass
+    return out
 def vq_mode(on):
     """The global 'Voice mode' switch. Off clears the live queue but keeps the enrolled/muted roster for resume.
     ON = start FRESH: only completions from NOW ON surface. MUST be FAST (the mic tap awaits this): do NOT read
@@ -12639,7 +12672,20 @@ def vq_mode(on):
     bump baseline_gen and let the background watcher baseline every enrolled seen_fp on its next tick."""
     with _VQ_LOCK:
         d = _vq_load(); d["mode"] = bool(on); d["queue"] = []
-        if on: d["baseline_gen"] = int(d.get("baseline_gen", 0)) + 1
+        if on:
+            d["baseline_gen"] = int(d.get("baseline_gen", 0)) + 1
+            # ENROLL EVERYTHING (operator ask: "anything that finishes should be read to me"): auto-enroll every scoped,
+            # non-muted session -- INCLUDING sessions running in the BACKGROUND that aren't open in a pane. Enrollment
+            # used to depend on the client having the pane open when you flipped voice on, so a background session that
+            # finished was never watched -> silent. Now the server enrolls them all. The baseline pass (bumped above)
+            # marks each one's CURRENT message as already-seen, so pre-existing completions don't dump on you; only NEW
+            # completions from now on surface. Names only here (fast); the watcher reads transcripts on its own tick.
+            en = d.setdefault("enrolled", {}); muted = (d.get("muted") or {})
+            try:
+                for s in _voice_enrollable_sessions():
+                    if s in muted: continue
+                    en.setdefault(s, {"seen_fp": ""})
+            except Exception: pass
         _vq_save(d)
     return vq_state()
 def vq_state():
@@ -13215,6 +13261,42 @@ def _handoff_pointers(subject, limit=6):
         except Exception: pass
     return ptrs[:10]
 
+_SCOPE_RESOLVE_CACHE = {"ts": 0, "v": None}
+def _module_rels():
+    """Every real module directory under the project (a folder holding a CLAUDE.md), as project-relative rels.
+    Independent of _scope_candidates (which excludes the command-center engine subtree from AUTO-routing) so an
+    EXPLICIT handoff target can still resolve to any real module -- e.g. command-center/mobile. Cached 60s."""
+    if _SCOPE_RESOLVE_CACHE["v"] is not None and (time.time() - _SCOPE_RESOLVE_CACHE["ts"]) < 60:
+        return _SCOPE_RESOLVE_CACHE["v"]
+    rels = []
+    for root, dirs, files in os.walk(PROJECT):
+        dirs[:] = [d for d in dirs if d not in CC_SKIP and not d.startswith(".") and not re.match(r"^iter\d", d)]
+        if root == PROJECT: continue
+        if "CLAUDE.md" in files:
+            r = os.path.relpath(root, PROJECT)
+            if r and r != ".": rels.append(r)
+    _SCOPE_RESOLVE_CACHE["ts"] = time.time(); _SCOPE_RESOLVE_CACHE["v"] = rels
+    return rels
+
+def _resolve_scope(name):
+    """Resolve a possibly-loose scope reference to a REAL module rel. Returns (rel, candidates):
+       rel = the resolved rel, or None if unknown/ambiguous; candidates = near-matches to show the caller.
+    A full, existing rel passes through unchanged ('command-center/mobile'); a bare leaf ('mobile') resolves to
+    the unique module whose last path segment matches ('command-center/mobile'). Ambiguous -> None + the matches."""
+    n = (name or "").strip().strip("/")
+    if not n: return None, []
+    try:
+        if os.path.isdir(projpath(n)): return n, []          # already a real path under the project
+    except Exception: pass
+    low = n.lower(); rels = _module_rels()
+    exact = [r for r in rels if r.lower() == low or (r.split("/")[-1].lower() == low)]
+    if len(exact) == 1: return exact[0], []
+    if len(exact) > 1: return None, sorted(exact)
+    ends = [r for r in rels if r.lower().endswith("/" + low)]
+    if len(ends) == 1: return ends[0], []
+    if len(ends) > 1: return None, sorted(ends)
+    return None, sorted([r for r in rels if low in r.lower()])[:8]
+
 def handoff_propose(from_session=None, to=None, goal="", summary="", decisions=None, open_q=None,
                     next_step="", subject=None, by="agent", hops=0):
     """An out-of-lane agent (or the operator) PREPARES a warm transfer: routes (unless `to` is explicit/'new'),
@@ -13230,7 +13312,11 @@ def handoff_propose(from_session=None, to=None, goal="", summary="", decisions=N
         routed = route(" ".join([goal, summary]), exclude=from_rel)
         to_rel = None; needs_new = True; parent = routed.get("suggested_parent")
     else:
-        to_rel = to.strip("/"); needs_new = False; parent = None
+        rel_r, cands = _resolve_scope(to)                    # RESOLVE + VALIDATE an explicit target (e.g. 'mobile'
+        if not rel_r:                                        # -> 'command-center/mobile'). Never trust a bare string:
+            return {"ok": False, "error": "unknown scope '%s'%s -- pass the full module rel (e.g. command-center/mobile), or --to new to create a home" % (
+                to, (" (did you mean: " + ", ".join(cands) + ")") if cands else "")}   # an unresolved rel used to strand the session at $HOME
+        to_rel = rel_r; needs_new = False; parent = None
     subj = (subject or (os.path.basename(to_rel) if to_rel else _slug(goal or summary or "topic")))
     if to_rel and from_rel and to_rel == from_rel:
         return {"ok": False, "error": "that's the current scope -- no handoff needed"}
@@ -13656,21 +13742,27 @@ def _handoff_authority(subject=None):
     """Give a scoped agent the AUTHORITY + the mechanism to warm-transfer when the conversation drifts out of its
     lane -- the 'good front desk' behavior. Obeys the `handoff` toggle."""
     if CC.get("handoff", True) is False: return ""
-    return ("STAYING IN YOUR LANE (warm transfer): you are scoped to '%s'. If the conversation moves SUBSTANTIALLY "
-            "outside this scope, do NOT muscle through (that taints this scope's memory). Prepare a warm transfer: "
-            "`cc-handoff propose --goal '<what they now need>' --summary '<where we are>' [--to <scope|new>]` -- it "
-            "routes to the right home (creating one if none fits) and the operator confirms with one click; the next "
-            "agent picks up in the RIGHT place. Small digressions are fine -- transfer when the TOPIC has genuinely "
-            "changed. RECONCILE (keep this folder smart across conversations): when you finish a task or before going "
-            "idle, file durable decisions/learnings to THIS folder's records with `cc-note \"<one-line learning>\"` -- "
-            "many conversations in a folder converge on its CC:NOTES, so filing yours is what makes the next one "
-            "start informed. If you're mid-task and stepping away, `cc-hold` keeps this conversation from "
-            "auto-archiving (idle conversations are archived ~4h, always one-click resumable). "
-            "A DECLINED MOVE IS FINAL: if you suggest moving/refiling and the operator says no or wants to stay "
-            "here, DROP IT immediately and keep working right here -- do NOT nag or re-raise it. Only bring it up "
-            "again if the conversation LATER shifts to a genuinely DIFFERENT new topic (not the same one they "
-            "already chose to keep). If they insist on staying in a folder you think is wrong, respect it -- it's "
-            "their call; end-of-day housekeeping can tidy filing later without interrupting them." % (subject or "this scope"))
+    return ("STAYING IN YOUR LANE (you own drift-handling -- there is NO automatic popup; it's on YOU to notice, "
+            "gently): you are scoped to '%s'. If the conversation moves SUBSTANTIALLY onto a different topic, do NOT "
+            "muscle through (that taints this scope's memory) and do NOT silently ignore it either. Raise it SOFTLY, "
+            "conversationally, as a housekeeping courtesy -- never a demand. Say something like: \"It looks like we "
+            "may be drifting toward <new topic>. To keep things tidy I'd normally hand you to the right home for that "
+            "-- it looks like <existing folder> may already fit; want me to take you there? If that's not the right "
+            "place we can pick a better one, or if you'd rather just keep going here, say so and I'll stay put.\" "
+            "THREE outcomes, all fine: (a) they say go -> run `cc-handoff go --to <rel> --goal '<what they now need>' "
+            "--summary '<where we are + context>'` and it takes them there already briefed; if NO existing home fits, "
+            "`--to new` CREATES one (front-door style, next to the closest area) -- you can make them a home, you don't "
+            "need one to exist. Use `cc-handoff propose ...` instead if you'd rather they confirm with one click. "
+            "(b) they want a different place -> discuss, then hand off there. (c) they want to stay -> DROP IT "
+            "immediately, keep working right here, and do NOT raise it again for THIS topic. Only bring drift up again "
+            "if the conversation LATER shifts to a genuinely DIFFERENT new topic. Small digressions are fine -- only "
+            "raise it when the TOPIC has genuinely changed. A DECLINED MOVE IS FINAL: their call always wins; "
+            "end-of-day housekeeping can tidy filing later without interrupting them. "
+            "RECONCILE (keep this folder smart across conversations): when you finish a task or before going idle, "
+            "file durable decisions/learnings to THIS folder's records with `cc-note \"<one-line learning>\"` -- many "
+            "conversations in a folder converge on its CC:NOTES, so filing yours is what makes the next one start "
+            "informed. If you're mid-task and stepping away, `cc-hold` keeps this conversation from auto-archiving "
+            "(idle conversations are archived ~4h, always one-click resumable)." % (subject or "this scope"))
 
 def _cc_config_set(updates):
     """Persist toggle(s) into cc.config.json (0600) + update the live CC. Used by the Context tab controls."""
@@ -13694,7 +13786,9 @@ def context_settings():
         "scout": {"on": CC.get("scout", True) is not False, "label": "The Scout (proactive surfacing)",
             "doc": "Beyond the cited brief, a cheap index pass flags FRESH items relevant to what you're doing that you were NOT handed -- the email/file/call just out of view -- as pointers in the launch brief + the Scout panel. Solves 'the agent doesn't know what it doesn't know' without dumping the inbox. Off = only the explicit brief is injected."},
         "handoff": {"on": CC.get("handoff", True) is not False, "label": "Warm transfer (the front desk)",
-            "doc": "Every scoped agent is told to STAY IN ITS LANE and, when a conversation drifts out of scope, prepare a warm transfer -- a structured packet (goal/state/pointers) routed to the right home (created if none fits); you confirm with one click in the Transfers tab. Housekeeping also watches server-side: it proposes moving a FILED conversation whose topic drifted off-lane, AND filing an UNFILED conversation running at the project root into the specific home it clearly belongs in (so single-project / control-brain nodes benefit too, not just agency trees) -- both high-precision + model-confirmed so platform-wide root work stays put. The Chief acts as the triage front door. Keeps each scope's memory clean instead of tainting the folder you happened to launch in. Off = no drift-detection or handoff prompts."},
+            "doc": "Every scoped agent is told to STAY IN ITS LANE and, when a conversation genuinely drifts to a NEW topic, RAISE IT SOFTLY in conversation (never a demand) and offer a warm transfer -- a structured packet (goal/state/pointers) to the right home, creating one front-door-style if none fits; the operator says go / pick another place / stay put, and a declined move is final. The Chief is the triage front door. Keeps each scope's memory clean instead of tainting the folder you happened to launch in. Off = agents no longer offer transfers."},
+        "drift_sweep": {"on": CC.get("drift_sweep", False) is True, "label": "Auto drift-detection popups (server-side)",
+            "doc": "OFF by default. When on, the server also watches every live conversation and AUTO-PROPOSES 'this drifted -- move it?' popups in the Transfers tab / in-pane. These were frequently wrong and read as nagging, so drift-handling now lives with the agent (soft, conversational -- see Warm transfer above). Turn this on only if you want the platform to proactively flag drift for you instead."},
         "reconcile": {"on": CC.get("reconcile", True) is not False, "label": "Reconcile + auto-archive idle conversations",
             "idle_hours": round(float(CC.get("idle_archive_sec") or _IDLE_ARCHIVE_SEC) / 3600.0, 1),
             "doc": "Many conversations in one folder converge on that folder's records: each meeting files its minutes (CC:NOTES), then idle + harvested + un-held conversations are auto-archived (always one-click resumable) so offices don't fill with zombies. Pin / Hold / agent self-hold keep one alive. Adjust the idle window + see everything in the Workspace hygiene panel (Transfers). Off = nothing auto-archives."},
@@ -13758,7 +13852,10 @@ def _drift_sweep():
     # The unscoped OVERSEER (ROLE=org) shares the tmux server and sees EVERY node's sessions; it must NOT manage
     # individual conversations (it would scope them against the wrong project root -> garbage proposals). Each
     # project node sweeps its OWN sessions; the overseer only oversees the fleet.
-    if ROLE == "org" or CC.get("handoff", True) is False:
+    # DRIFT SWEEP is OFF by default: the auto "you're drifting -- move it?" proposals were often wrong and read as
+    # nagging popups. Drift-handling now lives with the AGENT (soft, conversational -- see _handoff_authority): it
+    # notices and OFFERS, the operator decides. Opt back into the server-side sweep with cc.config drift_sweep:true.
+    if ROLE == "org" or CC.get("drift_sweep", False) is not True:
         return {"checked": 0, "proposed": []}
     cand_sum = {c["rel"]: c["summary"] for c in _scope_candidates()}
     open_for = {h.get("from_session") for h in _hand_load().get("handoffs", []) if h.get("status") == "proposed"}
@@ -19274,7 +19371,19 @@ class H(BaseHTTPRequestHandler):
             return self._s(200, json.dumps(notebook.nb_transcribe(body.get("audio", ""), body.get("mime", "audio/webm"))))
         if u.path == "/api/voice/dictate":   # VOICE talk: transcribe a recorded mic blob (Deepgram) -> text
             if not voice: return self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
-            return self._s(200, json.dumps(voice.vc_stt(body.get("audio", ""), body.get("mime", "audio/webm"), body.get("session", ""))))
+            _au = body.get("audio", "") or ""; _mm = body.get("mime", "audio/webm"); _ss = body.get("session", "")
+            # INPUT-PATH TRACE (both directions logged, per operator): EVERY transcription attempt -- success OR
+            # failure -- writes a breadcrumb, so a spoken message can never vanish without a trace. This is
+            # path-agnostic: the dock, the standalone header mic, and the /term modal ALL hit this route, so even
+            # dictation done with voice-mode OFF (which the client-side loop never traced) is now visible here.
+            # audio_b64 ~= 1.33x the raw audio bytes; a very small value = the recording never really captured speech.
+            _voice_dbg({"ev": "stt-in", "sess": _ss, "audio_b64": len(_au), "mime": _mm})
+            _r = voice.vc_stt(_au, _mm, _ss)
+            _voice_dbg({"ev": "stt-out", "sess": _ss, "ok": bool(isinstance(_r, dict) and _r.get("ok")),
+                        "chars": (len((_r.get("text") or "")) if isinstance(_r, dict) else 0),
+                        "dur": (_r.get("dur") if isinstance(_r, dict) else None),
+                        "error": (_r.get("error") if isinstance(_r, dict) and not _r.get("ok") else None)})
+            return self._s(200, json.dumps(_r))
         if u.path == "/api/voice/speak-last":   # VOICE hear: render a session's last assistant reply to audio (smart)
             if not voice: return self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
             sess = body.get("session", "")
@@ -19303,10 +19412,19 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/voice/send":   # VOICE talk: inject a spoken turn into a session (guarded injector)
             sess, txt = body.get("session", ""), (body.get("text", "") or "").strip()
             if not sess or not txt: return self._s(200, json.dumps({"ok": False, "error": "session and text required"}))
-            _mesh_deliver(sess, txt)
+            # HONEST DELIVERY: verify the target session actually EXISTS before claiming success. Previously this
+            # returned {ok:true} the instant it queued -- so a spoken message to a dead/rotated session got a green
+            # "Sent!" toast, then the async worker silently dropped it (session gone / never freed in 30 min). That is
+            # the classic "I said a whole message and nothing happened" abyss. Now: gone -> ok:false, and the text is
+            # already persisted in Recent dictations (the STT safety net), so the client surfaces it + you can resend.
+            _exists = (sh([TMUX, "has-session", "-t", sess])[0] == 0)
+            _voice_dbg({"ev": "send", "sess": sess, "len": len(txt), "exists": _exists})
+            if not _exists:
+                return self._s(200, json.dumps({"ok": False, "error": "session not running", "saved": True}))
+            _mesh_deliver(sess, txt, voice=True)   # voice=True -> the worker traces the ACTUAL delivery outcome to the voice log
             try: vq_touch(sess)   # baseline this session's current message so the queue watcher enqueues the REPLY when it lands
             except Exception: pass
-            return self._s(200, json.dumps({"ok": True}))
+            return self._s(200, json.dumps({"ok": True, "queued": True}))
         if u.path == "/api/voice/say":   # VOICE: render an arbitrary short phrase to audio (confirmations, prompts)
             if not voice: return self._s(200, json.dumps({"ok": False, "error": "voice not available"}))
             _txt = (body.get("text", "") or "").strip()
@@ -29810,6 +29928,7 @@ function recStart(target,onDone){                 // -> false if refused (alread
   if(!voiceKeyOK())return false;
   try{voiceStopAudio();}catch(e){}                // starting to talk SILENCES any in-flight readback (never talk over you)
   var gen=++REC.gen;REC.state='arming';REC.target=target;REC.onDone=onDone;REC.chunks=[];REC.discard=false;
+  try{vmTrace('rec-start',{sess:target||'',vmon:!!(window.VM&&VM.on)});}catch(e){}   // INPUT trace: works even with voice-mode OFF (standalone mic) so a dictation is never invisible
   navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
     if(gen!==REC.gen||REC.state!=='arming'){try{stream.getTracks().forEach(function(t){t.stop();});}catch(e){}return;}   // abandoned while arming
     var mr;try{mr=new MediaRecorder(stream);}catch(e){try{stream.getTracks().forEach(function(t){t.stop();});}catch(_){}recSettle(gen,null,'Recording not supported in this browser.');return;}
@@ -29828,7 +29947,8 @@ function recStop(discard){
   REC.discard=!!discard;REC.state='stopping';vmDock();
   try{REC.mr.stop();}catch(e){recSettle(REC.gen,null,'record failed');}}
 function recSettle(gen,blob,err){if(gen!==REC.gen)return;
-  var done=REC.onDone,tgt=REC.target,disc=REC.discard,mime=REC.mime;recReset();
+  var done=REC.onDone,tgt=REC.target,disc=REC.discard,mime=REC.mime,t0=REC.t0;recReset();
+  try{vmTrace('rec-settle',{sess:tgt||'',size:(blob&&blob.size)||0,ms:t0?(Date.now()-t0):0,err:err||'',discarded:!!disc});}catch(e){}   // how much audio actually got captured -> tiny/0 = the recording never grabbed speech
   if(done)done({target:tgt,blob:(disc||err)?null:blob,mime:mime,err:err,discarded:disc});
   vmDock();}
 function recReset(){try{if(REC.capT){clearTimeout(REC.capT);REC.capT=null;}}catch(e){}
@@ -29837,14 +29957,16 @@ function recReset(){try{if(REC.capT){clearTimeout(REC.capT);REC.capT=null;}}catc
 
 // ---- shared STT helper (blob -> text; used by the dock and by standalone dictation) ----
 function voiceTranscribe(blob,mime,session){return new Promise(function(res){
-  if(!blob||blob.size<1800){res('');return;}                          // too small to be speech -> don't bill Deepgram
+  if(!blob||blob.size<1800){try{vmTrace('stt-skip',{size:(blob&&blob.size)||0,why:'too-small'});}catch(e){}res('');return;}   // too small to be speech -> don't bill Deepgram
   var fr=new FileReader();fr.onloadend=function(){var b64=(String(fr.result||'').split(',')[1])||'';
-    if(!b64){res('');return;}
+    if(!b64){try{vmTrace('stt-skip',{why:'no-b64'});}catch(e){}res('');return;}
+    try{vmTrace('stt-start',{size:blob.size,mime:(mime||'audio/webm').split(';')[0]});}catch(e){}
     fetch('/api/voice/dictate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:b64,mime:(mime||'audio/webm').split(';')[0],session:session||''})})
       .then(function(r){return r.json();}).then(function(r){
-        if(r&&r.ok){res((r.text||'').trim());return;}
+        if(r&&r.ok){try{vmTrace('stt-ok',{chars:((r.text||'').trim().length)});}catch(e){}res((r.text||'').trim());return;}
+        try{vmTrace('stt-fail',{err:((r&&r.error)||'?')});}catch(e){}
         vcToast((/corrupt|unsupported|Bad Request|no audio/i.test((r&&r.error)||''))?'Didn\'t catch that — try again.':('Transcribe: '+((r&&r.error)||'?')),3500);res('');
-      }).catch(function(){vcToast('Transcribe failed',3000);res('');});
+      }).catch(function(){try{vmTrace('stt-fail',{err:'network'});}catch(e){}vcToast('Transcribe failed',3000);res('');});
   };fr.readAsDataURL(blob);});}
 
 // ---- reply routing: your reply ALWAYS goes to the session ON YOUR SCREEN (captured at Talk-tap) ----
@@ -29877,8 +29999,10 @@ async function vmRecDone(res){
   // DELIVER -- a successfully-transcribed message is NEVER dropped just because voice-mode toggled during a long
   // transcription. It's also persisted server-side (Recent dictations) as a backstop. (bugfix: two lost messages)
   if(!res.target){vcToast('No session was open — transcript saved (Voice ▸ Recent dictations)',6000);vmDock();return;}
-  try{await fetch('/api/voice/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:res.target,text:text})});}
-  catch(e){vcToast('Send failed — transcript saved, recover it in Voice ▸ Recent dictations',6000);vmDock();return;}
+  var _sok=false,_serr='';
+  try{var _sr=await(await fetch('/api/voice/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:res.target,text:text})})).json();_sok=!!(_sr&&_sr.ok);_serr=(_sr&&_sr.error)||'';}
+  catch(e){_sok=false;_serr='network';}
+  if(!_sok){try{vmTrace('send-fail',{sess:res.target,err:_serr||'?'});}catch(e){}vcToast('“'+res.target+'” isn\'t running — your message is saved in Voice ▸ Recent dictations',6500);vmDock();return;}   // HONEST: the session was gone/unreachable -> tell you + it's recoverable, don't pretend it sent
   vcToast('Sent to '+res.target+': '+text.slice(0,50),2800);
   try{vmTrace('sent',{sess:res.target,len:(text||'').length});}catch(e){}
   if(!VM.on){vmDock();return;}                                         // voice mode ended mid-transcription -> delivered, just don't start a reply-read cycle
@@ -30265,7 +30389,11 @@ function voiceMic(n){if(REC.state==='recording'){recStop(false);return;}if(REC.s
   try{voiceUnlockAudio();}catch(e){}
   recStart(n,function(res){if(res.err){vcToast(res.err,3200);return;}if(!res.blob)return;
     voiceTranscribe(res.blob,res.mime).then(function(t){if(t)voiceSend(n,t);});});}
-function voiceSend(n,text){return fetch('/api/voice/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,text:text})}).then(function(){vcToast('Sent: '+text.slice(0,60),3000);}).catch(function(){vcToast('Send failed',3000);});}
+function voiceSend(n,text){try{vmTrace('send-req',{sess:n||'',len:(text||'').length});}catch(e){}
+  return fetch('/api/voice/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,text:text})}).then(function(r){return r.json();}).then(function(r){
+    if(r&&r.ok){try{vmTrace('send-ok',{sess:n||''});}catch(e){}vcToast('Sent: '+text.slice(0,60),3000);}
+    else{try{vmTrace('send-fail',{sess:n||'',err:((r&&r.error)||'?')});}catch(e){}vcToast('“'+n+'” isn\'t running — your message is saved in Voice ▸ Recent dictations',6000);}   // HONEST: never claim "Sent" for a message the server couldn't deliver
+  }).catch(function(){try{vmTrace('send-fail',{sess:n||'',err:'network'});}catch(e){}vcToast('Send failed — saved in Voice ▸ Recent dictations',5000);});}
 
 // ---- hold-to-talk hotkey (backtick) — desktop, when focus isn't in an input or the terminal iframe ----
 document.addEventListener('keydown',function(e){if(e.key!=='`'||e.repeat||e.metaKey||e.ctrlKey||e.altKey)return;var t=e.target;if(t&&(/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName||'')||t.isContentEditable))return;
@@ -32327,9 +32455,25 @@ function stageShow(name){
   if(typeof sbPoll==='function') sbPoll();              // repaint dock .up + clear this tile's gold now
   try{if(window.VQ&&VQ.mode){voiceAutoEnroll(name);voiceDockRefresh();}}catch(e){}   // voice mode: opening a session auto-joins it + the dock follows you (Talk targets what's on screen)
 }
+// iOS pinch-zoom trap fix: the terminal iframe captures touch, so a page that got pinch-zoomed in the
+// Projects/tree lens (where zoom is deliberately allowed to tap tiny controls) stays zoomed with no way
+// back once the Stage terminal is up. Momentarily clamp the PAGE viewport to maximum-scale=1 (forces iOS
+// to snap the visual zoom back to 1), then restore the pinch-allowing base so Projects stays zoomable.
+function resetPinchZoom(){
+  try{
+    if(!wkMobile())return;   // desktop never needs this and must never lose zoom
+    var m=document.querySelector('meta[name="viewport"]'); if(!m)return;
+    if(resetPinchZoom._base===undefined)resetPinchZoom._base=m.getAttribute('content')||'width=device-width,initial-scale=1';
+    m.setAttribute('content','width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no');
+    void document.documentElement.offsetHeight;   // force reflow so iOS applies the clamp -> snaps zoom to 1
+    clearTimeout(resetPinchZoom._t);
+    resetPinchZoom._t=setTimeout(function(){ try{ m.setAttribute('content',resetPinchZoom._base||'width=device-width,initial-scale=1'); }catch(_){} },350);   // restore -> Projects can pinch again
+  }catch(_){}
+}
 function stageOpen(name){
   if(!wkMobile()){ if(typeof openInSessions==='function')openInSessions(name); return; }   // desktop: unchanged
   var st=document.getElementById('stage'); if(!st)return;
+  resetPinchZoom();   // snap visual zoom back to 1 on every mobile session-open (else the terminal traps a zoomed page)
   if(!STG.open){ try{ history.pushState({cfStage:1},''); }catch(_){}
     STG.open=true; document.body.classList.add('cf-stage-open'); st.classList.add('on'); stageHeadWire(); stageKbdWire(); }
   stageShow(name);

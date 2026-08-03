@@ -3,6 +3,13 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.232 -- 2026-08-03  (Mobile pinch-zoom trap fixed; voice delivery tracing; handoff can never strand a session at $HOME; drift popups off by default -> agent-driven)
+
+- **Mobile — iOS pinch-zoom trap fixed** (device-verified): pinch-zooming Projects to tap a tiny control, then opening a session, left you zoomed IN behind the terminal (which captures touch, so pinch-OUT is dead). `resetPinchZoom()` on the mobile session-open choke point (`stageOpen`) momentarily clamps the PAGE viewport to `maximum-scale=1` to snap iOS back to scale 1, then restores the pinch-allowing base so Projects stays zoomable.
+- **Voice — real delivery tracing**: a spoken message now records its ACTUAL async delivery outcome (ok / drop / timeout, with the reason) plus STT in/out and background auto-enroll, so a voice send is never a silent black hole.
+- **Warm transfer / launch hardening**: `launch()` clamps a bad or nonexistent working dir to the project root -- a wrong `--to` (e.g. `mobile` instead of `command-center/mobile`) can never again silently strand a session at `$HOME` (wrong cwd, wrong voice label, broken cc-* scope resolution). `handoff_propose` now resolves a bare scope leaf to its real module rel via `_resolve_scope()` and HARD-FAILS an unknown scope (with candidates) instead of launching into nowhere.
+- **Drift -> agent-driven**: the server-side auto "this drifted -- move it?" proposals/popups are now **OFF by default** (`cc.config drift_sweep`, new Context toggle). They were frequently wrong and read as nagging. Drift-handling now lives with the agent: it notices genuine topic drift, raises it **softly and conversationally**, and offers a warm transfer to an existing home or a newly-created one -- never a demand; a declined move is final.
+
 ## 0.99.231 -- 2026-08-01  (Sessions taskbar: Center is the default alignment on desktop)
 The desktop taskbar now defaults to CENTER when no per-device preference is stored (`cc_sb_align` unset ->
 'center'). Anyone who explicitly chose Left keeps Left; mobile stays left-aligned regardless via the
