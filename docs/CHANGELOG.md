@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.234 -- 2026-08-04  (Account-autopilot gets a RELIABLE actuator: optional browser-driven OAuth switch)
+
+- `account_switch_verified` can now switch the live login by driving a FRESH OAuth login (browser) instead of
+  restoring a keychain snapshot (which rotates / goes stale). Opt-in per NODE via `cc.config account_switch_cmd`
+  (`<cmd> <email>`; must exit 0 only if the login actually became `<email>`, and leave it UNCHANGED on failure —
+  a partial OAuth never writes tokens, so it can never strand a login). Unset on other nodes -> unchanged
+  keychain-snapshot behavior (backward-compatible; inert fleet-wide). The autopilot loop, verify+rollback,
+  health ledger, and mode toggle are untouched — they just drive a switch that doesn't go stale.
+- hptuners node ships the actuator: `command-center/Usage/account-switcher/` (`cc-switch <account>`) — node-local
+  (NOT a framework_path; needs that node's Chrome profiles + screen-sharing setup). OCR (Vision) + dark-button
+  detector locate the Authorize button; the click goes through the local screen-sharing input path because
+  Anthropic's OAuth buttons reject synthetic clicks; a self-attached display makes it work while unattended.
+
 ## 0.99.233 -- 2026-08-04  (Warm-transfer brief: hand off = a new SESSION via cc-handoff, NEVER the Agent/subagent tool)
 
 - **Handoff mechanism disambiguation.** Agents correctly sense WHEN to hand off but were reaching for the wrong tool: asked to "hand it to an agent in the pipeline folder", a session spawned a Claude Code **subagent** (ephemeral sub-work that returns in-place) instead of running `cc-handoff` to open a real, separate, scoped **session** the operator is taken to. Both launch briefs now spell out the distinction unmissably: `_handoff_authority` (the drift/warm-transfer brief) leads with a "#1 mistake" MECHANISM block -- 'hand off / hand it to an agent in <folder> / take me to <scope>' ALWAYS = `cc-handoff go|propose --to <full-rel>` (opens/continues a scoped session; screen follows), NEVER the Agent tool (which doesn't move the operator, doesn't create a home, dies with the session); and the universal `_system_brief` CLAUDE-CODE-POWERS line now ends with the same rule so every session (not just scoped ones) gets it. Also reminds: pass the FULL module rel (e.g. 'FM Scraper/1.00'), keep the --summary as specific as possible, and you can keep working after handing off.

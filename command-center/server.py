@@ -4444,6 +4444,13 @@ def set_account_autopilot(mode):
 AUTO_IDLE_SEC = int(CC.get("autopilot_idle_sec") or 300)         # require this much idle before auto-switching
 AUTO_COOLDOWN_SEC = int(CC.get("autopilot_cooldown_sec") or 1800)# min seconds between auto-switches (anti-flap)
 AUTO_FRESH_SEC = int(CC.get("autopilot_fresh_sec") or 3600)      # the pick's /usage reading must be fresher than this
+# Optional per-NODE actuator: a command that switches the live login by driving a FRESH OAuth login
+# (browser), instead of restoring a keychain snapshot (which rotates/goes stale). Node-specific
+# (needs that node's browser-profile + GUI setup), so it's opt-in via cc.config and unset on other nodes.
+# Contract: `<cmd> <email>` performs the switch and exits 0 only if the login actually became <email>;
+# on any failure it MUST leave the login unchanged (a partial OAuth never writes tokens). See
+# command-center/Usage/account-switcher/ (cc-switch).
+ACCT_SWITCH_CMD = (CC.get("account_switch_cmd") or "").strip() or None
 def _acct_autopilot_loop():
     """Auto-switch the live login to the recommended pick -- but ONLY when EVERY safety gate passes:
       - this macOS user is in 'auto' AND the verify-then-rollback ledger is auto_proven (>=SWITCH_PROOF_N good)
@@ -4509,9 +4516,22 @@ def account_switch_verified(target, by="manual"):
     tgt_email = rec.get("email") or target
     if prev_email and tgt_email and prev_email == tgt_email:
         return {"ok": True, "noop": True, "verified": True, "email": tgt_email, "note": "already live"}
-    if not _kc_write(rec.get("blob"), rec.get("account")):
-        _switch_health_log(prev_email, tgt_email, False, by, "write", "keychain write failed")
-        return {"ok": False, "error": "keychain write failed (login not changed)"}
+    if ACCT_SWITCH_CMD:
+        # Reliable path: drive a FRESH OAuth login for tgt_email. A partial/failed run leaves the login
+        # UNCHANGED (OAuth only writes tokens on a successful callback) -> safe, no rollback needed.
+        try:
+            cp = subprocess.run([ACCT_SWITCH_CMD, tgt_email], capture_output=True, text=True, timeout=200)
+        except Exception as e:
+            _switch_health_log(prev_email, tgt_email, False, by, "switch-cmd", str(e)[:140])
+            return {"ok": False, "error": "browser switch command failed (login unchanged): " + str(e)[:140]}
+        if _current_email() != tgt_email:                 # did not land -> login still prev (safe)
+            tail = ((cp.stdout or "") + (cp.stderr or ""))[-180:]
+            _switch_health_log(prev_email, tgt_email, False, by, "switch-cmd", tail)
+            return {"ok": False, "error": "browser switch did not land (login unchanged): " + tail}
+    else:
+        if not _kc_write(rec.get("blob"), rec.get("account")):
+            _switch_health_log(prev_email, tgt_email, False, by, "write", "keychain write failed")
+            return {"ok": False, "error": "keychain write failed (login not changed)"}
     time.sleep(1.0)
     live_now = _current_email(); verified = False; werr = None; windows = None
     authed = False
