@@ -5034,30 +5034,74 @@ def _fit_origin(xs, ys):
     mx = sum(xs) / len(xs); ss_tot = sum((x - mx) ** 2 for x in xs) or 1e-9
     return k, max(0.0, 1 - ss_res / ss_tot)
 
+_CALIB_FIT_DAYS = int(CC.get("calib_fit_days") or 14)   # fit on a recency-consistent TIME window, NOT a fixed
+_MIN_CYCLE_SAMPLES = 4                                    # row count -- a fixed count reaches into stale/drifted
+_MIN_CYCLES_PERCYC = 5                                    # data for under-sampled accounts (were unfittable before)
+def _median(v):
+    v = sorted(v); n = len(v)
+    return 0.0 if not n else (v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2.0)
+def _coefvar(v):                                          # coefficient of variation (std/mean) -- cross-cycle stability
+    if not v: return 9.0
+    m = sum(v) / len(v)
+    if m <= 0: return 9.0
+    return (sum((x - m) ** 2 for x in v) / len(v)) ** 0.5 / m
+
 _ACCT_MODEL_CACHE = {"at": 0.0, "data": None}
 def _acct_model_fit(ttl=300):
-    """Per (account, window): fit capacity for each candidate feature, keep the best-R² one. 'ready' once there
-    are enough samples spanning >=2 distinct window instances with a decent fit. Cached."""
+    """Per (account, window): fit the account's hidden capacity (feature value at 100% used).
+      - SESSION (5h): MANY reset cycles, and effective capacity DRIFTS cycle-to-cycle (model-mix -- an Opus-heavy
+        5h hits the limit faster than a Sonnet-heavy one). One global fit across cycles fails (low R²) even though
+        each cycle is a clean line -> fit capacity PER CYCLE, take the MEDIAN, and choose the feature whose
+        per-cycle capacity is most STABLE (lowest coefficient of variation). This rescues 5h windows a single
+        global fit can't (pooled R² ~0.3 -> per-cycle ~0.99).
+      - WEEKLY: only a handful of cycles in the horizon -> a POOLED recent fit is better (per-cycle would thrash).
+    Both fit ONLY on the last _CALIB_FIT_DAYS days -- the token->% relationship drifts as Anthropic tunes limits,
+    so a fixed row count (which reaches further back in time for under-sampled accounts) poisons the fit. Cached."""
     now = time.time()
     if _ACCT_MODEL_CACHE["data"] is not None and now - _ACCT_MODEL_CACHE["at"] < ttl:
         return _ACCT_MODEL_CACHE["data"]
+    cut = now - _CALIB_FIT_DAYS * 86400
     groups = {}
-    for r in _acct_calib_load():
+    for r in _acct_calib_load(40000):
         if not (1 <= (r.get("pct") or 0) <= 99): continue   # 0% uninformative; 100% is clipped/saturated
+        if (r.get("ts") or 0) < cut: continue               # recency-consistent per account (drift-robust)
         groups.setdefault((r.get("account"), r.get("window")), []).append(r)
     model = {}
     for (acct, win), rs in groups.items():
         if not acct: continue
-        ys = [r["pct"] / 100.0 for r in rs]; wins = len(set(r.get("reset_ts") for r in rs)); best = None
-        for feat in _CALIB_FEATURES:
-            xs = [float(r.get(feat, 0) or 0) for r in rs]
-            if not any(xs): continue
-            k, r2 = _fit_origin(xs, ys)
-            if k is None: continue
-            if best is None or r2 > best["r2"]: best = {"feature": feat, "capacity": k, "r2": round(r2, 3)}
+        bycyc = {}
+        for r in rs: bycyc.setdefault(r.get("reset_ts"), []).append(r)
+        cyc = [crs for crs in bycyc.values() if len(crs) >= _MIN_CYCLE_SAMPLES]
+        best = None
+        if win == "session" and len(cyc) >= _MIN_CYCLES_PERCYC:      # PER-CYCLE, stability-selected feature
+            for feat in _CALIB_FEATURES:
+                caps, r2s = [], []
+                for crs in cyc:
+                    k, r2 = _fit_origin([float(r.get(feat, 0) or 0) for r in crs], [r["pct"] / 100.0 for r in crs])
+                    if k: caps.append(k); r2s.append(r2)
+                if len(caps) < _MIN_CYCLES_PERCYC: continue
+                mr2 = _median(r2s)
+                if mr2 < 0.5: continue
+                cv = _coefvar(caps)
+                if best is None or cv < best["cv"]:
+                    best = {"feature": feat, "capacity": _median(caps), "r2": round(mr2, 3), "cv": round(cv, 2),
+                            "cycles": len(caps), "mode": "per-cycle"}
+            if best:
+                best.update({"n": len(rs), "windows": len(bycyc),
+                             "ready": best["cycles"] >= _MIN_CYCLES_PERCYC and best["r2"] >= 0.55 and best["cv"] <= 0.6})
+        if best is None:                                             # POOLED (weekly, or a session too new for cycles)
+            ys = [r["pct"] / 100.0 for r in rs]; wins = len(bycyc)
+            for feat in _CALIB_FEATURES:
+                xs = [float(r.get(feat, 0) or 0) for r in rs]
+                if not any(xs): continue
+                k, r2 = _fit_origin(xs, ys)
+                if k is None: continue
+                if best is None or r2 > best["r2"]:
+                    best = {"feature": feat, "capacity": k, "r2": round(r2, 3), "cv": None, "mode": "pooled"}
+            if best:
+                best.update({"n": len(rs), "windows": wins,
+                             "ready": (len(rs) >= 6 and wins >= 2 and best["r2"] >= 0.55)})
         if best:
-            best.update({"n": len(rs), "windows": wins,
-                         "ready": (len(rs) >= 6 and wins >= 2 and best["r2"] >= 0.55)})
             model.setdefault(acct, {})[win] = best
     _ACCT_MODEL_CACHE.update({"at": now, "data": model})
     return model

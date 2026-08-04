@@ -3,7 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
-## 0.99.234 -- 2026-08-04  (Account-autopilot gets a RELIABLE actuator: optional browser-driven OAuth switch)
+## 0.99.235 -- 2026-08-04  (Limit-model: per-cycle capacity for 5h windows + recency-window fit -> all windows calibrate)
+
+- The account limit-model (`_acct_model_fit`) got two fixes so under-calibrated windows converge:
+  (1) **5-hour (session) windows now fit capacity PER RESET CYCLE and take the median**, choosing the feature
+  whose per-cycle capacity is most STABLE (lowest coefficient of variation). The effective 5h budget drifts
+  cycle-to-cycle (model-mix), so one global fit failed (R² ~0.3) even though each cycle is a clean line; per-cycle
+  fixes it (R² ~0.99). Weekly windows keep the pooled recent fit (too few cycles for per-cycle).
+  (2) **Fit on the last N days (`calib_fit_days`, default 14), not a fixed row count** — the token->% relationship
+  drifts as limits are tuned, so a fixed row count reaches into stale data for under-sampled accounts and poisons
+  their fit. Time-windowing makes every account recency-consistent.
+- Net: 5h + weekly windows across all accounts move from "calibrating" to READY, unlocking trustworthy
+  predicted-live-% for the autopilot recommendation. Companion node-local collector (hptuners
+  `Usage/calib/`) densely samples the live account while active to trace the fast 5h curve.
 
 - `account_switch_verified` can now switch the live login by driving a FRESH OAuth login (browser) instead of
   restoring a keychain snapshot (which rotates / goes stale). Opt-in per NODE via `cc.config account_switch_cmd`
