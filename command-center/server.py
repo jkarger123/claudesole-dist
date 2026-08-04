@@ -8483,7 +8483,11 @@ def roster_text():
                 "(_agent_run: a scoped expert -- code-reviewer/security-auditor/incident-scanner/... -- as a callable "
                 "function that returns {result,cost,ms}); reach for a DYNAMIC WORKFLOW when a task needs MANY agents to "
                 "be comprehensive or confident (say 'ultracode' or ask to use the Workflow tool). Full when/why decision "
-                "guide: docs/CLAUDE_CODE_REFERENCE.md sec 14.")
+                "guide: docs/CLAUDE_CODE_REFERENCE.md sec 14. NOTE -- these subagents/workflows do sub-work INSIDE this "
+                "session and return their result to YOU; they are NOT a handoff. To HAND OFF / route a topic to another "
+                "folder or scope (open a real, separate SESSION the operator is taken to), use `cc-handoff go|propose "
+                "--to <scope>` -- NEVER the Agent/subagent tool. 'Hand it to an agent in <folder>' = a scoped session "
+                "there via cc-handoff.")
     bits.append("TO-DO: if you spot a task the operator should do (or a date they should put on their calendar), "
                 "propose it by running:  bash " + os.path.join(CC_HOME, "command-center", "cc-task") + " \"<short task>\""
                 "  -- it lands as a SUGGESTION in their Tasks tab for them to approve (never auto-added).")
@@ -12478,7 +12482,14 @@ def _session_pending_question(name, pane=None):
     # is this the FINAL 'submit your answers' step of a multi-part question? ("1. Submit answers  2. Cancel")
     submit_i = next((i for i, o in enumerate(opts) if re.match(r"submit\b", o["label"], re.I)), -1)
     is_submit = submit_i >= 0 and any(re.match(r"(cancel|keep|review|edit|no\b|go back)", o["label"], re.I) for o in opts)
-    return {"tool_id": "pane", "questions": [{"question": qtext, "header": "", "multiSelect": False,
+    # MULTI-SELECT detection (#3): a multi-select picker adds a "space to select/toggle" hint in its footer; a
+    # single-select one never does. This is a conservative, low-false-positive signal (single-select footer is
+    # "Enter to select · ↑/↓ to navigate · Esc to cancel" -- no "space"). We don't try to DRIVE the checkboxes by
+    # keystroke (the pane format isn't reliable enough to toggle the right boxes); the client instead routes a
+    # multi-select answer as a free-text message so the agent still gets your intent -- never a wrong auto-pick.
+    _footer = " ".join(lines[foot_i:foot_i + 2])
+    multi = bool(re.search(r"\bspace\b", _footer, re.I))
+    return {"tool_id": "pane", "questions": [{"question": qtext, "header": "", "multiSelect": multi,
             "options": opts, "submit_index": (submit_i if is_submit else -1)}]}
 
 _ORDINALS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
@@ -12497,7 +12508,10 @@ def _question_speech(sess, q):
             line = "%s: %s." % (_ORDINALS[i] if i < len(_ORDINALS) else str(i + 1), lab)
             if desc: line += " " + desc + ("" if desc.endswith((".", "!", "?")) else ".")
             parts.append(line)
-        parts.append("Say the number, the option, or your own answer.")
+        if q.get("multiSelect"):
+            parts.append("This one takes multiple answers. Say all your picks and I'll pass them along, or choose on screen.")
+        else:
+            parts.append("Say the number, the option, or your own answer.")
     return " ".join(parts)
 
 def _answer_question(session, index, num_options, text=""):
@@ -12605,7 +12619,7 @@ def _vq_save(d): save(VOICE_QUEUE_FILE, d)
 def _vq_fp(sess):
     t = _session_last_assistant(sess)
     return hashlib.sha1(t.encode("utf-8", "ignore")).hexdigest()[:16] if t else ""
-def vq_enroll(session, on):
+def vq_enroll(session, on, present=True):
     if not session: return {"ok": False, "error": "no session"}
     with _VQ_LOCK:
         d = _vq_load(); en = d.setdefault("enrolled", {}); q = d.setdefault("queue", [])
@@ -12613,7 +12627,9 @@ def vq_enroll(session, on):
             (d.setdefault("muted", {})).pop(session, None)   # explicit enroll un-mutes
             fp = _vq_fp(session); done = _session_finished(session) and not _pane_busy(session)
             en[session] = {"seen_fp": fp}
-            if fp and done:   # already FINISHED its turn with something to say -> present it right away
+            if present and fp and done:   # already FINISHED its turn with something to say -> present it right away
+                # present=False (the mass enroll-on-voice-toggle) SKIPS this: a session already finished when you flipped
+                # voice on is baselined (seen_fp set) but NOT queued, so only NEW completions surface -- no startup burst (#4)
                 q[:] = [x for x in q if x.get("session") != session]
                 q.append({"session": session, "fp": fp, "scope": (_session_scope(session) or ""), "ts": int(time.time())})
             # still working (or mid-task) -> baseline seen_fp set; the watcher enqueues it ONLY when it truly FINISHES
@@ -13749,10 +13765,20 @@ def _handoff_authority(subject=None):
             "may be drifting toward <new topic>. To keep things tidy I'd normally hand you to the right home for that "
             "-- it looks like <existing folder> may already fit; want me to take you there? If that's not the right "
             "place we can pick a better one, or if you'd rather just keep going here, say so and I'll stay put.\" "
+            "!! MECHANISM -- READ THIS, it is the #1 mistake: 'hand off', 'hand it/me to an agent in <folder>', 'take "
+            "me to <scope/area>', 'move this to the pipeline' ALWAYS means `cc-handoff` -- which opens (or resumes) a "
+            "REAL, separate, scoped SESSION in that folder that the OPERATOR is taken to (their screen follows). It is "
+            "NOT the Claude Code Agent / subagent tool. A subagent runs sub-work INSIDE your current session and "
+            "returns its result to YOU -- it does not move the operator, does not create a scoped home, is invisible in "
+            "the dashboard, and its memory dies with your session. So when the operator says 'hand it to an agent in "
+            "the pipeline folder', they mean a SESSION there -> you MUST run `cc-handoff`, NEVER the Agent tool. (Use "
+            "the Agent tool only for parallel helper work you will synthesize yourself, never to 'hand off' a topic.) "
             "THREE outcomes, all fine: (a) they say go -> run `cc-handoff go --to <rel> --goal '<what they now need>' "
-            "--summary '<where we are + context>'` and it takes them there already briefed; if NO existing home fits, "
-            "`--to new` CREATES one (front-door style, next to the closest area) -- you can make them a home, you don't "
-            "need one to exist. Use `cc-handoff propose ...` instead if you'd rather they confirm with one click. "
+            "--summary '<where we are + context, AS SPECIFIC as possible>'` (rel = the FULL module path, e.g. "
+            "'FM Scraper/1.00', not a bare leaf) and it opens/continues that scoped session already briefed; if NO "
+            "existing home fits, `--to new` CREATES one (front-door style, next to the closest area) -- you can make "
+            "them a home, you don't need one to exist. Use `cc-handoff propose ...` instead if you'd rather they "
+            "confirm with one click. After you hand off, you can keep working on whatever ELSE the operator asked for. "
             "(b) they want a different place -> discuss, then hand off there. (c) they want to stay -> DROP IT "
             "immediately, keep working right here, and do NOT raise it again for THIS topic. Only bring drift up again "
             "if the conversation LATER shifts to a genuinely DIFFERENT new topic. Small digressions are fine -- only "
@@ -19421,6 +19447,16 @@ class H(BaseHTTPRequestHandler):
             _voice_dbg({"ev": "send", "sess": sess, "len": len(txt), "exists": _exists})
             if not _exists:
                 return self._s(200, json.dumps({"ok": False, "error": "session not running", "saved": True}))
+            # TALK PAST A QUESTION: if a multiple-choice picker is blocking the session and you spoke a free-form
+            # message (not a menu pick), dismiss the picker first so your words land as a real message instead of
+            # being typed into the picker's filter. This is what unblocks "the agent asked a question and now voice
+            # won't let me just TALK to it" -- a pending picker used to capture every dictation as a (mis-matched) answer.
+            if body.get("past_question"):
+                try:
+                    if _session_pending_question(sess):
+                        sh([TMUX, "send-keys", "-t", sess, "Escape"]); time.sleep(0.4)
+                        _voice_dbg({"ev": "past-question", "sess": sess})
+                except Exception: pass
             _mesh_deliver(sess, txt, voice=True)   # voice=True -> the worker traces the ACTUAL delivery outcome to the voice log
             try: vq_touch(sess)   # baseline this session's current message so the queue watcher enqueues the REPLY when it lands
             except Exception: pass
@@ -19454,7 +19490,7 @@ class H(BaseHTTPRequestHandler):
             _voice_dbg({"ev": "answer", "sess": sess, "text_head": ("option#" + str(idx) if idx is not None else ("Other: " + text[:80]))})
             return self._s(200, json.dumps({"ok": bool(ok)}))
         if u.path == "/api/voice/enroll":   # VOICE queue: add/remove a session from the attention queue
-            return self._s(200, json.dumps(vq_enroll(body.get("session", ""), bool(body.get("on", True)))))
+            return self._s(200, json.dumps(vq_enroll(body.get("session", ""), bool(body.get("on", True)), present=bool(body.get("present", True)))))
         if u.path == "/api/voice/queue-ack":   # VOICE queue: this session was presented -> drop it from the queue
             return self._s(200, json.dumps(vq_ack(body.get("session", ""))))
         if u.path == "/api/voice/mute":     # VOICE: per-session opt-out
@@ -30008,7 +30044,11 @@ async function vmRecDone(res){
   if(!VM.on){vmDock();return;}                                         // voice mode ended mid-transcription -> delivered, just don't start a reply-read cycle
   if(VM.floor){vmAck(VM.floor.session);VM.floor=null;}                // you replied -> the floor item is dealt with
   VM.await=res.target;VM.readNote='';
-  try{var b=await(await fetch('/api/voice/state?session='+encodeURIComponent(res.target))).json();VM.awaitBase=(b&&b.msg_fp)||'';}catch(e){VM.awaitBase='';}   // baseline so the fast-poll only fires on a NEW reply
+  // Baseline the await on the fp you last actually HEARD (VM.read), not the current last-assistant fp. If you fire off
+  // a SECOND message before the first reply was presented, using the current fp would baseline AWAY that unheard first
+  // reply (it becomes == base, so 'changed' is false and it's never read). Anchoring to what you've heard means any
+  // reply you haven't heard -- the first one AND the new one -- still fires. (#5: rapid double-send dropped a reply.)
+  try{var b=await(await fetch('/api/voice/state?session='+encodeURIComponent(res.target))).json();VM.awaitBase=VM.read[res.target]||((b&&b.msg_fp)||'');}catch(e){VM.awaitBase=VM.read[res.target]||'';}
   try{vmTrace('await-armed',{sess:res.target,base:(VM.awaitBase||'').slice(0,8)});}catch(e){}   // now waiting for THIS session's reply; the fast-poll below fires when msg_fp changes
   VM._awKey=null;   // reset the await-poll counter for the new wait
   vmSet('idle');vmPollNow();}                                         // the fast-poll (or the server watcher) presents the REPLY
@@ -30039,8 +30079,8 @@ async function vmPresent(item){var gen=vmGen();
     if(r&&r.ok)break;
     if(r&&r.busy){try{vmTrace('present-skip',{sess:item.session,why:'busy'});}catch(e){}VM.floor=null;VM.readNote='';vmSet('idle');return;}   // it started working again -> don't read a mid-step msg; the self-cleaning queue drops it until it truly finishes
     if(r&&r.empty){vmSkipEmpty(item);return;}                         // EMPTY is first-class: silent skip, NO retry, nothing spoken
-    if(timedout){try{vmTrace('present-timeout',{sess:item.session,tries:tries});}catch(e){}VM.readNote='reading is slow — tap the name to view it, or just reply';vmSet('yourturn');return;}   // NO-HANG: TTS render took too long -> don't freeze
-    tries++;if(tries>2){try{vmTrace('present-skip',{sess:item.session,why:'failread'});}catch(e){}VM.readNote='couldn\'t read aloud — tap the name to view it';vmSet('yourturn');return;}
+    if(timedout){try{vmTrace('present-timeout',{sess:item.session,tries:tries});}catch(e){}VM._presentFail=VM._presentFail||{};VM._presentFail[item.session]=item.fp||'';VM.readNote='reading is slow — tap the name to view it, or just reply';vmSet('yourturn');return;}   // NO-HANG: TTS render took too long -> don't freeze (mark this fp failed so the poller doesn't re-request it in a loop)
+    tries++;if(tries>2){try{vmTrace('present-skip',{sess:item.session,why:'failread'});}catch(e){}VM._presentFail=VM._presentFail||{};VM._presentFail[item.session]=item.fp||'';VM.readNote='couldn\'t read aloud — tap the name to view it';vmSet('yourturn');return;}
     VM.readNote='retrying ('+tries+')';vmDock();
     await new Promise(function(x){setTimeout(x,2000);});
     if(gen!==VM.gen)return;
@@ -30049,7 +30089,7 @@ async function vmPresent(item){var gen=vmGen();
   vmMarkRead(item.session,r.fp||'');VM.lastAudio=r.file;VM.readNote='';
   vmSet('speaking');
   voicePlay(r.file,function(){if(gen!==VM.gen)return;vmSet('yourturn');});}
-function vmMarkRead(sess,fp){VM.read[sess]=fp||'';vmAck(sess);}   // heard it -> remember (per session) AND drop it from the waiting queue so it can never re-present
+function vmMarkRead(sess,fp){VM.read[sess]=fp||'';try{if(VM._presentFail)delete VM._presentFail[sess];}catch(e){}vmAck(sess);}   // heard it -> remember (per session), clear any prior failed-read marker, AND drop it from the waiting queue so it can never re-present
 // ---- MULTIPLE-CHOICE by voice: read the question + options aloud, you answer by voice, it picks the option ----
 async function vmPresentQuestion(item,gen){var s=item.session;
   var qd=null;try{qd=await(await fetch('/api/voice/question?session='+encodeURIComponent(s))).json();}catch(e){}
@@ -30103,7 +30143,33 @@ function voiceAnswerMode(){try{var m=localStorage.getItem('cc_voice_answer_mode'
 function voiceSay(text,cb){try{voiceUnlockAudio();}catch(e){}
   voiceFetchT('/api/voice/say',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text})},voiceReadTimeoutMs()).then(function(r){return r.json();}).then(function(r){
     if(r&&r.ok){VM.lastAudio=r.file;voicePlay(r.file,cb);}else if(cb)cb();}).catch(function(){if(cb)cb();});}   // timeout/err -> just proceed (don't hang the confirm step)
-async function vmAnswer(text){var fq=VM.floorQ;if(!fq)return;var idx=vmMatchAnswer(text,fq.options);
+// deliver a free-form spoken sentence to a session that's BLOCKED on a question -- dismiss the picker, then send it as
+// a normal message (hardened /api/voice/send path). This is the escape hatch from the "voice won't let me talk while
+// the agent is asking something" trap. On failure the text is preserved in Recent dictations (server safety net).
+function vmSendPastQuestion(sess,text){VM.sending=true;vmDock();
+  try{vmTrace('answer-as-msg',{sess:sess,len:(text||'').length});}catch(e){}
+  return fetch('/api/voice/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:sess,text:text,past_question:true})}).then(function(r){return r.json();}).then(function(r){
+    VM.sending=false;VM.floorQ=null;VM.confirmA=null;
+    if(r&&r.ok){vcToast('Sent to '+sess+': '+text.slice(0,50),3000);if(VM.floor){vmAck(VM.floor.session);}VM.floor=null;VM.await=sess;VM.readNote='';vmSet('idle');vmPollNow();}
+    else{try{vmTrace('send-fail',{sess:sess,err:((r&&r.error)||'?')});}catch(e){}vcToast('“'+sess+'” isn\'t running — your message is saved in Voice ▸ Recent dictations',6000);vmSet('yourturn');}
+  }).catch(function(){VM.sending=false;try{vmTrace('send-fail',{sess:sess,err:'network'});}catch(e){}vcToast('Send failed — saved in Voice ▸ Recent dictations',5000);vmSet('yourturn');});}
+async function vmAnswer(text){var fq=VM.floorQ;if(!fq)return;
+  // STALE-QUESTION GUARD: if the question was already answered OUT OF BAND -- you picked it manually with the arrow
+  // keys in the terminal, or answered on another device -- the picker is gone. Do NOT match this dictation against a
+  // dead question's options (that strands you "answering" forever). Verify it's still pending; if not, clear the answer
+  // state and deliver your words as a normal message. (Bug: manually-answered MC left voice stuck in answer mode.)
+  try{var _pq=await(await fetch('/api/voice/question?session='+encodeURIComponent(fq.session))).json();
+    if(!_pq||!_pq.pending){try{vmTrace('question-gone',{sess:fq.session,where:'answer'});}catch(e){}VM.floorQ=null;VM.confirmA=null;return vmSendPastQuestion(fq.session,text);}}catch(e){}
+  // MULTI-SELECT (#3): we can't reliably toggle the right boxes by keystroke, so deliver your spoken picks as a MESSAGE
+  // (the agent gets your intent) rather than risk a wrong auto-selection. You can also select on screen with Space.
+  if(fq.multiSelect){try{vmTrace('answer-multiselect-as-msg',{sess:fq.session});}catch(e){}VM.floorQ=null;VM.confirmA=null;return vmSendPastQuestion(fq.session,text);}
+  var idx=vmMatchAnswer(text,fq.options);
+  // ESCAPE THE MENU-TRAP: a real spoken menu answer is SHORT ("option two", "the first one"). A long sentence -- or
+  // anything that doesn't clearly name an option -- means you're TALKING to the agent, not picking. Deliver it as a
+  // MESSAGE (dismissing the blocking picker first) instead of reading your whole sentence back and looping "say yes to
+  // send it". Fixes the case where a session's question captured every dictation (esp. when the options parsed garbled).
+  var _wc=(text||'').trim().split(/\s+/).filter(Boolean).length;
+  if(_wc>12){VM.floorQ=null;VM.confirmA=null;return vmSendPastQuestion(fq.session,text);}   // a whole SENTENCE = you're talking to the agent -> deliver as a message. A SHORT unmatched answer (e.g. "one") is NOT auto-sent -- it falls through to the read-back-&-confirm safety below so a mis-hear can be corrected, never dismissing the question + firing a stray message.
   var a={session:fq.session,idx:idx,text:text,label:(idx>=0)?((fq.options[idx]||{}).label||''):text,options:fq.options,question:fq.question};
   var mode=voiceAnswerMode();
   if(mode==='quiet')return vmSubmitAnswer(a);
@@ -30115,7 +30181,8 @@ async function vmSubmitAnswer(a){var s=a.session;var body={session:s};if(a.idx>=
   try{await fetch('/api/voice/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}catch(e){}
   vcToast(a.idx>=0?('Answered “'+(a.label||'').slice(0,40)+'”'):('Answered: '+(a.text||'').slice(0,40)),3000);
   VM.confirmA=null;VM.floorQ=null;VM.floor=null;VM.await=s;VM.readNote='';   // the session now processes your answer -> wait for its reply
-  try{var b=await(await fetch('/api/voice/state?session='+encodeURIComponent(s))).json();VM.awaitBase=(b&&b.msg_fp)||'';}catch(e){VM.awaitBase='';}
+  try{if(VM.read)delete VM.read[s];}catch(e){}   // #7: forget the question's fp so a later message (or a re-asked identical question) from this session isn't suppressed by dedup
+  try{var b=await(await fetch('/api/voice/state?session='+encodeURIComponent(s))).json();VM.awaitBase=VM.read[s]||((b&&b.msg_fp)||'');}catch(e){VM.awaitBase='';}
   vmSet('idle');vmPollNow();}
 function vmConfirmResponse(text){var a=VM.confirmA;if(!a)return;var t=(text||'').toLowerCase();
   var yes=/\b(yes|yeah|yep|yup|correct|right|send|confirm|do it|sure|good|perfect|that works|go)\b/.test(t);
@@ -30127,12 +30194,26 @@ function vmConfirmResponse(text){var a=VM.confirmA;if(!a)return;var t=(text||'')
     var g=vmGen();vmSet('speaking');voiceSay('You picked, '+a2.label+'. Say yes to send, or another option.',function(){if(g!==VM.gen)return;vmSet('yourturn');if(voiceHandsfreeOn())vmTalk();});return;}
   if(no){VM.confirmA=null;VM.floorQ={session:a.session,options:a.options,question:a.question};   // cancel -> back to answering
     var g2=vmGen();vmSet('speaking');voiceSay('Okay. Say your answer.',function(){if(g2!==VM.gen)return;vmSet('yourturn');if(voiceHandsfreeOn())vmTalk();});return;}
+  var _wc=(text||'').trim().split(/\s+/).filter(Boolean).length;
+  if(idx<0&&_wc>12){VM.confirmA=null;VM.floorQ=null;return vmSendPastQuestion(a.session,text);}   // a whole sentence in confirm-mode = you're talking to the agent -> deliver it, don't loop "say yes"
   var g3=vmGen();vmSet('speaking');voiceSay('Say yes to send '+(a.label||'that')+', or say a different option.',function(){if(g3!==VM.gen)return;vmSet('yourturn');if(voiceHandsfreeOn())vmTalk();});}
 function vmSkipEmpty(item){try{vmTrace('present-skip',{sess:item.session,why:'empty'});}catch(e){}vcToast('Nothing to read from “'+item.session+'” — skipped',2600);
   vmAck(item.session);VM.floor=null;vmSet('idle');}
 
 // ---- the poller: THE one scheduler (server queue -> floor). Runs only while VM.on. Fast while awaiting a reply. ----
 async function vmPoll(){if(!VM.on)return;
+  // SELF-HEAL a stale question: a question was on the floor for a VOICE answer, but it got answered OUT OF BAND
+  // (you picked it manually with the arrow keys, or on another device) -> the picker is gone. Proactively clear the
+  // answer/confirm state so you're not stuck "answering" a dead question -- your next dictation is a normal message.
+  if((VM.floorQ||VM.confirmA)&&REC.state==='idle'&&!VM.sending&&VM.state!=='speaking'){
+    var _qs=(VM.floorQ&&VM.floorQ.session)||(VM.confirmA&&VM.confirmA.session);
+    if(_qs){try{var _qd=await(await fetch('/api/voice/question?session='+encodeURIComponent(_qs))).json();
+      if(!VM.on)return;
+      if(!_qd||!_qd.pending){try{vmTrace('question-gone',{sess:_qs,where:'poll'});}catch(e){}
+        VM.floorQ=null;VM.confirmA=null;try{if(VM.read)delete VM.read[_qs];}catch(e){}   // clear the question dedup too so a later message/re-ask isn't suppressed (#7)
+        if(VM.floor&&VM.floor.session===_qs){vmAck(_qs);VM.floor=null;}VM.readNote='';if(VM.state==='yourturn')vmSet('idle');}
+    }catch(e){}}
+  }
   // FAST PATH: the reply to a message you just SENT by voice -> auto-play (it's a focus interaction you asked for)
   if(VM.state==='idle'&&VM.await&&REC.state==='idle'&&!VM.sending){
     var aw=VM.await;
@@ -30147,6 +30228,8 @@ async function vmPoll(){if(!VM.on)return;
         if(!!st.busy!==VM._awBusy){VM._awBusy=!!st.busy;try{vmTrace('await-busy',{sess:aw,busy:!!st.busy,polls:VM._awN});}catch(e){}}
         if(chg){try{vmTrace('await-fire',{sess:aw,busy:!!st.busy,dedup:!!ded,polls:VM._awN,newfp:(st.msg_fp||'').slice(0,8)});}catch(e){}}
         if(!st.busy&&chg&&!ded){VM.await='';VM._awKey=null;vmPresent({session:aw,fp:st.msg_fp,scope:''});return;}
+        if(!st.busy&&chg&&ded){try{vmTrace('await-dedup-stop',{sess:aw});}catch(e){}VM.await='';VM._awKey=null;}   // #6: the reply is identical to what you already heard -> nothing new to read, STOP waiting (don't fast-poll forever)
+        else if(VM._awN>45){try{vmTrace('await-giveup',{sess:aw,polls:VM._awN});}catch(e){}VM.await='';VM._awKey=null;}   // GIVEUP after ~60s idle: stop spinning the fast-poll; a genuine new completion still routes via the queue watcher below
       }
     }catch(e){try{vmTrace('await-err',{sess:aw});}catch(_){}}
   }
@@ -30155,6 +30238,20 @@ async function vmPoll(){if(!VM.on)return;
   try{voiceMarkTiles();}catch(e){}
   var q=VQ.queue||[],focus=voiceTalkTarget(),floor=VM.floor?VM.floor.session:null;
   vmPruneReady(q);   // forget pre-rendered audio for sessions no longer waiting (acked / started working again)
+  // CONTINUE THE CONVERSATION: the session you're actively engaged with (the current floor) finished AGAIN with a NEW
+  // message while you're in 'yourturn'. Read it. A multi-message turn -- it answers, then follows up (or you send a
+  // reply and it responds) -- must never go silent just because you already heard its PREVIOUS message. The old auto-
+  // play paths both blocked this: branch (2) only fires when state==='idle', and branch (3) explicitly SKIPS the floor
+  // session. That left a back-and-forth's follow-up sitting unread in the queue ("it just stopped reading me"). This
+  // reads the floor session's next message directly (dedup by fp; never while you're talking/recording/answering).
+  if(floor&&VM.state==='yourturn'&&REC.state==='idle'&&!VM.sending&&!VM.floorQ&&!VM.confirmA){
+    var _pf=VM._presentFail||{};   // an fp whose read already TIMED OUT / failed -> do NOT auto-retry it forever (that
+    // was an infinite re-render loop: timeout leaves floor set + VM.read unset, so this branch re-fired every tick).
+    // A genuinely NEW message (different fp) is not in _presentFail, so a real follow-up still auto-reads; a failed one
+    // waits as a tap-to-hear shelf item instead of looping. (The 'reading is slow' render mismatch amplified this.)
+    for(var _c=0;_c<q.length;_c++){if(q[_c].session===floor&&q[_c].fp&&q[_c].fp!==VM.read[floor]&&_pf[floor]!==q[_c].fp){
+      try{vmTrace('floor-continue',{sess:floor,fp:(q[_c].fp||'').slice(0,8)});}catch(e){}vmPresent(q[_c]);return;}}
+  }
   // BACKGROUND pre-render runs ALWAYS (even while you're engaged with another session) so a finished background
   // session is rendered + FLASHING the instant it's done -- tapping it then plays immediately with no wait.
   var canAutoFocus=(VM.state==='idle'&&REC.state==='idle'&&!VM.sending);   // will the focus auto-play THIS tick?
@@ -30326,7 +30423,9 @@ function vPaneSlim(n){var muted=voiceMuted(n);var ready=VM.ready[n];var waiting=
   else {dotcls='idle';label='idle';}
   var talk=muted?'':('<button class="vbar-talk mini" onclick="event.stopPropagation();vPaneTap(\''+esc(n)+'\')" title="Talk to '+esc(n)+' now">Talk</button>');
   var mute='<button class="vbar-mute mini" onclick="event.stopPropagation();voiceMuteToggle(\''+esc(n)+'\')" title="'+(muted?('Un-mute '+esc(n)):('Mute '+esc(n)+' — stop reading just this session'))+'">'+(muted?'unmute':'mute')+'</button>';
-  return '<div class="vbar-strip'+(muted?' muted':'')+'"'+click+'><span class="vbar-dot '+dotcls+'"></span><span class="vbar-nm">'+esc(n)+'</span><span class="vbar-sub">'+label+'</span>'+talk+mute+'</div>';}
+  // Talk button FIRST (bottom-left) so it sits in the SAME spot the big Send button lands when recording -- it never
+  // jumps sides, it just grows in place. Then the status (dot/name/label), then mute on the right.
+  return '<div class="vbar-strip'+(muted?' muted':'')+'"'+click+'>'+talk+'<span class="vbar-dot '+dotcls+'"></span><span class="vbar-nm">'+esc(n)+'</span><span class="vbar-sub">'+label+'</span>'+mute+'</div>';}
 // repaint every pane bar in place (called by vmDock; the single writer principle, extended per-pane)
 function vmPaintPanes(){var bars;try{bars=document.querySelectorAll('.vbar[data-vsess]');}catch(e){return;}if(!bars||!bars.length)return;
   var on=!!(window.VM&&VM.on);try{if(wkMobile())on=false;}catch(e){}
@@ -30365,7 +30464,10 @@ async function voiceModeToggle(){var on=!VM.on;
     voiceDockHide();vcToast('Voice mode off',2000);}
   try{voiceMarkTiles();}catch(e){}try{paintSessTools(window.SESSDATA?SESSDATA.length:null);}catch(e){}try{vmDock();}catch(e){}}   // update the global switch + pane bars in place -- NO full render() (that reloads the terminals)
 async function voiceAutoEnroll(n){if(!n||!VQ.mode||voiceMuted(n)||voiceQueued(n))return;
-  try{var r=await(await fetch('/api/voice/enroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,on:true})})).json();
+  // present:false -> DON'T immediately read a session that was ALREADY finished when you flipped voice on. The switch
+  // promises "read to you WHEN IT FINISHES" -- only NEW completions from now on. Without this, flipping voice on with
+  // several finished panes open dumped all their old messages at you in a burst. (#4)
+  try{var r=await(await fetch('/api/voice/enroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,on:true,present:false})})).json();
     VQ.enrolled=r.enrolled||[];VQ.queue=r.queue||VQ.queue;}catch(e){}vmDock();}
 async function voiceMuteToggle(n){var mute=!voiceMuted(n);try{voiceUnlockAudio();}catch(e){}
   try{var r=await(await fetch('/api/voice/mute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:n,on:mute})})).json();
@@ -30517,9 +30619,10 @@ window.VQ={on:false,mode:false,enrolled:[],muted:[],queue:[],jumpTo:null};
   +'.vbar-dot.wait{background:var(--warn);animation:vdblink 1s steps(1) infinite}.vbar-dot.rdy{background:var(--ok);box-shadow:0 0 8px var(--ok)}.vbar-dot.q{background:var(--accent);box-shadow:0 0 8px var(--accent)}'
   +'.vbar-nm{font-weight:700;color:var(--accent);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:42%}'
   +'.vbar-sub{font-size:11.5px;color:var(--mut);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
-  +'.vbar-talk{opacity:0;transition:opacity .12s;font-size:11px;padding:4px 11px;flex:0 0 auto}'
+  +'.vbar-talk{opacity:1;font-size:11.5px;font-weight:800;letter-spacing:.02em;padding:5px 17px;flex:0 0 auto;background:var(--accent);color:var(--bg-warm);border:none;border-radius:15px;cursor:pointer}'   /* ALWAYS visible: a clear "click to talk" button on every pane the moment voice mode is on -- no hover-to-reveal */
+  +'.vbar-talk:hover{filter:brightness(1.08)}'
   +'.vbar-mute{opacity:.5;transition:opacity .12s;font-size:11px;padding:4px 11px;flex:0 0 auto}'
-  +'.vbar.slim .vbar-strip:hover .vbar-talk,.vbar.slim .vbar-strip:hover .vbar-mute{opacity:1}'
+  +'.vbar.slim .vbar-strip:hover .vbar-mute{opacity:1}'   /* mute stays secondary (hover) -- Talk is the primary, always-on action */
   +'.vbar-strip.muted{opacity:.62}.vbar-strip.muted .vbar-mute{opacity:1}.vbar-dot.muted{background:var(--dim)}'
   +'.vbar .vd-banner{display:flex;align-items:center;gap:9px;min-width:0;padding:6px 9px;border-radius:9px;background:rgba(var(--krgb,var(--accent-rgb)),.14);border:1px solid rgba(var(--krgb,var(--accent-rgb)),.45)}'
   +'.vbar .vd-state{font-weight:900;font-size:13px;letter-spacing:.06em;color:var(--kcol,var(--accent));white-space:nowrap;flex:0 0 auto}'

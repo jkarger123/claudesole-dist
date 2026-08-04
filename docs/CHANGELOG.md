@@ -3,6 +3,10 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.233 -- 2026-08-04  (Warm-transfer brief: hand off = a new SESSION via cc-handoff, NEVER the Agent/subagent tool)
+
+- **Handoff mechanism disambiguation.** Agents correctly sense WHEN to hand off but were reaching for the wrong tool: asked to "hand it to an agent in the pipeline folder", a session spawned a Claude Code **subagent** (ephemeral sub-work that returns in-place) instead of running `cc-handoff` to open a real, separate, scoped **session** the operator is taken to. Both launch briefs now spell out the distinction unmissably: `_handoff_authority` (the drift/warm-transfer brief) leads with a "#1 mistake" MECHANISM block -- 'hand off / hand it to an agent in <folder> / take me to <scope>' ALWAYS = `cc-handoff go|propose --to <full-rel>` (opens/continues a scoped session; screen follows), NEVER the Agent tool (which doesn't move the operator, doesn't create a home, dies with the session); and the universal `_system_brief` CLAUDE-CODE-POWERS line now ends with the same rule so every session (not just scoped ones) gets it. Also reminds: pass the FULL module rel (e.g. 'FM Scraper/1.00'), keep the --summary as specific as possible, and you can keep working after handing off.
+
 ## 0.99.232 -- 2026-08-03  (Mobile pinch-zoom trap fixed; voice delivery tracing; handoff can never strand a session at $HOME; drift popups off by default -> agent-driven)
 
 - **Mobile — iOS pinch-zoom trap fixed** (device-verified): pinch-zooming Projects to tap a tiny control, then opening a session, left you zoomed IN behind the terminal (which captures touch, so pinch-OUT is dead). `resetPinchZoom()` on the mobile session-open choke point (`stageOpen`) momentarily clamps the PAGE viewport to `maximum-scale=1` to snap iOS back to scale 1, then restores the pinch-allowing base so Projects stays zoomable.
