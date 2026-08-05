@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.241 -- 2026-08-05  (Usage: cross-node limit-model capacity fit + multi-node cap flag)
+
+- **Multi-node weekly-capacity under-read fixed.** An account used on >1 store (e.g. Sarah on both hptuners +
+  AFP) had its fitted weekly capacity read artificially LOW: each node's limit model counts only its LOCAL
+  tokens, but the `/usage` % is account-GLOBAL, so fewer-tokens-per-% → a low inferred cap (looked like a
+  smaller plan). New mesh GET `/api/acct-feature` (fleet_share-gated, in `AUTH_MESH_INGRESS`) returns a
+  store's per-account token feature since a timestamp; `_acct_feature_fleet` sums self + peers (deduped by
+  `store_id`, 60s cache, graceful local-only fallback); `_acct_calib_log` uses it for multi-node accounts so
+  NEW calibration rows carry GLOBAL features and the cap converges over `calib_fit_days`. Cross-node work is
+  kept OFF the hot request path (calib/scrape path only; live prediction stays local — the governor anchors
+  to the real scrape %).
+- **Multi-node flag (UI).** `account_windows_all` sets `multi_node`/`burn_sides` from the cached fleet rollup
+  (non-blocking); the Usage fleet card shows "multi-node — weekly cap under-reads" so it isn't mistaken for a
+  smaller plan.
+
 ## 0.99.240 -- 2026-08-05  (Ralph limit-detector false-positive fix + reactive-aware pacing (Phase 1.1))
 
 - **Ralph limit-detector fix (all loops, not gated).** `run_iteration` flagged a "usage/rate limit" (→ 900s

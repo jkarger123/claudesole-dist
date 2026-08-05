@@ -2112,7 +2112,7 @@ def _web_manifest():
 # Peer/machine-to-machine ingress: NOT gated by the operator token (that's a human surface). These are
 # peer surface, protected on their own MESH_TOKEN track, so enabling operator auth on a node never severs
 # the mesh (a peer POSTs here with X-Mesh-Token or nothing, never the operator cookie/bearer).
-AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store", "/api/account-windows-store", "/api/vault-lease", "/api/google-lease", "/api/opnote-recv", "/api/agent-msg-recv", "/api/agent-msg-reply", "/api/agent-directory")
+AUTH_MESH_INGRESS = ("/api/chief-say", "/api/mesh-recv", "/api/mesh-reply", "/api/ccr-submit", "/api/fw-fingerprint", "/api/superadmin-exec", "/api/usage-store", "/api/account-windows-store", "/api/acct-feature", "/api/vault-lease", "/api/google-lease", "/api/opnote-recv", "/api/agent-msg-recv", "/api/agent-msg-reply", "/api/agent-directory")
 
 # Security frame stamped onto EVERY inbound peer message (appended AFTER the literal "[message from X]" so
 # the Stop-hook sender regex still matches). Makes the trust boundary explicit in the message itself -- a
@@ -5046,6 +5046,16 @@ def account_windows_all():
         if ca and any((ca["windows"].get(k) or {}).get("expired") for k in ("session", "week", "week_sonnet")):
             threading.Thread(target=lambda: (_acct_refresh_due(600) and account_windows_refresh()), daemon=True).start()
     except Exception: pass
+    # MULTI-NODE flag: an account whose tokens burn on >1 store has a per-node calibration UNDERCOUNT -- each
+    # node's limit-model only counts the tokens burned locally, but the /usage % is account-GLOBAL, so the fitted
+    # weekly capacity reads artificially low (e.g. an account primarily used on another node). Flag it so the UI
+    # marks the cap as under-reading and the cross-node fit (when peers report) can correct it.
+    try:
+        _fc = _FLEET_CACHE.get("data") or {}; _mn = {a.get("account"): len(a.get("where") or []) for a in (_fc.get("by_account") or [])}
+    except Exception:
+        _mn = {}
+    for a in accounts:
+        a["burn_sides"] = _mn.get(a["email"], 0); a["multi_node"] = bool(a["burn_sides"] > 1)
     info, pick = _acct_recommend(accounts, now)
     for a in accounts:
         a.update(info.get(a["email"], {"status": "no_data", "why": "", "score": -9, "use_next": False}))
@@ -5153,18 +5163,57 @@ def _acct_feature_since(account, since_ts, model_sub=None, log=None):
                 f["output"] += out; f["raw"] += inp + out + cw + cr; f["n"] += 1
     return f
 
+_ACCT_FEAT_FLEET_CACHE = {}                              # (account, since_bucket, model) -> (ts, feature dict)
+def _acct_is_multinode(account):
+    """True if this account's tokens burn on >1 store (per the fleet rollup) -> its per-node capacity fit
+    UNDERCOUNTS (local tokens vs the account-GLOBAL /usage %). Reads the CACHED fleet rollup only -- never
+    triggers a (blocking) mesh pull, so it is safe to call on the hot request path. Populated by the Usage
+    lens's /api/usage-fleet poll + the overseer; false until the cache warms (self-corrects)."""
+    try:
+        fc = _FLEET_CACHE.get("data") or {}
+        for a in (fc.get("by_account") or []):
+            if a.get("account") == account: return len(a.get("where") or []) > 1
+    except Exception: pass
+    return False
+
+def _acct_feature_fleet(account, since_ts, model_sub=None, log=None, ttl=60):
+    """CROSS-NODE feature sum: this store's tokens + every OTHER store's (mesh), so an account used on multiple
+    nodes is fit/predicted against its GLOBAL telemetry -- matching the account-global /usage %. Dedupes by
+    store_id; degrades to local-only when peers are unreachable or don't serve /api/acct-feature. Cached
+    (since_ts is stable within a window, so the peer pull is reused)."""
+    key = (account, int(since_ts), model_sub or ""); now = time.time()
+    c = _ACCT_FEAT_FLEET_CACHE.get(key)
+    if c and now - c[0] < ttl: return dict(c[1])
+    f = _acct_feature_since(account, since_ts, model_sub, log)
+    try:
+        seen = {_store_id()}
+        for p in peers():
+            u = (p.get("url") or "").rstrip("/")
+            if not u: continue
+            qq = u + "/api/acct-feature?account=" + urllib.parse.quote(account) + "&since=" + str(int(since_ts)) + (("&model=" + urllib.parse.quote(model_sub)) if model_sub else "")
+            r = _mesh_get(qq)
+            if isinstance(r, dict) and r.get("ok"):
+                sid = r.get("store_id")
+                if sid in seen: continue
+                seen.add(sid)
+                for k in ("cost", "context", "billable", "output", "raw", "n"): f[k] = f.get(k, 0) + (r.get(k) or 0)
+    except Exception: pass
+    _ACCT_FEAT_FLEET_CACHE[key] = (now, dict(f)); return f
+
 def _acct_calib_log(account, side, windows, now):
-    """Append one calibration row per window: observed % + our cumulative feature-vector since the window start."""
+    """Append one calibration row per window: observed % + our cumulative feature-vector since the window start.
+    For a MULTI-NODE account the feature is summed across the fleet so it matches the account-global /usage %."""
     if not account: return
     log = _acct_log_load(); rows = []
+    mn = _acct_is_multinode(account); featfn = _acct_feature_fleet if mn else _acct_feature_since
     for wkey, w in (windows or {}).items():
         if not w: continue
         pct = w.get("pct"); rts = w.get("resets_ts"); wl = _WIN_LEN.get(wkey)
         if pct is None or not rts or not wl: continue
-        f = _acct_feature_since(account, rts - wl, _WIN_MODEL.get(wkey), log)
+        f = featfn(account, rts - wl, _WIN_MODEL.get(wkey), log)
         rows.append({"ts": int(now), "account": account, "side": side, "window": wkey, "reset_ts": int(rts),
                      "pct": int(pct), "cost": round(f["cost"], 4), "context": f["context"],
-                     "billable": f["billable"], "raw": f["raw"], "nev": f["n"]})
+                     "billable": f["billable"], "raw": f["raw"], "nev": f["n"], "fleet": 1 if mn else 0})
     if not rows: return
     with _ACCT_CALIB_LOCK:
         try:
@@ -5324,9 +5373,12 @@ def _acct_model_view(account, windows_now, now, live=False, log=None):
     am = _acct_model_fit().get(account) or {}
     if not am: return None
     log = log if log is not None else _acct_log_load(); out = {}
+    mn = _acct_is_multinode(account)   # cheap (cached); the field lets the UI flag a multi-node under-read
     for wkey, m in am.items():
-        v = {"feature": m["feature"], "capacity": round(m["capacity"], 4), "r2": m["r2"], "n": m["n"], "ready": m["ready"]}
+        v = {"feature": m["feature"], "capacity": round(m["capacity"], 4), "r2": m["r2"], "n": m["n"], "ready": m["ready"], "multi_node": mn}
         w = (windows_now or {}).get(wkey) or {}; rts = w.get("resets_ts"); wl = _WIN_LEN.get(wkey)
+        # NOTE: live pred/eta stay LOCAL (fast, hot path). The cross-node correction lives in _acct_calib_log
+        # (the scrape path), which feeds the FIT -- the governor anchors to the real scrape %, not pred_pct.
         if live and m.get("ready") and rts and wl and m["capacity"] > 0:
             feat = m["feature"]
             fnow = _acct_feature_since(account, rts - wl, _WIN_MODEL.get(wkey), log)[feat]
@@ -18943,6 +18995,17 @@ class H(BaseHTTPRequestHandler):
             if not _mesh_ingress_ok(self.headers): return self._s(403, json.dumps({"error": "mesh token required"}))
             if not FLEET_SHARE: return self._s(403, json.dumps({"error": "this node does not share usage (fleet_share off)", "store_id": _store_id()}))
             return self._s(200, json.dumps(account_windows_store()))
+        if u.path == "/api/acct-feature":   # peer-to-peer (mesh): this store's per-account token feature since a ts
+            if not _mesh_ingress_ok(self.headers): return self._s(403, json.dumps({"error": "mesh token required"}))
+            if not FLEET_SHARE: return self._s(403, json.dumps({"error": "fleet_share off", "store_id": _store_id()}))
+            _acct = (q.get("account", [""])[0] or "").strip()
+            try: _since = float(q.get("since", ["0"])[0] or 0)
+            except Exception: _since = 0
+            _mdl = (q.get("model", [""])[0] or "") or None
+            if not _acct or _since <= 0: return self._s(400, json.dumps({"error": "account+since required"}))
+            _fe = _acct_feature_since(_acct, _since, _mdl)
+            _fe.update({"ok": True, "store_id": _store_id(), "account": _acct, "since": int(_since)})
+            return self._s(200, json.dumps(_fe))
         if u.path == "/api/backup-status": return self._s(200, json.dumps(backup_status()))
         if u.path == "/api/security":      return self._s(200, json.dumps(security_status()))
         if u.path == "/api/agents":        return self._s(200, json.dumps(agents_list()))
@@ -25307,6 +25370,7 @@ function uxAcctCard(a){
       +'<div class="uxlimiter">'+e2(lim)+'</div>';
   } else if(a.ok){ foot='<div class="uxlimiter" style="opacity:.7">pacing calibrating…</div>'; }
   var lm=uxLmLine(m); if(lm) foot+='<div class="uxlm">'+lm+'</div>';
+  if(a.multi_node) foot+='<div class="uxlm" style="color:var(--warn)" data-tip="This account also burns on another node. Each node\'s limit model counts only its LOCAL tokens, but the /usage % is account-global — so the fitted weekly cap reads low here. The cross-node fit corrects this once peers report.">multi-node — also runs elsewhere; weekly cap under-reads (local tokens vs global %)</div>';
   var act='';
   if(a.active) act='<button class="mini" title="Re-read this account\'s /usage now" onclick="awRefresh(\''+esc(a.email)+'\',this)">↻ refresh</button>';
   else if(!elsewhere && a.in_wallet) act='<button class="mini" title="Switch this machine\'s login to '+esc(a.email)+'" onclick="acctSwitch(\''+esc(a.label||a.email)+'\',\''+esc(a.email)+'\')">▶ switch to this</button>';
