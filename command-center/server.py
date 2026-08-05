@@ -3259,7 +3259,34 @@ def usage_payload(ttl=20):
             d["total"] += ev[2] + ev[3] + ev[4] + ev[5]; d["output"] += ev[3]; d["cost"] += _ev_cost(ev); d["calls"] += 1
         by_account = sorted([v for v in ba.values() if v["total"] > 0], key=lambda x: -x["total"])
         acct_since = (_alog[0].get("ts") if _alog else None)   # when per-account tracking began (for the UI note)
+        # ---- "when usage occurs": (a) hour x weekday matrix (trailing 4 weeks) and (b) a daily calendar
+        #      (last 35 days), each cell carrying total tokens (darkness) AND the DOMINANT Claude account
+        #      that burned them (color), attributed via the per-user account timeline. ----
+        import datetime as _dt
+        _cut4 = now - 28 * 86400
+        heat = [[0] * 24 for _ in range(7)]; _heat_acc = [[{} for _ in range(24)] for _ in range(7)]
+        _CAL = 35; _cal_start = _dt.date.fromtimestamp(now) - _dt.timedelta(days=_CAL - 1)
+        _cal = [{"tok": 0, "acc": {}} for _ in range(_CAL)]
+        for ev, p, slf in evs:
+            ts = ev[0]; tok = ev[2] + ev[3] + ev[4] + ev[5]; ac = _acct_active_at(ts, _alog)
+            if ts >= _cut4:
+                _lt = time.localtime(ts); _d = _lt.tm_wday; _h = _lt.tm_hour
+                heat[_d][_h] += tok; _heat_acc[_d][_h][ac] = _heat_acc[_d][_h].get(ac, 0) + tok
+            _di = (_dt.date.fromtimestamp(ts) - _cal_start).days
+            if 0 <= _di < _CAL:
+                _cal[_di]["tok"] += tok; _cal[_di]["acc"][ac] = _cal[_di]["acc"].get(ac, 0) + tok
+        heat_peak = max((max(r) for r in heat), default=0)
+        heat_acct = [[(max(_heat_acc[d][h].items(), key=lambda kv: kv[1])[0] if _heat_acc[d][h] else None)
+                      for h in range(24)] for d in range(7)]
+        heat_month = []
+        for i, c in enumerate(_cal):
+            dd = _cal_start + _dt.timedelta(days=i)
+            dom = max(c["acc"].items(), key=lambda kv: kv[1])[0] if c["acc"] else None
+            heat_month.append({"date": dd.isoformat(), "dow": dd.weekday(), "day": dd.day, "tok": c["tok"], "acct": dom})
+        heat_month_peak = max((c["tok"] for c in heat_month), default=0)
         data = {"totals": totals, "series": ser, "by_account": by_account, "acct_since": acct_since,
+                "heat": heat, "heat_peak": heat_peak, "heat_acct": heat_acct,
+                "heat_month": heat_month, "heat_month_peak": heat_month_peak,
                 "by_model": sorted([v for v in bm.values() if v["total"] > 0], key=lambda x: -x["total"]),
                 "by_project": sorted([v for v in bp.values() if v["total"] > 0], key=lambda x: -x["total"])[:14],
                 "composition": comp, "calls": len(evs),
@@ -4332,6 +4359,8 @@ PACE_MIN_GAP_S   = float(CC.get("pace_min_gap_s") or 3)        # Ralph inter-ite
 PACE_MAX_GAP_S   = float(CC.get("pace_max_gap_s") or 300)      # Ralph inter-iteration gap at intensity 0 (glide to the cap)
 PACE_MAX_LOOPS   = int(CC.get("pace_max_loops") or 4)          # concurrent Ralph loops allowed at intensity 1 (Phase 2)
 PACE_MIN_LOOPS   = int(CC.get("pace_min_loops") or 1)          # concurrent Ralph loops allowed at intensity 0 (never 0 -> the one loop self-throttles)
+PACE_REACTIVE_RECOVER_S = int(CC.get("pace_reactive_recover_s") or 1800)  # after a GENUINE limit-hit, recover full permission over this long (Phase 1.1)
+_PACE_LIMITHIT = os.path.expanduser("~/.claude/_cc_pace_limithit")        # last genuine reactive limit-hit epoch (written by ralph_runner)
 PACE_ENABLE      = bool(CC.get("pace_enable"))                 # master gate: Ralph within-loop + concurrency pacing (Phases 1-2). default OFF
 PACE_SWITCH      = bool(CC.get("pace_switch"))                 # gate: pacing-driven login switch (Phase 3). default OFF
 ACCT_POLL_LOCKFILE = os.path.expanduser("~/.claude/_cc_acct_poll.lock")    # which instance owns the poll
@@ -4908,6 +4937,20 @@ def _pace_loop_cap_for(intensity):
     it = max(0.0, min(1.0, float(intensity)))
     return max(1, int(round(PACE_MIN_LOOPS + (PACE_MAX_LOOPS - PACE_MIN_LOOPS) * it)))
 
+def _pace_reactive_factor(now=None):
+    """Phase 1.1 reactive-aware pacing. The governor only models the 5h-all + weekly-all windows; if Ralph hits a
+    GENUINE limit (per-model / burst / anything /usage doesn't expose) while those show headroom, that's ground
+    truth the model can't see. The runner stamps `_cc_pace_limithit` on every real limit; this returns a factor in
+    [0,1] that is ~0 right after a hit and recovers linearly to 1 over pace_reactive_recover_s -> effective
+    intensity = intensity * factor, so loops back off after real limit-hits and ease back on their own."""
+    try:
+        now = now or time.time()
+        last = float(open(_PACE_LIMITHIT).read().strip() or 0)
+        if last <= 0 or PACE_REACTIVE_RECOVER_S <= 0: return 1.0
+        return max(0.0, min(1.0, (now - last) / PACE_REACTIVE_RECOVER_S))
+    except Exception:
+        return 1.0
+
 def pace_payload():
     """Read surface for the pacing governor (Phase 0). The live account's CURRENT pace_intensity + forecast,
     computed fresh from the limit model, alongside the persisted per-account snapshots. Ralph (Phases 1+) reads
@@ -4923,16 +4966,24 @@ def pace_payload():
         if os.path.isfile(ACCT_PACING_FILE):
             with open(ACCT_PACING_FILE) as f: saved = json.load(f) or {}
     except Exception: saved = {}
-    # Phase 2 concurrency cap: allowed simultaneous Ralph loops at the current burn permission (None when pacing off
+    # Phase 1.1 reactive penalty: effective intensity = modeled intensity * reactive_factor (~0 right after a real
+    # limit-hit, recovering to 1). Both actuators (the runner's gap/pre-empt via effective_intensity, and the cap)
+    # read this, so a limit the governor can't see still makes loops back off.
+    rf = _pace_reactive_factor(now)
+    base_int = live.get("intensity") if isinstance(live, dict) and live.get("ready") else None
+    eff_int = round(base_int * rf, 3) if base_int is not None else None
+    # Phase 2 concurrency cap: allowed simultaneous Ralph loops at the EFFECTIVE permission (None when pacing off
     # or no ready signal -> uncapped). live_loops = how many are running now (ralph_launch + the supervisor gate on it).
-    loop_cap = _pace_loop_cap_for(live.get("intensity")) if (PACE_ENABLE and isinstance(live, dict) and live.get("ready")) else None
+    loop_cap = _pace_loop_cap_for(eff_int) if (PACE_ENABLE and eff_int is not None) else None
     return {"ok": True, "now": now, "current_email": cur, "live": live, "saved": saved,
             "enabled": PACE_ENABLE, "switch_enabled": PACE_SWITCH,
+            "effective_intensity": eff_int, "reactive_factor": round(rf, 3),
             "loop_cap": loop_cap, "live_loops": _ralph_alive_count(),
             "config": {"target_pct": PACE_TARGET_PCT, "curve_k": PACE_CURVE_K, "tail_h": PACE_TAIL_H,
                        "s_ceiling_pct": PACE_5H_CEIL_PCT, "band_pp": PACE_BAND_PP,
                        "min_gap_s": PACE_MIN_GAP_S, "max_gap_s": PACE_MAX_GAP_S,
-                       "min_loops": PACE_MIN_LOOPS, "max_loops": PACE_MAX_LOOPS}}
+                       "min_loops": PACE_MIN_LOOPS, "max_loops": PACE_MAX_LOOPS,
+                       "reactive_recover_s": PACE_REACTIVE_RECOVER_S}}
 
 def _acct_windows_loop():
     time.sleep(40)                                       # let boot settle (first cycle refreshes if the lock is stale)
@@ -21820,6 +21871,151 @@ body.wk-dragging .wkdrop{display:flex;pointer-events:auto}
 .useg{height:100%;transition:opacity .12s}.useg:hover{opacity:.8}
 .uleg{display:flex;flex-wrap:wrap;gap:14px;margin-top:10px;font-size:12px;color:var(--mut)}
 .ulegi{display:inline-flex;align-items:center;gap:6px}.uled{width:11px;height:11px;border-radius:3px;display:inline-block}.ulegi b{color:var(--ink)}
+/* ===== Usage & Pacing redesign (ux-*, fully scoped so nothing collides with shared classes) ===== */
+.uxwrap{grid-column:1/-1;max-width:100%;min-width:0}
+.uxnum{font-variant-numeric:tabular-nums;font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+.uxsx{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}
+.uxchart svg{display:block;width:100%;height:auto}
+.uxchart svg text{font-family:ui-monospace,Menlo,monospace;paint-order:stroke;stroke:var(--card);stroke-width:3px;stroke-linejoin:round}
+.uxkick{font-size:10.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:26px 0 12px;display:flex;align-items:center;gap:10px}
+.uxkick::after{content:"";flex:1;height:1px;background:var(--hair)}
+.uxkick .uxknote{font-weight:400;letter-spacing:0;text-transform:none;color:var(--dim);font-size:11px}
+.uxheader{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding-bottom:14px;margin-bottom:16px;border-bottom:1px solid var(--hair)}
+.uxh-title{font-size:20px;font-weight:650;letter-spacing:-.01em;color:var(--ink)}
+.uxh-title .uxamp{color:var(--accent-light)}
+.uxh-sub{color:var(--mut);font-size:12px;margin-top:3px}
+.uxh-right{text-align:right;color:var(--dim);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:50%}
+.uxchip{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:99px;font-size:10.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;border:1px solid var(--hair2);color:var(--mut);white-space:nowrap}
+.uxchip.gold{color:var(--accent-light);border-color:rgba(var(--accent-rgb),.45);background:rgba(var(--accent-rgb),.10)}
+.uxchip.ok{color:var(--ok);border-color:rgba(var(--ok-rgb),.4);background:rgba(var(--ok-rgb),.08)}
+.uxchip.warn{color:var(--warn);border-color:rgba(var(--warn-rgb),.4);background:rgba(var(--warn-rgb),.08)}
+.uxchip.err{color:var(--err);border-color:rgba(var(--err-rgb),.4);background:rgba(var(--err-rgb),.08)}
+.uxchip.dim{color:var(--dim)}
+.uxcard{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:16px 18px;position:relative;min-width:0}
+.uxhero{display:grid;grid-template-columns:1.35fr 1fr 1.25fr;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:13px;overflow:hidden;box-shadow:0 0 0 1px rgba(var(--accent-rgb),.06),0 18px 50px -30px rgba(var(--accent-rgb),.25)}
+.uxhero>div{padding:18px 22px;min-width:0}
+.uxhero>div+div{border-left:1px solid var(--hair)}
+@media(max-width:1060px){.uxhero{grid-template-columns:1fr 1fr}.uxhero .uxhz-reco{grid-column:1/-1;border-left:none;border-top:1px solid var(--hair)}}
+@media(max-width:640px){.uxhero{grid-template-columns:1fr}.uxhero>div+div{border-left:none;border-top:1px solid var(--hair)}}
+.uxhz-label{font-size:10.5px;font-weight:650;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin-bottom:8px}
+.uxhz-value{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.uxhz-value .uxbig{font-size:40px;font-weight:700;letter-spacing:-.02em;color:var(--accent-light);line-height:1.02;text-shadow:0 0 34px rgba(var(--accent-rgb),.30);font-variant-numeric:tabular-nums}
+.uxlev{display:inline-flex;align-items:baseline;gap:5px;padding:4px 11px;border-radius:9px;background:rgba(var(--accent-rgb),.12);border:1px solid rgba(var(--accent-rgb),.4);color:var(--accent-light);font-weight:700;font-size:15px}
+.uxlev small{font-size:9.5px;font-weight:600;letter-spacing:.08em;color:var(--accent);text-transform:uppercase}
+.uxhz-sub{color:var(--mut);font-size:12px;margin-top:9px}.uxhz-sub b{color:var(--near);font-weight:600}
+.uxhz-zero{color:var(--dim);font-size:11px;margin-top:3px}
+.uxpace-big{font-size:23px;font-weight:650;color:var(--near);letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.uxpace-big small{font-size:12px;color:var(--mut);font-weight:500}
+.uxpace-spark{margin-top:10px}.uxpace-spark svg{max-width:240px}
+.uxhz-reco{background:linear-gradient(180deg,rgba(var(--accent-rgb),.10),rgba(var(--accent-rgb),.03)),var(--bg-warm)}
+.uxreco-line{display:flex;align-items:center;gap:10px;margin-bottom:7px}
+.uxreco-play{width:26px;height:26px;border-radius:8px;flex:none;display:grid;place-items:center;background:rgba(var(--accent-rgb),.18);border:1px solid rgba(var(--accent-rgb),.55);color:var(--accent-light);font-size:12px;animation:uxpulse 2.6s ease-in-out infinite}
+@keyframes uxpulse{0%,100%{box-shadow:0 0 0 0 rgba(var(--accent-rgb),.35)}50%{box-shadow:0 0 0 7px rgba(var(--accent-rgb),0)}}
+@media(prefers-reduced-motion:reduce){.uxreco-play{animation:none}}
+.uxreco-who{font-size:16px;font-weight:700;color:var(--ink)}.uxreco-who b{color:var(--accent-light)}
+.uxreco-why{color:var(--mut);font-size:12.5px;line-height:1.55}.uxreco-why b{color:var(--near);font-weight:600}
+.uxreco-meta{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.uxctrls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.uxfleet{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+@media(max-width:1120px){.uxfleet{grid-template-columns:1fr}}
+.uxacct{padding:0;overflow:hidden;display:flex;flex-direction:column}
+.uxacct.next{border-color:rgba(var(--accent-rgb),.55);box-shadow:0 0 0 1px rgba(var(--accent-rgb),.35),0 14px 44px -24px rgba(var(--accent-rgb),.5)}
+.uxacct.pinned{opacity:.96}
+.uxacct-head{display:flex;align-items:center;gap:9px;padding:13px 15px 11px;border-bottom:1px solid var(--hair)}
+.uxacct.next .uxacct-head{background:linear-gradient(180deg,rgba(var(--accent-rgb),.08),transparent)}
+.uxdot{width:8px;height:8px;border-radius:50%;flex:none}
+.uxdot.live{background:var(--ok);box-shadow:0 0 7px rgba(var(--ok-rgb),.8)}
+.uxdot.idle{background:transparent;border:1.5px solid var(--dim)}
+.uxacct-name{font-weight:650;font-size:14px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.uxacct-node{color:var(--dim);font-size:11px;white-space:nowrap}
+.uxacct-head .uxchip{margin-left:auto}
+.uxacct-body{padding:13px 15px 14px;display:flex;flex-direction:column;gap:11px;flex:1}
+.uxwin{display:grid;grid-template-columns:66px 1fr;gap:4px 12px;align-items:center}
+.uxwin-tag{font-size:10.5px;font-weight:650;letter-spacing:.06em;color:var(--mut);text-transform:uppercase}
+.uxwin-tag small{display:block;color:var(--dim);font-weight:500;letter-spacing:.02em;text-transform:none;font-size:10px}
+.uxmeter{position:relative;height:10px;border-radius:6px;background:var(--el2);border:1px solid var(--hair);cursor:default}
+.uxmeter .uxfill{position:absolute;inset:1px auto 1px 1px;border-radius:5px 3px 3px 5px;min-width:3px}
+.uxmeter .uxfill.ok{background:linear-gradient(180deg,rgba(var(--ok-rgb),.95),rgba(var(--ok-rgb),.65))}
+.uxmeter .uxfill.warn{background:linear-gradient(180deg,rgba(var(--warn-rgb),.95),rgba(var(--warn-rgb),.65))}
+.uxmeter .uxfill.err{background:linear-gradient(180deg,rgba(var(--err-rgb),.95),rgba(var(--err-rgb),.65))}
+.uxmeter .uxtick{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--accent-light);border-radius:2px;box-shadow:0 0 6px rgba(var(--accent-rgb),.7)}
+.uxwin-nums{grid-column:2;display:flex;justify-content:space-between;gap:10px;font-size:11px;color:var(--mut)}
+.uxwin-nums .uxpct{color:var(--near);font-weight:600}.uxwin-nums .uxfree{color:var(--dim)}
+.uxwin-nums .uxrst{color:var(--dim);white-space:nowrap}.uxwin-nums .uxrst b{color:var(--mut);font-weight:600}
+.uxacct-foot{margin-top:auto;border-top:1px solid var(--hair);padding-top:10px;display:flex;flex-direction:column;gap:7px}
+.uxintens{display:grid;grid-template-columns:66px 1fr 42px;gap:12px;align-items:center}
+.uxintens .uxbar{height:6px;border-radius:4px;background:var(--el2);border:1px solid var(--hair);position:relative}
+.uxintens .uxbar i{position:absolute;inset:1px auto 1px 1px;border-radius:3px;background:linear-gradient(90deg,var(--accent-dark),var(--accent-light))}
+.uxival{font-size:11px;color:var(--accent-light);font-weight:650;text-align:right}
+.uxlm{font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:var(--dim)}.uxlm b{color:var(--mut);font-weight:600}
+.uxlimiter{font-size:11px;color:var(--mut)}
+.uxacts{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:2px}
+.uxtog{font-size:10.5px;color:var(--dim);display:inline-flex;align-items:center;gap:5px;cursor:pointer}
+.uxgov{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,400px),1fr));gap:14px}
+.uxgov-one{grid-template-columns:minmax(0,680px)}
+.uxgovbar{margin-bottom:12px}
+@media(max-width:1120px){.uxgov{grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr))}}
+.uxgov-head{display:flex;align-items:center;gap:10px;margin-bottom:4px;flex-wrap:wrap}
+.uxgov-head .uxwho{font-weight:650;font-size:14px;color:var(--ink)}
+.uxgov-head .uxrst{margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap}.uxgov-head .uxrst b{color:var(--mut)}
+.uxleg{display:flex;gap:16px;flex-wrap:wrap;font-size:11px;color:var(--mut);margin:6px 2px 2px}
+.uxlg{display:inline-flex;align-items:center;gap:6px}
+.uxlg .uxsw{width:14px;height:0;border-top:2px solid var(--accent);border-radius:2px}
+.uxlg .uxsw.proj{border-top-style:dashed}
+.uxlg .uxsw.tgt{border-top:1px solid rgba(var(--accent-rgb),.8)}
+.uxlg .uxsw.dot{width:9px;height:9px;border:0;border-radius:50%;background:var(--accent-light)}
+.uxgstats{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:var(--hair);border:1px solid var(--hair);border-radius:9px;overflow:hidden;margin-top:12px}
+.uxgs{background:var(--el1);padding:8px 10px;min-width:0}
+.uxgs .uxl{font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:650}
+.uxgs .uxv{font-size:14px;font-weight:650;color:var(--near);margin-top:2px;white-space:nowrap}
+.uxgs.hot .uxv{color:var(--accent-light)}
+@media(max-width:640px){.uxgstats{grid-template-columns:repeat(3,1fr)}}
+.uxwhen{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:14px}
+@media(max-width:1120px){.uxwhen{grid-template-columns:1fr}}
+.uxct{display:flex;align-items:baseline;gap:10px;margin-bottom:12px}
+.uxct .uxt{font-weight:650;font-size:13px;color:var(--ink)}
+.uxct .uxs{font-size:11px;color:var(--dim)}
+.uxct .uxright{margin-left:auto}
+.uxseg{display:inline-flex;background:var(--el2);border:1px solid var(--hair);border-radius:8px;padding:2px;gap:2px}
+.uxseg button{border:0;background:transparent;color:var(--mut);font-family:ui-monospace,Menlo,monospace;font-size:11px;padding:3px 10px;border-radius:6px;cursor:pointer}
+.uxseg button:hover{color:var(--near)}
+.uxseg button.on{background:rgba(var(--accent-rgb),.16);color:var(--accent-light);font-weight:700}
+.uxhm-grid{display:grid;grid-template-columns:34px 1fr;gap:6px;min-width:560px}
+.uxhm-days{display:grid;grid-template-rows:repeat(7,1fr);gap:2px;font-size:10px;color:var(--dim);text-align:right;padding-right:2px}
+.uxhm-days span{display:flex;align-items:center;justify-content:flex-end}
+.uxhm-cells{display:grid;grid-template-columns:repeat(24,1fr);grid-template-rows:repeat(7,1fr);gap:2px}
+.uxhm-cells i{display:block;height:20px;border-radius:3px}
+.uxhm-hours{display:grid;grid-template-columns:34px 1fr;min-width:560px;margin-top:5px}
+.uxhm-hours>div:last-child{display:grid;grid-template-columns:repeat(24,1fr);font-size:9.5px;color:var(--dim)}
+.uxhm-scale{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:10px;color:var(--dim)}
+.uxhm-scale .uxramp{width:120px;height:7px;border-radius:4px;border:1px solid var(--hair);background:linear-gradient(90deg,rgba(var(--accent-light-rgb),.05),rgba(var(--accent-light-rgb),.95))}
+.uxhm-cells{position:relative}
+.uxhm-rst{position:absolute;inset:0;display:grid;grid-template-columns:repeat(24,1fr);grid-template-rows:repeat(7,1fr);gap:2px;pointer-events:none}
+.uxhm-rst span{border:2px solid;border-radius:3px}
+.uxcal{min-width:340px}
+.uxcal-hd{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;font-size:10px;color:var(--dim);text-align:center;margin-bottom:4px}
+.uxcal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.uxcal-d{position:relative;height:38px;border-radius:6px;overflow:hidden;border:1px solid var(--hair);display:block;cursor:default}
+.uxcal-e{height:38px}
+.uxcal-fill{position:absolute;inset:0}
+.uxcal-d b{position:absolute;top:3px;left:5px;font-size:10px;font-weight:600;color:var(--near);font-variant-numeric:tabular-nums;text-shadow:0 1px 2px rgba(0,0,0,.6)}
+.uxwhere{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+@media(max-width:1120px){.uxwhere{grid-template-columns:1fr}}
+.uxhb{display:grid;grid-template-columns:minmax(84px,auto) 1fr minmax(52px,auto);gap:10px;align-items:center;padding:4.5px 0;font-size:12px}
+.uxhb .uxlbl{color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.uxhb .uxlbl .uxself{color:var(--accent-light);margin-right:4px}
+.uxhb .uxtrack{height:9px;background:var(--el2);border:1px solid var(--hair);border-radius:5px;position:relative}
+.uxhb .uxtrack i{position:absolute;inset:1px auto 1px 1px;border-radius:4px 3px 3px 4px;min-width:2px}
+.uxhb .uxval{text-align:right;color:var(--near);font-weight:600;font-size:11.5px}
+.uxmleg{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--mut);margin-top:10px}
+.uxmleg .uxk{display:inline-flex;align-items:center;gap:6px}
+.uxmleg .uxk i{width:9px;height:9px;border-radius:3px;display:inline-block}
+.uxcomp{margin-top:14px}
+.uxcompbar{display:flex;height:22px;border-radius:7px;overflow:hidden;gap:2px;background:var(--card)}
+.uxcompbar i{display:block;height:100%;border-radius:3px}
+.uxcompbar i:first-child{border-radius:7px 3px 3px 7px}.uxcompbar i:last-child{border-radius:3px 7px 7px 3px}
+.uxcompnote{font-size:11px;color:var(--dim);margin-top:9px}.uxcompnote b{color:var(--mut);font-weight:600}
+#uxtip{position:fixed;z-index:140;pointer-events:none;opacity:0;transition:opacity .12s;background:var(--el3);border:1px solid var(--hair2);border-radius:8px;padding:6px 10px;font-size:11.5px;color:var(--near);box-shadow:0 10px 28px -12px rgba(0,0,0,.8);max-width:280px;font-family:ui-monospace,Menlo,monospace}
 /* Backup hub */
 .bk321{display:flex;flex-direction:column;gap:8px;margin-top:6px}
 .bk3{display:flex;align-items:center;gap:12px;background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:11px 13px}
@@ -25022,32 +25218,297 @@ function fleetCard(){
     sides[sd].forEach(function(n){ h+=hbar('• '+esc(n.node), n.total/nmax*100, fmtUSD(n.cost)+' · '+fmtTok(n.total), 'var(--accent-light)'); }); });
   return h+'</div>';
 }
-function renderUsage(){if(!USAGE)return;const u=USAGE,t=u.totals,cur=uRange(),ser=u.series[cur.k]||[],span=cur.span,tw=(t[cur.tot]||{total:0,cost:0,calls:0,output:0});
-  const n=ser.length||1,bdur=span/n,peak=Math.max(0,...ser.map(b=>b.tok||0)),rate=tw.total/Math.max(1/60,span/3600);
-  // TOP: per-account fuel gauges (rate-limit windows) when the wallet is on, then fleet rollup + metered hero.
-  let h=((window.CC&&window.CC.accountWallet)?acctFuelSection():'')+fleetCard()+heroBanner(cur);
-  h+='<div class="card" style="cursor:default"><div class="modnav"><b>Metered value by window</b> <span class="sub">live · every window at a glance · click one to drive the charts below</span></div>'
-    +'<div class="tokrow">'+URANGES.map(tokCard).join('')+'</div>'
-    +'<div class="ucsub" style="margin-top:10px"><b style="color:var(--accent-light)">'+cur.lbl+'</b> detail: <b>'+fmtTok(tw.total)+'</b> processed · <b>'+fmtTok(tw.bill||0)+'</b> billable · <b>'+fmtTok(tw.output)+'</b> out · <b>'+fmtTok(rate)+'/hr</b> · peak '+udur(bdur)+' bucket <b>'+fmtTok(peak)+'</b> · this node <b style="color:var(--accent-light)">'+fmtUSD((tw.self||{}).cost||0)+'</b> of '+fmtUSD(tw.cost)+'</div></div>';
-  h+='<div class="card" style="cursor:default"><h3><span>Metered cost over time</span> <span class="sub">~'+fmtUSD(ser.reduce((a,b)=>a+(b.cost||0),0))+' across '+cur.desc+'</span></h3>'+uBarChart(ser,'cost',span)+'<div class="uaxis"><span>'+udur(span)+' ago</span><span>now</span></div></div>';
-  h+='<div class="card" style="cursor:default"><h3><span>Tokens over time</span> <span class="sub">'+udur(bdur)+' buckets · '+cur.desc+'</span></h3>'
-    +uBarChart(ser,'tok',span)+'<div class="uaxis"><span>'+udur(span)+' ago</span><span>now</span></div></div>';
-  const mmax=Math.max(1,...u.by_model.map(m=>m.total));
-  let mid='<div class="card" style="cursor:default"><h3><span>By model</span> <span class="sub">all tracked · 30d</span></h3>'+u.by_model.map(m=>hbar(m.model,m.total/mmax*100,fmtTok(m.total)+' · '+fmtUSD(m.cost),UMC[m.model]||'var(--accent-light)')).join('')+'</div>';
-  const c=u.composition,ct=Math.max(1,c.input+c.output+c.cache_read+c.cache_write);
-  mid+='<div class="card" style="cursor:default"><h3><span>Token composition</span> <span class="sub">all tracked · 30d</span></h3>'
-    +'<div class="ustack">'+useg(c.cache_read,ct,'var(--ok)','cache read')+useg(c.input,ct,'var(--info)','input')+useg(c.cache_write,ct,'var(--accent-light)','cache write')+useg(c.output,ct,'var(--err)','output')+'</div>'
-    +'<div class="uleg">'+uleg('var(--info)','input',c.input)+uleg('var(--err)','output',c.output)+uleg('var(--accent-light)','cache write',c.cache_write)+uleg('var(--ok)','cache read',c.cache_read)+'</div>'
-    +'<div class="ucsub" style="margin-top:8px">cache reads are billed at ~10% of input — most of the raw token count, little of the cost.</div></div>';
-  h+='<div class="modgrid">'+mid+'</div>';
-  if(u.by_account&&u.by_account.length){const amax=Math.max(1,...u.by_account.map(a=>a.total));
-    const since=u.acct_since?new Date(u.acct_since*1000).toLocaleDateString():null;
-    h+='<div class="card" style="cursor:default"><h3><span>By Claude account</span> <span class="sub">30d · which login burned what</span></h3>'
-      +u.by_account.map(a=>{var pre=(a.account==='(before tracking)'||a.account==='unknown');return hbar(pre?'🕓 before account tracking':('👤 '+a.account),a.total/amax*100,fmtUSD(a.cost)+' · '+fmtTok(a.total)+' · '+(a.calls||0).toLocaleString()+' calls',pre?'var(--dim)':'#bc8cff');}).join('')
-      +'<div class="ucsub" style="margin-top:8px">Attributed by which account was logged in at the time of each call'+(since?(' — tracking started <b>'+since+'</b>; usage before that can\'t be split by account (transcripts don\'t record it)'):'')+'. Switch accounts in the Claude Accounts lens.</div></div>';}
-  const pmax=Math.max(1,...u.by_project.map(p=>p.total));
-  h+='<div class="card" style="cursor:default"><h3><span>By project / folder</span> <span class="sub">all tracked · 30d · '+u.by_project.length+' active · ▸ = part of this node</span></h3>'+u.by_project.map(p=>hbar((p.self?'▸ ':'')+p.name,p.total/pmax*100,fmtUSD(p.cost)+' · '+fmtTok(p.total)+' · '+(p.calls||0).toLocaleString()+' calls',p.self?'var(--accent-light)':'var(--accent-dark)')).join('')+'</div>';
-  document.getElementById("grid").innerHTML='<div class="modstack">'+h+'</div>';
+// ===== Usage & Pacing redesign (ux*): one cohesive live view built from /api/usage + /api/usage-fleet +
+// /api/account-windows. Old helpers (acctFuelSection/heroBanner/fleetCard/tokCard/awModel/awPacing) are
+// superseded by these; action handlers (awRefresh/awRotate/awSwitchNow/awSetMode/acctSwitch) are reused. =====
+var UXTREND='24h';
+function uxUSD0(v){return '$'+Math.round(v||0).toLocaleString();}
+function uxSev(p){p=p||0;return p>=80?'err':p>=55?'warn':'ok';}
+function uxCeilAt(f,tgt,k){f=Math.max(0,Math.min(1,f));return tgt*Math.pow(f,k);}
+function uxTipInit(){ if(window._uxTip) return;
+  var tp=document.createElement('div'); tp.id='uxtip'; document.body.appendChild(tp); window._uxTip=tp;
+  document.addEventListener('mousemove',function(e){ var t=e.target.closest?e.target.closest('[data-tip]'):null;
+    if(t){ tp.textContent=t.getAttribute('data-tip'); tp.style.opacity=1;
+      var w=tp.offsetWidth,hh=tp.offsetHeight,x=e.clientX+14,y=e.clientY+14;
+      if(x+w>innerWidth-10)x=e.clientX-w-14; if(y+hh>innerHeight-10)y=e.clientY-hh-14;
+      tp.style.left=x+'px'; tp.style.top=y+'px';
+    } else tp.style.opacity=0; });
+}
+function uxHeader(){
+  var d=ACCTWIN||{}, sides=(d.sides||[]);
+  var nodeTxt=sides.length?sides.map(function(s){return e2(s.side)+' → '+(s.live?e2(s.live):'—');}).join('  ·  '):'connect accounts to track logins';
+  var na=((d.accounts||[]).length)||0;
+  return '<div class="uxheader"><div><div class="uxh-title">Usage <span class="uxamp">&amp;</span> Pacing</div>'
+    +'<div class="uxh-sub">Account fleet'+(na?(' · '+na+' account'+(na>1?'s':'')):'')+' · autopilot '+e2(((d.autopilot||'off')+'').toUpperCase())+'</div></div>'
+    +'<div class="uxh-right">'+nodeTxt+'</div></div>';
+}
+function uxHero(){
+  var u=USAGE, t=u.totals||{}, nd=u.node||{}, sub=nd.sub_monthly||0;
+  var mo=t.month||{cost:0}, wk=t.week||{cost:0}, day=t.day||{cost:0};
+  var monthAll=mo.cost||0, lev=sub>0?monthAll/sub:0;
+  var paceMo=(wk.cost||0)*(2592000/604800), avgDay=monthAll/30, today=day.cost||0;
+  var delta=avgDay>0?((today-avgDay)/avgDay*100):0;
+  var sc=((u.series&&u.series['30d'])||[]).map(function(b){return b.cost||0;}).slice(-14);
+  var spark=sparkSVG(sc,240,40,'uxpace');
+  var d=ACCTWIN||{}, reco, sh=d.switch_health||{};
+  if(d.pick){
+    reco='<div class="uxhz-label" style="color:var(--accent)">Live recommendation</div>'
+      +'<div class="uxreco-line"><span class="uxreco-play">▶</span><span class="uxreco-who">Use <b>'+e2(d.pick)+'</b> next</span></div>'
+      +'<div class="uxreco-why">'+e2(d.pick_why||'')+'</div>'
+      +'<div class="uxreco-meta"><span class="uxchip gold">autopilot '+e2(((d.autopilot||'off')+'').toUpperCase())+'</span>'
+      +(d.should_switch?'<span class="uxchip warn">switch pending</span>':'<span class="uxchip ok">on best account</span>')
+      +(sh.total_ok!=null?'<span class="uxchip dim">'+sh.total_ok+' verified switches</span>':'')+'</div>'
+      +((d.should_switch&&d.pick_in_wallet)?'<div style="margin-top:11px"><button class="mini go" title="Switch this machine\'s login to '+esc(d.pick)+'" onclick="awSwitchNow(\''+esc(d.pick)+'\')">▶ Switch now</button></div>':'');
+  } else {
+    reco='<div class="uxhz-label" style="color:var(--accent)">Live recommendation</div>'
+      +'<div class="uxreco-why" style="margin-top:6px">'+((d.accounts&&d.accounts.length)?'No in-rotation account has headroom right now — they\'re cooling or resting. See the fleet below.':'Connect Claude accounts to get a burn recommendation.')+'</div>';
+  }
+  return '<div class="uxhero">'
+    +'<div><div class="uxhz-label">Metered API value · last 30 days</div>'
+      +'<div class="uxhz-value"><span class="uxbig">'+uxUSD0(monthAll)+'</span>'+(lev>0?'<span class="uxlev">'+lev.toFixed(lev>=10?0:1)+'&times;<small>value</small></span>':'')+'</div>'
+      +'<div class="uxhz-sub">vs <b>'+uxUSD0(sub)+'/mo</b> flat</div>'
+      +'<div class="uxhz-zero">actual spend $0 — flat subscription; every $ shown is the metered pay-as-you-go equivalent</div></div>'
+    +'<div><div class="uxhz-label">Burn pace</div>'
+      +'<div class="uxpace-big">'+fmtUSD(paceMo)+'<small>/mo at current 7-day pace</small></div>'
+      +'<div class="uxhz-sub">30-day avg <b class="uxnum">'+uxUSD0(avgDay)+'/day</b> · today <b class="uxnum">'+uxUSD0(today)+'</b> '
+      +(Math.abs(delta)>=1?'<span style="color:var(--'+(delta>0?'warn':'ok')+')">'+(delta>0?'▲':'▼')+Math.abs(delta).toFixed(0)+'%</span>':'')+'</div>'
+      +'<div class="uxpace-spark">'+spark+'</div></div>'
+    +'<div class="uxhz-reco">'+reco+'</div></div>';
+}
+function uxMeter(tag,sub,w,ceil){
+  w=w||{}; var pct=Math.round(w.pct||0), cls=uxSev(pct), free=100-pct;
+  var rst=(w.ttr!=null)?awDur(w.ttr):(w.resets?e2(w.resets):'—');
+  var tick=(ceil!=null&&ceil>0)?'<span class="uxtick" style="left:'+Math.min(100,ceil)+'%" data-tip="pacing ceiling now: '+Math.round(ceil)+'% — governor brakes above this"></span>':'';
+  return '<div class="uxwin"><span class="uxwin-tag">'+tag+(sub?'<small>'+sub+'</small>':'')+'</span>'
+    +'<span class="uxmeter" data-tip="'+tag+': '+pct+'% used · '+free+'% free · resets in '+rst+'"><span class="uxfill '+cls+'" style="width:'+pct+'%"></span>'+tick+'</span>'
+    +'<span class="uxwin-nums"><span><span class="uxpct uxnum">'+pct+'%</span> used <span class="uxfree uxnum">· '+free+'% free</span></span>'
+    +'<span class="uxrst">resets <b class="uxnum">'+rst+'</b></span></span></div>';
+}
+function uxLmLine(m){ if(!m) return '';
+  var parts=[];
+  [['session','5h'],['week','weekly']].forEach(function(pr){ var x=m[pr[0]]; if(!x||!x.ready) return;
+    var cap=x.feature==='cost'?fmtUSD(x.capacity):fmtTok(x.capacity); var s=pr[1]+' cap ≈ <b>'+cap+'</b>';
+    if(x.eta_h!=null) s+=' · maxout '+awDur(x.eta_h*3600); parts.push(s); });
+  return parts.length?('limit model · '+parts.join(' · ')):'';
+}
+function uxAcctCard(a){
+  var liveOn=(a.live_on||[]), live=liveOn.length||a.active, elsewhere=(liveOn.length&&!a.active), outrot=!a.in_rotation, pinned=(elsewhere||outrot), next=(a.use_next||a.status==='use_next');
+  var nodeTxt=a.active?'● live · this node':(liveOn.length?('● live · '+liveOn.map(e2).join(', ')):'○ idle · ready');
+  var chip=next?'<span class="uxchip gold">▶ use next</span>':(elsewhere?'<span class="uxchip dim">in use · '+liveOn.map(e2).join(', ')+'</span>':(outrot?'<span class="uxchip dim">pinned · not in rotation</span>':''));
+  var m=a.model||{}, pac=m.pacing||{}, ceil=(pac.ready&&pac.ceiling_pct!=null)?pac.ceiling_pct:null, w=a.windows||{};
+  var body=uxMeter('5-hour','session',w.session,null)+uxMeter('7-day','all models',w.week,ceil)+uxMeter('7d Sonnet','',w.week_sonnet,null);
+  var foot='';
+  if(pac.ready){
+    var inten=Math.round((pac.intensity||0)*100);
+    var limMap={'clear':'full permission — no brake','5h-capped':'5-hour cap is the brake','weekly-ceiling':'reserving weekly budget for later','weekly-at-target':'weekly target reached — resting'};
+    var lim=limMap[pac.limiter]||pac.limiter||'';
+    foot='<div class="uxintens" data-tip="pacing intensity: '+inten+'% burn permission"><span class="uxwin-tag">Pacing</span>'
+      +'<span class="uxbar"><i style="width:'+inten+'%"></i></span><span class="uxival uxnum">'+inten+'%</span></div>'
+      +'<div class="uxlimiter">'+e2(lim)+'</div>';
+  } else if(a.ok){ foot='<div class="uxlimiter" style="opacity:.7">pacing calibrating…</div>'; }
+  var lm=uxLmLine(m); if(lm) foot+='<div class="uxlm">'+lm+'</div>';
+  var act='';
+  if(a.active) act='<button class="mini" title="Re-read this account\'s /usage now" onclick="awRefresh(\''+esc(a.email)+'\',this)">↻ refresh</button>';
+  else if(!elsewhere && a.in_wallet) act='<button class="mini" title="Switch this machine\'s login to '+esc(a.email)+'" onclick="acctSwitch(\''+esc(a.label||a.email)+'\',\''+esc(a.email)+'\')">▶ switch to this</button>';
+  var rot='<label class="uxtog" title="include this account in the switch rotation"><input type="checkbox" '+(a.in_rotation?'checked':'')+' onchange="awRotate(\''+esc(a.email)+'\',this.checked)"> rotation</label>';
+  return '<div class="uxcard uxacct'+(next?' next':'')+(pinned?' pinned':'')+'">'
+    +'<div class="uxacct-head"><span class="uxdot '+(live?'live':'idle')+'"></span>'
+    +'<div style="min-width:0"><div class="uxacct-name">'+e2(a.email)+'</div><div class="uxacct-node">'+nodeTxt+'</div></div>'+chip+'</div>'
+    +'<div class="uxacct-body">'+body+'<div class="uxacct-foot">'+foot+'<div class="uxacts">'+act+rot+'</div></div></div></div>';
+}
+function uxFleet(){
+  var d=ACCTWIN;
+  if(!d) return '<div class="uxkick">Account fleet</div><div class="uxcard" style="grid-column:1/-1"><span class="spin"></span> reading account limits…</div>';
+  var accts=(d.accounts||[]); if(!accts.length) return '';
+  var mode=d.autopilot||'off';
+  var mk=function(mm,lbl){return '<button class="mini'+(mode===mm?' go':'')+'" title="autopilot mode: '+mm+'" onclick="awSetMode(\''+mm+'\')">'+lbl+'</button>';};
+  var ctrls=d.multi_account?('<div class="uxctrls"><span class="uxwin-tag">Autopilot</span>'+mk('off','Off')+mk('alert','Alert')+mk('auto','Auto')
+    +'<button class="mini" title="Re-read every account\'s /usage now" style="margin-left:auto" onclick="awRefreshAll(this)">↻ read live now</button></div>'):'';
+  return '<div class="uxkick">Account fleet <span class="uxknote">rate-limit windows · % used · reset countdowns</span></div>'+ctrls
+    +'<div class="uxfleet">'+accts.map(uxAcctCard).join('')+'</div>';
+}
+function uxGovChart(a){
+  var p=(a.model&&a.model.pacing)||{}, w=(a.windows||{}).week||{}, tgt=(p.target_pct||90), k=(p.curve_k||1.5);
+  var ready=!!p.ready, haveW=(w.pct!=null);
+  if(!ready && !haveW) return '<div class="uxcard"><div class="uxgov-head"><span class="uxwho">'+e2(a.email)+'</span></div>'
+    +'<div class="uxlimiter" style="opacity:.75;margin-top:6px">no weekly reading yet — this account will chart once it is read live</div></div>';
+  var ef,live,proj,ceilNow,inten,limiter;
+  if(ready){ ef=Math.max(0,Math.min(1,p.elapsed_frac||0)); live=p.pred_pct||0; proj=(p.forecast_pct!=null?p.forecast_pct:live); ceilNow=(p.ceiling_pct!=null?p.ceiling_pct:uxCeilAt(ef,tgt,k)); inten=Math.round((p.intensity||0)*100); limiter=p.limiter; }
+  else { ef=(w.ttr!=null)?Math.max(0,Math.min(1,1-(w.ttr/604800))):0.5; live=w.pct||0; ceilNow=uxCeilAt(ef,tgt,k); proj=null; inten=null; limiter=null; }
+  var over,behind,pc;
+  if(ready){ over=proj>tgt+2; behind=proj<tgt-2; } else { over=live>ceilNow+2; behind=live<ceilNow-2; }
+  pc=over?'var(--err)':(behind?'var(--warn)':'var(--ok)');
+  var W=560,H=200,L=40,R=16,T=16,B=30,pw=W-L-R,ph=H-T-B;
+  var X=function(f){return L+Math.max(0,Math.min(1,f))*pw;}, Y=function(v){return T+ph-(Math.max(0,Math.min(108,v))/108)*ph;};
+  var cPts=[]; for(var f=0;f<=1.0001;f+=.02) cPts.push(X(f).toFixed(1)+' '+Y(uxCeilAt(f,tgt,k)).toFixed(1));
+  var cLine='M'+cPts.join(' L'), cArea=cLine+' L'+X(1).toFixed(1)+' '+Y(0).toFixed(1)+' L'+X(0).toFixed(1)+' '+Y(0).toFixed(1)+' Z';
+  var nx=X(ef),ny=Y(live),fx=X(1),fy=(proj!=null?Y(proj):null);
+  var grid=[25,50,75].map(function(g){return '<line x1="'+L+'" y1="'+Y(g)+'" x2="'+(W-R)+'" y2="'+Y(g)+'" stroke="var(--hair)"/><text x="'+(L-7)+'" y="'+(Y(g)+3)+'" font-size="9" fill="var(--dim)" text-anchor="end">'+g+'</text>';}).join('');
+  var verdict=ready?(over?'ahead — governor easing off':behind?'behind — room to lean in':'on pace'):(over?'above the budget curve':behind?'below curve — headroom to burn':'tracking the curve');
+  var limMap={'clear':'full permission','5h-capped':'5-hour cap braking','weekly-ceiling':'reserving budget','weekly-at-target':'resting'};
+  var chip=ready?(limMap[limiter]||limiter||''):(a.active?'live':'projected from last read');
+  var rst=(w.ttr!=null)?awDur(w.ttr):awDur((p.reset_h||0)*3600);
+  var svg='<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="xMidYMid meet">'+grid
+    +'<line x1="'+L+'" y1="'+Y(tgt)+'" x2="'+(W-R)+'" y2="'+Y(tgt)+'" stroke="rgba(var(--accent-rgb),.55)"/><text x="'+(L-7)+'" y="'+(Y(tgt)+3)+'" font-size="9" fill="var(--accent)" text-anchor="end">'+tgt+'</text>'
+    +'<path d="'+cArea+'" fill="rgba(var(--accent-rgb),.07)"/><path d="'+cLine+'" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>'
+    +'<line x1="'+nx.toFixed(1)+'" y1="'+T+'" x2="'+nx.toFixed(1)+'" y2="'+Y(0)+'" stroke="var(--hair2)"/><text x="'+nx.toFixed(1)+'" y="'+(T-5)+'" font-size="9" fill="var(--dim)" text-anchor="middle">now</text>'
+    +(proj!=null?('<line x1="'+nx.toFixed(1)+'" y1="'+ny.toFixed(1)+'" x2="'+fx.toFixed(1)+'" y2="'+fy.toFixed(1)+'" stroke="'+pc+'" stroke-width="2" stroke-dasharray="5 5" stroke-linecap="round"/><circle cx="'+fx.toFixed(1)+'" cy="'+fy.toFixed(1)+'" r="4.5" fill="'+pc+'" stroke="var(--card)" stroke-width="2"/><text x="'+(fx-6).toFixed(1)+'" y="'+(fy-9).toFixed(1)+'" font-size="10" font-weight="700" fill="var(--near)" text-anchor="end">&#8594; '+Math.round(proj)+'%</text>'):'')
+    +'<circle cx="'+nx.toFixed(1)+'" cy="'+ny.toFixed(1)+'" r="5" fill="var(--accent-light)" stroke="var(--card)" stroke-width="2"/><text x="'+(nx-9).toFixed(1)+'" y="'+(ny-9).toFixed(1)+'" font-size="10.5" font-weight="700" fill="var(--near)" text-anchor="end">'+Math.round(live)+'%</text>'
+    +'<line x1="'+L+'" y1="'+Y(0)+'" x2="'+(W-R)+'" y2="'+Y(0)+'" stroke="var(--hair2)"/>'
+    +'<text x="'+L+'" y="'+(H-12)+'" font-size="9" fill="var(--dim)">week start</text>'
+    +'<text x="'+(W-R)+'" y="'+(H-12)+'" font-size="9" fill="var(--dim)" text-anchor="end">reset '+rst+'</text></svg>';
+  return '<div class="uxcard"><div class="uxgov-head"><span class="uxwho">'+e2(a.email)+'</span>'
+    +'<span class="uxchip '+(over?'err':behind?'warn':'ok')+'">'+e2(chip)+'</span>'
+    +'<span class="uxrst">resets <b class="uxnum">'+rst+'</b></span></div>'
+    +'<div class="uxleg"><span class="uxlg"><span class="uxsw"></span>ceiling</span>'+(proj!=null?('<span class="uxlg"><span class="uxsw proj" style="border-top-color:'+pc+'"></span>projection</span>'):'')+'<span class="uxlg"><span class="uxsw tgt"></span>target '+tgt+'%</span><span class="uxlg"><span class="uxsw dot"></span>now</span></div>'
+    +'<div class="uxchart">'+svg+'</div>'
+    +'<div class="uxgstats">'
+    +'<div class="uxgs hot"><div class="uxl">Intensity</div><div class="uxv uxnum">'+(inten!=null?inten+'%':'—')+'</div></div>'
+    +'<div class="uxgs"><div class="uxl">Live</div><div class="uxv uxnum">'+Math.round(live)+'%</div></div>'
+    +'<div class="uxgs"><div class="uxl">Ceiling now</div><div class="uxv uxnum">'+Math.round(ceilNow)+'%</div></div>'
+    +'<div class="uxgs"><div class="uxl">Projected</div><div class="uxv uxnum" style="color:'+pc+'">'+(proj!=null?Math.round(proj)+'%':'—')+'</div></div>'
+    +'<div class="uxgs"><div class="uxl">Verdict</div><div class="uxv" style="font-size:11px;white-space:normal;color:var(--mut)">'+verdict+'</div></div>'
+    +'</div></div>';
+}
+var UXGOVSEL=null;
+function uxGov(){
+  var d=ACCTWIN; if(!d||!(d.accounts||[]).length) return '';
+  var rot=(d.accounts||[]).filter(function(a){return a.in_rotation;});
+  var head='<div class="uxkick">Pacing governor <span class="uxknote">weekly ceiling = 90% &times; f<sup>1.5</sup> — back-loaded so budget survives to reset · pick an account or show all</span></div>';
+  if(!rot.length) return head+'<div class="uxcard" style="grid-column:1/-1"><div class="uxlimiter" style="opacity:.75">No accounts are in the switch rotation — toggle accounts into rotation on the fleet cards above.</div></div>';
+  var emails=rot.map(function(a){return a.email;});
+  if(UXGOVSEL!=='all' && emails.indexOf(UXGOVSEL)<0) UXGOVSEL=(d.pick && emails.indexOf(d.pick)>=0)?d.pick:emails[0];
+  var seg='<span class="uxseg" id="uxGovSeg">'+rot.map(function(a){var e=a.email;
+      return '<button class="'+(UXGOVSEL===e?'on':'')+'" data-k="'+esc(e)+'" title="'+esc(e)+'" onclick="uxSetGov(\''+esc(e)+'\')">'+e2(uxAcctShort(e))+'</button>';}).join('')
+    +(rot.length>1?'<button class="'+(UXGOVSEL==='all'?'on':'')+'" data-k="all" title="show every rotating account at once" onclick="uxSetGov(\'all\')">All</button>':'')+'</span>';
+  return head+'<div class="uxgovbar">'+seg+'</div><div id="uxGovWrap">'+uxGovBody(rot)+'</div>';
+}
+function uxGovBody(rot){
+  if(!rot){ var d=ACCTWIN||{}; rot=(d.accounts||[]).filter(function(a){return a.in_rotation;}); }
+  if(!rot.length) return '';
+  if(UXGOVSEL==='all') return '<div class="uxgov">'+rot.map(uxGovChart).join('')+'</div>';
+  var a=rot.filter(function(x){return x.email===UXGOVSEL;})[0]||rot[0];
+  return '<div class="uxgov uxgov-one">'+uxGovChart(a)+'</div>';
+}
+function uxSetGov(k){ UXGOVSEL=k; var seg=document.getElementById('uxGovSeg'); if(seg)[].forEach.call(seg.children,function(x){x.classList.toggle('on',x.getAttribute('data-k')===k);});
+  var w=document.getElementById('uxGovWrap'); if(w) w.innerHTML=uxGovBody(); }
+var UXHEAT='week';
+var UXPAL=['var(--accent-light)','var(--info)','#bc8cff','#4dd2c6','#e8739b','#f0883e'];
+function uxAcctShort(e){return (e&&e.indexOf('@')>0)?e.split('@')[0]:(e||'?');}
+function uxAcctMap(){ var d=ACCTWIN||{}, ems=((d.accounts||[]).map(function(a){return a.email;})).filter(Boolean).slice().sort();
+  var m={}; ems.forEach(function(e,i){m[e]=UXPAL[i%UXPAL.length];}); return m; }
+function uxAcctColor(e,m){ if(!e||e==='(before tracking)'||e==='unknown') return 'var(--dim)'; return (m&&m[e])||'var(--mut)'; }
+function uxAcctResets(){ var d=ACCTWIN||{}, out=[]; (d.accounts||[]).forEach(function(a){ var w=(a.windows||{}).week||{}; if(w.resets_ts) out.push({email:a.email,ts:w.resets_ts}); }); return out; }
+function uxHeatLegend(){ var m=uxAcctMap(), ems=Object.keys(m);
+  var acc=ems.map(function(e){return '<span class="uxk"><i style="background:'+m[e]+'"></i>'+e2(uxAcctShort(e))+'</span>';}).join('');
+  return acc+'<span class="uxk" style="margin-left:auto;color:var(--dim)">color = account · more opaque = more usage · ring = weekly reset</span>'; }
+function uxHeatWeek(){
+  var heat=USAGE.heat, ha=USAGE.heat_acct, peak=USAGE.heat_peak||0, m=uxAcctMap();
+  if(!heat||!heat.length) return '<div class="uxlimiter" style="opacity:.7">collecting hourly data…</div>';
+  var days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  var rmark={}; uxAcctResets().forEach(function(r){ var t=new Date(r.ts*1000); rmark[((t.getDay()+6)%7)*24+t.getHours()]=uxAcctColor(r.email,m); });
+  var dh='<div class="uxhm-days">'+days.map(function(x){return '<span>'+x+'</span>';}).join('')+'</div>';
+  var cells='', marks='';
+  for(var d=0;d<7;d++)for(var h=0;h<24;h++){ var v=(heat[d]&&heat[d][h])||0, op=peak>0?Math.min(1,.06+.94*(v/peak)):.06;
+    var ac=(ha&&ha[d]&&ha[d][h])||null, col=ac?uxAcctColor(ac,m):'var(--el3)';
+    var hh=h===0?'12a':h<12?h+'a':h===12?'12p':(h-12)+'p';
+    var tip=days[d]+' '+hh+': '+fmtTok(v)+' tok'+(ac?(' · mostly '+uxAcctShort(ac)):'');
+    cells+='<i style="background:'+col+';opacity:'+op.toFixed(2)+'" data-tip="'+e2(tip)+'"></i>';
+    if(rmark[d*24+h]) marks+='<span style="grid-column:'+(h+1)+';grid-row:'+(d+1)+';border-color:'+rmark[d*24+h]+'"></span>'; }
+  var hours=''; for(var h2=0;h2<24;h2++) hours+='<span>'+(h2%6===0?(h2===0?'12a':h2<12?h2+'a':h2===12?'12p':(h2-12)+'p'):'')+'</span>';
+  return '<div class="uxhm-grid">'+dh+'<div class="uxhm-cells">'+cells+'<div class="uxhm-rst">'+marks+'</div></div></div><div class="uxhm-hours"><div></div><div>'+hours+'</div></div>';
+}
+function uxHeatMonth(){
+  var cal=USAGE.heat_month, peak=USAGE.heat_month_peak||0, m=uxAcctMap();
+  if(!cal||!cal.length) return '<div class="uxlimiter" style="opacity:.7">collecting daily data…</div>';
+  var days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  var startTs=(new Date(cal[0].date+'T00:00:00')).getTime()/1000, endTs=(new Date(cal[cal.length-1].date+'T23:59:59')).getTime()/1000;
+  var rmark={}; uxAcctResets().forEach(function(r){ var t=r.ts; while(t>endTs) t-=604800;
+    while(t>=startTs-1){ var ds=new Date(t*1000); var key=ds.getFullYear()+'-'+String(ds.getMonth()+1).padStart(2,'0')+'-'+String(ds.getDate()).padStart(2,'0'); rmark[key]=uxAcctColor(r.email,m); t-=604800; } });
+  var dh='<div class="uxcal-hd">'+days.map(function(x){return '<span>'+x+'</span>';}).join('')+'</div>';
+  var cells=''; for(var i=0;i<cal[0].dow;i++) cells+='<i class="uxcal-e"></i>';
+  cal.forEach(function(c){ var op=peak>0?Math.min(1,.08+.92*(c.tok/peak)):.08, col=c.acct?uxAcctColor(c.acct,m):'var(--el2)';
+    var ring=rmark[c.date]?('box-shadow:inset 0 0 0 2px '+rmark[c.date]):'';
+    var tip=c.date+': '+fmtTok(c.tok)+' tok'+(c.acct?(' · mostly '+uxAcctShort(c.acct)):'')+(rmark[c.date]?' · weekly reset':'');
+    cells+='<i class="uxcal-d" style="'+ring+'" data-tip="'+e2(tip)+'"><span class="uxcal-fill" style="background:'+col+';opacity:'+op.toFixed(2)+'"></span><b>'+c.day+'</b></i>'; });
+  return '<div class="uxcal">'+dh+'<div class="uxcal-grid">'+cells+'</div></div>';
+}
+function uxHeatBody(){ return UXHEAT==='month'?uxHeatMonth():uxHeatWeek(); }
+function uxSetHeat(k){ UXHEAT=k; var seg=document.getElementById('uxHeatSeg'); if(seg)[].forEach.call(seg.children,function(x){x.classList.toggle('on',x.getAttribute('data-k')===k);});
+  var sub=document.getElementById('uxHeatSub'); if(sub) sub.textContent=(k==='month'?'by day · last 5 weeks':'by hour × weekday · trailing 4 weeks');
+  var wrap=document.getElementById('uxHeatWrap'); if(wrap) wrap.innerHTML=uxHeatBody(); }
+function uxTrendDraw(){
+  var map={'5h':{k:'5h',span:18000,sub:'per 10 min · last 5h'},'24h':{k:'24h',span:86400,sub:'per hour · last 24h'},'7d':{k:'7d',span:604800,sub:'per day · last 7 days'},'30d':{k:'30d',span:2592000,sub:'per day · last 30 days'}};
+  var cfg=map[UXTREND]||map['24h'], ser=((USAGE.series&&USAGE.series[cfg.k])||[]), n=ser.length||1;
+  var el=document.getElementById('uxTrendSub'); if(el) el.textContent='tokens '+cfg.sub;
+  var vals=ser.map(function(b){return b.tok||0;});
+  var W=520,H=230,L=40,R=14,T=16,B=30,pw=W-L-R,ph=H-T-B;
+  var max=Math.max(1,Math.max.apply(null,vals.length?vals:[0]))*1.12;
+  var avg=vals.reduce(function(s,x){return s+x;},0)/n, peakI=0;
+  vals.forEach(function(x,i){if(x>vals[peakI])peakI=i;});
+  var bw=Math.min(24,(pw/n)-2), X=function(i){return L+(i+.5)*(pw/n);}, Y=function(v){return T+ph-(v/max)*ph;};
+  var bars=ser.map(function(b,i){var v=b.tok||0,hh=Math.max(2,(v/max)*ph),y=T+ph-hh,col=i===peakI?'var(--accent-light)':'rgba(var(--accent-rgb),.6)';
+    return '<g data-tip="'+ubLabel(i,n,cfg.span)+': '+fmtTok(v)+' tok · '+fmtUSD(b.cost||0)+'"><rect x="'+(X(i)-bw/2-1).toFixed(1)+'" y="'+T+'" width="'+(bw+2).toFixed(1)+'" height="'+ph+'" fill="transparent"/><rect x="'+(X(i)-bw/2).toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hh.toFixed(1)+'" rx="3" fill="'+col+'"/></g>';}).join('');
+  var grid=[.33,.66,1].map(function(kk){var v=max*kk; if(Y(v)<T+4) return ''; return '<line x1="'+L+'" y1="'+Y(v).toFixed(1)+'" x2="'+(W-R)+'" y2="'+Y(v).toFixed(1)+'" stroke="var(--hair)"/><text x="'+(L-6)+'" y="'+(Y(v)+3).toFixed(1)+'" font-size="9" fill="var(--dim)" text-anchor="end">'+fmtTok(v)+'</text>';}).join('');
+  var nlab=Math.ceil(n/6);
+  var xl=ser.map(function(b,i){return (i%nlab===0||i===n-1)?'<text x="'+X(i).toFixed(1)+'" y="'+(H-10)+'" font-size="9" fill="var(--dim)" text-anchor="middle">'+ubLabel(i,n,cfg.span).replace(' ago','')+'</text>':'';}).join('');
+  var svg='<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="xMidYMid meet">'+grid+bars
+    +'<line x1="'+L+'" y1="'+Y(avg).toFixed(1)+'" x2="'+(W-R)+'" y2="'+Y(avg).toFixed(1)+'" stroke="var(--mut)" stroke-dasharray="4 3"/><text x="'+(W-R)+'" y="'+(Y(avg)-4).toFixed(1)+'" font-size="9" fill="var(--mut)" text-anchor="end">avg '+fmtTok(avg)+'</text>'
+    +(vals.length?'<text x="'+X(peakI).toFixed(1)+'" y="'+(Y(vals[peakI])-6).toFixed(1)+'" font-size="9.5" font-weight="700" fill="var(--near)" text-anchor="middle">peak</text>':'')
+    +'<line x1="'+L+'" y1="'+(T+ph)+'" x2="'+(W-R)+'" y2="'+(T+ph)+'" stroke="var(--hair2)"/>'+xl+'</svg>';
+  var t=document.getElementById('uxTrend'); if(t) t.innerHTML=svg;
+}
+function uxSetTrend(k){ UXTREND=k; var seg=document.getElementById('uxTrendSeg');
+  if(seg)[].forEach.call(seg.children,function(x){x.classList.toggle('on',x.getAttribute('data-k')===k);}); uxTrendDraw(); }
+function uxWhen(){
+  return '<div class="uxkick">When usage occurs</div><div class="uxwhen">'
+    +'<div class="uxcard"><div class="uxct"><span class="uxt">When usage occurs</span><span class="uxs" id="uxHeatSub">by hour × weekday · trailing 4 weeks</span><span class="uxright"><span class="uxseg" id="uxHeatSeg"></span></span></div>'
+    +'<div class="uxsx"><div id="uxHeatWrap">'+uxHeatBody()+'</div></div>'
+    +'<div class="uxmleg" id="uxHeatLegend">'+uxHeatLegend()+'</div></div>'
+    +'<div class="uxcard"><div class="uxct"><span class="uxt">Usage over time</span><span class="uxs" id="uxTrendSub"></span><span class="uxright"><span class="uxseg" id="uxTrendSeg"></span></span></div>'
+    +'<div class="uxsx"><div class="uxchart" id="uxTrend" style="min-width:420px"></div></div></div></div>';
+}
+function uxBars(rows,colorFn,valFn,tipFn){
+  var max=Math.max.apply(null,rows.map(function(r){return r._v;}).concat([1]));
+  return rows.map(function(r){return '<div class="uxhb" data-tip="'+tipFn(r)+'"><span class="uxlbl">'+(r._self?'<span class="uxself">▸</span>':'')+e2(r._name)+'</span>'
+    +'<span class="uxtrack"><i style="width:'+(r._v/max*100).toFixed(1)+'%;background:'+colorFn(r)+'"></i></span><span class="uxval uxnum">'+valFn(r)+'</span></div>';}).join('');
+}
+function uxWhere(){
+  var u=USAGE, f=window.FLEET;
+  var models=(u.by_model||[]).map(function(m){return {_name:m.model,_v:m.cost,cost:m.cost,total:m.total};});
+  var projs=(u.by_project||[]).map(function(p){return {_name:p.name,_v:p.cost,_self:p.self,cost:p.cost,total:p.total};});
+  var accSrc=(f&&f.by_account&&f.by_account.length)?f.by_account.map(function(a){return {_name:a.account,_v:a.cost,cost:a.cost,total:a.total,where:a.where};})
+    :(u.by_account||[]).map(function(a){return {_name:a.account,_v:a.cost,cost:a.cost,total:a.total};});
+  var totCost=((u.totals&&u.totals.month&&u.totals.month.cost))||1;
+  var mBars=uxBars(models,function(r){return UMC[r._name]||'var(--accent-light)';},function(r){return fmtUSD(r.cost);},function(r){return e2(r._name)+': '+fmtUSD(r.cost)+' · '+fmtTok(r.total)+' tok';});
+  var mLeg=(u.by_model||[]).map(function(m){return '<span class="uxk"><i style="background:'+(UMC[m.model]||'var(--accent-light)')+'"></i>'+e2(m.model)+'</span>';}).join('');
+  var pBars=uxBars(projs,function(){return 'var(--accent)';},function(r){return fmtUSD(r.cost);},function(r){return e2(r._name)+(r._self?' · this node':'')+': '+fmtUSD(r.cost);});
+  var acmap=uxAcctMap();
+  var aBars=uxBars(accSrc,function(r){return uxAcctColor(r._name,acmap);},function(r){return fmtUSD(r.cost);},function(r){return e2(r._name)+': '+fmtUSD(r.cost)+((r.where&&r.where.length)?(' · '+r.where.map(function(x){return e2(x.side)+' '+fmtTok(x.total);}).join(', ')):'');});
+  var c=u.composition||{input:0,output:0,cache_read:0,cache_write:0}, ct=Math.max(1,c.input+c.output+c.cache_read+c.cache_write);
+  var comp=[['cache read',c.cache_read,'var(--ok)'],['input',c.input,'var(--info)'],['cache write',c.cache_write,'#bc8cff'],['output',c.output,'var(--err)']];
+  var compBar=comp.map(function(x){var p=x[1]/ct*100; return p<.3?'':'<i style="width:'+p.toFixed(2)+'%;background:'+x[2]+'" data-tip="'+x[0]+': '+fmtTok(x[1])+' ('+p.toFixed(1)+'%)"></i>';}).join('');
+  var compLeg=comp.map(function(x){return '<span class="uxk"><i style="background:'+x[2]+'"></i>'+x[0]+' <span style="color:var(--dim)">'+fmtTok(x[1])+'</span></span>';}).join('');
+  return '<div class="uxkick">Where usage goes <span class="uxknote">last 30 days · metered-equivalent $</span></div><div class="uxwhere">'
+    +'<div class="uxcard"><div class="uxct"><span class="uxt">By model</span><span class="uxs">'+fmtUSD(totCost)+' total</span></div>'+mBars+'<div class="uxmleg">'+mLeg+'</div></div>'
+    +'<div class="uxcard"><div class="uxct"><span class="uxt">By project</span><span class="uxs">▸ = this node</span></div>'+pBars+'</div>'
+    +'<div class="uxcard"><div class="uxct"><span class="uxt">By account</span><span class="uxs">who burned it</span></div>'+aBars
+    +'<div class="uxcomp"><div class="uxct" style="margin-bottom:8px"><span class="uxt" style="font-size:12px">Token composition</span><span class="uxs">'+fmtTok(ct)+' raw</span></div>'
+    +'<div class="uxcompbar">'+compBar+'</div><div class="uxmleg">'+compLeg+'</div>'
+    +'<div class="uxcompnote"><b>Cache reads are ~free</b> (≈0.1&times; input price) — most of the raw tokens, little of the cost.</div></div></div></div>';
+}
+function renderUsage(){
+  if(!USAGE){document.getElementById("grid").innerHTML=empty("Loading usage…");return;}
+  uxTipInit();
+  var h=uxHeader()+uxHero();
+  if(window.CC&&window.CC.accountWallet){ h+=uxFleet()+uxGov(); }
+  h+=uxWhen()+uxWhere();
+  document.getElementById("grid").innerHTML='<div class="uxwrap">'+h+'</div>';
+  var seg=document.getElementById('uxTrendSeg');
+  if(seg) seg.innerHTML=['5h','24h','7d','30d'].map(function(k){return '<button class="'+(k===UXTREND?'on':'')+'" data-k="'+k+'" title="usage over the last '+k+'" onclick="uxSetTrend(\''+k+'\')">'+k+'</button>';}).join('');
+  var hseg=document.getElementById('uxHeatSeg');
+  if(hseg) hseg.innerHTML=[['week','Week'],['month','Month']].map(function(x){return '<button class="'+(x[0]===UXHEAT?'on':'')+'" data-k="'+x[0]+'" title="'+(x[0]==='week'?'hour by weekday, last 4 weeks':'daily calendar, last 5 weeks')+'" onclick="uxSetHeat(\''+x[0]+'\')">'+x[1]+'</button>';}).join('');
+  uxTrendDraw();
 }
 // ---- Files lens: one organized place for every agent-OUTPUT file across the deployment ----
 let FILES=null, FILESMODE=localStorage.getItem('hpcc_filesmode')||'outputs', BROWSE=null, BROWSEREL='';
@@ -31572,7 +32033,7 @@ var HELP={
  machines:{t:'Machines',sub:'The computers in your fleet and whether each one is online right now.',h:'<p><b>What:</b> the other computers this system can reach -- your dev boxes and servers -- each showing a green dot when it is online.</p><p><b>Why:</b> you can confirm a machine is up and start work on it without opening a terminal yourself.</p><p><b>How:</b> click a machine to see its details and launch a session on it.</p>'},
  desktop:{t:'Remote Desktop',sub:'See and control the host Mac\'s full screen from here, even from your phone.',h:'<p><b>What:</b> a live view of the host Mac\'s actual screen, with full mouse and keyboard control, tunneled securely over your private network.</p><p><b>Why:</b> when you need to do something on the machine itself -- click a real app, approve a dialog -- you can, from any device including a phone.</p><p><b>How:</b> tap Open fullscreen; the first connection asks for the screen-sharing password (saved after that). If it will not connect, macOS Screen Sharing is not turned on yet.</p>'},
  server:{t:'Server',sub:'Whole-machine health -- cores, load, CPU, memory, disk, thermal, and every Command Center node\'s own vitals.',h:'<p><b>What:</b> a live view of the physical server this runs on: CPU load vs core count, memory + disk use, thermal pressure, the heaviest processes, and each co-located Command Center node\'s file descriptors / threads / CPU (its self-heal vitals).</p><p><b>Why:</b> so you can VISUALLY confirm nothing is running away -- the exact blind spot that once let a leaked process eat the whole machine for hours. If Load is above the core count, or a process is pegging many cores, or a node shows CRITICAL, you see it here immediately.</p><p><b>How:</b> it refreshes every 5s; watch Load-per-core and the Heaviest-processes list. Live CPU/GPU temperature (and power draw) come from the Apple Silicon SoC sensors via macmon -- sudoless, no helper; thermal pressure (the throttling signal) is shown alongside.</p>'},
- usage:{t:'Accounts / Usage',sub:'How many AI tokens and dollars you are spending, broken down by account and project.',h:'<p><b>What:</b> a live view of your AI usage -- tokens processed and dollar cost over time, split by model, Claude account, and project.</p><p><b>Why:</b> you can see where the spend is going and, when accounts are connected, how much of each account\'s rate-limit window is left before you hit a wall.</p><p><b>How:</b> pick a time window at the top to drive the charts; switch which login is active over in the Accounts tab.</p>'},
+ usage:{t:'Usage & Pacing',sub:'Metered API value across your account fleet, each account\'s rate-limit health, the pacing governor, and where the usage goes.',h:'<p><b>What:</b> one view of your Claude usage -- the metered pay-as-you-go value of what your flat subscription actually did, each account\'s 5-hour and weekly rate-limit windows, the pacing governor that lands each account near its target by reset, when you burn (hour x weekday), and where it goes (by model / project / account).</p><p><b>Why:</b> you run multiple accounts on flat plans; this shows the leverage, keeps every account healthy against its limits, and tells you which login to burn next.</p><p><b>How:</b> the Account fleet shows live windows + which to use next; the Pacing governor projects where each rotating account finishes; toggle the trend window; switch or auto-rotate logins from the fleet cards.</p>'},
  backup:{t:'Backup',sub:'Whether your work is safely backed up, and a one-click button to back up now.',h:'<p><b>What:</b> the status of your automatic backups -- when the last one succeeded and whether it reached its offsite copy.</p><p><b>Why:</b> peace of mind that your work is saved, with a clear warning if backups have gone stale.</p><p><b>How:</b> it runs on its own; click Back up now to force one immediately (it scans for secrets first, then commits and pushes).</p>'},
  security:{t:'Security',sub:'A red/yellow/green health check of your setup -- secrets, access, and AI safety.',h:'<p><b>What:</b> a scan of this node\'s security posture -- exposed secrets, access settings, dependencies, network, and AI-agent safety -- summed up as a single green, amber, or red light.</p><p><b>Why:</b> it catches the risky mistakes (a leaked key, an open door) before they bite, and tells you exactly what to fix.</p><p><b>How:</b> click Run scan; each finding shows what it is and the evidence. Ask your Chief of Staff to help fix anything flagged red.</p>'},
  agents:{t:'Agents',sub:'Your roster of specialist helpers -- backup, security, cost, and more -- each with one job.',h:'<p><b>What:</b> a set of scoped specialist agents, each an expert at one job (backup, security, cost, usage, and so on). They report findings and are read-only or ask before acting, so they are safe to run.</p><p><b>Why:</b> instead of one general assistant doing everything, you get focused experts you can run on demand and trust to stay in their lane.</p><p><b>How:</b> click Run to have one do its check, Talk to open a conversation with it, or ask your Chief of Staff: \'have the cost agent report our spend this month.\'</p>'},

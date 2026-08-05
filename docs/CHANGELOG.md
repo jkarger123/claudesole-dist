@@ -3,6 +3,23 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.240 -- 2026-08-05  (Ralph limit-detector false-positive fix + reactive-aware pacing (Phase 1.1))
+
+- **Ralph limit-detector fix (all loops, not gated).** `run_iteration` flagged a "usage/rate limit" (→ 900s
+  backoff banking nothing) whenever ANY stream line — including the model's own work output — contained broad
+  prose like `resets ` / `rate limit` / `usage limit`. Loops whose WORK is *about* usage/limits (e.g. building
+  this very governor) tripped it almost every iteration, and even an `API Error: Connection closed` was
+  mislabeled a rate-limit. Now: (1) skip assistant/user CONTENT and match only specific error tokens
+  (`rate_limit_error`, `overloaded_error`, `... limit reached`, `claude usage limit`); (2) never honor a limit if
+  the iteration COMPLETED cleanly (a run that merely mentioned limits isn't a limit hit). Connection/API errors
+  now correctly take the brief error backoff, not the 900s one. Discovered live watching a real loop churn.
+- **Reactive-aware pacing (Phase 1.1, gated by `pace_enable`).** The governor only models the 5h-all + weekly-all
+  windows; if Ralph hits a GENUINE limit while those show headroom (a per-model/burst limit `/usage` doesn't
+  expose), the runner stamps `~/.claude/_cc_pace_limithit` and the server decays a `reactive_factor` (0 right
+  after a hit → 1 over `pace_reactive_recover_s`=1800s). `effective_intensity = intensity x reactive_factor`
+  drives the gap, pre-empt, and concurrency cap — so loops back off after real limit-hits the model can't see,
+  then ease back on their own. New knob `pace_reactive_recover_s`(1800). Exposed on `/api/pace`.
+
 ## 0.99.239 -- 2026-08-05  (Pacing governor Phase 3: pacing-aware login switch -- loops rotate to a fresh account instead of idling)
 
 - Closes the landmine: autopilot's idle gate (never yank the login mid-task) meant busy Ralph loops kept the box

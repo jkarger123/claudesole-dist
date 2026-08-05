@@ -144,12 +144,25 @@ def _pace_read():
         j = json.loads(urllib.request.urlopen(req, timeout=8).read().decode())
         live = j.get("live") if isinstance(j, dict) else None
         if isinstance(live, dict) and live.get("ready") and live.get("intensity") is not None:
-            data = {"intensity": float(live["intensity"]), "s_perm": live.get("s_perm"),
+            # Phase 1.1: use EFFECTIVE intensity (modeled intensity x reactive penalty) when the server provides it,
+            # so the gap/pre-empt back off after a GENUINE limit-hit the modeled windows can't see.
+            eff = j.get("effective_intensity")
+            it = float(eff) if eff is not None else float(live["intensity"])
+            data = {"intensity": it, "modeled_intensity": float(live["intensity"]),
+                    "reactive_factor": j.get("reactive_factor"), "s_perm": live.get("s_perm"),
                     "limiter": live.get("limiter"), "pred_pct": live.get("pred_pct")}
     except Exception:
         data = None
     _PACE_CACHE.update({"at": now, "data": data})
     return data
+
+_PACE_LIMITHIT = os.path.expanduser("~/.claude/_cc_pace_limithit")
+def _pace_stamp_limit():
+    """Phase 1.1: record a GENUINE reactive limit-hit (a real rate/usage limit the modeled windows didn't predict).
+    The server's reactive factor decays effective intensity to ~0 right after, then recovers -> loops back off on
+    limits the governor can't see. Written on every real limit regardless of pace_enable (inert until read)."""
+    try: open(_PACE_LIMITHIT, "w").write(str(time.time()))
+    except Exception: pass
 
 def _pace_gap(default=3):
     """Inter-iteration sleep seconds, paced by burn permission: lerp(pace_max_gap_s, pace_min_gap_s, intensity).
@@ -407,14 +420,19 @@ def run_iteration(n):
         if _lf:                                   # feed the live tab (ralph_live.py renders this stream)
             try: _lf.write(raw + "\n"); _lf.flush()
             except Exception: pass
-        _low = raw.lower()                         # transient usage/rate-limit signal anywhere in the stream (D3)
-        if ("session limit" in _low or "usage limit" in _low or "rate_limit" in _low or "rate limit" in _low
-                or "resets " in _low or "overloaded_error" in _low):
-            limit_hit = True
-        try:
-            _ev = json.loads(raw)
-            if isinstance(_ev, dict) and _ev.get("type") == "result": last_result = _ev
-        except Exception: pass
+        _low = raw.lower()
+        try: _ev = json.loads(raw)
+        except Exception: _ev = None
+        if isinstance(_ev, dict) and _ev.get("type") == "result": last_result = _ev
+        # Genuine rate/usage-limit signal ONLY. Two tightenings vs the old "any phrase, any line" scan, which
+        # misfired constantly on loops whose WORK is about usage/limits (they'd back off 900s banking nothing):
+        #  (1) SKIP assistant/user CONTENT -- the model discussing "rate limits" in its own output is not a limit;
+        #  (2) match only specific ERROR tokens, never broad prose like "resets " / bare "rate limit".
+        if not (isinstance(_ev, dict) and _ev.get("type") in ("assistant", "user")):
+            if ("rate_limit_error" in _low or "overloaded_error" in _low or "usage limit reached" in _low
+                    or "session limit reached" in _low or "5-hour limit reached" in _low
+                    or "weekly limit reached" in _low or "claude usage limit" in _low):
+                limit_hit = True
         s = _pane_summary(raw)                     # keep the runner pane a COMPACT control+activity view
         if s: log("  " + s)
     try:
@@ -431,9 +449,14 @@ def run_iteration(n):
     if stop["why"] == "halt":  return "halt"
     if stop["why"] == "pause": log("  iteration interrupted (pause requested)."); return "pause"
     _sub = str(last_result.get("subtype") or "")
-    if limit_hit:                                  # transient -> caller backs off + retries; NEVER terminal (D3)
+    _err = bool(last_result.get("is_error"))
+    _completed_ok = bool(last_result) and not _err        # a clean result event -> the run FINISHED its work
+    _limit_sub = any(k in _sub.lower() for k in ("rate_limit", "usage_limit", "overloaded"))
+    # A real limit INTERRUPTS the run; an iteration that COMPLETED cleanly but merely mentioned limits in its work
+    # is NOT a limit hit (the false-positive that churned 900s backoffs on usage/pacing work). D3 stays transient.
+    if (limit_hit or _limit_sub) and not _completed_ok:
         log("  usage/rate limit detected this iteration."); return "limit"
-    if last_result.get("is_error") and _sub != "error_max_turns":
+    if _err and _sub != "error_max_turns":
         log("  iteration error: %s" % (_sub or "error")); return "error"
     return "ok"
 
@@ -504,6 +527,7 @@ def main():
         if res == "halt":
             log("  HALT during iteration -- stopping."); set_status(state="halted"); break
         if res == "limit":                          # transient usage/rate limit -> back off + RETRY same iteration (D3)
+            _pace_stamp_limit()                      # Phase 1.1: a REAL limit -> decay effective intensity so we don't slam again
             wait_s = int(CFG.get("limit_backoff_s", 900))
             log("  usage limit -- backing off %ds then retrying (the window is otherwise burned banking nothing)." % wait_s)
             set_status(state="throttled", current="usage limit -- waiting to retry"); _sleep_interruptible(wait_s); continue
