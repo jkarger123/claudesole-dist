@@ -3,6 +3,30 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.236 -- 2026-08-04  (Pacing governor Phase 0: read-only burn-rate telemetry -> pace_intensity per live account)
+
+- New cross-system **pacing governor** (`command-center/Usage/pacing/`), Phase 0 = READ-ONLY telemetry; nothing
+  actuates. It computes one `pace_intensity` in [0,1] per LIVE account that would land the weekly window near a
+  target (~90%) by reset without tripping the 5-hour or weekly limit -- back-loaded (reserve early, lean harder
+  as reset nears) with a tail-unleash near reset and a hard 5h clamp. Fleet-safe: a node with no wallet never
+  computes it; nothing consumes it yet.
+  - **Anchored to the REAL `/usage` scrape** (the same ground truth the fuel gauges show), NOT the limit-model's
+    predicted %, which undercounts badly when an account's usage burned on another node/user (observed ~45% real
+    vs ~12% modeled). Works for any account with a live reading, regardless of model calibration.
+  - `_pace_signal` + `_acct_model_view` (server.py): an account-level `pacing` bundle (intensity, ceiling,
+    forecast, limiter, `source`) riding up free inside `model` on `/api/account-windows`.
+  - Forecast = **average pace over the week so far** (stable), not a last-30-min rate extrapolated across days
+    (which swung the projection wildly on a burst).
+  - New `GET /api/pace` read surface + shared state `~/.claude/_cc_acct_pacing.json`, written every ~5m from
+    `_acct_windows_loop`. Ralph (Phase 1+) will read this.
+  - Dashboard: the Accounts/Usage fuel card for the live account draws a proper, non-distorting pacing curve
+    (uniform-scaled + capped width so it doesn't smear on big monitors): convex ceiling vs live usage vs
+    projected finish + an intensity gauge. Read-only -- watch it, tune K/target/bands, then wire actuation.
+  - Config knobs (all inert): `pace_target_pct`(90) `pace_curve_k`(1.5) `pace_tail_h`(6) `pace_5h_ceiling_pct`(92)
+    `pace_band_pp`(15); actuation gates `pace_enable`/`pace_switch` land now, default **OFF**.
+  - Doc fix: the account-recommend weekly reserve gate is `WK_RESERVE_PCT = 10`, not 5% (corrected the stale
+    docstring + `Usage/CLAUDE.md`).
+
 ## 0.99.235 -- 2026-08-04  (Limit-model: per-cycle capacity for 5h windows + recency-window fit -> all windows calibrate)
 
 - The account limit-model (`_acct_model_fit`) got two fixes so under-calibrated windows converge:

@@ -4317,7 +4317,19 @@ def account_usage_current():
 # set of accounts. So the readings cache + prefs live under ~/.claude (shared) and only ONE instance polls (a
 # file lock) -- otherwise every instance spawns same-named cc-uw sessions that collide and all reads fail.
 ACCT_WINDOWS_FILE = os.path.expanduser("~/.claude/_cc_acct_windows.json")  # email -> last reading (shared)
+ACCT_PACING_FILE = os.path.expanduser("~/.claude/_cc_acct_pacing.json")    # email -> live pacing signal (shared; Phase 0 telemetry)
 ACCT_PREFS_FILE = os.path.expanduser("~/.claude/_cc_acct_prefs.json")      # {rotation:[emails]|None} (shared)
+# --- Pacing governor knobs (Usage/pacing/DESIGN.md) --------------------------------------------------
+# Phase 0 ships the governor as READ-ONLY telemetry; the two actuation flags land now but gate nothing until
+# Phases 1-3. All inert unless a node opts in via cc.config: a node with no wallet never computes pacing, a
+# node with no Ralph loops never consumes it. Same fleet-safe carry-but-inert pattern as account_switch_cmd.
+PACE_TARGET_PCT  = float(CC.get("pace_target_pct") or 90)      # land the weekly window here by reset
+PACE_CURVE_K     = float(CC.get("pace_curve_k") or 1.5)        # convex back-load exponent (reserve early, steep near reset)
+PACE_TAIL_H      = float(CC.get("pace_tail_h") or 6)           # within this many h of weekly reset -> unleash to mop up headroom
+PACE_5H_CEIL_PCT = float(CC.get("pace_5h_ceiling_pct") or 92)  # hard 5h clamp: never push the session window past this
+PACE_BAND_PP     = float(CC.get("pace_band_pp") or 15)         # pct-points over which intensity ramps to the ceiling (weekly & 5h)
+PACE_ENABLE      = bool(CC.get("pace_enable"))                 # master gate: Ralph within-loop + concurrency pacing (Phases 1-2). default OFF
+PACE_SWITCH      = bool(CC.get("pace_switch"))                 # gate: pacing-driven login switch (Phase 3). default OFF
 ACCT_POLL_LOCKFILE = os.path.expanduser("~/.claude/_cc_acct_poll.lock")    # which instance owns the poll
 ACCT_POLL_TTL = int(CC.get("account_poll_ttl") or 1800)            # background refresh cadence (s); default 30 min
 _ACCT_WIN_LOCK = threading.Lock()
@@ -4686,7 +4698,7 @@ def _acct_recommend(accounts, now):
     can't be burned right now ('cooling') -> fall through to the next-soonest-reset account; it frees again
     at its own soon 5h reset. The weekly window is the scarce one that actually drives the choice.
 
-    Gates: weekly drained (<=5% free) -> 'resting'; 5h throttle full (<=8% free) -> 'cooling'; else 'ready',
+    Gates: weekly drained (<=10% free, WK_RESERVE_PCT) -> 'resting'; 5h throttle full (<=8% free) -> 'cooling'; else 'ready',
     ranked by SOONEST weekly reset (headroom is only a faint tie-breaker between near-equal reset times).
     When the fitted limit-model is READY it supplies a PREDICTED LIVE % (continuous telemetry between
     scrapes) -- fresher than the last /usage scrape -- used for the free%.
@@ -4829,12 +4841,58 @@ def _acct_refresh_due(interval=1800):
     try: open(_ACCT_REFRESH_LOCK, "w").write(str(int(time.time())))
     except Exception: pass
     return True
+def _acct_pacing_write():
+    """Persist the LIVE account's pacing signal to ~/.claude/_cc_acct_pacing.json (Phase 0 telemetry; the Ralph
+    throttle + /api/pace read it). Mirrors the shared-per-user _cc_acct_windows.json pattern. Uses the live
+    telemetry the model already tracks between scrapes, so it refreshes every loop tick (not just on a re-scrape)."""
+    try:
+        cur = _current_email()
+        if not cur: return
+        now = time.time(); store = _acct_windows_load(); rec = store.get(cur) or {}
+        pac = (_acct_model_view(cur, rec.get("windows") or {}, now, live=True) or {}).get("pacing")
+        if not pac: return
+        data = {}
+        try:
+            if os.path.isfile(ACCT_PACING_FILE):
+                with open(ACCT_PACING_FILE) as f: data = json.load(f) or {}
+        except Exception: data = {}
+        data[cur] = {"intensity": pac.get("intensity"), "target_rate_pph": pac.get("target_rate_pph"),
+                     "forecast_pct": pac.get("forecast_pct"), "ceiling_pct": pac.get("ceiling_pct"),
+                     "pred_pct": pac.get("pred_pct"), "limiter": pac.get("limiter"),
+                     "ready": pac.get("ready"), "ts": int(now)}
+        tmp = ACCT_PACING_FILE + ".tmp"
+        with open(tmp, "w") as f: json.dump(data, f)
+        os.replace(tmp, ACCT_PACING_FILE)
+    except Exception: pass
+
+def pace_payload():
+    """Read surface for the pacing governor (Phase 0). The live account's CURRENT pace_intensity + forecast,
+    computed fresh from the limit model, alongside the persisted per-account snapshots. Ralph (Phases 1+) reads
+    this; today it's telemetry only. `enabled`/`switch_enabled` echo the (default-OFF) actuation gates."""
+    now = time.time(); cur = _current_email() or ""; live = None
+    if cur:
+        try:
+            store = _acct_windows_load(); rec = store.get(cur) or {}
+            live = (_acct_model_view(cur, rec.get("windows") or {}, now, live=True) or {}).get("pacing")
+        except Exception: live = None
+    saved = {}
+    try:
+        if os.path.isfile(ACCT_PACING_FILE):
+            with open(ACCT_PACING_FILE) as f: saved = json.load(f) or {}
+    except Exception: saved = {}
+    return {"ok": True, "now": now, "current_email": cur, "live": live, "saved": saved,
+            "enabled": PACE_ENABLE, "switch_enabled": PACE_SWITCH,
+            "config": {"target_pct": PACE_TARGET_PCT, "curve_k": PACE_CURVE_K, "tail_h": PACE_TAIL_H,
+                       "s_ceiling_pct": PACE_5H_CEIL_PCT, "band_pp": PACE_BAND_PP}}
+
 def _acct_windows_loop():
     time.sleep(40)                                       # let boot settle (first cycle refreshes if the lock is stale)
     while True:
         try:
             if _current_email() and _acct_refresh_due(1800):    # live login present + not refreshed in the last ~30m
                 account_windows_refresh()
+        except Exception: pass
+        try: _acct_pacing_write()                        # Phase 0: refresh the live pacing signal every tick (uses live telemetry)
         except Exception: pass
         time.sleep(300)                                  # re-check every 5m; the shared lock gates the actual ~30m read
 
@@ -5106,9 +5164,63 @@ def _acct_model_fit(ttl=300):
     _ACCT_MODEL_CACHE.update({"at": now, "data": model})
     return model
 
+def _pace_forecast_pct(pct, reset_h, win_len_h):
+    """End-of-window % projection from AVERAGE pace so far (stable): keep filling at the rate that reached `pct`
+    over the window elapsed so far -> land at pct*win_len/elapsed. Anchored to the REAL scraped %, not a modeled
+    token rate; a last-30-min burst extrapolated over days swung this wildly (an active session read as 62%).
+    Too early to average -> just the current %."""
+    if pct is None or reset_h is None: return None
+    elapsed_h = max(0.0, win_len_h - reset_h)
+    if elapsed_h < 1.0: return round(min(150.0, max(0.0, pct)), 1)
+    return round(min(150.0, max(0.0, pct) * win_len_h / elapsed_h), 1)
+
+def _pace_signal(lc):
+    """The pacing governor (Usage/pacing/DESIGN.md): fold the weekly BACK-LOADED ceiling + the ironclad 5h clamp
+    into ONE `pace_intensity` in [0,1] for the LIVE account. Intensity = *permission to burn* (Ralph fills it if
+    it has work; it is not forced burn). "Lean harder near reset" falls out of the convex ceiling + tail-unleash.
+    ANCHORED TO THE REAL /usage SCRAPE (`pct`), the same ground truth the fuel gauges show -- NOT the limit-model's
+    predicted %, which can undercount badly when an account's usage burned on another node/user (observed ~45%
+    real vs an ~12% model prediction). `lc[wkey]` = {pct, reset_h} from the scrape. Missing -> intensity None."""
+    wk, ss = lc.get("week"), lc.get("session")
+    if not wk or not ss or wk.get("pct") is None or ss.get("pct") is None:
+        return {"ready": False, "intensity": None, "reason": "no live /usage reading for week + session yet"}
+    def c01(x): return max(0.0, min(1.0, x))
+    BAND = PACE_BAND_PP or 15.0
+    pw, ps = float(wk["pct"]), float(ss["pct"])
+    reset_w, reset_s = wk.get("reset_h"), ss.get("reset_h")
+    ef = c01((168.0 - reset_w) / 168.0) if reset_w is not None else 1.0
+    ceil_w = round(PACE_TARGET_PCT * (ef ** PACE_CURVE_K), 1)
+    ceil_s = round(PACE_5H_CEIL_PCT, 1)
+    # weekly permission from the convex ceiling; tail-unleash near reset ("don't leave usage on the table")
+    wk_perm = c01((ceil_w - pw) / BAND)
+    tail = bool(reset_w is not None and reset_w <= PACE_TAIL_H and pw < PACE_TARGET_PCT)
+    if tail: wk_perm = max(wk_perm, c01((PACE_TARGET_PCT - pw) / BAND))
+    if pw >= PACE_TARGET_PCT: wk_perm = 0.0          # hard reserve cap: never push weekly past target
+    # 5h clamp (never trip a 5-hour limit)
+    s_perm = c01((ceil_s - ps) / BAND)
+    if ps >= ceil_s: s_perm = 0.0
+    intensity = min(wk_perm, s_perm)
+    forecast_w = _pace_forecast_pct(pw, reset_w, 168.0)
+    # %/hour still needed to reach target by reset (honest, unit-free) -- what a full-tilt push must sustain
+    target_rate_pph = round(max(0.0, (PACE_TARGET_PCT - pw) / reset_w), 3) if (reset_w and reset_w > 0) else None
+    # which constraint is binding -> the switch layer (Phase 3) handles the two intensity->0 causes differently
+    if intensity >= 0.999:      limiter = "clear"             # full permission -- nothing binding
+    elif pw >= PACE_TARGET_PCT: limiter = "weekly-at-target"  # this account done for the week -> normal rotation
+    elif s_perm < wk_perm:      limiter = "5h-capped"          # rotate to a fresh account
+    else:                       limiter = "weekly-ceiling"     # pacing back-load holding it down early
+    return {"ready": True, "intensity": round(intensity, 3), "source": "usage-scrape",
+            "wk_perm": round(wk_perm, 3), "s_perm": round(s_perm, 3), "limiter": limiter, "tail": tail,
+            "ceiling_pct": ceil_w, "pred_pct": round(pw, 1), "forecast_pct": forecast_w,
+            "target_rate_pph": target_rate_pph, "reset_h": reset_w,
+            "pred_pct_session": round(ps, 1), "ceiling_pct_session": ceil_s, "reset_h_session": reset_s,
+            "target_pct": PACE_TARGET_PCT, "curve_k": PACE_CURVE_K, "band_pp": BAND, "tail_h": PACE_TAIL_H,
+            "elapsed_frac": round(ef, 4)}
+
 def _acct_model_view(account, windows_now, now, live=False, log=None):
     """Attach model-derived numbers for an account: capacity + confidence always; for the LIVE account also the
-    predicted live % (from continuous telemetry, between scrapes), recent burn rate, and max-out ETA."""
+    predicted live % (from continuous telemetry, between scrapes), recent burn rate, and max-out ETA. For the
+    live account it also folds in the pacing governor (out['pacing'], Phase 0 telemetry) + per-window
+    forecast_pct/ceiling_pct."""
     am = _acct_model_fit().get(account) or {}
     if not am: return None
     log = log if log is not None else _acct_log_load(); out = {}
@@ -5121,11 +5233,22 @@ def _acct_model_view(account, windows_now, now, live=False, log=None):
             v["pred_pct"] = round(min(150.0, max(0.0, 100.0 * fnow / m["capacity"])), 1)
             frec = _acct_feature_since(account, now - 1800, _WIN_MODEL.get(wkey), log)[feat]
             rate_h = frec / 0.5                          # feature consumed per hour (last 30 min)
+            v["rate_h"] = round(rate_h, 4)
             remaining = max(0.0, m["capacity"] - fnow)
             v["eta_h"] = round(remaining / rate_h, 2) if rate_h > 0 else None
             v["reset_h"] = round((rts - now) / 3600.0, 2)
             v["maxout_before_reset"] = bool(v.get("eta_h") is not None and v["eta_h"] < v["reset_h"])
         out[wkey] = v
+    # Pacing governor -- anchored to the REAL /usage scrape (ground truth the fuel gauges show), NOT the limit
+    # model's predicted % (which undercounts when usage burned on another node/user). Works for any account with a
+    # live reading, regardless of model calibration.
+    if live:
+        lc = {}
+        for wkey in ("week", "session"):
+            w = (windows_now or {}).get(wkey) or {}; rts = w.get("resets_ts")
+            if w.get("pct") is not None and rts:
+                lc[wkey] = {"pct": w.get("pct"), "reset_h": round((rts - now) / 3600.0, 2)}
+        out["pacing"] = _pace_signal(lc)
     return out
 
 def _acct_tod_report():
@@ -5328,6 +5451,10 @@ def chief_open():
               "types the command WITHOUT Enter, and CONFIRMS it landed), then ask me to run it in the Sessions tab. "
               "NEVER hand-roll `tmux send-keys` against a guessed session name -- that mis-targets the wrong node's "
               "shell. Protocol: see docs/SESSIONS_AND_SUDO.md in the ClaudeFather framework. "
+              "FLEET COMPUTER ACCESS: to SSH into any physical fleet machine (t490/t480/t14s/imac/air) run "
+              "`cc-fleet-ssh <host> [command]` (or `cc-fleet-ssh --list`) -- it pulls the key + host map from the "
+              "vault and connects from ANY node; NEVER hand-roll bare `ssh <host>` (it uses the wrong local key -> "
+              "'Permission denied', the classic fumble). "
               "When you (or an agent) create a file FOR me (a report/export/doc I SPECIFICALLY asked for), save it "
               "to the relevant module folder's deliverables/ subdir -- that is THE way it reaches me: it then shows "
               "in that module's Files panel AND the top-level Files lens (newest first, open/download from any "
@@ -18852,6 +18979,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/session-bar":   return self._s(200, json.dumps(session_bar()))
         if u.path == "/api/claude-accounts": return self._s(200, json.dumps(account_list()))
         if u.path == "/api/account-windows": return self._s(200, json.dumps(account_windows_all()))
+        if u.path == "/api/pace": return self._s(200, json.dumps(pace_payload()))
         if u.path == "/api/account-tod": return self._s(200, json.dumps(_acct_tod_report()))
         if u.path == "/api/account-switch-health": return self._s(200, json.dumps(switch_health()))
         if u.path == "/api/brief":
@@ -24657,6 +24785,7 @@ function acctFuelCard(a){
     if(a.why) h+='<div class="ucsub" style="margin-top:9px;color:'+(a.use_next?'var(--accent-light)':'var(--mut)')+'">'+e2(a.why)+'</div>';
   } else { h+='<div class="ucsub" style="margin-top:10px">No reading yet — log into this account on a machine (it becomes readable only while it\'s the live login) and it\'ll report in.</div>'; }
   h+=awModel(a);
+  if(a.active) h+=awPacing(a);   // Phase 0: the pacing governor's live opinion (read-only) for the account live HERE
   // login freshness (autopilot safety): can a machine safely auto-switch to this account, and is its stored login fresh?
   var sw=(a.switchable_on||[]).slice().sort(function(x,y){return (y.validated_ts||0)-(x.validated_ts||0);});
   if(sw.length){ var b=sw[0];
@@ -24689,6 +24818,66 @@ function awModel(a){
   return '<div class="ucsub" style="margin-top:8px;border-top:1px dashed var(--line);padding-top:7px;color:'+(any_warn?'var(--err)':'var(--mut)')+'">'
     +'<b style="color:var(--info)">📈 limit model</b> '+parts.map(e2).join(' &nbsp;·&nbsp; ')
     +' <span style="opacity:.5;cursor:help" title="Reverse-engineered from observed /usage % vs our per-account token telemetry. Capacity is in the best-fitting weighting (cost=$, context=tokens). It refines as more samples land; predicts the live % between scrapes and when this window will max out.">ⓘ</span></div>';
+}
+function awPacing(a){
+  // The pacing governor (Usage/pacing): convex back-loaded weekly ceiling + hard 5h clamp -> one burn-permission
+  // 'intensity'. Curve = ceiling (gold) vs live usage (dot) vs projected finish (dashed). Read-only in Phase 0.
+  var m=a.model; if(!m||!m.pacing) return '';
+  var p=m.pacing;
+  if(!p.ready){
+    return '<div class="ucsub" style="margin-top:8px;border-top:1px dashed var(--line);padding-top:7px;opacity:.72">'
+      +'<b style="color:var(--info)">🎯 pacing</b> calibrating — '+e2(p.reason||'limit model not ready')
+      +' <span style="opacity:.5;cursor:help" title="The pacing governor lands the weekly window near its target by reset without tripping the 5-hour or weekly limit. It activates once the limit model is calibrated for this account.">ⓘ</span></div>';
+  }
+  // A properly-proportioned chart: fixed viewBox scaled UNIFORMLY (meet, not 'none' -> no horizontal smear),
+  // width capped + centered so it doesn't sprawl across a big monitor, and non-scaling strokes so lines stay crisp.
+  var W=560,H=230,padL=34,padR=16,padT=16,padB=30,plotW=W-padL-padR,plotH=H-padT-padB,YMAX=108;
+  function xOf(f){return padL+Math.max(0,Math.min(1,f))*plotW;}
+  function yOf(pc){return padT+(1-Math.max(0,Math.min(YMAX,pc))/YMAX)*plotH;}
+  function n1(v){return v.toFixed(1);}
+  var tgt=p.target_pct||90,k=p.curve_k||1.5,ef=p.elapsed_frac||0,pw=p.pred_pct||0,fc=(p.forecast_pct!=null?p.forecast_pct:pw);
+  var pts=[]; for(var i=0;i<=60;i++){var f=i/60; pts.push(n1(xOf(f))+','+n1(yOf(tgt*Math.pow(f,k))));}
+  var ceil='M'+pts.join(' L');
+  var area='M'+n1(xOf(0))+','+n1(yOf(0))+' L'+pts.join(' L')+' L'+n1(xOf(1))+','+n1(yOf(0))+' Z';
+  var grid=''; [0,25,50,75,100].forEach(function(pc){ var y=n1(yOf(pc));
+    grid+='<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="var(--line)" stroke-width="1" vector-effect="non-scaling-stroke" opacity="'+(pc===100?'.55':'.22')+'"/>'
+      +'<text x="'+(padL-5)+'" y="'+(parseFloat(y)+3.3)+'" text-anchor="end" font-size="9.5" fill="var(--mut)">'+pc+'</text>'; });
+  var ty=n1(yOf(tgt));
+  var tgtLine='<line x1="'+padL+'" y1="'+ty+'" x2="'+(W-padR)+'" y2="'+ty+'" stroke="var(--accent-light)" stroke-width="1" stroke-dasharray="2 3" vector-effect="non-scaling-stroke" opacity=".75"/>'
+    +'<text x="'+(W-padR)+'" y="'+(parseFloat(ty)-4)+'" text-anchor="end" font-size="9.5" fill="var(--accent-light)">target '+tgt+'%</text>';
+  var over=fc>tgt+2,behind=fc<tgt-2,fcCol=over?'var(--err)':(behind?'var(--warn)':'var(--ok)');
+  var nx=n1(xOf(ef)),ny=n1(yOf(pw)),fx=n1(xOf(1)),fy=n1(yOf(fc));
+  var nowGuide='<line x1="'+nx+'" y1="'+padT+'" x2="'+nx+'" y2="'+(H-padB)+'" stroke="var(--ink)" stroke-width="1" stroke-dasharray="2 3" vector-effect="non-scaling-stroke" opacity=".3"/>';
+  var proj='<line x1="'+nx+'" y1="'+ny+'" x2="'+fx+'" y2="'+fy+'" stroke="'+fcCol+'" stroke-width="2" stroke-dasharray="5 4" stroke-linecap="round" vector-effect="non-scaling-stroke"/><circle cx="'+fx+'" cy="'+fy+'" r="3.2" fill="'+fcCol+'"/>';
+  var nowDot='<circle cx="'+nx+'" cy="'+ny+'" r="4.3" fill="var(--ink)" stroke="var(--card)" stroke-width="2"/>';
+  var svg='<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">'
+    +grid
+    +'<path d="'+area+'" fill="rgba(var(--accent-rgb),.10)"/>'
+    +'<path d="'+ceil+'" fill="none" stroke="var(--accent-light)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>'
+    +tgtLine+nowGuide+proj+nowDot
+    +'<text x="'+padL+'" y="'+(H-9)+'" font-size="9.5" fill="var(--mut)">week start</text>'
+    +'<text x="'+nx+'" y="'+(H-9)+'" text-anchor="middle" font-size="9.5" fill="var(--ink)">now</text>'
+    +'<text x="'+(W-padR)+'" y="'+(H-9)+'" text-anchor="end" font-size="9.5" fill="var(--mut)">reset '+awDur((p.reset_h||0)*3600)+'</text></svg>';
+  var inten=Math.round((p.intensity||0)*100);
+  var limMap={'clear':'full permission — no brake','5h-capped':'5-hour cap is the brake right now','weekly-ceiling':'held back — reserving weekly budget for later','weekly-at-target':'weekly target reached — resting this account'};
+  var lim=(p.limiter in limMap)?limMap[p.limiter]:(p.limiter||'');
+  var verdict=over?('<span style="color:var(--err)">projected '+fc+'% — ahead, easing off</span>'):behind?('<span style="color:var(--warn)">projected '+fc+'% — behind, room to lean in</span>'):('<span style="color:var(--ok)">projected '+fc+'% — on pace</span>');
+  var head='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:7px">'
+    +'<b style="color:var(--info)">🎯 pacing</b>'
+    +'<span class="awbadge" title="Burn permission right now: how hard loops may lean on this account. 0% = throttle to the cap, 100% = full speed. Read-only in Phase 0 (nothing acts on it yet).">intensity '+inten+'%</span>'
+    +'<div style="flex:1;min-width:80px;max-width:180px;height:7px;border-radius:5px;background:#0006;overflow:hidden"><div style="height:100%;width:'+inten+'%;background:var(--accent-light)"></div></div>'
+    +'<span class="sub">'+verdict+'</span></div>';
+  var foot='<div class="ucsub" style="margin-top:6px;opacity:.82">'
+    +'live '+pw+'% · ceiling now '+(p.ceiling_pct!=null?p.ceiling_pct+'%':'—')+' · target '+tgt+'% by reset · 5h '+(p.pred_pct_session!=null?p.pred_pct_session+'%':'—')+' (cap '+(p.ceiling_pct_session||92)+'%)'
+    +(lim?(' — '+e2(lim)):'')
+    +' <span style="opacity:.5;cursor:help" title="Gold curve = the back-loaded weekly ceiling (reserve early, lean harder as reset nears). Dot = live usage now. Dashed line = projected finish at the current burn rate. The governor keeps the projection landing near '+tgt+'% without the 5-hour window tripping. Phase 0: telemetry only — no throttling or switching acts on this yet.">ⓘ</span></div>';
+  var legend='<div class="ucsub" style="display:flex;gap:16px;flex-wrap:wrap;justify-content:center;margin-top:7px;opacity:.85">'
+    +'<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:16px;height:0;border-top:2px solid var(--accent-light)"></span>ceiling (budget)</span>'
+    +'<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:var(--ink);border:2px solid var(--card)"></span>now '+pw+'%</span>'
+    +'<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:16px;height:0;border-top:2px dashed '+fcCol+'"></span>projected '+fc+'%</span>'
+    +'</div>';
+  return '<div style="margin-top:8px;border-top:1px dashed var(--line);padding-top:9px">'+head
+    +'<div style="width:100%;max-width:600px;margin:0 auto">'+svg+legend+'</div>'+foot+'</div>';
 }
 function awTokenSetup(a){
   var id='awtok_'+(a.email||'').replace(/[^a-z0-9]/gi,'');
