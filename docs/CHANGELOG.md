@@ -3,6 +3,20 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.238 -- 2026-08-05  (Pacing governor Phase 2: cross-loop concurrency cap -- fewer loops near a cap, not just slower)
+
+- Burn-derived cap on SIMULTANEOUS Ralph loops: `allowed = round(lerp(pace_min_loops=1, pace_max_loops=4,
+  intensity))`. Full permission -> up to 4 loops; near a cap / reserving weekly budget -> down to 1 (never 0 --
+  the surviving loop self-throttles via the Phase-1 gap/pre-empt). Gated by `pace_enable` (default OFF); inert +
+  behavior-identical when off.
+  - `_pace_loop_cap_for` + `pace_payload` now expose `loop_cap` + `live_loops`; both actuators read the same number.
+  - `ralph_launch` (server.py): over-cap launches DEFER -- record `state="deferred"` in status.json + return
+    `deferred:true`; nothing is spawned past the budget.
+  - `ralph-supervisor-all.sh`: the master relauncher (which spawned dead loops with NO ceiling) now reads the cap
+    from `/api/pace`, counts running loops, and holds relaunches over the cap. `deferred` is a should-run state,
+    so a held loop starts the instant a slot frees as intensity rises.
+  - New knobs: `pace_max_loops`(4) `pace_min_loops`(1). Still no login-switch actuation (Phase 3).
+
 ## 0.99.237 -- 2026-08-05  (Pacing governor Phase 1: Ralph within-loop pacing -- glide to the cap, don't slam it)
 
 - Ralph now CONSUMES the pace signal (`ralph_runner.py`). Gated by cc.config **`pace_enable` (default OFF)** and

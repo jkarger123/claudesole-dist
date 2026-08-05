@@ -4330,6 +4330,8 @@ PACE_5H_CEIL_PCT = float(CC.get("pace_5h_ceiling_pct") or 92)  # hard 5h clamp: 
 PACE_BAND_PP     = float(CC.get("pace_band_pp") or 15)         # pct-points over which intensity ramps to the ceiling (weekly & 5h)
 PACE_MIN_GAP_S   = float(CC.get("pace_min_gap_s") or 3)        # Ralph inter-iteration gap at intensity 1 (tight loop)
 PACE_MAX_GAP_S   = float(CC.get("pace_max_gap_s") or 300)      # Ralph inter-iteration gap at intensity 0 (glide to the cap)
+PACE_MAX_LOOPS   = int(CC.get("pace_max_loops") or 4)          # concurrent Ralph loops allowed at intensity 1 (Phase 2)
+PACE_MIN_LOOPS   = int(CC.get("pace_min_loops") or 1)          # concurrent Ralph loops allowed at intensity 0 (never 0 -> the one loop self-throttles)
 PACE_ENABLE      = bool(CC.get("pace_enable"))                 # master gate: Ralph within-loop + concurrency pacing (Phases 1-2). default OFF
 PACE_SWITCH      = bool(CC.get("pace_switch"))                 # gate: pacing-driven login switch (Phase 3). default OFF
 ACCT_POLL_LOCKFILE = os.path.expanduser("~/.claude/_cc_acct_poll.lock")    # which instance owns the poll
@@ -4867,6 +4869,22 @@ def _acct_pacing_write():
         os.replace(tmp, ACCT_PACING_FILE)
     except Exception: pass
 
+def _ralph_alive_count():
+    """Count live Ralph loop sessions (ralph-<name>, excluding the -live viewer tabs). Phase 2 concurrency cap."""
+    try:
+        code, out, _ = sh([TMUX, "list-sessions", "-F", "#{session_name}"])
+        if code != 0: return 0
+        return sum(1 for s in out.split() if s.startswith("ralph-") and not s.endswith("-live"))
+    except Exception:
+        return 0
+
+def _pace_loop_cap_for(intensity):
+    """Allowed concurrent Ralph loops from burn permission: round(lerp(pace_min_loops, pace_max_loops, intensity)).
+    Never below pace_min_loops (default 1) -- the surviving loop self-throttles via the within-loop gap/pre-empt."""
+    if intensity is None: return None
+    it = max(0.0, min(1.0, float(intensity)))
+    return max(1, int(round(PACE_MIN_LOOPS + (PACE_MAX_LOOPS - PACE_MIN_LOOPS) * it)))
+
 def pace_payload():
     """Read surface for the pacing governor (Phase 0). The live account's CURRENT pace_intensity + forecast,
     computed fresh from the limit model, alongside the persisted per-account snapshots. Ralph (Phases 1+) reads
@@ -4882,11 +4900,16 @@ def pace_payload():
         if os.path.isfile(ACCT_PACING_FILE):
             with open(ACCT_PACING_FILE) as f: saved = json.load(f) or {}
     except Exception: saved = {}
+    # Phase 2 concurrency cap: allowed simultaneous Ralph loops at the current burn permission (None when pacing off
+    # or no ready signal -> uncapped). live_loops = how many are running now (ralph_launch + the supervisor gate on it).
+    loop_cap = _pace_loop_cap_for(live.get("intensity")) if (PACE_ENABLE and isinstance(live, dict) and live.get("ready")) else None
     return {"ok": True, "now": now, "current_email": cur, "live": live, "saved": saved,
             "enabled": PACE_ENABLE, "switch_enabled": PACE_SWITCH,
+            "loop_cap": loop_cap, "live_loops": _ralph_alive_count(),
             "config": {"target_pct": PACE_TARGET_PCT, "curve_k": PACE_CURVE_K, "tail_h": PACE_TAIL_H,
                        "s_ceiling_pct": PACE_5H_CEIL_PCT, "band_pp": PACE_BAND_PP,
-                       "min_gap_s": PACE_MIN_GAP_S, "max_gap_s": PACE_MAX_GAP_S}}
+                       "min_gap_s": PACE_MIN_GAP_S, "max_gap_s": PACE_MAX_GAP_S,
+                       "min_loops": PACE_MIN_LOOPS, "max_loops": PACE_MAX_LOOPS}}
 
 def _acct_windows_loop():
     time.sleep(40)                                       # let boot settle (first cycle refreshes if the lock is stale)
@@ -10426,6 +10449,23 @@ def ralph_launch(name):
         return {"ok": True, "session": sess, "complete": True, "note": "loop is complete -- not relaunched (archive it, or add unchecked items to resume)"}
     for ctl in ("halt", "pause"):
         try: os.remove(os.path.join(d, ctl))
+        except Exception: pass
+    # Pacing concurrency cap (Phase 2): when pace_enable is on, don't fan out past the burn budget -- if the allowed
+    # simultaneous-loop count is already running, DEFER (record intent in status.json; the supervisor starts it the
+    # moment a slot frees as intensity rises). Inert when pace_enable off. Gates automated + explicit launches alike.
+    if PACE_ENABLE:
+        try:
+            pp = pace_payload(); cap = pp.get("loop_cap"); alive = pp.get("live_loops") or 0
+            if cap is not None and alive >= cap:
+                sp = os.path.join(d, "status.json"); stt = _rjson(sp) if os.path.isfile(sp) else {}
+                stt.update({"state": "deferred", "updated": time.time(),
+                            "current": "pacing: deferred -- %d loops running >= cap %d at current burn" % (alive, cap)})
+                try:
+                    with open(sp, "w") as f: json.dump(stt, f)
+                except Exception: pass
+                return {"ok": True, "session": sess, "deferred": True, "loop_cap": cap, "live_loops": alive,
+                        "note": "pacing: %d loops already running (cap %d at current burn) -- deferred; the supervisor "
+                                "starts it when a slot frees" % (alive, cap)}
         except Exception: pass
     # pass this server's URL + config path so the runner can ping /api/ralph-notify (authenticated) on completion
     _cfgpath = os.environ.get("CC_CONFIG") or os.path.join(CC_HOME, "cc.config.json")
