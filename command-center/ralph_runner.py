@@ -162,6 +162,14 @@ def _pace_gap(default=3):
     it = max(0.0, min(1.0, p["intensity"]))
     return max(0.1, hi + (lo - hi) * it)
 
+_SWITCH_FLAG = os.path.expanduser("~/.claude/_cc_switch_in_progress")
+def _switch_in_progress(max_age=180):
+    """True while the server is mid-swap of the live Claude login (Phase 3). The runner HOLDS new iterations so a
+    loop never runs against a login being switched. Staleness-guarded (self-heals if a switch crashed uncleared).
+    Always checked (a manual operator switch should pause loops too); no-op when no switch is happening."""
+    try: return (time.time() - float(open(_SWITCH_FLAG).read().strip() or 0)) < max_age
+    except Exception: return False
+
 def _notify_starter():
     """On COMPLETION, tell the starting session the loop finished (server delivers when that session is idle)."""
     if _notify({"kind": "complete"}): log("  notified the starting session that this loop finished.")
@@ -475,6 +483,11 @@ def main():
             _notify_starter(); break   # ping the agent/session that started this loop (via the server)
         if MAX_ITERS and n > (START + MAX_ITERS - 1):
             log("  max iterations reached."); set_status(state="stopped"); break
+        # Login swap in progress (Phase 3)? HOLD -- never run an iteration against a login being switched out.
+        if _switch_in_progress():
+            log("  login switch in progress -- holding this iteration until it completes.")
+            set_status(state="throttled", current="login switch in progress -- holding")
+            _sleep_interruptible(10); continue
         # Pacing pre-empt (Phase 1): if burn permission is ~0 (5h cap hit or weekly at its target), HOLD for headroom
         # instead of running an iteration into the wall + eating the reactive 900s backoff that banks nothing. Bounded
         # chunk so it re-polls promptly + resumes the moment headroom returns; interruptible so halt/pause still win.

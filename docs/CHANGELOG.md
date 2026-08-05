@@ -3,6 +3,21 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.239 -- 2026-08-05  (Pacing governor Phase 3: pacing-aware login switch -- loops rotate to a fresh account instead of idling)
+
+- Closes the landmine: autopilot's idle gate (never yank the login mid-task) meant busy Ralph loops kept the box
+  non-idle, so autopilot NEVER fired while loops ran -> heavy loops slammed the cap instead of rotating. Now when
+  cc.config **`pace_switch` (default OFF)** is on AND the LIVE account is `cooling`/`resting` (burning here is
+  already blocked, the Phase-1 pre-empt is holding the loops), `_acct_autopilot_loop` BYPASSES the idle gate and
+  rotates to a fresh account. Every other gate still applies (auto + auto_proven + in-wallet + fleet-exclusivity +
+  fresh reading + verify/rollback). A healthy live account (`ready`) is still never yanked mid-task.
+- **Switch-pause:** `account_switch_verified` sets a staleness-guarded `~/.claude/_cc_switch_in_progress` flag for
+  the ~20-30s swap; `ralph_runner.py` HOLDS new iterations while it's set, so no loop runs against a login being
+  swapped. Always checked (covers manual operator switches too); self-heals if a switch crashes uncleared.
+- Switches taken via the idle-bypass are logged/attributed `by="pace"` (distinct from idle `auto`).
+- DEFERRED to Phase 3.1 (tune during observation): the `_acct_recommend` cooling-branch "prefer idle over
+  reserve-burn" nuance -- left the shared recommendation brain untouched to avoid perturbing existing rotation.
+
 ## 0.99.238 -- 2026-08-05  (Pacing governor Phase 2: cross-loop concurrency cap -- fewer loops near a cap, not just slower)
 
 - Burn-derived cap on SIMULTANEOUS Ralph loops: `allowed = round(lerp(pace_min_loops=1, pace_max_loops=4,

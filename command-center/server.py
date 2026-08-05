@@ -4490,11 +4490,19 @@ def _acct_autopilot_loop():
                     pa = next((a for a in aw.get("accounts", []) if a.get("email") == pick), None)
                     fresh = bool(pa and pa.get("ok") and pa.get("ts") and (now - pa["ts"]) < AUTO_FRESH_SEC)
                     idle = _user_idle_secs()
+                    # Pacing-aware switch (Phase 3): the idle gate exists so we never yank the login mid-task -- but
+                    # busy Ralph loops keep the box non-idle, so autopilot never fired while loops ran, and heavy
+                    # loops slammed the cap instead of rotating to a fresh account. When pace_switch is on AND the
+                    # LIVE account is cooling/resting, burning HERE is already blocked (Phase-1 pre-empt is holding
+                    # the loops), so there's nothing to yank -> BYPASS the idle gate and rotate now. Every other gate
+                    # (auto + auto_proven + in-wallet + fleet-exclusivity + fresh + verify/rollback) still applies.
+                    live_status = ((next((a for a in aw.get("accounts", []) if a.get("active")), None) or {}).get("status"))
+                    pacing_motivated = bool(PACE_SWITCH and live_status in ("cooling", "resting"))
                     if (aw.get("should_switch") and aw.get("pick_in_wallet") and pick and pick != cur
-                            and idle >= AUTO_IDLE_SEC and fresh):
+                            and (idle >= AUTO_IDLE_SEC or pacing_motivated) and fresh):
                         _autopilot_state_save({"last_switch_ts": now})           # claim intent (shared) BEFORE acting
-                        r = account_switch_verified(pick, by="auto")
-                        msg = ("auto-switched %s -> %s (%s)" % (cur, pick,
+                        r = account_switch_verified(pick, by=("pace" if pacing_motivated and idle < AUTO_IDLE_SEC else "auto"))
+                        msg = ("%s-switched %s -> %s (%s)" % (("pace" if pacing_motivated and idle < AUTO_IDLE_SEC else "auto"), cur, pick,
                                "verified" if r.get("ok") else ("FAILED, " + ("rolled back" if r.get("rolled_back") else "NOT rolled back") + ": " + str(r.get("error"))[:120])))
                         _autopilot_state_save({"last_switch_ts": time.time(), "last_note": time.strftime("%H:%M ") + msg})
                         try: open(os.path.expanduser("~/.cc-credential-changes.log"), "a").write(
@@ -4519,6 +4527,19 @@ def _wallet_rec(target):
     except Exception: pass
     return None
 
+_SWITCH_FLAG = os.path.expanduser("~/.claude/_cc_switch_in_progress")  # set while a login swap is mid-flight (Phase 3)
+def _switch_flag_set():
+    try: open(_SWITCH_FLAG, "w").write(str(time.time()))
+    except Exception: pass
+def _switch_flag_clear():
+    try: os.remove(_SWITCH_FLAG)
+    except Exception: pass
+def _switch_in_progress(max_age=180):
+    """True while a login switch is mid-flight -- Ralph reads this to PAUSE new iterations so a loop never runs
+    against a login being swapped. Staleness-guarded so a crashed/failed switch that didn't clear it self-heals."""
+    try: return (time.time() - float(open(_SWITCH_FLAG).read().strip() or 0)) < max_age
+    except Exception: return False
+
 def account_switch_verified(target, by="manual"):
     """Switch this macOS user's live login to `target` (wallet label or email), then VERIFY the new account is
     actually live AND can read /usage; on ANY failure ROLL BACK to the prior login. Logs every attempt to the
@@ -4532,6 +4553,7 @@ def account_switch_verified(target, by="manual"):
     tgt_email = rec.get("email") or target
     if prev_email and tgt_email and prev_email == tgt_email:
         return {"ok": True, "noop": True, "verified": True, "email": tgt_email, "note": "already live"}
+    _switch_flag_set()                                    # Phase 3: signal Ralph to hold new iterations during the swap
     if ACCT_SWITCH_CMD:
         # Reliable path: drive a FRESH OAuth login for tgt_email. A partial/failed run leaves the login
         # UNCHANGED (OAuth only writes tokens on a successful callback) -> safe, no rollback needed.
@@ -4571,6 +4593,7 @@ def account_switch_verified(target, by="manual"):
         verified = verified or authed
     else:
         werr = "identity did not flip (live shows %s)" % (live_now or "none")
+    _switch_flag_clear()                                   # swap attempt resolved -> let Ralph resume (rollback below is a fast keychain write)
     if verified:                                           # success: persist any reading + mark proven-good
         try:
             if windows:                                    # only overwrite the stored reading when we got one (never
