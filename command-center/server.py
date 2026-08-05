@@ -4328,6 +4328,8 @@ PACE_CURVE_K     = float(CC.get("pace_curve_k") or 1.5)        # convex back-loa
 PACE_TAIL_H      = float(CC.get("pace_tail_h") or 6)           # within this many h of weekly reset -> unleash to mop up headroom
 PACE_5H_CEIL_PCT = float(CC.get("pace_5h_ceiling_pct") or 92)  # hard 5h clamp: never push the session window past this
 PACE_BAND_PP     = float(CC.get("pace_band_pp") or 15)         # pct-points over which intensity ramps to the ceiling (weekly & 5h)
+PACE_MIN_GAP_S   = float(CC.get("pace_min_gap_s") or 3)        # Ralph inter-iteration gap at intensity 1 (tight loop)
+PACE_MAX_GAP_S   = float(CC.get("pace_max_gap_s") or 300)      # Ralph inter-iteration gap at intensity 0 (glide to the cap)
 PACE_ENABLE      = bool(CC.get("pace_enable"))                 # master gate: Ralph within-loop + concurrency pacing (Phases 1-2). default OFF
 PACE_SWITCH      = bool(CC.get("pace_switch"))                 # gate: pacing-driven login switch (Phase 3). default OFF
 ACCT_POLL_LOCKFILE = os.path.expanduser("~/.claude/_cc_acct_poll.lock")    # which instance owns the poll
@@ -4883,7 +4885,8 @@ def pace_payload():
     return {"ok": True, "now": now, "current_email": cur, "live": live, "saved": saved,
             "enabled": PACE_ENABLE, "switch_enabled": PACE_SWITCH,
             "config": {"target_pct": PACE_TARGET_PCT, "curve_k": PACE_CURVE_K, "tail_h": PACE_TAIL_H,
-                       "s_ceiling_pct": PACE_5H_CEIL_PCT, "band_pp": PACE_BAND_PP}}
+                       "s_ceiling_pct": PACE_5H_CEIL_PCT, "band_pp": PACE_BAND_PP,
+                       "min_gap_s": PACE_MIN_GAP_S, "max_gap_s": PACE_MAX_GAP_S}}
 
 def _acct_windows_loop():
     time.sleep(40)                                       # let boot settle (first cycle refreshes if the lock is stale)

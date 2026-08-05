@@ -3,6 +3,19 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.237 -- 2026-08-05  (Pacing governor Phase 1: Ralph within-loop pacing -- glide to the cap, don't slam it)
+
+- Ralph now CONSUMES the pace signal (`ralph_runner.py`). Gated by cc.config **`pace_enable` (default OFF)** and
+  read fresh each iteration, so flipping it takes effect with no restart; off = behavior byte-identical to before.
+  - **Variable inter-iteration gap:** `gap = lerp(pace_max_gap_s=300, pace_min_gap_s=3, intensity)` -- full
+    permission = tight 3s loop; as permission falls (nearing a cap / reserving weekly budget early) the gap
+    stretches so loops GLIDE to the ceiling instead of the old slam-then-sleep-900s churn.
+  - **Predictive pre-empt:** when burn permission is ~0 (5h cap hit or weekly at target) the loop HOLDS for
+    headroom in bounded, interruptible chunks BEFORE running an iteration into the wall -- so it never eats the
+    reactive 900s "banking nothing" backoff. (Phase 3 will switch logins here instead of idling.)
+  - `_pace_read` hits the local `GET /api/pace`; falls back to the old fixed 3s gap if unreachable / not ready.
+  - New knobs surfaced: `pace_min_gap_s`(3) `pace_max_gap_s`(300). Still no login-switch actuation (Phase 3).
+
 ## 0.99.236 -- 2026-08-04  (Pacing governor Phase 0: read-only burn-rate telemetry -> pace_intensity per live account)
 
 - New cross-system **pacing governor** (`command-center/Usage/pacing/`), Phase 0 = READ-ONLY telemetry; nothing

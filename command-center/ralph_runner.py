@@ -122,6 +122,46 @@ def _notify(payload):
     except Exception as e:
         log("  (notify failed: %s)" % str(e)[:100]); return False
 
+# ---- Pacing governor consumption (Usage/pacing, Phase 1): pace the loop by the live account's burn permission ----
+# The server computes one `pace_intensity` in [0,1] for the LIVE login (what THIS loop burns), anchored to the real
+# /usage scrape. We read it and (a) size the inter-iteration gap so loops GLIDE to the cap instead of slamming it,
+# and (b) pre-empt an iteration when permission is ~0 (5h cap hit / weekly at target) so we never run into the wall
+# and eat the reactive 900s "banking nothing" backoff. ALL of this is INERT unless cc.config `pace_enable` is on
+# (read fresh each call, so flipping the flag takes effect without a restart) -> default behavior is byte-identical.
+_PACE_CACHE = {"at": 0.0, "data": None}
+def _pace_read():
+    """The live account's pacing signal from the local server (GET /api/pace), cached ~20s. Returns None when
+    pace_enable is off, the server is unreachable, or no ready signal exists -> caller keeps its old fixed gap."""
+    c = _notify_cfg()
+    if not c.get("pace_enable"): return None
+    now = time.time()
+    if _PACE_CACHE["data"] is not None and now - _PACE_CACHE["at"] < 20: return _PACE_CACHE["data"]
+    url = os.environ.get("CC_NOTIFY") or ("http://127.0.0.1:%s" % (c.get("port") or 8799))
+    tok = c.get("auth_token") or ""; data = None
+    try:
+        import urllib.request
+        req = urllib.request.Request(url.rstrip("/") + "/api/pace", headers={"Cookie": "cc_auth=%s" % tok})
+        j = json.loads(urllib.request.urlopen(req, timeout=8).read().decode())
+        live = j.get("live") if isinstance(j, dict) else None
+        if isinstance(live, dict) and live.get("ready") and live.get("intensity") is not None:
+            data = {"intensity": float(live["intensity"]), "s_perm": live.get("s_perm"),
+                    "limiter": live.get("limiter"), "pred_pct": live.get("pred_pct")}
+    except Exception:
+        data = None
+    _PACE_CACHE.update({"at": now, "data": data})
+    return data
+
+def _pace_gap(default=3):
+    """Inter-iteration sleep seconds, paced by burn permission: lerp(pace_max_gap_s, pace_min_gap_s, intensity).
+    High intensity -> tight loop; low (near a cap, or reserving weekly budget early in the week) -> long gap, so
+    loops glide to the ceiling. Off/unavailable -> the old fixed default."""
+    p = _pace_read()
+    if not p: return default
+    c = _notify_cfg()
+    lo = float(c.get("pace_min_gap_s", 3) or 3); hi = float(c.get("pace_max_gap_s", 300) or 300)
+    it = max(0.0, min(1.0, p["intensity"]))
+    return max(0.1, hi + (lo - hi) * it)
+
 def _notify_starter():
     """On COMPLETION, tell the starting session the loop finished (server delivers when that session is idle)."""
     if _notify({"kind": "complete"}): log("  notified the starting session that this loop finished.")
@@ -435,6 +475,17 @@ def main():
             _notify_starter(); break   # ping the agent/session that started this loop (via the server)
         if MAX_ITERS and n > (START + MAX_ITERS - 1):
             log("  max iterations reached."); set_status(state="stopped"); break
+        # Pacing pre-empt (Phase 1): if burn permission is ~0 (5h cap hit or weekly at its target), HOLD for headroom
+        # instead of running an iteration into the wall + eating the reactive 900s backoff that banks nothing. Bounded
+        # chunk so it re-polls promptly + resumes the moment headroom returns; interruptible so halt/pause still win.
+        # Inert unless pace_enable is on (_pace_read -> None). Phase 3 will switch logins here instead of idling.
+        _pp = _pace_read()
+        if _pp is not None and _pp["intensity"] <= 0.01:
+            chunk = int(round(min(float(_notify_cfg().get("pace_max_gap_s", 300) or 300), 120)))
+            log("  pacing: burn permission 0 (%s, live ~%s%%) -- holding %ds for headroom (not slamming the cap)."
+                % (_pp.get("limiter") or "capped", _pp.get("pred_pct"), chunk))
+            set_status(state="throttled", current="pacing: waiting for %s headroom" % (_pp.get("limiter") or "cap"))
+            _sleep_interruptible(chunk); continue
         before = parse_progress()["checked"]
         res = run_iteration(n)
         if res == "halt":
@@ -485,7 +536,12 @@ def main():
         n += 1
         if DRY and not CFG.get("dry_loop") and n > START + 1:
             log("  [DRY RUN] stop after 1."); set_status(state="done"); break
-        time.sleep(3)
+        _gap = _pace_gap(3)                          # paced inter-iteration gap (old fixed 3s when pace_enable off)
+        if _gap > 3.5:
+            log("  pacing: burn permission %.0f%% -- gap %ds (gliding, not slamming)." % (100 * max(0.0, min(1.0, (_pace_read() or {}).get("intensity", 1))), int(round(_gap))))
+            _sleep_interruptible(int(round(_gap)))
+        else:
+            time.sleep(_gap)
     log("")
     log("  total: %.2f hr / %d iterations" % ((time.time() - t0) / 3600.0, n - START))
     _reap_live()   # runner is exiting -> tear down the live viewer so the loop doesn't keep LOOKING alive (D4)

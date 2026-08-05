@@ -24,7 +24,7 @@
       "cf-key-backup.sh": "2b8f32a392c4cfdd1b429e62e295e8dba25a1671ff706c5dd4a2f02c9c9c2ad2",
       "cf-key-restore.sh": "67f97afbcbeb65eb124984af9d7697f0a98a97fa12063175943ff24fd2cda5a8",
       "cf-update-healer.sh": "a86056ca43fc5a10dedc009409647dde1f846b22916a1c89c5c1dbe442f78bc4",
-      "claudesole.manifest.json": "669c2248ec04be3707c1b74c018d1bd186cd57b1aa161d9619d3d71de0368514",
+      "claudesole.manifest.json": "08835a8dbf0b9add15eeb8ef511ceb30e0f7bd74034a1aeac974aa6ea456f29f",
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/campaign_runner.py": "0a385adb090626c76c1f3baf4a1ed944cd0a80983ef752686e471003a012e339",
       "command-center/cc-advise": "e449156a34ddcb9068fc1c89223a2d3f8574b6dba15f2e3d3fe748bf2f49a70f",
@@ -67,11 +67,11 @@
       "command-center/policy_hook.py": "33bcbbdf940faeb4c0a51e5d47680c022f29aebd0451ad05c700713b927de188",
       "command-center/preship.py": "485bf7c63286dcce2e937989431362d813f70d21679d9668f0db8ecdf0d4d58b",
       "command-center/ralph_live.py": "91acfe6f45ada18364dd3fde74fd777d6ed83a6ef1b7673030dc2faef4d92878",
-      "command-center/ralph_runner.py": "4b2b0c719596a638647900c9d2c896870132d52e134b8a4c2e8dde9456a56cb8",
+      "command-center/ralph_runner.py": "5a6e639dfff8988aed29249972b726bdbade54edc1118c4d3c918e4b7de99d97",
       "command-center/residue_lint.py": "0b1c757909a27470095d5ea8b48641a9e9e0248ec1729f3598596f2129fd1d6f",
       "command-center/rollback_guard.py": "603ae76f8f854b46e0dd152a123e11cc85c760a8c82e7865ab5eeaf75b2ac800",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "63a43bef3ebae95af5770e185902aa98872d95ae001130e901de45e5d7fa267f",
+      "command-center/server.py": "545141b3053047d9b9e0ab5520755cbb1b7a7cdfaf052851147056a3cfb6dd7f",
       "command-center/skill_scan.py": "809f29a7c954dc1df44934152ac6054fa1873c8ca92ed04c6cb00b525cfa9b8c",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/static/phosphor/fill.css": "555980683a582c1910a954648b4ae38f58d76e797f02bfdc2c5e817901e6d4fc",
@@ -175,9 +175,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1785911853,
+    "generated": 1785912202,
     "v": 1,
-    "version": "0.99.236"
+    "version": "0.99.237"
   },
-  "sig": "HfyImytHI0BD1DYu9gP6GjlsEfvJjH4DFbW7swSXS5UcKsOAucWrvvWh7GeBbbwaaLYhaOjQ8FfUWpPDnyRACQ=="
+  "sig": "fatCU/PVC5vBh/PgQU498hTE4XbcyPBxGJxFIXSENUqaNYXrVlcC29AKaMvuisB2T7pviO6dGLvIxfSOm+EGAQ=="
 }
