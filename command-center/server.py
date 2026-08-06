@@ -4540,8 +4540,16 @@ def _acct_autopilot_loop():
                     # back. So accept a stale pick that is an idle, not-elsewhere-live 'ready' reserve with headroom.
                     # (the pick is always relabeled status='use_next' by _acct_recommend, so DON'T check =='ready';
                     #  it is by construction chosen from ready accounts, so wk_free > reserve already proves headroom.)
+                    # EMERGENCY PICK (2026-08-06): when every login is down to its reserve, _acct_recommend falls
+                    # through to the emergency branch and picks the soonest-resetting RESTING account -- which by
+                    # definition has wk_free <= WK_RESERVE_PCT, so the headroom clause below could NEVER pass and
+                    # autopilot was structurally unable to execute an emergency rotation on a stale reading. The
+                    # deadlock logic still holds for it: an idle, not-live-elsewhere reserve's usage is flat, so a
+                    # stale reading is a safe LOWER bound, and account_switch_verified re-reads /usage right after
+                    # the swap (rolling back a bad login). The emergency flag itself IS the deliberate decision to
+                    # spend that reserve, so don't re-litigate it with a headroom test.
                     pick_stale_ok = bool(pa and pa.get("ok") and not pa.get("live_on")
-                                         and (pa.get("wk_free") or 0) > WK_RESERVE_PCT)
+                                         and ((pa.get("wk_free") or 0) > WK_RESERVE_PCT or pa.get("emergency")))
                     fresh_ok = fresh or pick_stale_ok
                     idle = _user_idle_secs()
                     # Pacing-aware switch (Phase 3): the idle gate exists so we never yank the login mid-task -- but
@@ -4809,9 +4817,23 @@ def _acct_recommend(accounts, now):
             info[em] = {"status": "no_data", "score": -9, "use_next": False,
                         "why": "no reading yet — log into this account on any node to read it"}; continue
         def _free(winkey, wv, fallback):
+            # The /usage SCRAPE is ground truth at its timestamp, and usage inside a window is MONOTONIC -- so the
+            # scraped % is a hard FLOOR. The model's job is only to add what burned SINCE the scrape; it must never
+            # walk the number back DOWN. Without this floor an under-fit model silently masked a real 97%-used 5h
+            # window as 37% free-side 63% (2026-08-06): the 'cooling' throttle never fired, the live account scored
+            # 'ready', so `should_switch` stayed false and autopilot saw nothing to rotate away from while the box
+            # sat pinned at the cap. 5h capacity drifts cycle-to-cycle with the model mix, so the fit WILL be wrong
+            # on some cycles -- the floor makes that a lost optimization instead of a blown window. (The pacing
+            # governor already anchors to the scrape for exactly this reason; this brings the brain in line.)
+            # Only floor a reading that belongs to the CURRENT window -- if it reset since the scrape, the old %
+            # is stale-high. `_win_view` already zeroes an expired window, so this is belt-and-braces.
             pp = (mdl.get(winkey) or {}).get("pred_pct")   # model's predicted live % (live account only)
-            if pp is not None: return max(0.0, 100.0 - pp)
-            return wv.get("free", fallback)
+            if pp is None: return wv.get("free", fallback)
+            spct = wv.get("pct"); rts = wv.get("resets_ts"); wl = _WIN_LEN.get(winkey)
+            if (spct is not None and rts and wl and not wv.get("expired")
+                    and (a.get("ts") or 0) > (rts - wl)):
+                pp = max(pp, float(spct))
+            return max(0.0, 100.0 - pp)
         s_free = _free("session", s, 0)
         wk_free = _free("week", wk, 100)
         s_ttr = s.get("ttr"); s_ttr_h = max(0.05, (s_ttr if s_ttr else S_LEN_H * 3600) / 3600.0)

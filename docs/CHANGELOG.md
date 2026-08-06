@@ -3,6 +3,32 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.246 -- 2026-08-06  (Account brain: the /usage scrape is a FLOOR; emergency rotation can act on a stale reserve)
+
+- **The limit-model could hide a maxed window from the switcher.** `_acct_recommend._free()` preferred the
+  fitted model's `pred_pct` over the real `/usage` scrape whenever the model was READY. Caught live: a 1-minute-old
+  scrape read **97% of the 5h window used** while the model predicted 36.9%, so `s_free` came out 63% — the
+  `cooling` throttle (`s_free <= 8`) never fired, the live account scored `ready` and was relabeled `use_next`,
+  `should_switch` (`pick != cur`) stayed **false**, and autopilot never even reached its gates. The box sat pinned
+  at the cap with the UI reporting "on best account · 50% free". Root cause of the bad prediction is the known
+  cycle-to-cycle drift in 5h effective capacity (model mix) — this cycle's implied capacity was ~413 cost-units vs
+  the fitted median 1087 — so the fit WILL be wrong on some cycles by design.
+  **FIX:** usage inside a rate-limit window is MONOTONIC, so the scraped % is a hard **floor** —
+  `pp = max(pred_pct, scraped_pct)`. The model keeps its real job (adding what burned *since* the scrape) and can
+  still run ahead; it just can't walk the number back down. Only applied to a reading that belongs to the CURRENT
+  window (skipped when `expired`, or when the scrape predates the window start) so a stale-high % can't leak past
+  a reset. This brings the brain in line with the pacing governor, which already anchored to the scrape.
+- **Emergency rotation was structurally unreachable under autopilot.** When every login is down to its reserve,
+  `_acct_recommend` falls through to the emergency branch and picks the soonest-resetting `resting` account — which
+  by definition has `wk_free <= WK_RESERVE_PCT`. But `_acct_autopilot_loop`'s stale-reserve escape hatch required
+  `wk_free > WK_RESERVE_PCT`, so an emergency pick with a stale reading could never pass the freshness gate. The
+  hatch now also accepts a pick carrying the `emergency` flag: the freshness-deadlock reasoning still holds (an
+  idle, not-live-elsewhere reserve's usage is flat, so a stale reading is a safe lower bound, and
+  `account_switch_verified` re-reads `/usage` right after the swap and rolls back a bad login), and the emergency
+  flag IS the deliberate decision to spend that reserve — no need to re-litigate it with a headroom test.
+- Unit-tested against the exact incident state plus three regressions: model legitimately ahead of an older scrape
+  is NOT clamped down; an expired/reset window is NOT floored by its dead %; the no-model legacy path is unchanged.
+
 ## 0.99.245 -- 2026-08-06  (Model-weight diagnostic: coverage guard + variance gate; ships vmix to AFP)
 
 - **Two guards on `_acct_model_weight_report` (`GET /api/account-model-weight`)** so the Opus-5-weight verdict
