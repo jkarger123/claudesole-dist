@@ -3,6 +3,14 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.243 -- 2026-08-06  (Fix the freshness-deadlock fix: the pick's status is 'use_next', not 'ready')
+
+- v0.99.242's `pick_stale_ok` guard required `status == "ready"`, but `_acct_recommend` relabels the chosen
+  account `status = "use_next"` -- so the guard was ALWAYS false for the pick and the deadlock fix never engaged
+  (caught by verifying against live data before it mattered). Dropped the status check; the pick is by
+  construction chosen from ready accounts, so `wk_free > WK_RESERVE_PCT` (+ `ok` + `not live_on`) already proves
+  it was an idle reserve with headroom. Verified `pick_stale_ok` now True for the real stale reserve.
+
 ## 0.99.242 -- 2026-08-06  (Autopilot freshness-deadlock fix -- can finally rotate to a long-idle reserve account)
 
 - **Bug (found live: an account sat at 96% weekly without auto-switching).** The autopilot switch gate
