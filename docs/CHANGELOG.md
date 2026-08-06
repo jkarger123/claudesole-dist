@@ -3,6 +3,23 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.242 -- 2026-08-06  (Autopilot freshness-deadlock fix -- can finally rotate to a long-idle reserve account)
+
+- **Bug (found live: an account sat at 96% weekly without auto-switching).** The autopilot switch gate
+  (`_acct_autopilot_loop`) required the recommended pick's `/usage` reading to be < `autopilot_fresh_sec`(1h)
+  old. But a reserve account's real 5h/weekly windows only render while it is the LIVE keychain login, so an
+  IDLE reserve's reading necessarily goes stale -> autopilot could NEVER rotate to it: can't get a fresh read
+  without switching, can't switch without a fresh read. A node stuck on one login for >1h could not rotate off
+  a resting account to any reserve.
+- **Fix.** Accept a stale pick when it is an idle, **not-live-elsewhere**, `ready` reserve that had headroom
+  (`wk_free > WK_RESERVE_PCT`). Safe because an idle reserve's free capacity only GROWS (usage is flat while
+  idle, and jumps to 100% free at its weekly reset), so a stale "was ready" reading is a safe LOWER BOUND; and
+  `account_switch_verified` reads `/usage` right after the swap (verify + rollback), so the pick self-refreshes
+  and a bad login rolls back. Fleet-exclusivity (`not live_on`) still excludes accounts live on another node.
+- **Note:** on a BUSY node the idle gate (300s) still blocks a normal auto-switch; the Phase-3 `pace_switch`
+  bypass (live account cooling/resting) is what lets it rotate while loops run. This fix removes the *freshness*
+  blocker so that bypass can actually complete. Belongs to the pacing module's Phase 3.1.
+
 ## 0.99.241 -- 2026-08-05  (Usage: cross-node limit-model capacity fit + multi-node cap flag)
 
 - **Multi-node weekly-capacity under-read fixed.** An account used on >1 store (e.g. Sarah on both hptuners +

@@ -4518,6 +4518,17 @@ def _acct_autopilot_loop():
                     pick = aw.get("pick"); cur = aw.get("current_email")
                     pa = next((a for a in aw.get("accounts", []) if a.get("email") == pick), None)
                     fresh = bool(pa and pa.get("ok") and pa.get("ts") and (now - pa["ts"]) < AUTO_FRESH_SEC)
+                    # FRESHNESS DEADLOCK FIX (Phase 3.1): a reserve account's real 5h/weekly windows only render while
+                    # it's the LIVE login, so an IDLE reserve's reading necessarily goes stale -> the fresh gate could
+                    # NEVER rotate to it (can't get a fresh read without switching; can't switch without a fresh read).
+                    # But an idle reserve's free capacity only GROWS (usage is flat while idle, and jumps to 100% free
+                    # at its weekly reset), so a stale "was ready" reading is a safe LOWER BOUND. Not-live-elsewhere is
+                    # required (an account burning on another node isn't safely stale); account_switch_verified reads
+                    # /usage right after the swap (verify + rollback), so the pick self-refreshes and a bad login rolls
+                    # back. So accept a stale pick that is an idle, not-elsewhere-live 'ready' reserve with headroom.
+                    pick_stale_ok = bool(pa and pa.get("ok") and not pa.get("live_on")
+                                         and pa.get("status") == "ready" and (pa.get("wk_free") or 0) > WK_RESERVE_PCT)
+                    fresh_ok = fresh or pick_stale_ok
                     idle = _user_idle_secs()
                     # Pacing-aware switch (Phase 3): the idle gate exists so we never yank the login mid-task -- but
                     # busy Ralph loops keep the box non-idle, so autopilot never fired while loops ran, and heavy
@@ -4528,10 +4539,11 @@ def _acct_autopilot_loop():
                     live_status = ((next((a for a in aw.get("accounts", []) if a.get("active")), None) or {}).get("status"))
                     pacing_motivated = bool(PACE_SWITCH and live_status in ("cooling", "resting"))
                     if (aw.get("should_switch") and aw.get("pick_in_wallet") and pick and pick != cur
-                            and (idle >= AUTO_IDLE_SEC or pacing_motivated) and fresh):
+                            and (idle >= AUTO_IDLE_SEC or pacing_motivated) and fresh_ok):
                         _autopilot_state_save({"last_switch_ts": now})           # claim intent (shared) BEFORE acting
-                        r = account_switch_verified(pick, by=("pace" if pacing_motivated and idle < AUTO_IDLE_SEC else "auto"))
-                        msg = ("%s-switched %s -> %s (%s)" % (("pace" if pacing_motivated and idle < AUTO_IDLE_SEC else "auto"), cur, pick,
+                        _how = ("pace" if pacing_motivated and idle < AUTO_IDLE_SEC else "auto")
+                        r = account_switch_verified(pick, by=_how)
+                        msg = ("%s-switched %s -> %s%s (%s)" % (_how, cur, pick, ("" if fresh else " [stale reserve reading -- verified on switch]"),
                                "verified" if r.get("ok") else ("FAILED, " + ("rolled back" if r.get("rolled_back") else "NOT rolled back") + ": " + str(r.get("error"))[:120])))
                         _autopilot_state_save({"last_switch_ts": time.time(), "last_note": time.strftime("%H:%M ") + msg})
                         try: open(os.path.expanduser("~/.cc-credential-changes.log"), "a").write(
