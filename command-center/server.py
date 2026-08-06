@@ -2918,7 +2918,7 @@ def tmux_sessions():
     res.sort(key=lambda x: -x["activity"]); return res
 
 # ---- token usage + per-session remaining-context -----------------------------
-# The fleet runs claude-opus-4-8 at the 1M context window (max ctx observed ~985K),
+# The fleet runs claude-opus-5 at the 1M context window (max ctx observed ~985K),
 # so the per-session "remaining context" denominator is 1,000,000. Token totals are
 # summed from the Claude Code transcripts (~/.claude/projects/<slug>/<sessionId>.jsonl)
 # bucketed into rolling 1h / 24h / 7d / 30d windows. Scanning is incremental (each
@@ -3175,22 +3175,34 @@ def _model_label(model):
     for k in ("opus", "sonnet", "haiku", "fable"):
         if k in m: return k.capitalize()
     return model or "?"
+_MODEL_VER_DATE_RE = re.compile(r"-20\d{6}$")          # trailing YYYYMMDD build date
+def _model_ver(model):
+    """Canonical model-VERSION tag (family+version), finer than _model_label -- it KEEPS the version so
+    Opus 4.8 vs Opus 5 are distinguishable (both collapse to 'Opus' / the 'opus' price tier). e.g.
+    'claude-opus-5[1m]' -> 'opus-5', 'claude-opus-4-8' -> 'opus-4-8', 'claude-haiku-4-5-20251001' -> 'haiku-4-5'.
+    Used ONLY for calibration attribution (per-model-version mix per row) -- pricing/labeling are unchanged."""
+    m = (model or "").strip().lower()
+    if not m or m == "<synthetic>": return "synthetic"
+    if m.startswith("claude-"): m = m[7:]
+    m = m.split("[", 1)[0]                              # drop the [1m] context-window suffix
+    m = _MODEL_VER_DATE_RE.sub("", m)                  # drop the trailing build date
+    return m or "?"
 
 # ---- Selectable session models (the Sessions model picker). Config-overridable via cc.config "models" so a new
 # tier (or a renamed alias) needs NO core release. `id` is what we pass to Claude Code's /model (it accepts the
 # short alias); `default` resets a session to the account's default model. Keep in sync with _PRICING labels.
 CC_MODELS = CC.get("models") or [
     {"id": "default", "label": "Default", "short": "Default"},
-    {"id": "opus",    "label": "Opus 4.8",   "short": "Opus"},
+    {"id": "opus",    "label": "Opus 5",   "short": "Opus"},
     {"id": "sonnet",  "label": "Sonnet 4.6", "short": "Sonnet"},
     {"id": "fable",   "label": "Fable 5",    "short": "Fable"},
     {"id": "haiku",   "label": "Haiku 4.5",  "short": "Haiku"},
 ]
 _MODEL_IDS = {m["id"] for m in CC_MODELS}
-# Every session defaults to Opus 4.8 at the 1M context window unless a specific model is requested (cheap
+# Every session defaults to Opus 5 at the 1M context window unless a specific model is requested (cheap
 # subagents/concierge/readers pass their own). Claude Code's built-in default drifted to Sonnet, so we force
 # this explicitly. Config-overridable per node with cc.config "default_model".
-DEFAULT_SESSION_MODEL = CC.get("default_model") or "claude-opus-4-8[1m]"
+DEFAULT_SESSION_MODEL = CC.get("default_model") or "claude-opus-5[1m]"
 
 _USAGE_CACHE = {"at": 0.0, "data": None}
 def usage_payload(ttl=20):
@@ -5164,6 +5176,7 @@ def _acct_feature_since(account, since_ts, model_sub=None, log=None):
     account was live at each event's timestamp (the same per-user account timeline used everywhere else)."""
     log = log if log is not None else _acct_log_load()
     f = {"cost": 0.0, "context": 0, "billable": 0, "output": 0, "raw": 0, "n": 0}
+    by_ver = {}                                          # model-version -> {b: billable, c: cost} (attribution only)
     with _TOK_LOCK:
         _scan_tok()
         for st in _TOK_STATE.values():
@@ -5173,8 +5186,11 @@ def _acct_feature_since(account, since_ts, model_sub=None, log=None):
                 if model_sub and model_sub not in (ev[1] or "").lower(): continue
                 if _acct_active_at(ts, log) != account: continue
                 inp, out, cw, cr = ev[2], ev[3], ev[4], ev[5]
-                f["cost"] += _ev_cost(ev); f["context"] += inp + cr; f["billable"] += inp + out + cw
+                bill = inp + out + cw; cost = _ev_cost(ev)
+                f["cost"] += cost; f["context"] += inp + cr; f["billable"] += bill
                 f["output"] += out; f["raw"] += inp + out + cw + cr; f["n"] += 1
+                v = by_ver.setdefault(_model_ver(ev[1]), {"b": 0, "c": 0.0}); v["b"] += bill; v["c"] += cost
+    f["by_ver"] = by_ver
     return f
 
 _ACCT_FEAT_FLEET_CACHE = {}                              # (account, since_bucket, model) -> (ts, feature dict)
@@ -5211,6 +5227,9 @@ def _acct_feature_fleet(account, since_ts, model_sub=None, log=None, ttl=60):
                 if sid in seen: continue
                 seen.add(sid)
                 for k in ("cost", "context", "billable", "output", "raw", "n"): f[k] = f.get(k, 0) + (r.get(k) or 0)
+                for ver, pv in (r.get("by_ver") or {}).items():          # merge the per-model-version mix too
+                    v = f.setdefault("by_ver", {}).setdefault(ver, {"b": 0, "c": 0.0})
+                    v["b"] += (pv.get("b") or 0); v["c"] += (pv.get("c") or 0)
     except Exception: pass
     _ACCT_FEAT_FLEET_CACHE[key] = (now, dict(f)); return f
 
@@ -5225,9 +5244,14 @@ def _acct_calib_log(account, side, windows, now):
         pct = w.get("pct"); rts = w.get("resets_ts"); wl = _WIN_LEN.get(wkey)
         if pct is None or not rts or not wl: continue
         f = featfn(account, rts - wl, _WIN_MODEL.get(wkey), log)
+        # vmix = per-model-VERSION share of this window's feature since its start (additive; older rows lack it).
+        # Lets us later ask "does the fitted capacity shift as the Opus 5 share rises?" without changing the fit.
+        vmix = {ver: {"b": int(v.get("b") or 0), "c": round(v.get("c") or 0.0, 4)}
+                for ver, v in (f.get("by_ver") or {}).items() if (v.get("b") or v.get("c"))}
         rows.append({"ts": int(now), "account": account, "side": side, "window": wkey, "reset_ts": int(rts),
                      "pct": int(pct), "cost": round(f["cost"], 4), "context": f["context"],
-                     "billable": f["billable"], "raw": f["raw"], "nev": f["n"], "fleet": 1 if mn else 0})
+                     "billable": f["billable"], "raw": f["raw"], "nev": f["n"], "fleet": 1 if mn else 0,
+                     "vmix": vmix})
     if not rows: return
     with _ACCT_CALIB_LOCK:
         try:
@@ -5417,6 +5441,66 @@ def _acct_model_view(account, windows_now, now, live=False, log=None):
         out["pacing"] = _pace_signal(lc)
     return out
 
+_MODELWT_CACHE = {"at": 0.0, "data": None}
+def _acct_model_weight_report(ttl=300):
+    """DIAGNOSTIC (read-only; does NOT touch the fit). Does a model VERSION consume a rate-limit window at a
+    different weight per token? For each (account, window) take every calib row carrying a per-version mix
+    (`vmix`, recorded v0.99.244+), compute the row's IMPLIED capacity (billable at 100% = billable/(pct/100)),
+    and bucket rows by the OPUS-5 SHARE of the window's billable. FLAT implied-cap across buckets -> Opus 5
+    weighs the same as Opus 4.8; a downward trend as opus5-share rises -> Opus 5 is HEAVIER.
+    TWO guards keep it honest: (1) a COVERAGE guard drops rows whose vmix doesn't cover ~all the billable (a
+    not-yet-shipped peer would otherwise overstate the Opus-5 share on multi-node accounts); (2) a VARIANCE gate
+    withholds a verdict unless the Opus-5 share actually SPREADS across rows -- because the fleet-wide default
+    flip makes share near-collinear with time and pins it toward ~100%, so the clean signal only exists during
+    the transition window. Expected answer is SAME (both Opus-tier, identical pricing); this is insurance."""
+    now = time.time()
+    if _MODELWT_CACHE["data"] is not None and now - _MODELWT_CACHE["at"] < ttl: return _MODELWT_CACHE["data"]
+    cut = now - max(30, _CALIB_FIT_DAYS * 2) * 86400        # wider than the fit window: we want the history of the shift
+    groups = {}
+    for r in _acct_calib_load(40000):
+        if not (1 <= (r.get("pct") or 0) <= 99): continue
+        if (r.get("ts") or 0) < cut: continue
+        vmix = r.get("vmix"); bill = r.get("billable") or 0
+        if not isinstance(vmix, dict) or not vmix or bill <= 0: continue   # only rows with the per-version mix
+        tot_b = sum((v.get("b") or 0) for v in vmix.values())
+        # COVERAGE GUARD: for a multi-node account, a peer not yet shipped (e.g. AFP pre-0.99.245) contributes
+        # billable but NO by_ver -> vmix undercounts the window's tokens and OVERSTATES the Opus-5 share. Drop any
+        # row whose vmix doesn't account for ~all the billable -> fail closed, not skewed. Self-heals once every
+        # node that burns this account records by_ver.
+        if tot_b < bill * 0.95: continue
+        o5 = sum((v.get("b") or 0) for ver, v in vmix.items() if str(ver).startswith("opus-5"))
+        share = max(0.0, min(1.0, o5 / tot_b))
+        groups.setdefault((r.get("account"), r.get("window")), []).append((share, bill / (r["pct"] / 100.0)))
+    out = {}
+    BUCKETS = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.01)]
+    for (acct, win), pts in groups.items():
+        buckets = []
+        for lo, hi in BUCKETS:
+            caps = [c for s, c in pts if lo <= s < hi]
+            if caps: buckets.append({"share": "%d-%d%%" % (int(lo * 100), int(hi * 100)), "n": len(caps), "implied_cap": round(_median(caps))})
+        shares = [s for s, c in pts]
+        srange = (max(shares) - min(shares)) if shares else 0.0
+        verdict = "insufficient mixed-model data yet"
+        # VARIANCE GATE: the regression needs SPREAD in the Opus-5 share to identify anything. Right after a
+        # fleet-wide default flip, share is near-collinear with TIME (old rows low, new rows high) and heading to
+        # a pinned ~100% -- so a "trend" is confounded with anything else that changed in the same period. Only
+        # emit a weight verdict while there is a real contrast; otherwise say so, don't over-claim.
+        if srange < 0.25 and len(pts) >= 4:
+            verdict = "share variance too low (%d-%d%%) to separate weight from time/workload" % (round(min(shares) * 100), round(max(shares) * 100))
+        elif len([1 for s in shares if s > 0.05]) >= 4 and len(buckets) >= 2:
+            xs = shares; ys = [c for s, c in pts]
+            mx = sum(xs) / len(xs); my = sum(ys) / len(ys)
+            slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / (sum((x - mx) ** 2 for x in xs) or 1e-9)
+            rel = slope / my if my else 0.0                 # relative cap shift per full 0->100% opus5 swing
+            if abs(rel) < 0.12:   verdict = "SAME weight — implied capacity flat vs Opus-5 share (time-confounded during the migration)"
+            elif rel < 0:         verdict = "Opus 5 HEAVIER — implied cap falls ~%d%% as opus5 0->100%% (time-confounded; treat as before/after)" % round(-rel * 100)
+            else:                 verdict = "Opus 5 LIGHTER — implied cap rises ~%d%% as opus5 0->100%% (time-confounded; treat as before/after)" % round(rel * 100)
+        out.setdefault(acct, {})[win] = {"buckets": buckets, "n": len(pts), "share_range_pct": round(srange * 100), "verdict": verdict}
+    data = {"accounts": out, "now": now,
+            "note": "read-only; billable-implied capacity bucketed by Opus-5 share of each window's billable.",
+            "caveat": "The fleet default flipped to Opus 5 on 2026-08-06, so Opus-5 share is near-collinear with TIME and trending to a pinned ~100%. During the transition (the next 1-2 weeks) there is real contrast; after that, share has no variance and any verdict is a time-confounded before/after, NOT a clean weighting measurement. To get a clean answer you'd pin a reserve account to Opus 4.8 for a cycle to manufacture variance. Expected result is SAME (both are Opus-tier at identical pricing) -- this is insurance."}
+    _MODELWT_CACHE.update({"at": now, "data": data}); return data
+
 def _acct_tod_report():
     """Time-of-day diagnostics: does a window fill with FEWER tokens at certain hours (peak-throttling)?
     For each window we estimate the IMPLIED full-window capacity from every informative calibration row
@@ -5487,7 +5571,7 @@ def launch(target, name, cid=None, rel=None, extra_sys=None, model=None, seed=No
     # so it must work even on a deployment with no machines registered (the record is a per-deployment
     # preserve-path that fresh installs lack). Only remote targets need a registered machine (for the ssh alias).
     if target != "studio" and not m: return {"ok": False, "error": "unknown target: " + str(target)}
-    if not model: model = DEFAULT_SESSION_MODEL                    # default every session to Opus 4.8 1M unless one was requested
+    if not model: model = DEFAULT_SESSION_MODEL                    # default every session to Opus 5 1M unless one was requested
     _mdl = (" --model " + _shlex.quote(model)) if model else ""   # cost tier (e.g. sonnet for cheap onboarding readers)
     # BASE (this command-center dir) on PATH so the cc-* CLIs (cc-secure/cc-note/cc-handoff/cc-task/cc-hold) resolve
     # as BARE commands inside every session -- without it onboarding/agents report them "not reachable" and can't
@@ -10340,6 +10424,16 @@ def past_conversations(machine, limit=150, force=False):
     PAST_CACHE[machine] = (now, data)
     return data
 
+def _scope_convos(convos, machine):
+    """History is PER-PROJECT on a scoped node: drop conversations launched OUTSIDE this instance's PROJECT,
+    mirroring the Sessions-lens scoping (_session_in_project). Without this a co-located tenant shows another
+    node's conversations because every co-located instance shares one ~/.claude/projects on the host.
+    Only applies to the LOCAL box (a remote machine's paths are its own tree, not ours);
+    the unscoped overseer (SCOPE_SESSIONS False) still sees everything."""
+    if not SCOPE_SESSIONS or machine != "studio":
+        return convos
+    return [c for c in convos if _session_in_project(c.get("cwd"))]
+
 def _transcript_text(o):
     """Searchable text from ONE transcript JSON line -> (text, role). Only user/assistant message TEXT (tool_use/
     tool_result blocks are large/noisy -> skipped, mirroring scan_projects' peek policy)."""
@@ -10408,6 +10502,8 @@ def transcript_search(query, machine="studio", limit=40, per=3):
             a = max(0, i - 110); b = min(len(txt), i + len(q) + 110)
             snip = ("..." if a > 0 else "") + txt[a:b].replace("\n", " ").strip() + ("..." if b < len(txt) else "")
             matches.append({"role": role, "snippet": snip})
+        if SCOPE_SESSIONS and not _session_in_project(cwd):
+            continue                                      # per-project scoping: don't leak another node's transcripts
         if matches:
             results.append({"id": os.path.basename(p)[:-6], "cwd": cwd, "mtime": mt,
                             "label": label or "(no opening message)", "matches": matches})
@@ -19121,7 +19217,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/context/backfill":   # manual re-ingest (also runs every 15 min)
             return self._s(200, json.dumps({"ok": True, "ingested": _context_backfill(), "stats": context.stats()}, default=str))
         if u.path == "/api/past":
-            return self._s(200, json.dumps(past_conversations(q.get("machine", ["studio"])[0], force=("force" in q))))
+            _hm = q.get("machine", ["studio"])[0]
+            return self._s(200, json.dumps(_scope_convos(past_conversations(_hm, force=("force" in q)), _hm)))
         if u.path == "/api/transcript-search":   # HISTORY: full-text search across this node's session transcripts
             return self._s(200, json.dumps(transcript_search(q.get("q", [""])[0], q.get("machine", ["studio"])[0])))
         if u.path == "/api/managed": return self._s(200, json.dumps(managed_overview()))
@@ -19175,6 +19272,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/account-windows": return self._s(200, json.dumps(account_windows_all()))
         if u.path == "/api/pace": return self._s(200, json.dumps(pace_payload()))
         if u.path == "/api/account-tod": return self._s(200, json.dumps(_acct_tod_report()))
+        if u.path == "/api/account-model-weight": return self._s(200, json.dumps(_acct_model_weight_report()))
         if u.path == "/api/account-switch-health": return self._s(200, json.dumps(switch_health()))
         if u.path == "/api/brief":
             return self._s(200, json.dumps(morning_brief.mb_state(), default=str)) if morning_brief else self._s(200, json.dumps({"ok": False, "error": "morning_brief not available"}))

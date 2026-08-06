@@ -3,6 +3,31 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.245 -- 2026-08-06  (Model-weight diagnostic: coverage guard + variance gate; ships vmix to AFP)
+
+- **Two guards on `_acct_model_weight_report` (`GET /api/account-model-weight`)** so the Opus-5-weight verdict
+  can't be rendered on biased data: (1) COVERAGE guard drops any calib row whose `vmix` doesn't cover ~95% of
+  its `billable` — a not-yet-shipped peer (AFP pre-0.99.245) contributes billable but no `by_ver`, which would
+  overstate the Opus-5 share on multi-node accounts; fails closed, self-heals once every node records `by_ver`.
+  (2) VARIANCE gate withholds a verdict unless the Opus-5 share actually spreads (≥25pp) across rows — the
+  fleet default flip makes share near-collinear with time and pins it toward ~100%, so the clean signal only
+  exists during the transition; verdicts now carry a time-confound caveat + the payload a `caveat` field.
+- **Ships `vmix` (v0.99.244) fleet-wide** — AFP now records the per-version mix and serves `by_ver`, completing
+  cross-node coverage so multi-node rows become usable (the coverage guard stops dropping them).
+
+## 0.99.244 -- 2026-08-06  (Calibration: per-model-version mix per row — can Opus 5 be weighed vs Opus 4.8)
+
+- **Per-model-version attribution in the limit-model calibration** (does NOT change the fit — pure attribution).
+  Opus 4.8 and Opus 5 collapse to the same `_model_label`/price tier, so a per-token weighting change in the
+  5h/weekly windows would have been invisible (would show only as unexplained capacity drift). New `_model_ver`
+  keeps the version (`opus-5` vs `opus-4-8`); `_acct_feature_since` now also returns a `by_ver` breakdown
+  (billable + cost per version); `_acct_calib_log` records it on each row as **`vmix`** (ADDITIVE — old rows
+  lack it and still parse + fit unchanged); `_acct_feature_fleet` + `/api/acct-feature` carry `by_ver` so
+  multi-node mixes stay global. New read-only diagnostic `_acct_model_weight_report` + **`GET
+  /api/account-model-weight`**: per (account, window) it buckets rows by Opus-5 share of billable and reports
+  the implied capacity per bucket + a verdict (SAME / Opus 5 HEAVIER / LIGHTER). Sparse until Opus 5 usage
+  accrues — the point is the system can now answer the question as the share rises.
+
 ## 0.99.243 -- 2026-08-06  (Fix the freshness-deadlock fix: the pick's status is 'use_next', not 'ready')
 
 - v0.99.242's `pick_stale_ok` guard required `status == "ready"`, but `_acct_recommend` relabels the chosen
