@@ -4501,6 +4501,11 @@ def set_account_autopilot(mode):
 AUTO_IDLE_SEC = int(CC.get("autopilot_idle_sec") or 300)         # require this much idle before auto-switching
 AUTO_COOLDOWN_SEC = int(CC.get("autopilot_cooldown_sec") or 1800)# min seconds between auto-switches (anti-flap)
 AUTO_FRESH_SEC = int(CC.get("autopilot_fresh_sec") or 3600)      # the pick's /usage reading must be fresher than this
+# The weekly reserve floor: below this an account is parked as 'resting' and only spent in a genuine all-drained
+# emergency. MODULE-LEVEL on purpose -- it used to be a LOCAL inside _acct_recommend while _acct_autopilot_loop
+# referenced it as a global, so the loop raised NameError on EVERY pass (swallowed by its bare except) and could
+# never reach its own gates. That is the second half of why autopilot had not fired since 2026-06-28.
+WK_RESERVE_PCT = int(CC.get("wk_reserve_pct") or 10)
 # Optional per-NODE actuator: a command that switches the live login by driving a FRESH OAuth login
 # (browser), instead of restoring a keychain snapshot (which rotates/goes stale). Node-specific
 # (needs that node's browser-profile + GUI setup), so it's opt-in via cc.config and unset on other nodes.
@@ -4508,26 +4513,133 @@ AUTO_FRESH_SEC = int(CC.get("autopilot_fresh_sec") or 3600)      # the pick's /u
 # on any failure it MUST leave the login unchanged (a partial OAuth never writes tokens). See
 # command-center/Usage/account-switcher/ (cc-switch).
 ACCT_SWITCH_CMD = (CC.get("account_switch_cmd") or "").strip() or None
+
+# ---- The MID-TURN gate (replaces the box-idle gate, 2026-08-06) ----------------------------------------------
+# WHY: the old gate was `_user_idle_secs() >= AUTO_IDLE_SEC` -- the MAX activity across EVERY tmux session this
+# macOS user owns. On a co-located box (44 sessions here: every node's chief, Ralph loops, the lifeline console,
+# the voice watcher, each open work session) that number never climbs past ~2 minutes, so the gate was
+# STRUCTURALLY UNSATISFIABLE: autopilot had not fired since 2026-06-28 even with should_switch true, the pick in
+# wallet, the ledger proven and the cooldown long expired. The ONLY reachable path was the cooling/resting
+# `pacing_motivated` bypass -- i.e. it could rotate off an account already pinned at its cap, but could never do
+# the proactive thing (a reserve's 5h window cleared -> go take it). It measured "is this Mac doing anything",
+# not "would a swap interrupt a turn".
+# WHAT INSTEAD: the gate's real job is "never yank the login mid-task", so measure exactly that -- is any session
+# MID-TURN right now. 'esc to interrupt' is Claude Code's live spinner: per _classify_attn it is the one fully
+# reliable scrape signal, and a plain shell can never render it (so admin shells / service panes never block us).
+# It CAN blink off for an instant between a tool result and the next assistant token (see _session_finished), so
+# we sweep TWICE with a short gap and require BOTH clean. Fails CLOSED: if tmux can't be listed we don't switch.
+AUTO_BUSY_RECHECK_SEC = float(CC.get("autopilot_busy_recheck_sec") or 3)
+
+# ---- ONE OWNER for automatic rotation (the 2026-08-06 triple-switch incident) --------------------------------
+# The live Claude login is GLOBAL to the macOS user, so every co-located instance computes the SAME pick and --
+# before this -- each ran its own autopilot loop. The shared anti-flap claim (_autopilot_state_save last_switch_ts)
+# is guarded by _SWITCH_HEALTH_LOCK, a per-PROCESS threading.Lock: no mutual exclusion across processes. After a
+# simultaneous restart the loops were in lockstep (same 75s boot sleep), all read last_switch_ts as expired in
+# the same instant, and all three co-located instances fired the switch command within 47 seconds of each other.
+# Three concurrent OAuth logins stomped the credential store and every live session got
+# "Login expired -- run /login". A SINGLE switch has never done that -- manual switches are routine and safe.
+# So: exactly ONE process may own automatic rotation. Default = the OVERSEER (role org / preset overseer) -- it
+# is the fleet authority and already sees every node. Tenants still show the alert + the manual switch button.
+AUTOPILOT_OWNER = (CC.get("account_autopilot_owner") or "overseer").strip().lower()
+def _autopilot_is_owner():
+    """Is THIS instance the one allowed to auto-switch? 'overseer' (default) | 'any' | an explicit instance_id."""
+    if AUTOPILOT_OWNER == "any": return True
+    if AUTOPILOT_OWNER == "overseer": return ROLE == "org" or PRESET == "overseer"
+    return AUTOPILOT_OWNER == (globals().get("INSTANCE_ID") or "")
+
+# Defense in depth: even with a single owner, never let two PROCESSES be mid-switch at once (a stray second
+# owner, a restart overlapping a slow cc-switch). O_EXCL create = atomic; the same pattern as the compact lock.
+_ACCT_SWITCH_LOCK_FILE = "/tmp/cf-acct-switch.lock"
+_ACCT_SWITCH_LOCK_STALE = 300                                # a cc-switch tops out ~200s; older = crashed, stealable
+def _acct_switch_lock_acquire():
+    now = time.time()
+    payload = json.dumps({"ts": now, "pid": os.getpid(), "instance": globals().get("INSTANCE_ID")}).encode()
+    try:
+        fd = os.open(_ACCT_SWITCH_LOCK_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.write(fd, payload); os.close(fd); return True
+    except FileExistsError: pass
+    except Exception: return False
+    try: age = now - float(json.load(open(_ACCT_SWITCH_LOCK_FILE)).get("ts", 0))
+    except Exception: age = _ACCT_SWITCH_LOCK_STALE + 1      # garbled -> treat as stealable
+    if age < _ACCT_SWITCH_LOCK_STALE: return False           # a switch is genuinely in flight elsewhere
+    try:
+        fd = os.open(_ACCT_SWITCH_LOCK_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(fd, payload); os.close(fd); return True
+    except Exception: return False
+def _acct_switch_lock_release():
+    try: os.remove(_ACCT_SWITCH_LOCK_FILE)
+    except Exception: pass
+
+def _acct_switch_blockers():
+    """Sessions a login swap would interrupt = those MID-TURN right now. Empty list = safe to switch."""
+    try: sess = tmux_sessions()
+    except Exception: return ["<tmux unavailable>"]      # fail CLOSED: can't prove it's safe -> don't switch
+    busy = []
+    for s in sess:
+        nm = s.get("name")
+        if not nm: continue
+        try:
+            if _pane_busy(nm): busy.append(nm)
+        except Exception: pass                            # one unreadable pane must not block the whole sweep
+    return busy
+
+def _acct_switch_quiet():
+    """True when NOTHING is mid-turn, confirmed by two sweeps AUTO_BUSY_RECHECK_SEC apart (kills the
+    spinner-blink race). Returns (quiet, blockers)."""
+    b = _acct_switch_blockers()
+    if b: return False, b
+    if AUTO_BUSY_RECHECK_SEC > 0:
+        time.sleep(AUTO_BUSY_RECHECK_SEC)
+        b = _acct_switch_blockers()
+        if b: return False, b
+    return True, []
+
+# Observability (the second half of this fix): the loop used to be entirely SILENT -- `except Exception: pass`,
+# no record of which gate said no. That is why an unsatisfiable gate went unnoticed for 40 days. Every pass now
+# appends one evaluation record, surfaced in account_windows_all -> the Accounts/Usage card. In-memory ONLY and
+# per-instance: persisting it would mean co-located instances read-modify-writing the SHARED state file every
+# 2 min, which could clobber another instance's last_switch_ts intent-claim and let two of them switch at once.
+_AUTOPILOT_EVAL = []
+def _autopilot_eval_log(rec):
+    rec["ts"] = time.time()
+    _AUTOPILOT_EVAL.append(rec)
+    del _AUTOPILOT_EVAL[:-40]                             # ring buffer, newest 40
+
 def _acct_autopilot_loop():
     """Auto-switch the live login to the recommended pick -- but ONLY when EVERY safety gate passes:
       - this macOS user is in 'auto' AND the verify-then-rollback ledger is auto_proven (>=SWITCH_PROOF_N good)
       - the recommended pick differs from the live login and is in THIS node's wallet
-      - the user is idle (>= AUTO_IDLE_SEC) so we never yank the login mid-task
+      - NOTHING is mid-turn (_acct_switch_quiet) so we never yank the login out from under a working session
       - the pick's /usage reading is OK and fresh (< AUTO_FRESH_SEC) -- never act on stale/errored data
       - a SHARED cooldown since the last auto-switch (anti-flap, in the per-user state file)
     The switch itself is account_switch_verified (auto-rolls-back a bad login); a failed switch trips the ledger
     back below the proof bar, disabling auto until re-earned. KILL-SWITCH: set the mode to anything but 'auto'
     (live-applied, per-user). Co-located instances coordinate via the SHARED state: whoever has the pick in its
     wallet and passes the gates writes the intent (last_switch_ts) BEFORE acting, so the others back off on the
-    shared cooldown; after the first switch the live login == pick so should_switch is false for everyone."""
+    shared cooldown; after the first switch the live login == pick so should_switch is false for everyone.
+    Every pass logs ONE evaluation record (_autopilot_eval_log) naming the gate that said no -- see the comment
+    on the mid-turn gate above for why silence here cost us 40 days of a dead autopilot."""
     time.sleep(75)                                               # let boot + the first account poll settle
     while True:
         try:
-            if _autopilot_mode() == "auto" and switch_health().get("auto_proven"):
+            ev = {"node": globals().get("INSTANCE_ID")}
+            mode = _autopilot_mode(); ev["mode"] = mode
+            proven = bool(switch_health().get("auto_proven")); ev["auto_proven"] = proven
+            if mode != "auto" or not proven:
+                ev["action"] = "off"
+                ev["why"] = ("autopilot mode is '%s'" % mode) if mode != "auto" else "switch ledger is not auto_proven"
+                _autopilot_eval_log(ev)
+            else:
                 st = _autopilot_state(); now = time.time()
-                if (now - (st.get("last_switch_ts") or 0)) > AUTO_COOLDOWN_SEC:   # shared cooldown
+                cool_left = AUTO_COOLDOWN_SEC - (now - (st.get("last_switch_ts") or 0))
+                ev["cooldown_left"] = int(max(0, cool_left))
+                if cool_left > 0:                                             # shared cooldown (anti-flap)
+                    ev["action"] = "hold"; ev["why"] = "shared anti-flap cooldown, %ds left" % int(cool_left)
+                    _autopilot_eval_log(ev)
+                else:
                     aw = account_windows_all()
                     pick = aw.get("pick"); cur = aw.get("current_email")
+                    ev["pick"] = pick; ev["current"] = cur; ev["should_switch"] = bool(aw.get("should_switch"))
                     pa = next((a for a in aw.get("accounts", []) if a.get("email") == pick), None)
                     fresh = bool(pa and pa.get("ok") and pa.get("ts") and (now - pa["ts"]) < AUTO_FRESH_SEC)
                     # FRESHNESS DEADLOCK FIX (Phase 3.1): a reserve account's real 5h/weekly windows only render while
@@ -4551,27 +4663,52 @@ def _acct_autopilot_loop():
                     pick_stale_ok = bool(pa and pa.get("ok") and not pa.get("live_on")
                                          and ((pa.get("wk_free") or 0) > WK_RESERVE_PCT or pa.get("emergency")))
                     fresh_ok = fresh or pick_stale_ok
-                    idle = _user_idle_secs()
-                    # Pacing-aware switch (Phase 3): the idle gate exists so we never yank the login mid-task -- but
-                    # busy Ralph loops keep the box non-idle, so autopilot never fired while loops ran, and heavy
-                    # loops slammed the cap instead of rotating to a fresh account. When pace_switch is on AND the
-                    # LIVE account is cooling/resting, burning HERE is already blocked (Phase-1 pre-empt is holding
-                    # the loops), so there's nothing to yank -> BYPASS the idle gate and rotate now. Every other gate
+                    ev["fresh"] = fresh; ev["fresh_ok"] = fresh_ok
+                    # Pacing-aware switch (Phase 3): when pace_switch is on AND the LIVE account is cooling/
+                    # resting, burning HERE is already blocked (the Phase-1 pre-empt is holding the loops), so
+                    # there is nothing to yank -> BYPASS the mid-turn gate and rotate now. Every other gate
                     # (auto + auto_proven + in-wallet + fleet-exclusivity + fresh + verify/rollback) still applies.
                     live_status = ((next((a for a in aw.get("accounts", []) if a.get("active")), None) or {}).get("status"))
                     pacing_motivated = bool(PACE_SWITCH and live_status in ("cooling", "resting"))
-                    if (aw.get("should_switch") and aw.get("pick_in_wallet") and pick and pick != cur
-                            and (idle >= AUTO_IDLE_SEC or pacing_motivated) and fresh_ok):
-                        _autopilot_state_save({"last_switch_ts": now})           # claim intent (shared) BEFORE acting
-                        _how = ("pace" if pacing_motivated and idle < AUTO_IDLE_SEC else "auto")
-                        r = account_switch_verified(pick, by=_how)
-                        msg = ("%s-switched %s -> %s%s (%s)" % (_how, cur, pick, ("" if fresh else " [stale reserve reading -- verified on switch]"),
-                               "verified" if r.get("ok") else ("FAILED, " + ("rolled back" if r.get("rolled_back") else "NOT rolled back") + ": " + str(r.get("error"))[:120])))
-                        _autopilot_state_save({"last_switch_ts": time.time(), "last_note": time.strftime("%H:%M ") + msg})
-                        try: open(os.path.expanduser("~/.cc-credential-changes.log"), "a").write(
-                            time.strftime("%Y-%m-%d %H:%M:%S") + "  AUTOPILOT " + msg + "\n")
-                        except Exception: pass
-        except Exception: pass
+                    ev["live_status"] = live_status; ev["pacing_motivated"] = pacing_motivated
+                    if not (aw.get("should_switch") and aw.get("pick_in_wallet") and pick and pick != cur):
+                        ev["action"] = "nothing-to-do"
+                        ev["why"] = ("already on the recommended account" if pick and pick == cur
+                                     else ("pick '%s' is not in this node's wallet" % pick) if pick else "no recommended pick")
+                        _autopilot_eval_log(ev)
+                    elif not fresh_ok:
+                        ev["action"] = "hold"
+                        ev["why"] = "the pick's /usage reading is stale and it is not a safe idle reserve"
+                        _autopilot_eval_log(ev)
+                    else:
+                        # LAST gate -- and the only one that costs anything to evaluate, so it runs last.
+                        quiet, blockers = (True, []) if pacing_motivated else _acct_switch_quiet()
+                        ev["quiet"] = quiet; ev["blockers"] = blockers[:6]
+                        if not quiet:
+                            ev["action"] = "hold"
+                            ev["why"] = "%d session(s) mid-turn: %s" % (len(blockers), ", ".join(blockers[:3]))
+                            _autopilot_eval_log(ev)
+                        elif not _acct_switch_lock_acquire():
+                            ev["action"] = "hold"; ev["why"] = "another process is mid-switch (cross-process lock held)"
+                            _autopilot_eval_log(ev)
+                        else:
+                          try:
+                            _autopilot_state_save({"last_switch_ts": now})       # claim intent (shared) BEFORE acting
+                            _how = ("pace" if pacing_motivated else "auto")
+                            r = account_switch_verified(pick, by=_how)
+                            msg = ("%s-switched %s -> %s%s (%s)" % (_how, cur, pick, ("" if fresh else " [stale reserve reading -- verified on switch]"),
+                                   "verified" if r.get("ok") else ("FAILED, " + ("rolled back" if r.get("rolled_back") else "NOT rolled back") + ": " + str(r.get("error"))[:120])))
+                            ev["action"] = "switch"; ev["ok"] = bool(r.get("ok")); ev["why"] = msg
+                            _autopilot_eval_log(ev)
+                            _autopilot_state_save({"last_switch_ts": time.time(), "last_note": time.strftime("%H:%M ") + msg})
+                            try: open(os.path.expanduser("~/.cc-credential-changes.log"), "a").write(
+                                time.strftime("%Y-%m-%d %H:%M:%S") + "  AUTOPILOT " + msg + "\n")
+                            except Exception: pass
+                          finally:
+                            _acct_switch_lock_release()
+        except Exception as e:
+            try: _autopilot_eval_log({"action": "error", "why": str(e)[:160]})
+            except Exception: pass
         time.sleep(120)
 
 def _wallet_rec(target):
@@ -4798,7 +4935,6 @@ def _acct_recommend(accounts, now):
     # so if we accidentally max everything out there's a sliver on each login to "get lean" and limp along until
     # one resets. Below this an account is parked as reserve (resting) -- only spent in a genuine all-drained
     # emergency (handled after the ready loop), soonest-resetting reserve first.
-    WK_RESERVE_PCT = 10
     info = {}
     for a in accounts:
         em = a["email"]; w = a.get("windows") or {}; s = w.get("session"); wk = w.get("week") or {}
@@ -5119,6 +5255,9 @@ def account_windows_all():
             "autopilot": _autopilot_mode(), "multi_account": len(walletset) > 1,
             "should_switch": should_switch, "pick_in_wallet": pick_in_wallet,
             "switch_health": switch_health(),
+            # Autopilot observability: WHY the loop did or didn't act on its last pass (in-memory, this instance).
+            "autopilot_last": (_AUTOPILOT_EVAL[-1] if _AUTOPILOT_EVAL else None),
+            "autopilot_eval": _AUTOPILOT_EVAL[-12:],
             "sides": [{"side": r.get("side") or r.get("store_id"), "live": r.get("current_email"),
                        "idle_secs": r.get("idle_secs")} for r in reps]}
 
@@ -6960,27 +7099,247 @@ def secure_ack(id):
     if it: it["status"] = "seen"; _secure_save(d)
     return {"ok": True}
 
-def notify_send(text):
-    """Push a notification to the user via any installed+configured channel (Telegram today). Graceful:
-    returns {ok, sent[], skipped[]} and never raises. Loops/agents/UI call this to reach the user's phone."""
+# ==== NOTIFY RECIPIENTS -- who the platform can reach, on which channel ========================================
+# notify_send() was single-recipient (one Telegram chat = the node operator). This directory makes it
+# MULTI-PERSON + MULTI-CHANNEL (telegram | sms) so alerts can reach the operator, a colleague, or a named
+# subset. BACKWARD COMPATIBLE: with no recipients configured, notify_send(text) behaves exactly as before
+# (legacy TELEGRAM_CHAT_ID) -- all 20+ existing call sites keep working untouched.
+#
+# SMS COMPLIANCE (US A2P 10DLC) is not optional decoration; it is what keeps the number deliverable:
+#   - a number is only ever added WITH a recorded consent stamp (who took it, when, how) -- `sms_consent`;
+#   - adding a consented number fires an ENROLLMENT CONFIRMATION text (promised in our registered campaign);
+#   - `opted_out` is honored on every send and set by the STOP webhook / manual removal. Never send to it.
+# Twilio creds resolve VAULT-FIRST via _deploy_env (TWILIO_ACCOUNT_SID / _API_KEY_SID / _API_KEY_SECRET, plus
+# TWILIO_MESSAGING_SERVICE_SID -- preferred for 10DLC -- or TWILIO_FROM_NUMBER).
+RECIP_FILE = os.path.join(STATE_DIR, "_recipients.json")
+_RECIP_LOCK = threading.Lock()
+NOTIFY_CHANNELS = ("telegram", "sms")
+
+def _recip_load():
+    try:
+        d = json.load(open(RECIP_FILE))
+        if isinstance(d, dict) and isinstance(d.get("people"), list): return d
+    except Exception: pass
+    return {"people": []}
+
+def _recip_save(d):
+    with _RECIP_LOCK:
+        try:
+            fd = os.open(RECIP_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.write(fd, json.dumps(d, indent=1).encode()); os.close(fd); return True
+        except Exception:
+            return False
+
+def _recip_get(who):
+    """Resolve a person by id or (case-insensitive) name."""
+    w = (who or "").strip().lower()
+    for p in _recip_load().get("people", []):
+        if p.get("id") == who or (p.get("name") or "").lower() == w: return p
+    return None
+
+def _e164(num):
+    """Normalize to E.164, assuming US when no country code. Returns None if it can't be trusted."""
+    s = re.sub(r"[^\d+]", "", num or "")
+    if not s: return None
+    if s.startswith("+"): return s if 8 <= len(s) <= 16 else None
+    if len(s) == 10: return "+1" + s
+    if len(s) == 11 and s.startswith("1"): return "+" + s
+    return None
+
+def _twilio_send(to_number, text):
+    """Send ONE SMS via Twilio's REST API (stdlib only). Never raises -> {ok, sid|error}.
+    Prefers MessagingServiceSid (the correct sender for a registered 10DLC campaign) over a raw From."""
+    acct = _deploy_env("TWILIO_ACCOUNT_SID"); ksid = _deploy_env("TWILIO_API_KEY_SID")
+    ksec = _deploy_env("TWILIO_API_KEY_SECRET")
+    if not (acct and ksid and ksec): return {"ok": False, "error": "twilio not configured"}
+    svc = _deploy_env("TWILIO_MESSAGING_SERVICE_SID"); frm = _deploy_env("TWILIO_FROM_NUMBER")
+    if not (svc or frm): return {"ok": False, "error": "no messaging service or from-number configured"}
+    to = _e164(to_number)
+    if not to: return {"ok": False, "error": "bad number"}
+    try:
+        import urllib.request, urllib.parse, base64 as _b64
+        fields = {"To": to, "Body": text}
+        if svc: fields["MessagingServiceSid"] = svc
+        else:   fields["From"] = frm
+        data = urllib.parse.urlencode(fields).encode()
+        req = urllib.request.Request(
+            "https://api.twilio.com/2010-04-01/Accounts/%s/Messages.json" % acct, data=data)
+        req.add_header("Authorization", "Basic " + _b64.b64encode(("%s:%s" % (ksid, ksec)).encode()).decode())
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return {"ok": True, "sid": (json.loads(r.read().decode()) or {}).get("sid")}
+    except Exception as e:
+        detail = ""; code = None
+        try:                                                             # HTTPError body carries Twilio's reason + code
+            j = json.loads(e.read().decode()); detail = j.get("message", ""); code = j.get("code")
+        except Exception: pass
+        return {"ok": False, "error": (detail or str(e))[:160], "code": code}
+
+def _telegram_send(chat_id, text):
+    """Send ONE Telegram message. Never raises -> {ok, error?}."""
+    tok = _deploy_env("TELEGRAM_BOT_TOKEN")
+    if not tok: return {"ok": False, "error": "telegram not configured"}
+    if not chat_id: return {"ok": False, "error": "no chat id"}
+    try:
+        import urllib.request, urllib.parse
+        data = urllib.parse.urlencode({"chat_id": chat_id, "text": text,
+                                       "disable_web_page_preview": "true"}).encode()
+        req = urllib.request.Request("https://api.telegram.org/bot%s/sendMessage" % tok, data=data)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return {"ok": getattr(r, "status", 200) == 200}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+
+# The enrollment confirmation a newly-added number receives. US carriers expect the SENDER NAME, message
+# frequency, a rates disclosure, and HELP/STOP instructions -- so the default is built from this deploy's BRAND
+# and stays compliant on any tenant. Override wholesale with cc.config "sms_enroll_confirm" when a registered
+# A2P campaign's approved wording differs (it must still carry all four elements).
+SMS_ENROLL_CONFIRM = CC.get("sms_enroll_confirm") or (
+    "%s: You are now opted in to operational alerts. Approx 5-20 msgs/month. "
+    "Msg & data rates may apply. Reply HELP for help, STOP to opt out." % BRAND)
+
+def recip_add(name, tg_chat_id=None, sms_number=None, consent_by=None, consent_method="verbal", channels=None):
+    """Add/update a recipient. A number is only accepted WITH a consent record, and enrolling one sends the
+    confirmation text our registered A2P campaign promises. Returns {ok, person, confirm}."""
+    name = (name or "").strip()
+    if not name: return {"ok": False, "error": "name required"}
+    num = _e164(sms_number) if sms_number else None
+    if sms_number and not num: return {"ok": False, "error": "unparseable phone number (use E.164, e.g. +15551234567)"}
+    if num and not consent_by:
+        return {"ok": False, "error": "sms_number requires consent_by (who took the verbal opt-in) -- see the "
+                                      "registered campaign flow; a number may never be added without it"}
+    d = _recip_load(); now = int(time.time())
+    p = None
+    for x in d["people"]:
+        if (x.get("name") or "").lower() == name.lower(): p = x; break
+    fresh = p is None
+    if fresh:
+        p = {"id": "rcp_%d_%s" % (now, re.sub(r"\W+", "", name.lower())[:10]), "name": name,
+             "created": now, "enabled": True, "opted_out": False}
+        d["people"].append(p)
+    if tg_chat_id: p["tg_chat_id"] = str(tg_chat_id)
+    newly_enrolled = bool(num) and p.get("sms_number") != num
+    if num:
+        p["sms_number"] = num
+        p["sms_consent"] = {"at": now, "by": consent_by, "method": consent_method}
+        p["opted_out"] = False
+    p["channels"] = [c for c in (channels or p.get("channels") or list(NOTIFY_CHANNELS)) if c in NOTIFY_CHANNELS]
+    _recip_save(d)
+    confirm = None
+    if newly_enrolled:                       # campaign commitment: confirm enrollment on the channel itself
+        confirm = _twilio_send(num, SMS_ENROLL_CONFIRM)
+    return {"ok": True, "person": p, "confirm": confirm}
+
+def _recip_note_unlinked(msg):
+    """Record a Telegram chat that messaged this bot but is NOT yet a recipient, so the operator can link the
+    person with one click instead of hunting for a chat_id. Called from the inbound poller -- which is the ONLY
+    getUpdates consumer for this token, so we never open a second one (a 409 would break session replies).
+    Stores nothing sensitive: chat id + whatever display name Telegram already sent us."""
+    try:
+        chat = (msg.get("chat") or {}); cid = str(chat.get("id") or "")
+        if not cid: return
+        d = _recip_load()
+        if any(str(p.get("tg_chat_id") or "") == cid for p in d.get("people", [])): return   # already linked
+        who = (" ".join(x for x in (chat.get("first_name"), chat.get("last_name")) if x)
+               or chat.get("username") or chat.get("title") or "")
+        pend = d.setdefault("pending", [])
+        for e in pend:
+            if str(e.get("chat_id")) == cid:
+                e["last_seen"] = int(time.time()); e["name"] = who or e.get("name"); _recip_save(d); return
+        pend.append({"chat_id": cid, "name": who, "username": chat.get("username") or "",
+                     "first_seen": int(time.time()), "last_seen": int(time.time())})
+        _recip_save(d)
+    except Exception:
+        pass
+
+def recip_link_pending(chat_id, name=None):
+    """Promote a pending Telegram chat into a real recipient (the one-click 'that is who this is' action)."""
+    cid = str(chat_id or "")
+    d = _recip_load()
+    ent = next((e for e in d.get("pending", []) if str(e.get("chat_id")) == cid), None)
+    nm = (name or (ent or {}).get("name") or "").strip()
+    if not nm: return {"ok": False, "error": "need a name for this person"}
+    r = recip_add(nm, tg_chat_id=cid, channels=["telegram"])
+    if r.get("ok"):
+        d = _recip_load()
+        d["pending"] = [e for e in d.get("pending", []) if str(e.get("chat_id")) != cid]
+        _recip_save(d)
+    return r
+
+def recip_remove(who):
+    d = _recip_load(); n = len(d["people"])
+    d["people"] = [p for p in d["people"] if p.get("id") != who and (p.get("name") or "").lower() != (who or "").lower()]
+    _recip_save(d)
+    return {"ok": len(d["people"]) < n, "removed": n - len(d["people"])}
+
+def recip_optout(number_or_who, reason="STOP"):
+    """Honor an opt-out (STOP webhook, or manual). Sets opted_out -- sends are refused from then on."""
+    d = _recip_load(); hit = 0; e = _e164(number_or_who) if number_or_who else None
+    for p in d["people"]:
+        if p.get("id") == number_or_who or (p.get("name") or "").lower() == (number_or_who or "").lower() \
+           or (e and p.get("sms_number") == e):
+            p["opted_out"] = True; p["opted_out_at"] = int(time.time()); p["opted_out_reason"] = reason; hit += 1
+    if hit: _recip_save(d)
+    return {"ok": bool(hit), "count": hit}
+
+def notify_send(text, to=None, channel=None):
+    """Push a notification to the user(s). Graceful: returns {ok, sent[], skipped[]} and never raises.
+
+    to=None      -> every enabled recipient; if NO recipients are configured, falls back to the legacy single
+                    TELEGRAM_CHAT_ID so existing call sites behave exactly as they always have.
+    to="name"    -> one person (id or name); to=[..] -> that subset.
+    channel=None -> each person's own channels; "sms"/"telegram" pins one."""
     text = (text or "").strip()
     if not text: return {"ok": False, "reason": "empty text"}
     out = {"ok": True, "sent": [], "skipped": []}
-    if "telegram-notify" in _ext_installed():
-        tok = _deploy_env("TELEGRAM_BOT_TOKEN"); chat = _deploy_env("TELEGRAM_CHAT_ID")
-        if tok and chat:
-            try:
-                import urllib.request, urllib.parse
-                data = urllib.parse.urlencode({"chat_id": chat, "text": text, "disable_web_page_preview": "true"}).encode()
-                req = urllib.request.Request("https://api.telegram.org/bot%s/sendMessage" % tok, data=data)
-                with urllib.request.urlopen(req, timeout=10) as r:
-                    (out["sent"] if getattr(r, "status", 200) == 200 else out["skipped"]).append("telegram")
-            except Exception as e:
-                out["skipped"].append("telegram:%s" % str(e)[:60])
-        else:
-            out["skipped"].append("telegram:not-configured (run Set up)")
+    people = _recip_load().get("people", [])
+    if to is not None:
+        want = [to] if isinstance(to, str) else list(to or [])
+        wl = [str(w).strip().lower() for w in want]
+        people = [p for p in people if p.get("id") in want or (p.get("name") or "").lower() in wl]
+        if not people:
+            out["skipped"].append("no matching recipient: %s" % ", ".join(str(w) for w in want)); out["ok"] = False
+            return out
     else:
-        out["skipped"].append("no notify channel installed (install telegram-notify in the Marketplace)")
+        people = [p for p in people if p.get("enabled", True)]
+
+    if not people and to is None:                       # ---- legacy single-operator path (unchanged behavior)
+        if "telegram-notify" not in _ext_installed():
+            out["skipped"].append("no notify channel installed (install telegram-notify in the Marketplace)")
+            return out
+        chat = _deploy_env("TELEGRAM_CHAT_ID")
+        if not (chat and _deploy_env("TELEGRAM_BOT_TOKEN")):
+            out["skipped"].append("telegram:not-configured (run Set up)"); return out
+        r = _telegram_send(chat, text)
+        (out["sent"] if r.get("ok") else out["skipped"]).append("telegram" if r.get("ok") else "telegram:%s" % r.get("error"))
+        return out
+
+    for p in people:                                     # ---- directory path
+        name = p.get("name") or p.get("id")
+        chans = [channel] if channel else (p.get("channels") or list(NOTIFY_CHANNELS))
+        tried = 0
+        for ch in chans:
+            if ch == "telegram" and p.get("tg_chat_id"):
+                tried += 1
+                r = _telegram_send(p["tg_chat_id"], text)
+                out["sent" if r.get("ok") else "skipped"].append(
+                    "%s/telegram" % name if r.get("ok") else "%s/telegram:%s" % (name, r.get("error")))
+            elif ch == "sms" and p.get("sms_number"):
+                tried += 1
+                if p.get("opted_out"):                   # hard compliance gate -- never text an opted-out number
+                    out["skipped"].append("%s/sms:opted-out" % name); continue
+                r = _twilio_send(p["sms_number"], text)
+                if r.get("ok"):
+                    out["sent"].append("%s/sms" % name)
+                else:
+                    # 21610 = Twilio's "recipient unsubscribed" (they replied STOP). Carrier-side opt-out is
+                    # authoritative; mirror it into the directory so we stop trying -- no webhook/public ingress
+                    # needed, the failure itself is the sync signal.
+                    if r.get("code") == 21610:
+                        recip_optout(p.get("sms_number"), reason="STOP (carrier, via 21610)")
+                    out["skipped"].append("%s/sms:%s" % (name, r.get("error")))
+        if not tried:                                    # never silently do nothing for an addressed person
+            out["skipped"].append("%s:no usable channel (%s)" % (name, "/".join(chans) or "none"))
+    if not out["sent"]: out["ok"] = False
     return out
 
 # ==== TELEGRAM PER-SESSION COMMS -- route any session's correspondence to your phone, smart multi-session =======
@@ -7222,7 +7581,9 @@ def _tg_inbound_loop():
             for upd in res.get("result", []):
                 d = _tg_load(); d["offset"] = max(d.get("offset", 0), upd.get("update_id", 0)); _tg_save(d)
                 msg = upd.get("message") or {}; text = (msg.get("text") or "").strip()
-                if text: _tg_handle_inbound(msg, text)
+                if text:
+                    _recip_note_unlinked(msg)          # surface unknown senders for one-click linking (below)
+                    _tg_handle_inbound(msg, text)
         except Exception: time.sleep(5)
 
 # ==== SLACK PER-SESSION COMMS -- the TEAM twin of the Telegram tool. Route a session to a Slack channel; when
@@ -9884,12 +10245,21 @@ def _compact_lock_acquire(name):
     except Exception:
         return False
 
+# TRUNCATION (found 2026-08-06): Claude Code ELLIPSIZES its footer on a narrow pane, so a working session
+# renders "· esc to …" -- the literal substring "esc to interrupt" is NEVER present. Every pane on a co-located
+# box is 48-141 cols, so the old exact match returned False for EVERY session, always: a silent, total failure
+# of the "is it working" signal (it also mis-scored the account-autopilot mid-turn gate into a no-op). Match the
+# stable prefix plus either ending. Idle panes end at "(shift+tab to cycle)" or "· ← for a…", so this stays
+# specific. Also anchored to the BOTTOM lines now -- the old whole-pane scan could match an agent's own output
+# discussing "esc to interrupt" (the exact false-positive class _classify_attn warns about).
+_RE_PANE_BUSY = re.compile(r"esc to interrupt|esc to (?:…|\.\.\.)", re.I)
 def _pane_busy(name, pane=None):
     """Claude Code shows 'esc to interrupt' while it's working; absence of it = idle/ready for input.
     Pass a pre-captured `pane` to avoid a second capture-pane on the hot voice-watcher path."""
     if pane is None:
         _, pane, _ = sh([TMUX, "capture-pane", "-t", name, "-p"], timeout=3)   # short timeout: a wedged pane must not hang the voice path
-    return "esc to interrupt" in (pane or "").lower()
+    lines = [l for l in (pane or "").splitlines() if l.strip()]
+    return bool(lines) and bool(_RE_PANE_BUSY.search("\n".join(lines[-4:])))
 
 # ---- PROJECT ONBOARDING: bring a just-added project up to ClaudeFather spec, then hand to the Chief of Staff.
 # ADOPT (brownfield) = point at an existing codebase, fan out cheap readers, structure + document it to spec.
@@ -20090,7 +20460,19 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/entitlement-revoke":  return self._s(200, json.dumps(entitlement_revoke(body.get("node", INSTANCE_ID), body.get("ext", ""))))
         if u.path == "/api/extension-uninstall": return self._s(200, json.dumps(extension_uninstall(body.get("id", ""))))
         if u.path == "/api/extension-setup":     return self._s(200, json.dumps(extension_setup(body.get("id", ""))))
-        if u.path == "/api/notify":              return self._s(200, json.dumps(notify_send(body.get("text", ""))))
+        # NOTE: "/api/notify" is claimed EARLIER in do_POST by the attention-event route (notify_push); this
+        # push-to-my-phone route lives at /api/notify-send so it is actually reachable (it was dead before).
+        if u.path == "/api/notify-send":
+            return self._s(200, json.dumps(notify_send(body.get("text", ""), to=body.get("to"), channel=body.get("channel"))))
+        if u.path == "/api/recipients":          return self._s(200, json.dumps(_recip_load()))
+        if u.path == "/api/recipient-add":
+            return self._s(200, json.dumps(recip_add(body.get("name"), tg_chat_id=body.get("tg_chat_id"),
+                sms_number=body.get("sms_number"), consent_by=body.get("consent_by"),
+                consent_method=body.get("consent_method") or "verbal", channels=body.get("channels"))))
+        if u.path == "/api/recipient-remove":    return self._s(200, json.dumps(recip_remove(body.get("who"))))
+        if u.path == "/api/recipient-link":
+            return self._s(200, json.dumps(recip_link_pending(body.get("chat_id"), body.get("name"))))
+        if u.path == "/api/recipient-optout":    return self._s(200, json.dumps(recip_optout(body.get("who"), body.get("reason") or "STOP")))
         if u.path == "/api/telegram-session":    return self._s(200, json.dumps(telegram_session(body.get("name", ""), body.get("on"))))
         if u.path == "/api/autonudge-session":   return self._s(200, json.dumps(autonudge_session(body.get("name", ""), body.get("on"), body.get("msg"))))
         if u.path == "/api/slack-session":       return self._s(200, json.dumps(slack_session(body.get("name", ""), body.get("on"))))
@@ -23833,6 +24215,7 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <button data-l="comms"><i class="ph-light ph-chats-circle"></i>Comms<span id="commsBadge" style="display:none;margin-left:6px;background:var(--err);color:var(--ink);border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="telephone"><i class="ph-light ph-phone-outgoing"></i>Telephone</button>
 <button data-l="notes"><i class="ph-light ph-chat-circle-text"></i>Messages<span id="notesBadge" style="display:none;margin-left:6px;background:var(--err);color:var(--ink);border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
+<button data-l="recipients"><i class="ph-light ph-address-book"></i>Recipients</button>
 <button data-l="notebook"><i class="ph-light ph-notebook"></i>Notes</button>
 <button data-l="handoffs"><i class="ph-light ph-arrows-left-right"></i>Transfers<span id="transfersBadge" style="display:none;margin-left:6px;background:var(--accent);color:var(--bg-warm);border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
 <button data-l="ccr"><i class="ph-light ph-git-pull-request"></i>Change Requests<span id="ccrBadge" style="display:none;margin-left:6px;background:var(--err);color:var(--ink);border-radius:9px;padding:0 6px;font-size:11px;font-weight:700"></span></button>
@@ -23990,6 +24373,7 @@ function render(){
   else if(LENS=="comms"){loadComms();return;}
   else if(LENS=="telephone"){loadTelephone();return;}
   else if(LENS=="notes"){loadNotes();return;}
+  else if(LENS=="recipients"){loadRecipients();return;}
   else if(LENS=="notebook"){loadNotebook();return;}
   else if(LENS=="handoffs"){loadHandoffs();return;}
   else if(LENS=="build"){loadBuild();return;}
@@ -25209,7 +25593,7 @@ function acctFuelSection(){
       +'<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'
       +'<div style="font-size:22px">⚠️</div>'
       +'<div style="flex:1;min-width:200px"><div style="font-size:17px;font-weight:800;color:var(--accent-light);letter-spacing:-.2px">Switch now → '+e2(d.pick)+'</div>'
-      +'<div class="ucsub" style="margin-top:2px;color:var(--accent-light)">Live login is <b>'+e2(d.current_email||'?')+'</b>, but '+e2(d.pick)+' is the account to burn — '+e2(d.pick_why||'')+(d.autopilot==='auto'?' · auto will switch when you\'re idle':'')+'</div></div>'
+      +'<div class="ucsub" style="margin-top:2px;color:var(--accent-light)">Live login is <b>'+e2(d.current_email||'?')+'</b>, but '+e2(d.pick)+' is the account to burn — '+e2(d.pick_why||'')+(d.autopilot==='auto'?' · auto will switch as soon as no session is mid-turn':'')+'</div></div>'
       +'<button class="mini go" style="font-size:14px;padding:9px 16px" onclick="awSwitchNow(\''+esc(d.pick)+'\')">▶ Switch now</button>'
       +'</div></div>';
   }
@@ -25522,7 +25906,15 @@ function uxFleet(){
   var mk=function(mm,lbl){return '<button class="mini'+(mode===mm?' go':'')+'" title="autopilot mode: '+mm+'" onclick="awSetMode(\''+mm+'\')">'+lbl+'</button>';};
   var ctrls=d.multi_account?('<div class="uxctrls"><span class="uxwin-tag">Autopilot</span>'+mk('off','Off')+mk('alert','Alert')+mk('auto','Auto')
     +'<button class="mini" title="Re-read every account\'s /usage now" style="margin-left:auto" onclick="awRefreshAll(this)">↻ read live now</button></div>'):'';
-  return '<div class="uxkick">Account fleet <span class="uxknote">rate-limit windows · % used · reset countdowns</span></div>'+ctrls
+  // Autopilot transparency: name the gate that decided the last pass. A silent loop is how an unsatisfiable
+  // gate went unnoticed for 40 days -- if it is holding, the operator must be able to SEE what it is holding on.
+  var apl=d.autopilot_last, apnote='';
+  if(apl && d.multi_account){
+    apnote='<div class="uxknote" style="margin:-4px 0 8px" title="What the auto-switch loop decided on its last pass, and why">'
+      +'Last autopilot pass '+e2(ago(Math.max(0,(Date.now()/1000)-(apl.ts||0))))+' ago — <b>'+e2(apl.action||'?')+'</b>'
+      +(apl.why?(' · '+e2(apl.why)):'')+'</div>';
+  }
+  return '<div class="uxkick">Account fleet <span class="uxknote">rate-limit windows · % used · reset countdowns</span></div>'+ctrls+apnote
     +'<div class="uxfleet">'+accts.map(uxAcctCard).join('')+'</div>';
 }
 function uxGovChart(a){
@@ -29234,6 +29626,91 @@ async function arKeep(){var n=AR_PKT&&AR_PKT.name;arHide();AR_PKT=null;if(n){try
 async function arSnooze(){var n=AR_PKT&&AR_PKT.name;arHide();AR_PKT=null;if(n){try{await fetch('/api/session-hold',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,mode:'hold',hours:2})});toast('Snoozed 2 hours',3000);}catch(e){}}}
 async function arLetGo(){var n=AR_PKT&&AR_PKT.name;arHide();AR_PKT=null;if(n){try{await fetch('/api/session-archive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n})});toast('Tidied up &mdash; resumable in one click',3000);}catch(e){}}}
 setInterval(arPoll,30000);setTimeout(arPoll,5000);
+
+// ---- Recipients lens: who this node can reach on their phone, on which channel, with consent on record ----
+async function loadRecipients(){
+  var box=document.getElementById("grid");if(!box)return;
+  var d={};
+  try{d=await(await fetch("/api/recipients",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})).json();}
+  catch(e){box.innerHTML=empty("Couldn't load recipients.");return;}
+  var people=d.people||[],pending=d.pending||[];
+  var rows=people.map(function(p){
+    var chans=[];
+    if(p.tg_chat_id)chans.push('<span class="badge bdg-azure">Telegram</span>');
+    if(p.sms_number)chans.push('<span class="badge bdg-green">SMS '+e2(p.sms_number)+'</span>');
+    if(!chans.length)chans.push('<span class="badge bdg-gray">no channel</span>');
+    if(p.opted_out)chans.push('<span class="badge bdg-red">opted out</span>');
+    var c=p.sms_consent||{};
+    var consent=p.sms_number
+      ? '<div class="sub">consent recorded by '+e2(c.by||"?")+' ('+e2(c.method||"verbal")+')</div>'
+      : '';
+    return '<div class="cc-item"><div><b>'+e2(p.name||p.id)+'</b> '+chans.join(" ")+consent+'</div>'
+      +'<div class="cc-acts">'
+      +'<button class="mini" title="Send a short test message to this person right now" onclick="recipTest(\''+esc(p.name||p.id)+'\')">Test</button>'
+      +'<button class="mini" title="Stop sending to this person (honors an opt-out; they are never texted again unless re-added)" onclick="recipOptout(\''+esc(p.name||p.id)+'\')">Opt out</button>'
+      +'<button class="mini danger" title="Remove this person from the directory entirely" onclick="recipRemove(\''+esc(p.name||p.id)+'\')">Remove</button>'
+      +'</div></div>';
+  }).join("")||empty("Nobody is set up yet. Until you add someone, alerts fall back to this node's single Telegram chat, exactly as before.");
+  var pend=pending.length?('<div class="cc-head">Unlinked Telegram chats</div>'
+    +'<div class="sub" style="margin-bottom:6px">Someone messaged this node\'s bot but is not in the directory yet. Give them a name to link them.</div>'
+    +'<div class="cc-list">'+pending.map(function(x){
+      return '<div class="cc-item"><div><b>'+e2(x.name||"(no name)")+'</b> '
+        +(x.username?'<span class="badge bdg-dim">@'+e2(x.username)+'</span> ':'')
+        +'<span class="badge bdg-gray">chat '+e2(String(x.chat_id))+'</span></div>'
+        +'<div class="cc-acts"><button class="mini go" title="Add this Telegram chat to the directory as a named person" onclick="recipLink(\''+esc(String(x.chat_id))+'\',\''+esc(x.name||"")+'\')">Link as recipient</button></div></div>';
+    }).join("")+'</div>'):'';
+  box.innerHTML='<div class="cc-panel">'
+    +'<div class="cc-head">People this node can reach</div>'
+    +'<div class="cc-list">'+rows+'</div>'
+    +pend
+    +'<div class="cc-head" style="margin-top:14px">Add someone</div>'
+    +'<div class="sub" style="margin-bottom:6px">Telegram needs their chat ID (easiest: have them message the bot, then link them above). A phone number additionally requires a recorded verbal opt-in.</div>'
+    +'<div class="cc-grid">'
+      +'<input class="cc-in" id="rcpName" placeholder="Name">'
+      +'<input class="cc-in" id="rcpTg" placeholder="Telegram chat ID (optional)">'
+      +'<input class="cc-in" id="rcpSms" placeholder="Mobile number, E.164 (optional)">'
+      +'<input class="cc-in" id="rcpBy" placeholder="Verbal opt-in taken by (required for SMS)">'
+    +'</div>'
+    +'<div class="cc-acts" style="margin-top:8px">'
+      +'<button class="btn" title="Add this person to the directory. Adding a phone number also sends them the enrollment confirmation text our SMS campaign promises." onclick="recipAdd()">Add person</button>'
+    +'</div></div>';
+}
+async function recipPost(path,body){
+  try{return await(await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();}
+  catch(e){return {ok:false,error:"request failed"};}
+}
+async function recipAdd(){
+  var n=(document.getElementById("rcpName")||{}).value||"";
+  if(!n.trim()){toast("Give the person a name first.");return;}
+  var b={name:n,tg_chat_id:(document.getElementById("rcpTg")||{}).value||"",
+         sms_number:(document.getElementById("rcpSms")||{}).value||"",
+         consent_by:(document.getElementById("rcpBy")||{}).value||""};
+  busyOn();var r=await recipPost("/api/recipient-add",b);
+  if(!r.ok){await alertM("Could not add: "+(r.error||"unknown error"));}
+  else{toast("Added "+esc(n)+(r.confirm?(r.confirm.ok?" — enrollment text sent.":" — enrollment text FAILED: "+esc(r.confirm.error||"")):""));}
+  loadRecipients();
+}
+async function recipLink(cid,nm){
+  var name=await promptM("Who is this? (their name in the directory)",nm||"");
+  if(!name)return;
+  busyOn();var r=await recipPost("/api/recipient-link",{chat_id:cid,name:name});
+  if(!r.ok)await alertM("Could not link: "+(r.error||"unknown error"));else toast("Linked "+esc(name)+".");
+  loadRecipients();
+}
+async function recipRemove(who){
+  if(!await confirmM("Remove "+who+" from the directory? They will stop receiving alerts."))return;
+  busyOn();await recipPost("/api/recipient-remove",{who:who});toast("Removed.");loadRecipients();
+}
+async function recipOptout(who){
+  if(!await confirmM("Record an opt-out for "+who+"? They will never be texted again unless re-added with fresh consent."))return;
+  busyOn();await recipPost("/api/recipient-optout",{who:who,reason:"manual"});toast("Opt-out recorded.");loadRecipients();
+}
+async function recipTest(who){
+  busyOn();
+  var r=await recipPost("/api/notify-send",{to:who,text:"Test message from ClaudeFather. If you can read this, alerts can reach you."});
+  if(r.sent&&r.sent.length)toast("Sent: "+esc(r.sent.join(", ")));
+  else await alertM("Nothing sent. "+((r.skipped||[]).join("; ")||"No usable channel for this person."));
+}
 async function loadNotes(){
   var box=document.getElementById("grid");if(!box)return;
   var d={};try{d=await(await fetch("/api/opnotes")).json();}catch(e){box.innerHTML=empty("Couldn't load notes.");return;}
@@ -32254,6 +32731,7 @@ var HELP={
  audit:{t:'Description Audit',sub:'Keeps your agents and skills clearly labeled so the assistant always picks the right one.',h:'<p><b>What:</b> a quality check on the one-line descriptions of every agent, skill, and team -- flagging any that are vague, too short, or overlap with another.</p><p><b>Why:</b> the assistant chooses which helper to use based only on these descriptions, so a fuzzy one means the wrong tool gets picked, or none at all.</p><p><b>How:</b> click Re-run to scan; each flagged item tells you what to fix. Rewrite the weak descriptions in the Agents, Skills, or Teams tabs.</p>'},
  portfolio:{t:'Portfolio',sub:'A bird\'s-eye health board of all the systems you oversee, with a line to each.',h:'<p><b>What:</b> the overseer view -- every child system you run, each with a green, amber, or red health light and its live stats.</p><p><b>Why:</b> you watch a whole fleet from one screen and can message any system\'s Chief of Staff (or all at once) without opening each one.</p><p><b>How:</b> click a card to open that system, use Message the chiefs to reach them, or Add a ClaudeFather to spin up a new one. This tab is for overseer-role nodes.</p>'},
  projects:{t:'Platform',sub:'A documented map of the ClaudeFather platform itself -- every part and what it does.',h:'<p><b>What:</b> a reference map of the software this control panel is built from -- its core, lifecycle, extensions, agents, and docs -- each with a summary and a link to its documentation.</p><p><b>Why:</b> it is the under-the-hood tour for when you want to understand how the platform is put together.</p><p><b>How:</b> browse the sections and click any CLAUDE.md or Architecture link to read the details.</p>'},
+ recipients:{t:'Recipients',sub:'Who this node can reach on their phone, on which channel, and with consent on record.',h:'<p>Alerts from this node (job failures, approvals, daily summaries) reach people here. Each person can carry a <b>Telegram</b> chat and/or an <b>SMS</b> number. If nobody is listed, alerts fall back to this node\'s single Telegram chat exactly as they always have &mdash; adding people is opt-in and changes nothing until you do it.</p><p><b>Linking someone on Telegram</b> is the easy path: have them message the bot once, and they appear under <i>Unlinked Telegram chats</i> for you to name in one click. No chat IDs to hunt for.</p><p><b>Adding a phone number is different</b>, because US carriers require it. A number cannot be saved without recording who took the person\'s verbal opt-in, and saving one sends them the enrollment confirmation text our registered SMS campaign promises. If someone replies STOP, the carrier tells us on the next send and we mark them opted out automatically &mdash; they are never texted again unless re-added with fresh consent.</p>'},
  sessions:{t:'Sessions',sub:'Your live agent terminals, arranged like a workspace you can split side by side.',h:'<p>The bar pinned at the bottom lists every live session, like a taskbar. <b>Drag a session up</b> into the main area to open it; drag a <b>second</b> up and the screen <b>splits</b> -- drag the divider to set the widths, and pull in as many as you want. A pane\'s collapse button pushes it back to the taskbar. A tile <b>pulses gold when it finishes</b>, so a done agent pulls you back even from another tab. On a phone, tap a tile to swap the full-screen pane.</p><p>Each session shows a <b>model chip</b> (Opus / Sonnet / Fable / Haiku) -- click it to switch which model that agent runs; the same picker is in a broken-out session tab\'s top bar.</p>'},
  history:{t:'History',sub:'Every past conversation across your machines -- reopen or branch from any of them.',h:'<p><b>What:</b> a searchable log of your past agent conversations on each machine, with a preview of the last messages.</p><p><b>Why:</b> you never lose a thread -- pick up exactly where you left off, or branch a copy to try a different direction without disturbing the original.</p><p><b>How:</b> search or pick a machine, then Resume to continue a conversation or Fork to branch it into a new one.</p>'},
  tree:{t:'Conversation Tree',sub:'Your conversations grouped by the folder they started in, so you can find and reopen them.',h:'<p><b>What:</b> a family-tree view of your conversations, nested under the folder each was launched from, with branches (forks) grouped under their origin.</p><p><b>Why:</b> it shows how your work is organized and lets you jump back into any thread in its proper context.</p><p><b>How:</b> pick a time range, click a conversation for details, then Resume or Fork to jump back in.</p>'},
@@ -33000,6 +33478,7 @@ function applyPreset(){
   {var _fd=document.querySelector('#lens button[data-l="frontdesk"]');if(_fd)_fd.style.display='';}  // Front Desk: built-in, always available (deep-audit Phase 1.3)
   {var _md=document.querySelector('#lens button[data-l="modules"]');if(_md)_md.style.display='';}  // Projects (the family-tree Front Door) is a core built-in -- always available
   {var _nt=document.querySelector('#lens button[data-l="notes"]');if(_nt)_nt.style.display='';}  // Messages (operator<->operator) is a built-in -- always available
+  {var _rc=document.querySelector('#lens button[data-l="recipients"]');if(_rc)_rc.style.display='';}  // Recipients (who alerts can reach) is a built-in -- always available
   {var _nb=document.querySelector('#lens button[data-l="notebook"]');if(_nb)_nb.style.display='';}  // Notes (notebook) is a core built-in -- always available
   {var _hd=document.querySelector('#lens button[data-l="handoffs"]');if(_hd)_hd.style.display='';}  // Transfers (warm-transfer desk) is a built-in -- always available
   {var _bd=document.querySelector('#lens button[data-l="build"]');if(_bd)_bd.style.display=(window.CC&&window.CC.type==='developer')?'':'none';}  // Build lens = developer-type only (custom sandbox)
@@ -33096,7 +33575,7 @@ function navForceHead(view){
   return head.map(function(l){return {t:"tab",l:l};}).concat(rest);
 }
 var NAV_CAT_ORDER=["Google","Workspace","Agency","Team","Integrations","Experimental","System"];
-var NAV_CAT={
+var NAV_CAT={recipients:'System',
   agentlab:"Experimental",
   gmail:"Google",calendar:"Google",drive:"Google",
   modules:"Workspace",projects:"Workspace",context:"Workspace",capture:"Workspace",ideas:"Workspace",handoffs:"Workspace",
@@ -35372,7 +35851,11 @@ if __name__ == "__main__":
     _daemon("boot_housekeeping", _boot_housekeeping)     # one-shot: ends after boot chores (supervisor marks it ended)
     if ACCOUNT_WALLET:
         _daemon("acct_poll", _acct_poll_loop)            # per-account /usage fuel gauges (token-isolated)
-        _daemon("acct_autopilot", _acct_autopilot_loop)  # USAGE: idle-gated auto-switch (no-op unless account_autopilot=auto AND the switch ledger is proven)
+        if _autopilot_is_owner():                        # ONE owner only (default: the overseer) -- co-located
+            _daemon("acct_autopilot", _acct_autopilot_loop)  # USAGE: auto-switch (no-op unless account_autopilot=auto AND the ledger is proven)
+        else:                                            # instances racing this loop fired 3 concurrent OAuth
+            print("acct_autopilot: not this instance's job (owner=%s) -- alert + manual switch still available"
+                  % AUTOPILOT_OWNER)                     # logins and broke the login (2026-08-06); see _autopilot_is_owner
     _daemon("autoapprove", _autoapprove_loop)            # keep agents off the permission-prompt wall
     _daemon("autocompact", _autocompact_loop)            # graceful auto-compact when a session's context fills past the threshold
     _daemon("compact_recover", _compact_recover)         # one-shot: RESUME any compact orphaned by a restart (handoff written but /compact never ran)

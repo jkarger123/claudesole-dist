@@ -3,6 +3,46 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.247 -- 2026-08-06  (Account autopilot: ONE owner for rotation + three dead-silent bugs that kept it from ever firing)
+
+Autopilot had not performed an unattended switch since 2026-06-28 despite `should_switch` being true, the pick
+in wallet, the ledger `auto_proven` and the cooldown long expired. Three independent defects, all silent.
+
+- **`WK_RESERVE_PCT` was a LOCAL** inside `_acct_recommend` while `_acct_autopilot_loop` read it as a global, so
+  the loop raised `NameError` on **every pass** — swallowed by its bare `except: pass`. It never reached its own
+  gates. Hoisted to a module-level constant (`cc.config wk_reserve_pct`, default 10).
+- **The idle gate was structurally unsatisfiable.** `_user_idle_secs()` returns the MAX activity across EVERY
+  tmux session the macOS user owns; on a co-located box (44 sessions: every node's chief, Ralph loops, the
+  lifeline console, the voice watcher) it never climbs past ~2 minutes, so `idle >= 300` could never pass. The
+  only reachable path was the cooling/resting `pacing_motivated` bypass — i.e. it could rotate off an account
+  already pinned at its cap, but never proactively take a reserve whose window had cleared. Replaced with a
+  MID-TURN gate (`_acct_switch_quiet`): swept twice `autopilot_busy_recheck_sec` apart, failing closed.
+- **`_pane_busy` never matched anything.** It looked for the literal `esc to interrupt`, but Claude Code
+  ELLIPSIZES that footer on a narrow pane (`esc to …`) and every pane on a co-located box is 48-141 columns —
+  so it returned False for EVERY session, always. This also silently degraded `_classify_attn` and the voice
+  watcher. Now matches the stable prefix (`_RE_PANE_BUSY`) and is anchored to the BOTTOM 4 lines, so it can no
+  longer match an agent's own output *discussing* the string (the false-positive class `_classify_attn` warns
+  about). Live check went from 0 to 3 correctly-detected mid-turn sessions.
+
+**And the incident those fixes caused, now fixed too.** With the loop finally able to run, every co-located
+instance ran its own copy of it. The anti-flap claim (`_autopilot_state_save last_switch_ts`) is guarded by
+`_SWITCH_HEALTH_LOCK`, a per-PROCESS `threading.Lock` — no mutual exclusion across processes. After a
+simultaneous restart the loops were in lockstep on the same 75s boot sleep, all read the cooldown as expired in
+the same instant, and three instances fired the switch command within 47 seconds. Three concurrent OAuth logins
+stomped the credential store and every live session got `Login expired -- run /login`. A SINGLE switch has never
+done this; manual switches are routine and safe.
+
+- **`AUTOPILOT_OWNER`** (`cc.config account_autopilot_owner`, default `"overseer"`): only `role=org` /
+  `preset=overseer` starts `acct_autopilot`. Values: `overseer` | `any` | an explicit `instance_id`. Tenants keep
+  the alert banner and the manual verified-switch button; nothing else changes for them.
+- **Cross-process switch lock** (`/tmp/cf-acct-switch.lock`, `O_EXCL`, 300s stale-steal) around the switch
+  itself, so even a stray second owner cannot overlap.
+- **Autopilot observability.** The loop was entirely silent — no record of which gate said no, which is how an
+  unsatisfiable gate went unnoticed for 40 days. Every pass now appends an evaluation record (in-memory ring,
+  per instance, deliberately NOT persisted to the shared state file — that would race the intent-claim),
+  surfaced as `autopilot_last` / `autopilot_eval` on `/api/account-windows` and as a line under the Account
+  fleet controls naming the gate that is holding.
+
 ## 0.99.246 -- 2026-08-06  (Account brain: the /usage scrape is a FLOOR; emergency rotation can act on a stale reserve)
 
 - **The limit-model could hide a maxed window from the switcher.** `_acct_recommend._free()` preferred the
