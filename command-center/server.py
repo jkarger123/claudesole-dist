@@ -12116,8 +12116,15 @@ def _set_region(path, beg, end, body):
     txt = _read(path); region = (beg + "\n" + body + "\n" + end) if body else ""
     pat = re.compile(re.escape(beg) + r".*?" + re.escape(end), re.S)
     if pat.search(txt):
-        new = pat.sub(lambda m: region, txt)
-        if not region: new = re.sub(r"\n{3,}", "\n\n", new)
+        # Keep the FIRST region and DROP any duplicates. Readers use re.search (first match only) while this
+        # write hit EVERY copy -- so a CLAUDE.md that somehow grew two blocks carried the same content twice
+        # (double the always-loaded token cost on every turn) and a divergence would be clobbered silently.
+        _n = [0]
+        def _rep(m):
+            _n[0] += 1
+            return region if _n[0] == 1 else ""
+        new = pat.sub(_rep, txt)
+        if not region or _n[0] > 1: new = re.sub(r"\n{3,}", "\n\n", new)
     elif region:
         lines = txt.split("\n"); ins = len(lines)
         for i, ln in enumerate(lines):
@@ -22537,6 +22544,22 @@ PAGE = r"""<!DOCTYPE html><html data-theme="godfather"><head><meta charset="utf-
 @media(min-width:821px){body.cf-sessions #grid{display:flex;flex-direction:column;align-items:stretch;overflow:hidden;padding:12px 24px 10px}body.cf-sessions .modstack{flex:1 1 auto;min-height:0;width:100%}body.cf-sessions .wkspace{height:auto;flex:1 1 auto;min-height:0;width:100%}}
 .wkpane{display:flex;flex-direction:column;min-width:0;overflow:hidden;border:1px solid var(--accent);border-radius:12px;box-shadow:var(--glow);position:relative}
 .wkpane .stframe{flex:1;min-height:0;width:100%;border:0}
+/* ---- pane REORDER (desktop): grab a pane by its header and drag it to a new slot. Panes hold live terminal
+   iframes and moving an iframe in the DOM reloads it, so reordering is done with flex `order` -- pure layout,
+   no reparenting, terminals keep their scrollback + socket. */
+.wkspace .sthead{cursor:grab}
+.wkspace.reordering .sthead{cursor:grabbing}
+.wkspace.reordering{user-select:none}
+.wkspace.reordering .stframe,.wkspace.reordering .vbar{pointer-events:none}  /* iframes must not swallow pointermove */
+.wkspace.reordering .pane-split{opacity:.25;pointer-events:none}
+.wkpane.pane-glide{transition:transform .19s cubic-bezier(.2,.75,.3,1)}      /* the panes that shift aside */
+.wkpane.pane-lift{z-index:6;box-shadow:0 18px 42px rgba(0,0,0,.55),0 0 0 1px var(--accent);
+  border-color:var(--accent);opacity:.97;will-change:transform}
+.wkpane.pane-lift .sthead{background:var(--accent);color:var(--bg)}
+.wkpane.pane-lift .sthead .stname{color:var(--bg)}
+.pane-gap{flex:0 0 4px;align-self:stretch;border-radius:3px;background:var(--accent);
+  box-shadow:0 0 10px var(--accent);animation:gapin .16s ease-out}            /* where it will land */
+@keyframes gapin{from{opacity:0;transform:scaleY(.4)}to{opacity:1;transform:scaleY(1)}}
 .pane-split{flex:0 0 10px;cursor:col-resize;align-self:stretch;display:flex;align-items:center;justify-content:center;touch-action:none}
 .pane-split::before{content:"";width:3px;height:46px;border-radius:3px;background:var(--line)}
 .pane-split:hover::before,.pane-split.drag::before{background:var(--accent)}
@@ -32420,6 +32443,100 @@ function wkPaneHTML(x){ var name=x.name, grow=PANEW[name]||1;
 function wkFocusPane(name){ setTimeout(function(){ try{ document.querySelectorAll('.wkpane[data-ccsess],.bigsess[data-ccsess]').forEach(function(el){
   if(el.getAttribute('data-ccsess')===name){ try{el.scrollIntoView({behavior:'smooth',block:'nearest',inline:'center'});}catch(e){}
     el.classList.add('pane-justup'); setTimeout(function(){el.classList.remove('pane-justup');},1200);} }); }catch(e){} },60); }
+// ==== WORKSPACE PANE REORDER ==================================================================================
+// Drag a pane by its header to move it left/right among the open panes. THE constraint: a pane contains a live
+// terminal <iframe>, and moving an iframe node in the DOM makes every browser RELOAD it (losing scrollback and
+// the socket). So nothing is ever reparented -- we set flexbox `order`, which is pure layout. That means DOM
+// order stops matching visual order, so anything that needs "which pane is where" must ask wkVisualNames().
+function wkVisualNames(){
+  var wk=document.getElementById('wkspace'); if(!wk) return [];
+  var ps=[].slice.call(wk.querySelectorAll('.wkpane'));
+  ps.sort(function(a,b){ return (parseInt(a.style.order||'0',10)) - (parseInt(b.style.order||'0',10)); });
+  return ps.map(function(p){ return p.getAttribute('data-ccsess'); });
+}
+function wkPaneEl(name){
+  var wk=document.getElementById('wkspace'); if(!wk) return null;
+  return wk.querySelector('.wkpane[data-ccsess="'+(window.CSS&&CSS.escape?CSS.escape(name):name)+'"]');
+}
+// Paint flex order from PANES: pane i -> 2i, and the i-th splitter -> 2i+1 so a divider always sits BETWEEN
+// two panes regardless of DOM position. Splitters are interchangeable (they just resize their two neighbours).
+function wkApplyOrder(){
+  var wk=document.getElementById('wkspace'); if(!wk) return;
+  PANES.forEach(function(n,i){ var el=wkPaneEl(n); if(el) el.style.order=(i*2); });
+  [].slice.call(wk.querySelectorAll('.pane-split')).forEach(function(sp,i){ sp.style.order=(i*2+1); });
+}
+function wkReorderWire(){
+  var wk=document.getElementById('wkspace'); if(!wk||wkMobile()) return;
+  wk.querySelectorAll('.wkpane').forEach(function(pane){
+    var head=pane.querySelector(':scope > .sthead'); if(!head||head._reo) return; head._reo=1;
+    head.addEventListener('pointerdown',function(e){
+      if(e.button!==0||wkMobile()) return;
+      if(e.target.closest('button,input,select,textarea,a,.stbtns,.chip,.mini')) return;  // real controls still click
+      if(wk.querySelectorAll('.wkpane').length<2) return;                                 // nothing to reorder
+      wkDragStart(e,pane);
+    });
+  });
+}
+function wkDragStart(e0,pane){
+  var wk=document.getElementById('wkspace');
+  var name=pane.getAttribute('data-ccsess');
+  var startX=e0.clientX, grabDX=startX-pane.getBoundingClientRect().left;
+  var order=PANES.slice(), live=false, gap=null, pid=e0.pointerId;
+
+  function others(){ return order.filter(function(n){return n!==name;}).map(wkPaneEl).filter(Boolean); }
+  function place(idx){                       // move `name` to visual index idx, FLIP-animating everyone else
+    var cur=order.indexOf(name); if(cur===idx) return;
+    var before={}; others().forEach(function(el){ before[el.getAttribute('data-ccsess')]=el.getBoundingClientRect().left; });
+    order.splice(cur,1); order.splice(idx,0,name);
+    order.forEach(function(n,i){ var el=wkPaneEl(n); if(el) el.style.order=(i*2); });
+    others().forEach(function(el){                                   // First->Last->Invert->Play
+      var n=el.getAttribute('data-ccsess'), d=before[n]-el.getBoundingClientRect().left;
+      if(!d) return;
+      el.classList.remove('pane-glide'); el.style.transform='translateX('+d+'px)';
+      void el.offsetWidth;                                            // force the start frame
+      el.classList.add('pane-glide'); el.style.transform='';
+    });
+    if(gap) gap.style.order=(idx*2)-1;                                // slot marker rides just left of the target
+  }
+  function move(ev){
+    var dx=ev.clientX-startX;
+    if(!live){
+      if(Math.abs(dx)<6) return;                                      // threshold -> a plain click still works
+      live=true; wk.classList.add('reordering'); pane.classList.add('pane-lift');
+      try{ head_capture(ev); }catch(_){}
+      gap=document.createElement('div'); gap.className='pane-gap';
+      gap.style.order=(order.indexOf(name)*2)-1; wk.appendChild(gap);
+    }
+    pane.style.transform='';                                          // measure un-transformed, then track the pointer
+    var r=pane.getBoundingClientRect();
+    pane.style.transform='translateX('+(ev.clientX-grabDX-r.left)+'px)';
+    var mid=ev.clientX, idx=0;                                        // land before the first pane whose middle is past us
+    var rest=others();
+    for(var i=0;i<rest.length;i++){ var rb=rest[i].getBoundingClientRect(); if(mid > rb.left+rb.width/2) idx=i+1; }
+    place(idx);
+  }
+  function head_capture(ev){ pane.setPointerCapture ? pane.setPointerCapture(pid) : 0; }
+  function done(ok){
+    window.removeEventListener('pointermove',move,true);
+    window.removeEventListener('pointerup',up,true);
+    window.removeEventListener('pointercancel',cancel,true);
+    window.removeEventListener('keydown',esckey,true);
+    if(!live) return;
+    wk.classList.remove('reordering'); pane.classList.remove('pane-lift');
+    if(gap&&gap.parentNode) gap.parentNode.removeChild(gap);
+    pane.classList.add('pane-glide'); pane.style.transform='';        // settle into its slot
+    setTimeout(function(){ wk.querySelectorAll('.wkpane').forEach(function(p){p.classList.remove('pane-glide');}); },220);
+    if(ok){ panesSet(order); wkApplyOrder(); try{wkMarkDock();}catch(_){} }
+    else  { order=PANES.slice(); wkApplyOrder(); }
+  }
+  function up(){ done(true); }
+  function cancel(){ done(false); }
+  function esckey(ev){ if(ev.key==='Escape'){ ev.preventDefault(); done(false); } }
+  window.addEventListener('pointermove',move,true);
+  window.addEventListener('pointerup',up,true);
+  window.addEventListener('pointercancel',cancel,true);
+  window.addEventListener('keydown',esckey,true);
+}
 function wkAddPane(name){
   if(wkMobile()) return false;
   if(typeof LENS!=='undefined' && LENS!=='sessions') return false;
@@ -32429,8 +32546,8 @@ function wkAddPane(name){
   if(present){ wkFocusPane(name); return true; }                              // already up -> just front + glow (no rebuild)
   var x=(SESSDATA||[]).find(function(y){return y.name===name;})||{name:name,label:name};
   wk.insertAdjacentHTML('beforeend',(last!=null?wkSplitHTML(last,name):'')+wkPaneHTML(x));   // append ONE pane; existing iframes untouched
-  var order=[]; wk.querySelectorAll('.wkpane').forEach(function(p){order.push(p.getAttribute('data-ccsess'));});
-  panesSet(order);                                                            // sync PANES to the DOM order
+  panesSet(wkVisualNames().filter(function(n){return n!==name;}).concat([name]));  // append in VISUAL order (DOM order may differ after a reorder)
+  wkApplyOrder();                                                             // a new pane has no flex order yet -> would render first
   try{wkWire();}catch(e){} try{ccWireDropzones();}catch(e){} try{vmDock();}catch(e){}   // idempotent -> wires ONLY the new pane's splitter/dropzone/voicebar
   wkFocusPane(name);
   return true;
@@ -32445,8 +32562,7 @@ function wkRemovePane(name){
   if(prev&&prev.classList&&prev.classList.contains('pane-split')) prev.remove();
   else if(next&&next.classList&&next.classList.contains('pane-split')) next.remove();
   target.remove();
-  var order=[]; wk.querySelectorAll('.wkpane').forEach(function(p){order.push(p.getAttribute('data-ccsess'));});
-  delete PANEW[name]; panesSet(order); panesSaveW();
+  delete PANEW[name]; panesSet(wkVisualNames()); panesSaveW(); wkApplyOrder();
   try{wkMarkDock();}catch(e){} try{vmDock();}catch(e){}
   return true;
 }
@@ -32491,7 +32607,12 @@ function wkWire(){
   document.querySelectorAll('#wkspace .pane-split').forEach(function(sp){
     if(sp._w)return; sp._w=1;
     sp.addEventListener('pointerdown',function(e){
-      e.preventDefault(); var L=sp.previousElementSibling, R=sp.nextElementSibling; if(!L||!R)return;
+      e.preventDefault();
+      // Visual neighbours, not DOM siblings: after a reorder the divider's DOM siblings are the wrong panes.
+      var L=null,R=null,so=parseInt(sp.style.order||'',10);
+      if(!isNaN(so)){ var nm=wkVisualNames(), vi=(so-1)/2; L=wkPaneEl(nm[vi]); R=wkPaneEl(nm[vi+1]); }
+      if(!L||!R){ L=sp.previousElementSibling; R=sp.nextElementSibling; }      // pre-order fallback
+      if(!L||!R||!L.classList.contains('wkpane')||!R.classList.contains('wkpane'))return;
       var lw=L.getBoundingClientRect().width, rw=R.getBoundingClientRect().width, x0=e.clientX, total=lw+rw;
       sp.classList.add('drag'); sp.setPointerCapture(e.pointerId);
       function mv(ev){ var dx=ev.clientX-x0; var nl=Math.max(120,Math.min(total-120,lw+dx)); var nr=total-nl;
@@ -32511,6 +32632,8 @@ function wkWire(){
       var n=window.WKDRAG; if(!n&&e.dataTransfer){try{n=e.dataTransfer.getData('application/x-cc-pane');}catch(_){}}
       window.WKDRAG=null; if(n)paneUp(n);});
   }
+  try{ wkApplyOrder(); }catch(_){}      // keep flex order in sync with PANES (fresh render + after add/remove)
+  try{ wkReorderWire(); }catch(_){}     // header drag-to-reorder (idempotent: only wires new panes)
 }
 // ---- Mobile focus-terminal resize: drag the grip (or tap -/+) to size the terminal; remembered per device.
 // Max is innerHeight-based (STABLE -- no unreliable element-top, no scrollTo anywhere, so the page scrolls

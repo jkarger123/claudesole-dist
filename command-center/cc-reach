@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""cc-reach -- reach a PERSON on their phone (Telegram / SMS), and manage who the platform can reach.
+
+Distinct from `cc-notify`, which lights an attention dot on the dashboard taskbar. This one leaves the box
+and lands on somebody's phone. For agents AND humans. Resolves this node's port + token from cc.config.json
+(via CC_CONFIG if set, else next to this script) exactly like cc-task / cc-notify.
+
+  cc-reach "nightly pipeline failed"              send to everyone enabled
+  cc-reach --to James "build finished"            send to one person (id or name)
+  cc-reach --to James --channel sms "..."         pin a single channel (telegram|sms)
+  cc-reach --list                                 who can we reach, on what, consent state
+  cc-reach --add "Sarah" --telegram 12345678      add/update a Telegram recipient
+  cc-reach --add "Sarah" --sms +15551234567 --consent-by James
+                                                  add an SMS recipient. --consent-by is REQUIRED: it records
+                                                  who took the verbal opt-in. Adding a number also sends the
+                                                  enrollment-confirmation text our A2P campaign promises.
+  cc-reach --remove "Sarah"                       drop a recipient entirely
+  cc-reach --optout "Sarah"                       honor an opt-out (never texted again until re-added)
+
+With NO recipients configured, a plain send falls back to this node's single legacy Telegram chat -- so this
+is safe to run on a node that was never set up for multi-recipient.
+"""
+import json, os, sys, subprocess, urllib.request, urllib.error
+
+def die(msg, rc=1):
+    print(msg, file=sys.stderr); sys.exit(rc)
+
+def _cfg():
+    here = os.path.dirname(os.path.realpath(__file__))
+    try:
+        p = subprocess.run(["python3", os.path.join(here, "cc_resolve.py")],
+                           capture_output=True, text=True, timeout=20)
+        if p.returncode != 0: die(p.stdout.strip() or p.stderr.strip() or "cc_resolve failed", 3)
+        return json.load(open(p.stdout.strip()))
+    except Exception as e:
+        die("could not resolve this node's config: %s" % e, 3)
+
+def api(path, body):
+    c = _cfg()
+    req = urllib.request.Request("http://127.0.0.1:%d%s" % (int(c.get("port") or 8799), path),
+                                 data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json",
+                                          "X-CC-Token": c.get("auth_token") or ""})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        die("dashboard returned HTTP %s -- %s" % (e.code, e.read().decode()[:200]), 4)
+    except Exception as e:
+        die("could not reach the dashboard: %s" % e, 4)
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__); return
+
+    def opt(name, default=None):
+        return a[a.index(name) + 1] if name in a and a.index(name) + 1 < len(a) else default
+
+    if "--list" in a:
+        d = api("/api/recipients", {})
+        people = d.get("people") or []
+        if not people:
+            print("no recipients configured -- plain sends fall back to this node's legacy Telegram chat"); return
+        for p in people:
+            bits = []
+            if p.get("tg_chat_id"): bits.append("telegram")
+            if p.get("sms_number"):
+                c = p.get("sms_consent") or {}
+                bits.append("sms %s (consent: %s, %s)" % (p["sms_number"], c.get("by") or "?", c.get("method") or "?"))
+            flags = []
+            if p.get("opted_out"): flags.append("OPTED OUT")
+            if not p.get("enabled", True): flags.append("disabled")
+            print("  %-14s %-52s %s" % (p.get("name"), ", ".join(bits) or "(no channel)", " ".join(flags)))
+        return
+
+    if "--add" in a:
+        name = opt("--add")
+        if not name: die("usage: cc-reach --add \"Name\" [--telegram ID] [--sms +1555...] [--consent-by Who]")
+        body = {"name": name}
+        if opt("--telegram"): body["tg_chat_id"] = opt("--telegram")
+        if opt("--sms"):
+            body["sms_number"] = opt("--sms")
+            if not opt("--consent-by"):
+                die("--sms requires --consent-by \"Who took the verbal opt-in\".\n"
+                    "A number may never be added without a consent record -- that is what keeps our A2P\n"
+                    "campaign compliant. Read the disclosure aloud, get an explicit yes, then record who took it.")
+            body["consent_by"] = opt("--consent-by")
+        r = api("/api/recipient-add", body)
+        if not r.get("ok"): die("could not add: %s" % r.get("error"))
+        p = r.get("person") or {}
+        print("added/updated %s (%s)" % (p.get("name"), ", ".join(p.get("channels") or [])))
+        if r.get("confirm") is not None:
+            c = r["confirm"]
+            print("  enrollment confirmation SMS: %s" % ("sent" if c.get("ok") else "FAILED -- %s" % c.get("error")))
+        return
+
+    if "--remove" in a:
+        r = api("/api/recipient-remove", {"who": opt("--remove")})
+        print("removed %d" % r.get("removed", 0) if r.get("ok") else "no such recipient"); return
+
+    if "--optout" in a:
+        r = api("/api/recipient-optout", {"who": opt("--optout"), "reason": "manual"})
+        print("opted out %d recipient(s) -- they will not be texted again" % r.get("count", 0)
+              if r.get("ok") else "no such recipient"); return
+
+    # ---- plain send -------------------------------------------------------------------------------------
+    skip = set()
+    for f in ("--to", "--channel"):
+        if f in a: skip.add(a.index(f)); skip.add(a.index(f) + 1)
+    text = " ".join(x for i, x in enumerate(a) if i not in skip).strip()
+    if not text: die("nothing to send. usage: cc-reach [--to Name] [--channel telegram|sms] \"message\"")
+    r = api("/api/notify-send", {"text": text, "to": opt("--to"), "channel": opt("--channel")})
+    if r.get("sent"): print("sent: %s" % ", ".join(r["sent"]))
+    if r.get("skipped"): print("skipped: %s" % ", ".join(r["skipped"]), file=sys.stderr)
+    sys.exit(0 if r.get("ok") else 5)
+
+if __name__ == "__main__":
+    main()

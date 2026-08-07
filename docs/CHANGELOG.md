@@ -3,6 +3,43 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.251 -- 2026-08-07  (Reach a HUMAN: multi-recipient notifications + SMS; drag-to-reorder session panes)
+
+**Notifications can now reach PEOPLE, not just "the node operator".** `notify_send(text, to=, channel=)` is
+backed by a per-node recipient directory (`_recipients.json`) with Telegram and SMS channels.
+**Backward compatible:** with no recipients configured it takes the legacy single-`TELEGRAM_CHAT_ID` path, so
+all 20+ existing call sites (security alerts, resource self-heal, incidents, Ralph, morning brief) are
+untouched until someone is added.
+- SMS via Twilio (stdlib, vault-first creds), preferring `TWILIO_MESSAGING_SERVICE_SID` -- the correct sender
+  for a registered US A2P 10DLC campaign.
+- **US SMS compliance enforced in code:** a number cannot be added without a `consent_by` record; enrolling
+  one sends an enrollment confirmation (built from `BRAND`, override via cc.config `sms_enroll_confirm`);
+  `opted_out` is a hard send gate; Twilio error 21610 (recipient replied STOP) auto-mirrors into the
+  directory, so carrier opt-out syncs with NO public webhook.
+- New **Recipients lens**, `cc-reach` CLI, and `/api/recipients|recipient-add|-remove|-optout|-link`.
+- Unknown Telegram senders are captured by the EXISTING inbound poller (`_recip_note_unlinked`) and offered
+  for one-click linking -- we never open a second `getUpdates` consumer (that 409s / steals session replies).
+
+**Sessions workspace: drag a pane by its header to reorder it** (desktop). A pane holds a live terminal
+iframe and moving an iframe in the DOM reloads it, so reordering sets flexbox `order` and never reparents --
+terminals keep their scrollback and socket. Lift + glide animation, landing-slot marker, Escape cancels.
+
+**Fixes**
+- `/api/notify` was declared TWICE in `do_POST`; the attention-event route shadowed `notify_send`, leaving
+  that endpoint dead. Push-to-phone now lives at `/api/notify-send`.
+- **Nav:** a lens missing from an operator's SAVED tree was appended as a loose top-level tab, ignoring
+  `NAV_CAT` -- so only a FRESH browser ever filed a new lens into its category. `reconcileTree()` now files
+  it correctly (this also re-filed several previously-loose lenses).
+- **History lens leaked other projects' conversations** on co-located nodes: `/api/past` and
+  `transcript_search` scanned the whole shared `~/.claude/projects` with no project scoping. Now mirrors the
+  Sessions-lens scoping; the unscoped overseer still sees everything.
+- `_set_region()` replaced EVERY copy of a managed CLAUDE.md block while readers take only the first, so a
+  file with two blocks silently carried duplicate content. It now keeps the first and drops duplicates.
+- Default session model -> `claude-opus-5[1m]` (config-overridable via cc.config `default_model`).
+
+**Docs:** `server.py`'s section map moved out of the always-loaded `command-center/CLAUDE.md` into
+`docs/SERVER_MAP.md` (retrieval over preload) and extended with the notification + workspace-pane subsystems.
+
 ## 0.99.250 -- 2026-08-07  (Documentation: the account-rotation system written down, and every stale claim about it corrected)
 
 No behaviour change — comments, docstrings and docs only. The rotation system had been described across four
