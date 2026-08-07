@@ -36039,8 +36039,12 @@ WS_IDLE_MAX = float(CC.get("ws_idle_max") or 1800)
 # Machine-wide pty pressure thresholds (percent of kern.tty.ptmx_max). The 2026-08-07 outage went from
 # "fine" to total collapse with no warning because nothing watched this; warn EARLY (there is no cheap way
 # to grow the cap) so a leak is visible while there is still headroom to act.
-PTY_WARN_PCT = int(CC.get("pty_warn_pct") or 70)
-PTY_CRIT_PCT = int(CC.get("pty_crit_pct") or 85)
+# Tuned against this machine's REAL idle baseline. A busy multi-node box legitimately sits around 68-72% (each
+# live tmux session and interactive agent holds a pty), so a 70% warn fires constantly at rest -- and an alert
+# that is always on is an alert nobody reads, which is how the pool got to 103% unnoticed in the first place.
+# Warn at 80% still leaves ~100 devices of runway; the leak that caused the outage took weeks to build.
+PTY_WARN_PCT = int(CC.get("pty_warn_pct") or 80)
+PTY_CRIT_PCT = int(CC.get("pty_crit_pct") or 90)
 
 def _ws_child_register(pid, name):
     with _WS_CHILD_LOCK: _WS_CHILDREN[pid] = {"name": name, "at": time.time()}
