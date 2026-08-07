@@ -51,6 +51,30 @@ if _uncovered:
           "_KNOWN_UNSHIPPED allowlist with a reason):", _uncovered)
     sys.exit(1)
 
+# CLI-COMPLETENESS gate (the 2026-08-07 cc-reach miss): the checks above catch Python modules and files
+# server.py references by path -- but a STANDALONE CLI is referenced by neither, so a brand-new `cc-*` tool
+# passes every gate and then cc-update.sh silently skips it. It exists on the authoring node, works when you
+# test it there, and reaches NO tenant. (cc-reach shipped only because the mirror contents were listed by hand
+# after the sync.) Every cc-* in command-center/ must therefore be either shipped or EXPLICITLY declared local,
+# so omission is always a decision rather than an oversight.
+_CLI_LOCAL = {
+    "cc-launch.sh":    "targets are hardcoded studio|t490|t480 -- this deployment's machines, not framework",
+    "cc-sessions.sh":  "lists tmux on THIS Studio; tenant-specific",
+    "cc-supervise.sh": "supervisor for THIS source node (SSD/TCC paths). Tenants ship cc-instance-supervise.sh",
+    "cc-fleet-ssh":    "grants SSH to physical fleet machines via the central vault. Written for 'any node "
+                       "agent' and vault-gated, so shipping it is defensible -- but broadening SSH reach to "
+                       "every tenant is an OPERATOR decision, not a default. Ship it deliberately or leave here.",
+}
+_cli = sorted(f for f in os.listdir(BASE)
+              if f.startswith("cc-") and os.path.isfile(os.path.join(BASE, f)))
+_cli_missing = [f for f in _cli if ("command-center/%s" % f) not in fw and f not in _CLI_LOCAL]
+if _cli_missing:
+    print("PRESHIP FAIL: command-center CLI(s) not in framework_paths and not declared local -> cc-update.sh "
+          "will SKIP them and no tenant ever gets the tool (it will look fine on this node):", _cli_missing,
+          "\n  Fix: add each to claudesole.manifest.json framework_paths, or add it to preship's _CLI_LOCAL "
+          "with the reason it must stay on this node.")
+    sys.exit(1)
+
 # Footgun gate (the 2026-06-28 self-DoS class): `tmux kill-server` nukes the SHARED brain tmux server -> every
 # node + every chief + the operator's live terminals die at once. It must NEVER live in a shipped/automatable
 # script (the incident was a one-shot kill-server script registered with launchd KeepAlive -> infinite kill

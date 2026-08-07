@@ -3,6 +3,25 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.253 -- 2026-08-07  (Close the ship gap that hid cc-reach; the UI harness exists again)
+
+**preship now catches a new CLI that would never reach a tenant.** The existing gates cover Python modules
+`server.py` imports and files it references via `os.path.join(BASE, ...)` -- but a STANDALONE `cc-*` tool is
+neither, so it passes every check, works perfectly on the authoring node, and `cc-update.sh` silently skips
+it. That is exactly how `cc-reach` almost shipped nowhere in 0.99.251 (caught only by listing the mirror
+contents by hand). Every `command-center/cc-*` must now be in `framework_paths` or declared in preship's
+`_CLI_LOCAL` with a reason -- omission becomes a decision, not an oversight.
+
+Auditing that surfaced four more: `cc-launch.sh`, `cc-sessions.sh`, `cc-supervise.sh` are correctly
+node-specific (tenants get the generic `cc-instance-supervise.sh`) and are now declared local. **`cc-fleet-ssh`
+is left local pending an operator decision** -- it is written for "any node agent" and is vault-gated, so
+shipping it is defensible, but broadening SSH reach to every tenant should be deliberate, not a default.
+
+**`command-center/uitest/` is back.** `front-door/CLAUDE.md` had flagged the old suites as missing since
+2026-07-18; there are now two working ones plus a README covering setup and the traps (page globals declared
+with `let` are not on `window`; navigate via `gotoLens()`; categories ship collapsed). Authoring-node tools --
+deliberately not in `framework_paths`.
+
 ## 0.99.252 -- 2026-08-07  (Drift belongs to the AGENT: no more "this looks like it belongs elsewhere" popups)
 
 The launch brief every agent receives already promises **"you own drift-handling -- there is NO automatic
