@@ -27,6 +27,7 @@ showing up here, THAT node's own server.py copy is missing the reaper and needs 
 """
 import os, re, signal, subprocess, sys, time
 
+BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 BATCH = 15          # bridges per batch -- small enough that a fragile tmux server survives the churn
 PAUSE = 3.0         # seconds between batches, so tmux can process the detaches
 
@@ -80,9 +81,25 @@ def bridges():
     return out
 
 
+def _thresholds():
+    """Same thresholds the server uses, read from cc.config so the CLI and the dashboard never disagree about
+    what "WARN" means (defaults 80/90 -- a busy multi-node box idles near 70% and a permanently-on alert is
+    one nobody reads)."""
+    warn, crit = 80, 90
+    try:
+        import json as _j
+        cfg = os.environ.get("CC_CONFIG") or os.path.join(os.path.dirname(BASE_DIR), "cc.config.json")
+        d = _j.load(open(cfg))
+        warn = int(d.get("pty_warn_pct") or warn); crit = int(d.get("pty_crit_pct") or crit)
+    except Exception:
+        pass
+    return warn, crit
+
+
 def report(bs):
     used, cap, pct = pty_pressure()
-    state = "CRITICAL" if pct >= 85 else ("WARN" if pct >= 70 else "ok")
+    warn, crit = _thresholds()
+    state = "CRITICAL" if pct >= crit else ("WARN" if pct >= warn else "ok")
     print("pty devices: %d / %d  (%d%%)  [%s]" % (used, cap, pct, state))
     if pct >= 85:
         print("  >> at 100%% NOTHING on this box can open a terminal, start a tmux session, or restart a server.")

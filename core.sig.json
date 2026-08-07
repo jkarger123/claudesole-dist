@@ -43,7 +43,7 @@
       "command-center/cc-notify": "9dd614be58b9f3a8eef46cc528fd121e3eff2e1c1588a320874f3abca36d672f",
       "command-center/cc-onboard": "9b32268c9dd325cc75342bf2923fb5e85b1f88856f3a0672e8ca715db9e0b59d",
       "command-center/cc-opnote": "749666851ebd9081f02d17aa017744a220139b889f3ec0e973b5386f5543df07",
-      "command-center/cc-ptyrecover": "aaf8345f3eaae60b2fa3ad195220af89a3eb949e43fa127b69077b55347e20ef",
+      "command-center/cc-ptyrecover": "6994c546e0b6b6e9818df7a3d7f717f334917b111d193b703b2b0407999c78de",
       "command-center/cc-ralph": "7c6d8b428f42993e8f99f237601598aa9289b6c3d749a5f24f332cdfd255c4b1",
       "command-center/cc-reach": "a3120980645d313ab479573620d98058487254c77c7fa625d8d337092cecf16d",
       "command-center/cc-restart": "f078f2fac8a0ad6d8014042dee8ef0f6286f4782185dc886dfca3f5a12be226d",
@@ -178,9 +178,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1786136048,
+    "generated": 1786136133,
     "v": 1,
     "version": "0.99.254"
   },
-  "sig": "jgwMW+vMZm3IOeLZvotz5QGCRM7NZT/ElfjTi3r71thl2+7hhk4/VOl2Ax2C2rlDic6s1Etda0pubEfJZ9A4Cw=="
+  "sig": "nFF82LImf1b/OzC84eFiDJNrsY4MpTQnNfLpXz++qyBXGT79HXcwr3NL4pIgFMzC5AvietTLNy+Tm5GKTAP4Bg=="
 }
