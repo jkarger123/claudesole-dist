@@ -13894,6 +13894,21 @@ def _slug(s):
 def _hand_load(): return load(_HANDOFFS, {"handoffs": []})
 def _hand_save(d): save(_HANDOFFS, d)
 
+def _hand_purge_stale_auto():
+    """Drop still-'proposed' handoffs left behind by the SERVER-SIDE drift sweep once that sweep is off.
+    The sweep was disabled (it was often wrong and read as nagging) but its existing proposals stayed queued
+    forever -- and anything that surfaces proposals kept re-raising them, which is exactly the nagging the
+    disable was meant to end. Drift-handling belongs to the AGENT now (soft, conversational, once, and a NO is
+    final -- see _handoff_authority), so machine-generated leftovers have no owner and must not linger.
+    Operator- and agent-initiated proposals are untouched. Self-heals on boot, fleet-wide."""
+    if CC.get("drift_sweep", False) is True: return 0            # sweep deliberately on -> its proposals are live
+    d = _hand_load(); hs = d.get("handoffs") or []
+    keep = [h for h in hs if not (h.get("status") == "proposed" and h.get("by") == "auto-housekeeping")]
+    n = len(hs) - len(keep)
+    if n:
+        d["handoffs"] = keep; _hand_save(d)
+    return n
+
 def _session_scope(sess):
     """Best-effort: the project-relative folder a session is currently in (its 'home scope')."""
     try:
@@ -29791,50 +29806,17 @@ async function hoRoute(){var el=document.getElementById('hoRouteOut');var q=((do
 function hoSetBadge(n){var b=document.getElementById('transfersBadge');if(b){if(n>0){b.textContent=n>99?'99+':n;b.style.display='inline-block';}else{b.textContent='';b.style.display='none';}}try{paintNavNotif();}catch(e){}}
 var HO_ALERT_SEEN={}, HO_BYSESSION={};
 async function hoBadgePoll(){try{var d=await(await fetch('/api/handoffs?status=proposed')).json();hoSetBadge(d.proposed||0);
-  HO_BYSESSION={}; (d.handoffs||[]).forEach(function(p){ if(p.from_session) HO_BYSESSION[p.from_session]=p; });
-  try{ if(LENS==='sessions') hoPaintPaneBanners(); }catch(e){}
-  var top=(d.handoffs||[])[0];
-  // IN-PANE confirms (deep-audit #3): on the Sessions lens the proposal shows as a Move/Keep banner RIGHT IN the
-  // drifted session's pane -- so the corner alert (for OTHER lenses) is suppressed there to avoid double-surfacing.
-  if(top&&LENS!=="handoffs"&&LENS!=="sessions"&&!HO_ALERT_SEEN[top.id])hoShowAlert(top);
-  else if(!d.proposed)hoHideAlert();
+  // NO proactive drift prompt -- not a corner popup, not an in-pane banner. Noticing that a conversation has
+  // drifted is the AGENT's job, raised softly IN THE CONVERSATION, once, where a "no" is final (the launch brief
+  // promises exactly this: "you own drift-handling -- there is NO automatic popup"). A second, machine-driven
+  // channel re-asking the same question is the nagging that doctrine exists to prevent. Proposals an agent or
+  // operator actually files still show in the Transfers lens + its nav badge -- PULL, not push.
 }catch(e){}}
 // The Assisted "this drifted -- move it?" prompt, shown WHERE THE USER IS: a compact banner at the top of the
 // drifted session's own pane (not just the Transfers tab). Painted in-place on each poll so it never reloads the
 // terminals. Move -> hoAccept (opens/resumes the right scope + follows you there); Keep -> hoDecline (sticky).
-function hoMoveBanner(p){
-  var dest=p.needs_new_home?('a new home &ldquo;'+e2((p.to_subject||'').slice(0,40))+'&rdquo;')
-                           :('<code>'+e2(p.to_scope||'?')+'</code>'+(p.confidence?(' <span class="sub">'+Math.round(p.confidence*100)+'%</span>'):''));
-  return '<div class="homove" data-hid="'+esc(p.id)+'"><span class="hm-ic">&#9889;</span>'
-    +'<span class="hm-t">This looks like it belongs in '+dest+' &mdash; move it there so it opens already briefed?</span>'
-    +'<span class="hm-a"><button class="mini go" onclick="hoAccept(\''+esc(p.id)+'\')">&#128260; Move it there</button>'
-    +'<button class="mini" title="keep this conversation here -- and stop suggesting this move" onclick="hoDecline(\''+esc(p.id)+'\')">Keep here</button></span></div>';
-}
-function hoPaintPaneBanners(){
-  document.querySelectorAll('#wkspace .wkpane[data-ccsess]').forEach(function(pane){
-    var name=pane.getAttribute('data-ccsess'), p=HO_BYSESSION[name];
-    var cur=pane.querySelector(':scope > .homove');
-    if(p){
-      if(!cur){ var head=pane.querySelector(':scope > .sthead'); if(head) head.insertAdjacentHTML('afterend', hoMoveBanner(p)); else pane.insertAdjacentHTML('afterbegin', hoMoveBanner(p)); }
-      else if(cur.getAttribute('data-hid')!==p.id){ cur.insertAdjacentHTML('afterend', hoMoveBanner(p)); cur.remove(); }
-    } else if(cur){ cur.remove(); }
-  });
-}
 // GENTLE prompt when a conversation drifts -- it pops up, clearly says what it'd do, and is one tap to dismiss.
 var HO_REVIEW_PKT=null;
-function hoShowAlert(p){var el=document.getElementById("hoAlert");
-  if(!el){el=document.createElement("div");el.id="hoAlert";document.body.appendChild(el);}
-  HO_REVIEW_PKT=p;
-  var topic=(p.goal||'').replace(/^work moved to:\s*/i,'').slice(0,72)||'a new topic';
-  var dest=p.needs_new_home?('a new '+e2(p.to_subject||'home')):('<code>'+e2(p.to_scope||'?')+'</code>');
-  el.innerHTML='<div class="opa-h"><span class="opa-dot"></span><b>This looks like it belongs elsewhere</b><span class="opa-x" title="dismiss" onclick="hoAlertDismiss(\''+esc(p.id)+'\')">&times;</span></div>'
-    +'<div class="opa-body">A conversation in <code>'+e2(p.from_scope||'?')+'</code> drifted to &ldquo;'+e2(topic)+'&rdquo;. It belongs in '+dest+' &mdash; want to move it there?</div>'
-    +'<div class="opa-act"><button class="mini" onclick="hoAlertDismiss(\''+esc(p.id)+'\')">Not now</button><button class="mini go" onclick="hoAlertReview()">Review the move</button></div>';
-  el.classList.add("show");
-}
-function hoHideAlert(){var el=document.getElementById("hoAlert");if(el)el.classList.remove("show");}
-function hoAlertDismiss(id){if(id)HO_ALERT_SEEN[id]=1;hoHideAlert();}
-function hoAlertReview(){hoHideAlert();if(HO_REVIEW_PKT)hoReview(HO_REVIEW_PKT);else gotoLens('handoffs');}
 // FOCUSED review popup -- one transfer, plain language, decide right here (not the whole admin desk).
 function hoReview(p){
   if(!p)return;
@@ -36160,6 +36142,10 @@ if __name__ == "__main__":
     # minutes -- which printed the banner but never reached serve_forever(), so the server "came up" yet
     # accepted no connections (this took AFP down). Run it all in a daemon thread; serve immediately.
     def _boot_housekeeping():
+        try:                             # clear drift proposals orphaned by the (now-disabled) server-side sweep
+            _np = _hand_purge_stale_auto()
+            if _np: print("[handoffs] purged %d stale auto-housekeeping proposal(s) -- drift is the agent's job now" % _np, file=sys.stderr)
+        except Exception: pass
         try:  # baseline the active account so usage attributes to it (not "(before tracking)")
             _bem = (((_kc_read() or {}).get("account") or {}).get("emailAddress")) or _current_email()
             if _bem:

@@ -3,6 +3,26 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.252 -- 2026-08-07  (Drift belongs to the AGENT: no more "this looks like it belongs elsewhere" popups)
+
+The launch brief every agent receives already promises **"you own drift-handling -- there is NO automatic
+popup"**, but the dashboard still had two machine-driven prompts contradicting it. Both are removed:
+- the corner **"This looks like it belongs elsewhere"** alert, and
+- the in-pane **"move it there / keep here"** banner on the Sessions lens.
+
+Noticing that a conversation has drifted is the agent's job, raised **softly, in the conversation, once** --
+and a "no" is final. A second machine channel re-asking the same question is precisely the nagging that
+doctrine exists to prevent.
+
+**Stale proposals are purged.** The server-side `_drift_sweep` was disabled earlier (often wrong, read as
+nagging) but its already-queued proposals stayed `proposed` forever, so anything that surfaced them kept
+re-raising them. `_hand_purge_stale_auto()` now drops orphaned `by=auto-housekeeping` proposals on boot,
+fleet-wide and self-healing. **Agent- and operator-filed proposals are untouched.**
+
+What remains is PULL, not push: the **Transfers lens** and its nav badge for anything an agent actually
+files, and `cc-handoff go|propose` for the agent to warm-transfer someone (creating a new home only after
+confirming the location in the tree with the operator).
+
 ## 0.99.251 -- 2026-08-07  (Reach a HUMAN: multi-recipient notifications + SMS; drag-to-reorder session panes)
 
 **Notifications can now reach PEOPLE, not just "the node operator".** `notify_send(text, to=, channel=)` is
