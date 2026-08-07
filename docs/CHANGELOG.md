@@ -3,6 +3,42 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.249 -- 2026-08-07  (Account brain: shared accounts, an honest 100% ceiling, and two parser bugs that blinded whole windows)
+
+Four operator-reported corrections, all real.
+
+- **The 5-hour window showed `--%`.** `/usage` renders `Current session · NN% used` perfectly well — the parser
+  was cutting it off. `_parse_usage` took a fixed 240-character slice after each label, but the reader captures
+  with `-J`, which JOINS tmux's wrapped lines, and every TUI line is space-padded to the full pane width (200
+  cols) — so the `NN% used` that visually sits on the next line lands ~235 characters along, right on the
+  boundary. The 5h window therefore parsed intermittently and usually came back `None`. Each window's block is
+  now bounded by the NEXT `Current …` label instead of a fixed width: padding-proof, and it cannot bleed into
+  the following window's percentage.
+- **A partial read wiped a good window.** `/usage` fills its windows progressively, so a read can settle with the
+  weekly rendered but `Current session` not yet painted. That still counts as `ok`, and the persist step replaced
+  `windows` wholesale — writing `session: null` over a perfectly good 5h reading. The existing "a flaky scrape
+  must not wipe a good reading" invariant only covered `ok=False`; it now applies at WINDOW granularity, carrying
+  a previous window forward only while it still belongs to the current window period (surfaced as `carried`).
+- **The third weekly window went blind on a rename.** The parser hardcoded `Current week (Sonnet`; Anthropic now
+  renders `Current week (Fable)`. It matched nothing and returned `None` indefinitely. It now matches any model
+  name and reports which one via `week_model_label`, so the next rename is a label change, not an outage.
+- **The limit model claimed 107% used.** A window cannot exceed 100% — Claude cuts you off at the cap, so a
+  prediction above it means our fitted CAPACITY is too low, not that more was consumed. `pred_pct` is clamped to
+  100 and the raw value kept as `pred_pct_raw` + `over_cap` so the drift stays diagnosable. There is a concrete
+  cause right now: the **+50% weekly limits promo (through Aug 19)** raised the real cap and the fit predates it;
+  it re-converges as post-promo calibration rows land.
+
+**Shared accounts — a real policy instead of a blanket exclusion.** An account live on another node used to be
+hard-excluded as "reserved for that node". Too blunt: our nodes MAY use it. The actual requirement is to leave
+the partner room to work, and not to starve them early. So we now hold back a **partner reserve that DECAYS as
+the weekly window runs out** — `reserve_now = PARTNER_RESERVE_PCT × (time_left / window_length)` (`cc.config
+account_partner_reserve_pct`, default 50; 0 restores the old exclusion). Early in the week most of it is theirs;
+as reset approaches, unspent capacity is about to be WASTED, so the reserve relaxes toward zero and we may burn
+it hard. Use-it-or-lose-it. Ranking uses `wk_free_own` (what is actually ours), while the display keeps the true
+account figures. New `shared` status; `wk_free_own` / `partner_sides` / `partner_reserve` exposed on each account.
+The partner not auto-switching itself needs no new rule — a node without a fresh-OAuth actuator already never
+rotates unattended (v0.99.248).
+
 ## 0.99.248 -- 2026-08-06  (Account rotation: never auto-switch through the stale-snapshot path -- THE "Login expired" root cause)
 
 **Root cause of the `Login expired -- run /login` incidents, proven by measurement.** `account_switch_verified`

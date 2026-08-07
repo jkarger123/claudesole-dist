@@ -6,7 +6,7 @@ A faithful port of the Karger & Co Command Center, adapted for the HP Tuners fle
    so every session is persistent + attachable in the BROWSER TERMINAL (stdlib WebSocket -> PTY)
  - lenses: Pillars / Routines / Ralph Loops / Machines / Sessions / Docs(managed CLAUDE.md blocks)
 Python stdlib only. Serves on 0.0.0.0:8799 -> reachable over Tailscale at http://100.109.63.56:8799 ."""
-import base64, calendar, fcntl, glob, hashlib, hmac, json, os, pty, re, secrets, select, shutil, signal, socket, struct, subprocess, sys, termios, threading, time, urllib.parse, urllib.request, urllib.error
+import base64, bisect, calendar, fcntl, glob, hashlib, hmac, json, os, pty, re, secrets, select, shutil, signal, socket, struct, subprocess, sys, termios, threading, time, urllib.parse, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # Engine sub-modules are imported DEFENSIVELY: a missing/broken optional module must NEVER crash-loop a whole
 # node (an un-shipped clips.py once took AFP down). On import failure we substitute an inert stub whose every
@@ -3013,6 +3013,14 @@ def _parse_ts(ts):
 _TOK_LOCK = threading.Lock()
 _TOK_STATE = {}                       # path -> {"off": byte_offset, "events": [(ts, total, in, out, cache)]}
 _TOK_CACHE = {"at": 0.0, "data": None}
+_TOK_WALK = {"at": 0.0}               # when the last FULL directory walk finished
+# WALK GUARD: _scan_tok's parse is incremental (per-file byte offsets), but its DIRECTORY WALK was not guarded
+# -- every caller re-globbed ~20k transcripts and re-stat'ed each one (getmtime+getsize) while holding
+# _TOK_LOCK, plus rebuilt the horizon-filtered event list for all of them. usage_payload / token_totals /
+# usage_store / _acct_feature_since all call it, far faster than it is worth repeating. Reusing a recent walk
+# loses NOTHING: transcripts are append-only and the offsets persist, so the next walk still consumes every
+# byte written in the meantime -- the numbers stay exact, they just settle up to TOK_WALK_TTL later.
+TOK_WALK_TTL = float(CC.get("tok_walk_ttl") or 30)
 # PERSISTED across restarts (added after the 2026-07-02 slowdown): _TOK_STATE used to be memory-only, so
 # EVERY restart re-scanned the whole transcript store from byte 0 (1.7GB / 12k files on the Studio) -- and
 # co-located instances share one store, so a trio restart tripled it. Now the offsets+events persist to
@@ -3068,12 +3076,18 @@ def _is_self_cwd(cwd):
         if r and (cwd == r or cwd.startswith(r + "/")): return True
     return False
 
-def _scan_tok():
+def _scan_tok(max_age=None):
     """Incrementally parse newly-appended transcript bytes into per-file rich token events. Caller holds
-    _TOK_LOCK. Each transcript is append-only, so we only ever read the bytes added since last scan."""
+    _TOK_LOCK. Each transcript is append-only, so we only ever read the bytes added since last scan.
+    Skips the whole directory walk when one finished within `max_age` seconds (default TOK_WALK_TTL); pass
+    max_age=0 to force a fresh walk when a caller needs point-in-time truth."""
     if not _TOK_LOADED[0]: _tok_state_load()
+    now = time.time()
+    ttl = TOK_WALK_TTL if max_age is None else max_age
+    if _TOK_WALK["at"] and now - _TOK_WALK["at"] < ttl:
+        return now                                        # a recent walk already brought _TOK_STATE current
     changed = False
-    now = time.time(); horizon = now - 31 * 86400; seen = set()
+    horizon = now - 31 * 86400; seen = set()
     if os.path.isdir(CLAUDE_PROJECTS):
         for sl in os.listdir(CLAUDE_PROJECTS):
             dd = os.path.join(CLAUDE_PROJECTS, sl)
@@ -3123,6 +3137,7 @@ def _scan_tok():
     for f in list(_TOK_STATE.keys()):
         if f not in seen: _TOK_STATE.pop(f, None); changed = True
     if changed: _tok_state_save()
+    _TOK_WALK["at"] = time.time()                         # mark only AFTER a full walk actually completed
     return now
 
 def token_totals(ttl=45):
@@ -4174,17 +4189,33 @@ def _acct_log_active(email):
             try: os.chmod(_ACCT_LOG, 0o600)               # account-email history is not for other local users
             except Exception: pass
         except Exception: pass
+_ACCT_IDX_CACHE = {"v": None}         # (key, ts_list, em_list) -- rebound ATOMICALLY, never field-by-field
+def _acct_log_index(log):
+    """Sorted (ts, email) index over the account timeline, cached until the log changes. Built once per log
+    revision so the per-event lookup below is a binary search instead of a linear walk.
+    The cached triple is swapped in a SINGLE rebind: assigning ts and em separately would let a concurrent
+    reader pair one revision's timestamps with another's emails -- i.e. silently misattribute tokens."""
+    key = (len(log), log[0].get("ts") if log else None, log[-1].get("ts") if log else None,
+           log[-1].get("email") if log else None)
+    v = _ACCT_IDX_CACHE["v"]
+    if v is not None and v[0] == key: return v[1], v[2]
+    pairs = sorted(((e.get("ts", 0), e.get("email")) for e in log), key=lambda p: p[0])
+    v = (key, [p[0] for p in pairs], [p[1] for p in pairs])
+    _ACCT_IDX_CACHE["v"] = v
+    return v[1], v[2]
+
 def _acct_active_at(ts, log):
     """The account email active at time ts. Events BEFORE tracking began (the first log entry) can't be
     attributed -- transcripts don't record the account -- so they're '(before tracking)', NOT lumped under
-    whatever account happens to be logged in now."""
+    whatever account happens to be logged in now.
+    BINARY SEARCH (was a linear walk of the whole log per event). _acct_feature_since calls this once per
+    event -- ~470k events x an 81-entry log = ~38M comparisons, measured at 2.06s per call and 98% of that
+    function's entire cost. Same answer, ~26x faster: bisect_right-1 lands on the LAST entry with ts <= the
+    target, which is exactly what the old loop's 'keep assigning until one is greater' converged on."""
     if not log: return "(before tracking)"
-    if ts < log[0].get("ts", 0): return "(before tracking)"
-    act = log[0].get("email")
-    for e in log:
-        if e.get("ts", 0) <= ts: act = e.get("email")
-        else: break
-    return act or "(before tracking)"
+    tss, ems = _acct_log_index(log)
+    if not tss or ts < tss[0]: return "(before tracking)"
+    return ems[bisect.bisect_right(tss, ts) - 1] or "(before tracking)"
 
 ACCT_WALLET_DIR = os.path.join(CC_HOME, "secrets", "claude_accounts")   # one 0600 json per account
 def _acct_safe(s): return re.sub(r"[^A-Za-z0-9_.@+-]", "_", (s or "").strip())
@@ -4285,14 +4316,30 @@ def _parse_usage(text, now=None):
     def grab(lbl):
         m = re.search(re.escape(lbl), text or "")
         if not m: return None
-        seg = (text or "")[m.end(): m.end() + 240]   # this window's block, before the next label
+        # Bound this window's block at the NEXT "Current ..." label rather than a fixed 240 chars. The reader
+        # captures with `-J`, which JOINS tmux's wrapped lines -- and every TUI line is space-padded to the full
+        # pane width (200 cols), so the "NN% used" that visually sits on the next line ends up ~235 chars along.
+        # That sat right on the old 240 boundary, so the 5-hour window parsed intermittently and usually came
+        # back None -- which is why the fuel gauges showed "--%" for the 5h window while /usage plainly showed it.
+        # A label-bounded segment is padding-proof and can't bleed into the next window's percentage.
+        _rest = (text or "")[m.end():]
+        _nxt = re.search(r"Current (session|week)", _rest)
+        seg = _rest[:_nxt.start()] if _nxt else _rest[:1200]
         mp = re.search(r"(\d+)%\s*used", seg)
         if not mp: return None
         mr = re.search(r"Resets ([^\n]+)", seg)
         rtxt = mr.group(1).strip() if mr else None
         return {"pct": int(mp.group(1)), "resets": rtxt, "resets_ts": _parse_reset_ts(rtxt, now)}
+    # The THIRD window is per-model and Anthropic RENAMES it as the model line-up changes: it was
+    # "Current week (Sonnet)" and is now "Current week (Fable)" (observed live 2026-08-07). Hardcoding the model
+    # name silently returned None forever after the rename -- a whole window going quietly blind. Match any model
+    # name instead, and keep the parsed label so the UI can say WHICH model it is rather than assuming Sonnet.
+    _third = None; _third_label = None
+    for _m in re.finditer(r"Current week \(([^)]+)\)", text or ""):
+        if _m.group(1).strip().lower() == "all models": continue
+        _third_label = _m.group(1).strip(); _third = grab(_m.group(0)); break
     return {"session": grab("Current session"), "week": grab("Current week (all models)"),
-            "week_sonnet": grab("Current week (Sonnet")}
+            "week_sonnet": _third, "week_model_label": _third_label}
 def _read_usage_session(token=None, label="cur"):
     """Spawn a throwaway `claude` session, run /usage, scrape + parse the three rate-limit windows, kill it.
     When `token` is given it is exported as CLAUDE_CODE_OAUTH_TOKEN, which authenticates as THAT account
@@ -4380,6 +4427,7 @@ ACCT_POLL_TTL = int(CC.get("account_poll_ttl") or 1800)            # background 
 _ACCT_WIN_LOCK = threading.Lock()
 _ACCT_POLL_LOCK = threading.Lock()                                 # serialize the spawn-claude reads (one at a time)
 _ACCT_STORE_CACHE = {"at": 0.0, "data": None}                      # account_windows_store() does model scans -> cache it
+_ACCT_STORE_LOCK = threading.Lock()                                # ...and single-flight the refresh (see below)
 # Autopilot CAPTURE layer (prerequisites for safe unattended switching; the switch loop itself is not enabled yet):
 #  - login freshness: when an account is the live login and reads /usage OK (or is snapshotted), its wallet blob
 #    on THIS macOS user is proven-good -> stamp it, so autopilot never switches onto a stale/expired login.
@@ -4515,6 +4563,10 @@ AUTO_FRESH_SEC = int(CC.get("autopilot_fresh_sec") or 3600)      # the pick's /u
 # referenced it as a global, so the loop raised NameError on EVERY pass (swallowed by its bare except) and could
 # never reach its own gates. That is the second half of why autopilot had not fired since 2026-06-28.
 WK_RESERVE_PCT = int(CC.get("wk_reserve_pct") or 10)
+# How much of a SHARED account's weekly window to hold back for the partner node that also uses it, at the START
+# of the window. It decays linearly to 0 as the window approaches its reset, so capacity that would otherwise be
+# WASTED becomes ours to burn late in the week. 0 disables sharing (revert to the old hard exclusion behaviour).
+PARTNER_RESERVE_PCT = int(CC.get("account_partner_reserve_pct") or 50)
 # Optional per-NODE actuator: a command that switches the live login by driving a FRESH OAuth login
 # (browser), instead of restoring a keychain snapshot (which rotates/goes stale). Node-specific
 # (needs that node's browser-profile + GUI setup), so it's opt-in via cc.config and unset on other nodes.
@@ -4910,7 +4962,23 @@ def account_windows_refresh(email=None):
     store = _acct_windows_load(); prev = store.get(live) or {}
     now = int(time.time()); side = _side_label()
     if r.get("ok"):
-        rec = {"email": live, "windows": r.get("windows") or {}, "ts": now, "ok": True, "side": side, "error": None}
+        # PER-WINDOW MERGE (2026-08-07): /usage fills its windows PROGRESSIVELY, so a read can settle with the
+        # weekly rendered but "Current session" not yet painted. `ok` is true (we got a window), so the old
+        # wholesale replace wrote session=None over a perfectly good 5h reading -- which is why the fuel gauges
+        # showed "--%" for the 5h window. The existing "a failed read must not wipe a good reading" invariant
+        # only covered ok=False; a PARTIAL read needs the same protection at window granularity. Keep a previous
+        # window only while it still belongs to the CURRENT window period (resets_ts in the future) -- once it
+        # has rolled over the old % is stale-high and must not be carried forward.
+        _wnew = dict(r.get("windows") or {})
+        _wprev = (prev.get("windows") or {}) if prev.get("ok") else {}
+        _carried = []
+        for _k in ("session", "week", "week_sonnet"):
+            if _wnew.get(_k) is None and _wprev.get(_k):
+                _pv = _wprev[_k]; _rts = _pv.get("resets_ts")
+                if _rts and _rts > now:                      # still inside the same window -> the % is still valid
+                    _wnew[_k] = _pv; _carried.append(_k)
+        rec = {"email": live, "windows": _wnew, "ts": now, "ok": True, "side": side, "error": None}
+        if _carried: rec["carried"] = _carried               # transparency: which windows are held over, not re-read
         try: _acct_calib_log(live, side, r.get("windows") or {}, now)   # pair this %-reading with our token telemetry
         except Exception: pass
         try: _acct_validate(live)   # a successful live read proves this user's login for `live` works right now
@@ -4980,12 +5048,24 @@ def _acct_recommend(accounts, now):
         # FLEET-AWARENESS: never recommend an account already LIVE on ANOTHER node -- two nodes on one
         # subscription share its limits (and may trip concurrent-use), wasting a separate subscription. `active`
         # = live on THIS node (fine, we may stay); a non-empty live_on without active = held by another store.
-        elsewhere = [s2 for s2 in (a.get("live_on") or []) if True] if (a.get("live_on") and not a.get("active")) else []
-        if elsewhere:
-            info[em] = {"status": "elsewhere", "score": -5, "use_next": False,
-                        "why": "live on %s — reserved for that node (two nodes can't share one subscription)" % ", ".join(elsewhere)}
-            continue
-        if not a.get("ok") or not s:
+        # SHARED ACCOUNTS (operator correction, 2026-08-07). This used to hard-exclude any account live on another
+        # node as "reserved for that node". That was too blunt: such an account CAN be used by our nodes -- the
+        # requirement is only that we always leave the partner room to work, and that we don't starve them early.
+        # So instead of excluding it, hold back a PARTNER RESERVE that DECAYS as the weekly window runs out:
+        # early in the window we keep most of it for them; as reset approaches, unspent capacity is about to be
+        # WASTED, so the reserve relaxes toward zero and we may burn it hard. Use-it-or-lose-it, in one line:
+        #     reserve_now = PARTNER_RESERVE_PCT * (time_left / window_length)
+        # (The partner not auto-switching itself is enforced separately and already holds: a node without a
+        # fresh-OAuth actuator never rotates unattended -- see _autopilot_is_owner.)
+        partner_sides = list(a.get("live_on") or []) if (a.get("live_on") and not a.get("active")) else []
+        # A missing 5-HOUR window used to disqualify the account outright (`or not s`). But the 5h window is
+        # explicitly "ONLY a throttle, NEVER a ranking input" -- and newer Claude Code renders /usage as a TABBED
+        # view whose windows load separately, so a perfectly good read routinely comes back with session=null.
+        # That turned healthy accounts into 'no_data', which is how the brain ended up with NO pick at all while
+        # sitting on an exhausted login. Weekly is the scarce window that drives the choice, so require only that:
+        # `wk_known` below decides eligibility, and the 5h throttle applies when we actually know it.
+        s = s or {}
+        if not a.get("ok"):
             info[em] = {"status": "no_data", "score": -9, "use_next": False,
                         "why": "no reading yet — log into this account on any node to read it"}; continue
         def _free(winkey, wv, fallback):
@@ -5008,16 +5088,49 @@ def _acct_recommend(accounts, now):
             return max(0.0, 100.0 - pp)
         s_free = _free("session", s, 0)
         wk_free = _free("week", wk, 100)
+        # UNKNOWN != FULL. `_free`'s week fallback is 100, so an account with no usable weekly signal scored as
+        # completely fresh and, being ranked by soonest reset, could WIN the pick outright. Combined with the
+        # autopilot's stale-reserve exemption that is how the box was rotated onto an exhausted login. An account
+        # is only a candidate if SOMETHING vouches for its weekly headroom: a scrape that belongs to the current
+        # window, or a ready model prediction. Otherwise it is 'unknown' -- never picked, but still TRACKED and
+        # shown, and still reachable by a manual switch. (This does NOT re-create the freshness deadlock: an idle
+        # reserve now gets a model pred_pct above, which is exactly the vouching signal it previously lacked.)
+        _wk_scrape_ok = bool(wk.get("pct") is not None and not wk.get("expired"))
+        _wk_model_ok = ((mdl.get("week") or {}).get("pred_pct") is not None)
+        wk_known = bool(_wk_scrape_ok or _wk_model_ok)
+        # The 5h throttle is ADVISORY: only gate on it when we actually have a signal (scrape or model). With no
+        # signal, `_free`'s 0 fallback would read as "fully throttled" and park a healthy account as cooling
+        # forever -- and a 5h window self-heals within 5h anyway, so guessing it full is the wrong default.
+        s_known = bool((s.get("pct") is not None and not s.get("expired"))
+                       or ((mdl.get("session") or {}).get("pred_pct") is not None))
         s_ttr = s.get("ttr"); s_ttr_h = max(0.05, (s_ttr if s_ttr else S_LEN_H * 3600) / 3600.0)
         wk_ttr = wk.get("ttr"); wk_ttr_h = max(0.05, (wk_ttr if wk_ttr else WK_LEN_H * 3600) / 3600.0)
         modeled = bool((mdl.get("week") or {}).get("pred_pct") is not None
                        or (mdl.get("session") or {}).get("pred_pct") is not None)
         tag = " (modeled)" if modeled else ""
-        if wk_free <= WK_RESERVE_PCT:
+        # Apply the decaying partner reserve (see partner_sides above). `wk_free_own` is what is actually ours to
+        # spend right now; the raw wk_free still drives the display so the operator sees the real account state.
+        partner_reserve = 0.0
+        if partner_sides and wk_known:
+            partner_reserve = max(0.0, min(float(PARTNER_RESERVE_PCT),
+                                           PARTNER_RESERVE_PCT * (wk_ttr_h / WK_LEN_H)))
+        wk_free_own = wk_free - partner_reserve
+        if not wk_known:
+            st, score = "unknown", -2.0
+            why = ("no trustworthy weekly reading — its /usage windows only render while it is the live login, "
+                   "and the limit model can't vouch for it yet. Not eligible to be picked; switch to it manually "
+                   "to take a live reading.")
+        elif wk_free <= WK_RESERVE_PCT:
             st, score = "resting", -1.0
             why = ("weekly down to %d%% free — holding as emergency reserve; resets in %s%s" %
                    (wk_free, _acct_dur(wk_ttr), tag))
-        elif s_free <= 8:
+        elif partner_sides and wk_free_own <= WK_RESERVE_PCT:
+            # Not drained -- deliberately held for the partner. This RELEASES on its own as the window runs down.
+            st, score = "shared", -0.5
+            why = ("shared with %s — %d%% free but holding %d%% back so they can work; that reserve relaxes as "
+                   "the weekly window runs out (resets in %s), then it's ours to spend%s"
+                   % (", ".join(partner_sides), wk_free, partner_reserve, _acct_dur(wk_ttr), tag))
+        elif s_known and s_free <= 8:
             st, score = "cooling", 0.0
             why = ("5h throttle full (%d%% used) — switch away; frees in %s · weekly %d%% free%s" %
                    (100 - s_free, _acct_dur(s_ttr), wk_free, tag))
@@ -5025,11 +5138,19 @@ def _acct_recommend(accounts, now):
             st = "ready"
             # soonest weekly reset wins (its capacity is the cheapest to spend — refreshes first).
             # headroom is only a faint tie-breaker so two near-equal resets prefer the fuller one.
-            score = (WK_LEN_H / wk_ttr_h) + (wk_free / 10000.0)
-            why = ("ready · weekly %d%% free · resets in %s%s" % (wk_free, _acct_dur(wk_ttr), tag))
+            # Rank a SHARED account on what is actually OURS (wk_free_own), not the partner's share too.
+            score = (WK_LEN_H / wk_ttr_h) + (wk_free_own / 10000.0)
+            if partner_sides:
+                why = ("ready · shared with %s — %d%% of the weekly window is ours to spend now (%d%% held for "
+                       "them, releasing as it nears reset in %s)%s"
+                       % (", ".join(partner_sides), wk_free_own, partner_reserve, _acct_dur(wk_ttr), tag))
+            else:
+                why = ("ready · weekly %d%% free · resets in %s%s" % (wk_free, _acct_dur(wk_ttr), tag))
         info[em] = {"status": st, "why": why, "score": round(score, 4), "use_next": False,
-                    "usable": round(min(s_free, wk_free), 1), "wk_resets_h": round(wk_ttr_h, 1),
-                    "s_free": round(s_free, 1), "wk_free": round(wk_free, 1)}
+                    "usable": round(min(s_free, wk_free_own), 1), "wk_resets_h": round(wk_ttr_h, 1),
+                    "s_free": round(s_free, 1), "wk_free": round(wk_free, 1),
+                    "wk_free_own": round(wk_free_own, 1), "partner_sides": partner_sides,
+                    "partner_reserve": round(partner_reserve, 1)}
     ready = [(em, d) for em, d in info.items() if d["status"] == "ready"]
     pick = max(ready, key=lambda kv: kv[1]["score"])[0] if ready else None
     if pick:
@@ -5065,6 +5186,19 @@ def account_windows_store():
     now = time.time()
     if _ACCT_STORE_CACHE["data"] is not None and now - _ACCT_STORE_CACHE["at"] < 25:
         return _ACCT_STORE_CACHE["data"]
+    # SINGLE-FLIGHT. The refresh below runs a model view per (account x window) and the cache check above is
+    # unsynchronised, so every concurrent poller used to miss TOGETHER and each run the full refresh in
+    # parallel -- N threads doing identical CPU-bound work, each taking longer than the 25s TTL, so the cache
+    # could never catch up and the threads piled up unbounded (measured: 146 of 193 threads in this family,
+    # CPU pinned, not draining). Now one thread refreshes and the rest take its result.
+    with _ACCT_STORE_LOCK:
+        now = time.time()
+        if _ACCT_STORE_CACHE["data"] is not None and now - _ACCT_STORE_CACHE["at"] < 25:
+            return _ACCT_STORE_CACHE["data"]                       # somebody refreshed it while we waited
+        return _account_windows_store_build(now)
+
+def _account_windows_store_build(now):
+    """The actual (expensive) build. Only ever entered by the single-flight winner above."""
     store = _acct_windows_load(); cur = _current_email() or ""; log = _acct_log_load()
     accts = {}
     for em, rec in store.items():
@@ -5257,6 +5391,8 @@ def account_windows_all():
             "live_on": live_on.get(em, []), "in_rotation": em in rotset, "ok": bool(a.get("ok")),
             "windows": {"session": _win_view(w.get("session"), now, "session"), "week": _win_view(w.get("week"), now, "week"),
                         "week_sonnet": _win_view(w.get("week_sonnet"), now, "week_sonnet")},
+            "week_model_label": w.get("week_model_label"),       # which model the 3rd weekly window is for (renamed by Anthropic over time)
+            "carried": a.get("carried"),                          # windows held over from a prior read (partial /usage render)
             "ts": a.get("ts"), "side": a.get("side"), "last_error": a.get("last_error"), "model": a.get("model"),
             "switchable_on": switchable.get(em, [])})
     # If the LIVE account's windows look expired/stale when someone opens the lens, kick a background refresh now
@@ -5279,7 +5415,8 @@ def account_windows_all():
     info, pick = _acct_recommend(accounts, now)
     for a in accounts:
         a.update(info.get(a["email"], {"status": "no_data", "why": "", "score": -9, "use_next": False}))
-    order = {"use_next": 0, "ready": 1, "cooling": 2, "resting": 3, "elsewhere": 4, "tracked": 5, "no_data": 6}
+    order = {"use_next": 0, "ready": 1, "cooling": 2, "shared": 3, "resting": 4, "elsewhere": 5,
+             "unknown": 6, "tracked": 7, "no_data": 8}
     accounts.sort(key=lambda a: (order.get(a.get("status"), 9), -(a.get("score") or -9)))
     pa = next((a for a in accounts if a["email"] == pick), None)
     # Should the operator switch RIGHT NOW? Yes when the recommended pick exists, differs from the live login,
@@ -5372,9 +5509,27 @@ _WIN_LEN = {"5h": 5 * 3600, "session": 5 * 3600, "week": 7 * 86400, "week_sonnet
 _WIN_MODEL = {"week_sonnet": "sonnet"}                                   # weekly-Sonnet window = Sonnet tokens only
 _CALIB_FEATURES = ("cost", "context", "billable", "raw")                 # candidate weightings; the fit picks best-R²
 
-def _acct_feature_since(account, since_ts, model_sub=None, log=None):
+_ACCT_FEAT_CACHE = {}                                    # (account, since_ts, model) -> (computed_at, feature)
+ACCT_FEAT_TTL = float(CC.get("acct_feature_ttl") or 30)
+def _feat_copy(f):
+    """Deep-enough copy: callers (notably _acct_feature_fleet) mutate the returned dict AND its by_ver
+    sub-dicts in place, which would otherwise corrupt the cached entry."""
+    g = dict(f); g["by_ver"] = {k: dict(v) for k, v in (f.get("by_ver") or {}).items()}; return g
+
+def _acct_feature_since(account, since_ts, model_sub=None, log=None, ttl=None):
     """Sum an account's token telemetry since since_ts into candidate 'weight' features. Attribution = which
-    account was live at each event's timestamp (the same per-user account timeline used everywhere else)."""
+    account was live at each event's timestamp (the same per-user account timeline used everywhere else).
+    CACHED (default ACCT_FEAT_TTL). This is an O(every retained event) sweep -- ~470k events on this box --
+    and _acct_model_view runs it once per (account x window), so ONE account_windows_store() refresh asked for
+    9-12 of these, several of them character-for-character the same question. The key is exact (since_ts is a
+    window boundary, stable for hours), so a hit returns the identical sum, never an approximation of a
+    different question. Pass ttl=0 for a caller that must not reuse a prior result."""
+    key = (account, int(since_ts), model_sub or "")
+    now = time.time()
+    ttl = ACCT_FEAT_TTL if ttl is None else ttl
+    c = _ACCT_FEAT_CACHE.get(key)
+    if c and now - c[0] < ttl:
+        return _feat_copy(c[1])
     log = log if log is not None else _acct_log_load()
     f = {"cost": 0.0, "context": 0, "billable": 0, "output": 0, "raw": 0, "n": 0}
     by_ver = {}                                          # model-version -> {b: billable, c: cost} (attribution only)
@@ -5392,6 +5547,10 @@ def _acct_feature_since(account, since_ts, model_sub=None, log=None):
                 f["output"] += out; f["raw"] += inp + out + cw + cr; f["n"] += 1
                 v = by_ver.setdefault(_model_ver(ev[1]), {"b": 0, "c": 0.0}); v["b"] += bill; v["c"] += cost
     f["by_ver"] = by_ver
+    _ACCT_FEAT_CACHE[key] = (now, _feat_copy(f))
+    if len(_ACCT_FEAT_CACHE) > 512:                       # bounded: window boundaries roll, so keys must age out
+        for k in sorted(_ACCT_FEAT_CACHE, key=lambda k: _ACCT_FEAT_CACHE[k][0])[:256]:
+            _ACCT_FEAT_CACHE.pop(k, None)
     return f
 
 _ACCT_FEAT_FLEET_CACHE = {}                              # (account, since_bucket, model) -> (ts, feature dict)
@@ -5618,17 +5777,36 @@ def _acct_model_view(account, windows_now, now, live=False, log=None):
         w = (windows_now or {}).get(wkey) or {}; rts = w.get("resets_ts"); wl = _WIN_LEN.get(wkey)
         # NOTE: live pred/eta stay LOCAL (fast, hot path). The cross-node correction lives in _acct_calib_log
         # (the scrape path), which feeds the FIT -- the governor anchors to the real scrape %, not pred_pct.
-        if live and m.get("ready") and rts and wl and m["capacity"] > 0:
+        # pred_pct for EVERY account, not just the live one (2026-08-06). It used to be `if live`, which left an
+        # IDLE reserve with no model signal at all -- so _acct_recommend fell back to that account's last /usage
+        # SCRAPE, and a stale scrape is exactly the thing that can't be trusted for a reserve (its windows only
+        # render while it is the live login, so its scrape is stale BY CONSTRUCTION). That is how autopilot
+        # rotated onto an account at 97% of its weekly window twice: james' stale scrape looked roomy while this
+        # model already predicted 107%. The computation never needed the live login -- _acct_feature_since sums
+        # THIS account's own token telemetry since the window boundary, which we have for idle accounts too.
+        # rate/eta/pacing stay LIVE-only: they describe the current burn, which is meaningless for an idle box.
+        if m.get("ready") and rts and wl and m["capacity"] > 0:
             feat = m["feature"]
             fnow = _acct_feature_since(account, rts - wl, _WIN_MODEL.get(wkey), log)[feat]
-            v["pred_pct"] = round(min(150.0, max(0.0, 100.0 * fnow / m["capacity"])), 1)
-            frec = _acct_feature_since(account, now - 1800, _WIN_MODEL.get(wkey), log)[feat]
-            rate_h = frec / 0.5                          # feature consumed per hour (last 30 min)
-            v["rate_h"] = round(rate_h, 4)
-            remaining = max(0.0, m["capacity"] - fnow)
-            v["eta_h"] = round(remaining / rate_h, 2) if rate_h > 0 else None
-            v["reset_h"] = round((rts - now) / 3600.0, 2)
-            v["maxout_before_reset"] = bool(v.get("eta_h") is not None and v["eta_h"] < v["reset_h"])
+            # CLAMP TO 100: a window cannot exceed 100% used -- Claude cuts you off at the cap, so there is no
+            # such thing as 107% and showing one is just wrong (operator, 2026-08-07). A prediction ABOVE 100
+            # means our fitted capacity is too LOW, not that more was consumed; the honest reading is "full".
+            # Right now capacity is under-fit for a concrete reason: the "+50% weekly limits" promo (through
+            # Aug 19) raised the real cap, and the fit predates it -- it re-converges as post-promo calib rows
+            # land. Keep the raw value as pred_pct_raw so that drift stays diagnosable instead of hidden.
+            _raw = 100.0 * fnow / m["capacity"]
+            v["pred_pct"] = round(min(100.0, max(0.0, _raw)), 1)
+            if _raw > 100.0:
+                v["pred_pct_raw"] = round(min(400.0, _raw), 1)
+                v["over_cap"] = True                     # fit is under-reading capacity (e.g. an unmodelled limit promo)
+            if live:                                     # burn rate / max-out ETA describe the CURRENT burn
+                frec = _acct_feature_since(account, now - 1800, _WIN_MODEL.get(wkey), log)[feat]
+                rate_h = frec / 0.5                      # feature consumed per hour (last 30 min)
+                v["rate_h"] = round(rate_h, 4)
+                remaining = max(0.0, m["capacity"] - fnow)
+                v["eta_h"] = round(remaining / rate_h, 2) if rate_h > 0 else None
+                v["reset_h"] = round((rts - now) / 3600.0, 2)
+                v["maxout_before_reset"] = bool(v.get("eta_h") is not None and v["eta_h"] < v["reset_h"])
         out[wkey] = v
     # Pacing governor -- anchored to the REAL /usage scrape (ground truth the fuel gauges show), NOT the limit
     # model's predicted % (which undercounts when usage burned on another node/user). Works for any account with a
