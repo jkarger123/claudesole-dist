@@ -725,6 +725,15 @@ def _self_restart():
     ('server.py') would fail to be found if the launcher left a different cwd, killing the process with no
     respawn (this took AFP down once). Brief: the HTTP response has already flushed before this."""
     time.sleep(1)
+    # Shed our browser-terminal children FIRST. execv replaces the process image but KEEPS the pid, so every
+    # leaked `tmux attach-session` child is inherited by the new image -- while the registry that knew which of
+    # them were live does NOT survive. Restarting therefore used to carry the whole leak across (AFP came back
+    # from a restart still holding 88 bridges). Killing an attach client is detach-only: the tmux session and
+    # the work inside it are untouched; a live viewer simply reconnects, which the browser does automatically.
+    try:
+        _n = _reap_orphan_terminals()
+        if _n: print("[restart] shed %d browser-terminal bridge(s) before re-exec" % _n, file=sys.stderr)
+    except Exception: pass
     script = os.path.join(BASE, os.path.basename(__file__))   # absolute, cwd-independent
     if not os.path.isfile(script): script = os.path.abspath(__file__)
     try: os.execv(sys.executable, [sys.executable, script] + sys.argv[1:])
@@ -36021,6 +36030,7 @@ _SELFHEAL = {"last": 0, "boot": time.time()}
 _WS_CHILDREN = {}                # pid -> {"name": session, "at": forked-at}
 _WS_CHILD_LOCK = threading.Lock()
 _WS_ORPHAN_SEEN = {}             # pid -> first time we saw it unregistered (the grace clock)
+_WS_ORPHAN_SIG  = {}             # pid -> how many times we have already signalled it (drives HUP->TERM->KILL)
 WS_ORPHAN_GRACE = float(CC.get("ws_orphan_grace") or 300)   # 5 min unregistered before it is fair game
 WS_REAP_MAX = int(CC.get("ws_reap_max") or 3)               # per pass -- gentle by construction, never a sweep
 # No frame from the browser for this long (it stopped answering pings) -> the viewer is gone, release the pty.
@@ -36037,7 +36047,7 @@ def _ws_child_register(pid, name):
 
 def _ws_child_done(pid):
     with _WS_CHILD_LOCK: _WS_CHILDREN.pop(pid, None)
-    _WS_ORPHAN_SEEN.pop(pid, None)
+    _WS_ORPHAN_SEEN.pop(pid, None); _WS_ORPHAN_SIG.pop(pid, None)
 
 def _reap_ws_orphans(urgent=False):
     """Reap only UNREGISTERED /ws attach children older than the grace window. Returns the pids signalled.
@@ -36058,21 +36068,32 @@ def _reap_ws_orphans(urgent=False):
         first = _WS_ORPHAN_SEEN.setdefault(pid, now)     # start this pid's grace clock
         if now - first < grace: continue
         if len(reaped) >= cap: break                     # rate limit: the rest wait for the next pass
+        # ESCALATE. SIGHUP is the right FIRST move (tmux detaches the client cleanly), but it is not always
+        # sufficient: an orphan whose pty master fd is still open never sees a hangup, so it survives -- and the
+        # original reaper forgot the pid immediately after signalling, restarting its grace clock. The result was
+        # a reaper that looked healthy in its own log ("reaped 3") while re-signalling the SAME three pids every
+        # pass forever and freeing nothing (observed on AFP: 88 children, unchanged over 20 minutes, the log
+        # cycling through the same pids). Remember what we already tried and step up the signal.
+        tried = _WS_ORPHAN_SIG.get(pid) or 0
+        sig = signal.SIGHUP if tried == 0 else (signal.SIGTERM if tried == 1 else signal.SIGKILL)
         try:
-            os.kill(pid, signal.SIGHUP)                  # GENTLE -- lets tmux detach the client cleanly
+            os.kill(pid, sig)                            # detach-only either way: this kills a VIEWER, never a session
             reaped.append(pid)
+            _WS_ORPHAN_SIG[pid] = tried + 1
         except Exception:
-            pass
-        _WS_ORPHAN_SEEN.pop(pid, None)
+            _WS_ORPHAN_SIG.pop(pid, None)
+        _WS_ORPHAN_SEEN[pid] = now                       # re-arm the clock; do NOT forget it (that was the bug)
         try: os.waitpid(pid, os.WNOHANG)                 # clear the zombie if it went immediately
         except Exception: pass
     for pid in list(_WS_ORPHAN_SEEN):                    # forget pids that no longer exist
-        if pid not in kids: _WS_ORPHAN_SEEN.pop(pid, None)
+        if pid not in kids: _WS_ORPHAN_SEEN.pop(pid, None); _WS_ORPHAN_SIG.pop(pid, None)
     if reaped:
         try:
             with open(os.path.join(STATE_DIR, "_ws_reaper.log"), "a") as f:
-                f.write("%s reaped %d unregistered attach orphan(s) %s (live=%d, children=%d)\n"
-                        % (time.strftime("%Y-%m-%d %H:%M:%S"), len(reaped), reaped, len(live), len(kids)))
+                f.write("%s signalled %d unregistered attach orphan(s) %s (live=%d, children=%d)\n"
+                        % (time.strftime("%Y-%m-%d %H:%M:%S"), len(reaped),
+                           ["%d:%s" % (p_, ("HUP", "TERM", "KILL")[min(_WS_ORPHAN_SIG.get(p_, 1) - 1, 2)]) for p_ in reaped],
+                           len(live), len(kids)))
         except Exception: pass
     return reaped
 
@@ -36178,7 +36199,9 @@ def _vitals_loop():
         try:
             # Shed leaked browser-terminal children BEFORE sampling, so a slow leak is cleaned up continuously
             # instead of only at a self-heal restart. Bounded + SIGHUP-only, so it can never itself be the event.
-            try: _reap_ws_orphans(urgent=(_VITALS.get("pty_level") == "critical"))
+            # Urgent from WARN, not just critical: warn is the moment there is still headroom to act in. At critical the
+            # pool is nearly gone and a backlog draining 3-per-pass would take an hour we do not have.
+            try: _reap_ws_orphans(urgent=(_VITALS.get("pty_level") in ("warn", "critical")))
             except Exception: pass
             v = vitals()
             # PTY PRESSURE -- the 2026-08-07 outage class. Alert once per level change (not every 45s), and say

@@ -74,7 +74,7 @@
       "command-center/residue_lint.py": "0b1c757909a27470095d5ea8b48641a9e9e0248ec1729f3598596f2129fd1d6f",
       "command-center/rollback_guard.py": "603ae76f8f854b46e0dd152a123e11cc85c760a8c82e7865ab5eeaf75b2ac800",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "1e13e28d0291be68da9b0d171b77c0b099a0731b0d9112196dfa029fedbd35ca",
+      "command-center/server.py": "5deb9b07257b5c8bbedaf96a97a011a8330289a5d9b4b0a03cd1233a4e6fa03b",
       "command-center/skill_scan.py": "809f29a7c954dc1df44934152ac6054fa1873c8ca92ed04c6cb00b525cfa9b8c",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/static/phosphor/fill.css": "555980683a582c1910a954648b4ae38f58d76e797f02bfdc2c5e817901e6d4fc",
@@ -178,9 +178,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1786134075,
+    "generated": 1786135891,
     "v": 1,
     "version": "0.99.254"
   },
-  "sig": "ht7QNKTn+XM79QIPY/AFqidteqtXGbR3qsgzXCeufbsBXdH+MA0jDkVhF8KiHKVfBEBap3Y8E6CQo/mhHuzOAw=="
+  "sig": "E19NWOX6l1+/yW1R2ew01nN0PoULqH+M7iABmDBoV3QQJ5OR3nhfAaj/sFfttqQ5sEZIZcTROzGchxVCxvEdDA=="
 }
