@@ -4,6 +4,14 @@
 **>> Resume here:** read `_handoffs/20260725-0541__command-center.md` first -- it is the latest handoff.
 <!-- /LATEST-HANDOFF -->
 
+> **▶ TOUCHING USAGE / ACCOUNT TELEMETRY? READ `docs/USAGE_TELEMETRY.md` FIRST.** `_scan_tok`,
+> `_acct_active_at`, `_acct_feature_since`, `_acct_model_view` and `account_windows_store` sit on a hot path that
+> runs over ~470k events on **every** dashboard poll — it once pinned a node at 146/193 threads with CPU at 100%.
+> It is now held together by four deliberate guards (walk TTL, binary-search attribution, a feature memo, and a
+> single-flight lock) plus two easy-to-break invariants (atomic index swap; `_feat_copy` must deep-copy
+> `by_ver`). The doc has the measurements, the accuracy proofs, and how to diagnose a recurrence. **Never "fix"
+> a slowdown here by deleting transcripts — that breaks the numbers (it once cut monthly usage 85k → 42k).**
+
 > **▶ THE DISCIPLINE SYSTEM: `docs/ENGINEERING_AUTOPILOT.md`** — how we control the context payload (Menu/Scout/
 > Vault) AND auto-enforce engineer-grade habits (folder structure, filing, warm-transfer routing, record-keeping,
 > self-curating notes, housekeeping). Read it before touching context briefs, the housekeeping loop, the

@@ -24,6 +24,10 @@ oversized context, runaway loops.
 
 ## Hard boundaries
 - Read-only on transcripts; never modify or delete them. ASCII-only; large output to the SSD.
+- **Never propose pruning/archiving `~/.claude/projects` to cut CPU or disk.** Transcripts are the ONLY
+  source of usage truth, so deleting them silently falsifies every number -- it once cut monthly usage from
+  85k to 42k and had to be reverted. If the telemetry path is slow, the fix is in the code, not the data:
+  see `<CC_HOME>/docs/USAGE_TELEMETRY.md` (measured root causes + the four guards).
 - Cost figures are ESTIMATES -- label them as such; do not present the subscription dev usage as real spend.
 
 ## Where this stands (2026-06-20)

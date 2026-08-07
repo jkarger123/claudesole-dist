@@ -3,7 +3,32 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
-## 0.99.249 -- 2026-08-07  (Account brain: shared accounts, an honest 100% ceiling, and two parser bugs that blinded whole windows)
+## 0.99.250 -- 2026-08-07  (Documentation: the account-rotation system written down, and every stale claim about it corrected)
+
+No behaviour change — comments, docstrings and docs only. The rotation system had been described across four
+documents that now contradicted each other and the code, which is itself a failure mode: the "known autopilot
+gap" write-up sent readers chasing a freshness/idle-gate problem that was neither the cause nor still present.
+
+- **NEW `command-center/Usage/ACCOUNT_ROTATION.md`** — the single reference for the whole system: the two
+  actuators and why only one is safe, single-owner rotation, the full gate chain, the mid-turn gate and the
+  `esc to interrupt` truncation trap, the recommendation brain (statuses, `unknown`, the model covering idle
+  accounts, the 100% ceiling, the scrape floor, the stale-reserve exemption), shared accounts with the decaying
+  partner reserve, the seven `/usage` parser invariants, and a dated incident log of what actually happened.
+- **Corrected, not merely appended to** — each of these asserted something now false:
+  - `Usage/CLAUDE.md` — "never recommend an account already LIVE on ANOTHER node", "weekly Sonnet", the idle
+    gate, and the old autopilot description. Rewritten and pointed at the new reference.
+  - `Usage/account-switcher/CLAUDE.md` + `ARCHITECTURE.md` — the module is now **load-bearing**: it is the only
+    actuator a node may auto-switch through, and its "known autopilot gap" section described four bugs that are
+    fixed. If `cc-switch` breaks, unattended rotation stops fleet-wide — by design.
+  - `Usage/pacing/CLAUDE.md` + `SWITCHING.md` — the gate Phase 3 bypasses is no longer the box-idle gate;
+    "fleet-exclusivity" is gone entirely, replaced by the shared-account reserve. `SWITCHING.md` keeps its
+    (still-valuable) 2026-08-06 investigation but is now explicitly marked partially superseded, with each
+    outdated claim tagged inline rather than silently left to mislead.
+- **In-code**: the `FLEET-AWARENESS: never recommend an account already LIVE on ANOTHER node` comment and the
+  `_acct_recommend` docstring both still described the excluded-account model; both now describe what the
+  function actually does, including `unknown` and why "unknown must not read as full".
+
+## 0.99.249 -- 2026-08-07  (Account brain: shared accounts, an honest 100% ceiling, two parser bugs that blinded whole windows -- and the usage telemetry path that was melting the node)
 
 Four operator-reported corrections, all real.
 
@@ -38,6 +63,32 @@ it hard. Use-it-or-lose-it. Ranking uses `wk_free_own` (what is actually ours), 
 account figures. New `shared` status; `wk_free_own` / `partner_sides` / `partner_reserve` exposed on each account.
 The partner not auto-switching itself needs no new rule — a node without a fresh-OAuth actuator already never
 rotates unattended (v0.99.248).
+
+**The usage telemetry path no longer melts the node.** The operator's resource-warning flood was a real
+pathology: 146 of 193 threads stuck in the usage family, CPU pinned, not draining over 60s — the signature that
+has historically driven nodes to 400+ threads and self-heal restarts. The suspected cause (the ~20k-file
+directory walk in `_scan_tok`) was **not** it — measured warm, that walk is 0.18s. The actual cost was
+`_acct_active_at`, which answered "which account was live at time *ts*" with a **linear walk of the whole
+account log, once per event** — 470k events × an 81-entry log ≈ 38M comparisons, **2.06s per call and 98% of
+`_acct_feature_since`**. Two things amplified it into an unbounded pile: giving *every* account a `pred_pct`
+(correct — an idle reserve's scrape is stale by construction) took that function from ~3 to **9–12 calls per
+refresh ≈ 25s**, and `account_windows_store`'s 25s cache check sat **outside its lock**, so concurrent pollers
+all missed together and each ran the full refresh — with work-per-refresh exceeding the TTL, the cache could
+never catch up. Fixed in four places: `_acct_active_at` now **binary-searches** a cached sorted index; a
+**single-flight lock** collapses parallel refreshes to one; `_acct_feature_since` is **memoized** on its exact
+`(account, window-start, model)` key; and `_scan_tok` gained the **walk-TTL guard** it should always have had.
+Two new `cc.config` knobs: `tok_walk_ttl` and `acct_feature_ttl` (both default 30s).
+
+**No usage number moved.** Skipping a walk cannot drop data — transcripts are append-only and the per-file byte
+offsets persist, so the next walk still consumes every byte written in between; the totals settle later, never
+wrong. The binary search was proven equivalent **exhaustively over all 470,065 real events** plus every edge
+case, and full feature sums were verified **bit-identical across 24 account × window × model combinations**.
+Result: usage-family stuck threads 146 → **max 1** under a 72-request hammer, draining to 0 in ~12s; idle CPU
+85.7% → ~22%; the monthly total held at ~89B tokens. Note for anyone reading a before/after diff: rolling
+windows legitimately *decrease* as events age out — 210s of clock movement alone drops `day.bill` by ~1.4M — so
+run that control before calling a decrease a regression. Full write-up, invariants and the two traps
+(`_feat_copy` must deep-copy `by_ver`; the account index must be swapped in one atomic rebind) are in
+`docs/USAGE_TELEMETRY.md`.
 
 ## 0.99.248 -- 2026-08-06  (Account rotation: never auto-switch through the stale-snapshot path -- THE "Login expired" root cause)
 

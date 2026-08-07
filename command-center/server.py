@@ -4744,7 +4744,7 @@ def _acct_autopilot_loop():
                     # Pacing-aware switch (Phase 3): when pace_switch is on AND the LIVE account is cooling/
                     # resting, burning HERE is already blocked (the Phase-1 pre-empt is holding the loops), so
                     # there is nothing to yank -> BYPASS the mid-turn gate and rotate now. Every other gate
-                    # (auto + auto_proven + in-wallet + fleet-exclusivity + fresh + verify/rollback) still applies.
+                    # (auto + auto_proven + owner/actuator + in-wallet + fresh + lock + verify/rollback) still applies.
                     live_status = ((next((a for a in aw.get("accounts", []) if a.get("active")), None) or {}).get("status"))
                     pacing_motivated = bool(PACE_SWITCH and live_status in ("cooling", "resting"))
                     ev["live_status"] = live_status; ev["pacing_motivated"] = pacing_motivated
@@ -5029,11 +5029,15 @@ def _acct_recommend(accounts, now):
     can't be burned right now ('cooling') -> fall through to the next-soonest-reset account; it frees again
     at its own soon 5h reset. The weekly window is the scarce one that actually drives the choice.
 
-    Gates: weekly drained (<=10% free, WK_RESERVE_PCT) -> 'resting'; 5h throttle full (<=8% free) -> 'cooling'; else 'ready',
-    ranked by SOONEST weekly reset (headroom is only a faint tie-breaker between near-equal reset times).
-    When the fitted limit-model is READY it supplies a PREDICTED LIVE % (continuous telemetry between
-    scrapes) -- fresher than the last /usage scrape -- used for the free%.
-    Returns {email: {...}} plus the single pick email."""
+    Gates: no trustworthy weekly signal -> 'unknown' (NEVER picked -- "unknown" must not read as "full", which is
+    how the box twice rotated onto an exhausted login); weekly drained (<=WK_RESERVE_PCT free) -> 'resting';
+    a shared account whose partner reserve still covers it -> 'shared'; 5h throttle full (<=8% free, and only
+    when the 5h is actually KNOWN) -> 'cooling'; else 'ready', ranked by SOONEST weekly reset (headroom is only a
+    faint tie-breaker between near-equal reset times).
+    When the fitted limit-model is READY it supplies a PREDICTED LIVE % for EVERY account (not just the live one
+    -- an idle reserve's scrape is stale by construction), CLAMPED to 100 since a window cannot exceed its cap.
+    The /usage scrape is a hard FLOOR under that prediction (usage inside a window is monotonic).
+    Returns {email: {...}} plus the single pick email. Full reference: Usage/ACCOUNT_ROTATION.md"""
     WK_LEN_H = 7 * 24.0; S_LEN_H = 5.0
     # Keep an EMERGENCY RESERVE on every account: stop burning a weekly window once it's down to ~this much free,
     # so if we accidentally max everything out there's a sliver on each login to "get lean" and limp along until
@@ -5045,10 +5049,9 @@ def _acct_recommend(accounts, now):
         mdl = a.get("model") or {}
         if not a.get("in_rotation"):
             info[em] = {"status": "tracked", "why": "tracked, not in your rotation", "score": -9, "use_next": False}; continue
-        # FLEET-AWARENESS: never recommend an account already LIVE on ANOTHER node -- two nodes on one
-        # subscription share its limits (and may trip concurrent-use), wasting a separate subscription. `active`
-        # = live on THIS node (fine, we may stay); a non-empty live_on without active = held by another store.
-        # SHARED ACCOUNTS (operator correction, 2026-08-07). This used to hard-exclude any account live on another
+        # SHARED ACCOUNTS (operator correction, 2026-08-07). `active` = live on THIS node (fine, we may stay);
+        # a non-empty live_on WITHOUT active = also live on another store, i.e. shared with a partner node.
+        # This used to hard-exclude any account live on another
         # node as "reserved for that node". That was too blunt: such an account CAN be used by our nodes -- the
         # requirement is only that we always leave the partner room to work, and that we don't starve them early.
         # So instead of excluding it, hold back a PARTNER RESERVE that DECAYS as the weekly window runs out:
