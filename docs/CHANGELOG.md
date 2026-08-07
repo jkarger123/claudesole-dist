@@ -3,6 +3,39 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.248 -- 2026-08-06  (Account rotation: never auto-switch through the stale-snapshot path -- THE "Login expired" root cause)
+
+**Root cause of the `Login expired -- run /login` incidents, proven by measurement.** `account_switch_verified`
+has two actuators. With `cc.config account_switch_cmd` set it drives a FRESH OAuth login (`cc-switch`). Without
+one it falls back to `_kc_write`, restoring a FROZEN wallet snapshot. OAuth refresh tokens rotate ON USE, so
+that snapshot's token has already been consumed — restoring it strands the login. Measured on 2026-08-06: the
+snapshot of the account that was live *at that moment*, captured 6 minutes earlier, **already differed from the
+live keychain credential**. The identity still flips and `/usage` may still read, so verify-then-rollback passes —
+the login dies later, which is why the failure looked random and unattributable.
+
+Evidence, both directions:
+- Switch via the OAuth actuator (47s, real browser flow): **0 new login errors across all 44 live sessions**;
+  the credential store never went absent, going straight from one valid account to the next.
+- Switch via the snapshot fallback (14s): the stored blob is provably divergent from the live credential within
+  minutes of an account going live.
+
+This is why operator switches never broke a session (they run on a node that HAS the actuator) while automatic
+ones did (v0.99.247 made the overseer the sole owner — and the overseer has no actuator).
+
+- **`_autopilot_is_owner()` now HARD-REQUIRES `ACCT_SWITCH_CMD`.** A node that can only switch by restoring a
+  snapshot never rotates unattended, whatever else is configured. Default owner mode changed `overseer` ->
+  **`capable`** (any node with a working actuator); `overseer` | `any` | an explicit `instance_id` still work.
+  This is also the right default for a THIRD-PARTY install: `account_switch_cmd` is node-specific (needs that
+  box's browser profile + GUI), so a fresh deployment has none and `auto` is structurally refused until one is
+  configured — safe by default, zero configuration required.
+- **`set_account_autopilot("auto")` is refused** on a node without a reliable actuator, with an error that
+  explains the token-rotation hazard — so it cannot be armed into a broken state from the UI or the API.
+- **The manual path stays available but no longer silent:** a snapshot-path switch returns
+  `actuator: "keychain-snapshot"` plus a `warning` naming the stranding risk (the operator is present and may
+  still want it; they just shouldn't be surprised).
+- **`/api/account-windows`** now reports `switch_actuator`, `autopilot_owner` and `is_autopilot_owner`, and the
+  Account fleet header states plainly when automatic rotation is off on this node and why.
+
 ## 0.99.247 -- 2026-08-06  (Account autopilot: ONE owner for rotation + three dead-silent bugs that kept it from ever firing)
 
 Autopilot had not performed an unattended switch since 2026-06-28 despite `should_switch` being true, the pick

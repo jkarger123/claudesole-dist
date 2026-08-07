@@ -4489,6 +4489,15 @@ def set_account_autopilot(mode):
     mode = (mode or "").lower()
     if mode not in ("off", "alert", "auto"): return {"ok": False, "error": "mode must be off | alert | auto"}
     if mode == "auto":
+        # RELIABLE ACTUATOR GATE: without cc-switch (fresh OAuth) a switch restores a frozen keychain snapshot
+        # whose refresh token has already rotated -> dead login -> "Login expired" for every session on this
+        # user. Never let 'auto' be armed on a node that can only switch that way. See _autopilot_is_owner.
+        if not ACCT_SWITCH_CMD:
+            return {"ok": False, "locked": True,
+                    "error": "auto needs a reliable switch actuator on this node (cc.config account_switch_cmd). "
+                             "Without one a switch restores a stale keychain snapshot, whose OAuth refresh token "
+                             "has already rotated -- that strands the login and every session must run /login. "
+                             "Use 'alert' and switch manually, or configure account_switch_cmd."}
         h = switch_health()
         if not h.get("auto_proven"):
             return {"ok": False, "locked": True,
@@ -4540,10 +4549,26 @@ AUTO_BUSY_RECHECK_SEC = float(CC.get("autopilot_busy_recheck_sec") or 3)
 # "Login expired -- run /login". A SINGLE switch has never done that -- manual switches are routine and safe.
 # So: exactly ONE process may own automatic rotation. Default = the OVERSEER (role org / preset overseer) -- it
 # is the fleet authority and already sees every node. Tenants still show the alert + the manual switch button.
-AUTOPILOT_OWNER = (CC.get("account_autopilot_owner") or "overseer").strip().lower()
+AUTOPILOT_OWNER = (CC.get("account_autopilot_owner") or "capable").strip().lower()
 def _autopilot_is_owner():
-    """Is THIS instance the one allowed to auto-switch? 'overseer' (default) | 'any' | an explicit instance_id."""
-    if AUTOPILOT_OWNER == "any": return True
+    """Is THIS instance allowed to auto-switch?
+
+    HARD PRE-REQUISITE -- ACCT_SWITCH_CMD (root cause of the 2026-08-06 'Login expired' incidents):
+    without it, account_switch_verified falls back to _kc_write, which restores a FROZEN keychain snapshot
+    from the wallet. OAuth refresh tokens ROTATE on use, so that snapshot's refresh token has already been
+    consumed by the time the account goes live again -- restoring it yields a DEAD login and every session
+    on the user gets "Login expired -- run /login". (This is the documented 2026-06-28 stranded-login
+    fragility.) The cc-switch actuator sidesteps it by driving a FRESH OAuth login every time, which is why
+    operator switches from a node that HAS it have never once broken a session. So a node without a
+    reliable actuator must NEVER rotate unattended -- it stays alert-only and the operator switches manually.
+    This is also the correct default for a THIRD-PARTY install: account_switch_cmd is node-specific (needs
+    that box's browser profile + GUI), so a fresh deployment has none -> auto is structurally refused until
+    someone sets one up. Safe by default, no configuration required.
+
+    Mode: 'capable' (default -- any node with a working actuator) | 'overseer' | 'any' | an instance_id.
+    Concurrency across multiple capable nodes is bounded by the O_EXCL switch lock + the shared cooldown."""
+    if not ACCT_SWITCH_CMD: return False
+    if AUTOPILOT_OWNER in ("capable", "any"): return True
     if AUTOPILOT_OWNER == "overseer": return ROLE == "org" or PRESET == "overseer"
     return AUTOPILOT_OWNER == (globals().get("INSTANCE_ID") or "")
 
@@ -4767,9 +4792,18 @@ def account_switch_verified(target, by="manual"):
             _switch_health_log(prev_email, tgt_email, False, by, "switch-cmd", tail)
             return {"ok": False, "error": "browser switch did not land (login unchanged): " + tail}
     else:
+        # FRAGILE FALLBACK -- restores a FROZEN wallet snapshot. OAuth refresh tokens rotate ON USE, and measured
+        # 2026-08-06 they diverge within MINUTES of an account going live (the snapshot of the then-live account
+        # already differed from the live keychain 6 minutes after capture). So this can push an already-consumed
+        # token: the identity flips and even /usage may read, but the login is dying -- sessions later report
+        # "Login expired -- run /login". Unattended rotation is refused on such a node (_autopilot_is_owner);
+        # a MANUAL switch is still allowed (the operator is present) but must say plainly what it risks.
         if not _kc_write(rec.get("blob"), rec.get("account")):
             _switch_health_log(prev_email, tgt_email, False, by, "write", "keychain write failed")
             return {"ok": False, "error": "keychain write failed (login not changed)"}
+        _snap_warn = ("this node has no fresh-OAuth actuator (cc.config account_switch_cmd), so the switch "
+                      "restored a stored keychain snapshot -- if its OAuth refresh token has already rotated the "
+                      "login can strand and sessions will need /login. Configure account_switch_cmd for reliability.")
     time.sleep(1.0)
     live_now = _current_email(); verified = False; werr = None; windows = None
     authed = False
@@ -4808,6 +4842,8 @@ def account_switch_verified(target, by="manual"):
             except Exception: pass
         _switch_health_log(prev_email, tgt_email, True, by, "verified" if windows else "authed")
         return {"ok": True, "verified": True, "email": tgt_email, "from": prev_email,
+                "actuator": ("oauth" if ACCT_SWITCH_CMD else "keychain-snapshot"),
+                "warning": (None if ACCT_SWITCH_CMD else _snap_warn),
                 "note": ("live + verified (read /usage)" if windows else "live + login verified (usage windows still loading — will refresh in the background)")}
     rolled = bool(snap and _kc_write(snap.get("blob"), snap.get("account")))   # verify failed -> ROLL BACK
     _switch_health_log(prev_email, tgt_email, False, by, "verify", werr, rolled_back=rolled)
@@ -5258,6 +5294,10 @@ def account_windows_all():
             # Autopilot observability: WHY the loop did or didn't act on its last pass (in-memory, this instance).
             "autopilot_last": (_AUTOPILOT_EVAL[-1] if _AUTOPILOT_EVAL else None),
             "autopilot_eval": _AUTOPILOT_EVAL[-12:],
+            # Can this node switch SAFELY (fresh OAuth) or only by restoring a stale keychain snapshot? The
+            # latter strands the login -- it is why unattended rotation is refused here. See _autopilot_is_owner.
+            "switch_actuator": ("oauth" if ACCT_SWITCH_CMD else "keychain-snapshot"),
+            "autopilot_owner": AUTOPILOT_OWNER, "is_autopilot_owner": _autopilot_is_owner(),
             "sides": [{"side": r.get("side") or r.get("store_id"), "live": r.get("current_email"),
                        "idle_secs": r.get("idle_secs")} for r in reps]}
 
@@ -25914,6 +25954,13 @@ function uxFleet(){
       +'Last autopilot pass '+e2(ago(Math.max(0,(Date.now()/1000)-(apl.ts||0))))+' ago — <b>'+e2(apl.action||'?')+'</b>'
       +(apl.why?(' · '+e2(apl.why)):'')+'</div>';
   }
+  // Say plainly WHY this node will not rotate on its own. Without a fresh-OAuth actuator a switch restores a
+  // stale keychain snapshot and strands the login, so unattended rotation is refused rather than risked.
+  if(d.multi_account && d.switch_actuator!=='oauth'){
+    apnote+='<div class="uxknote" style="margin:-4px 0 8px" title="This node can only switch by restoring a saved keychain snapshot, whose OAuth refresh token may already have rotated. That strands the login, so automatic rotation is disabled here.">'
+      +'Automatic rotation is <b>off on this node</b> — no fresh-OAuth switch actuator (<code>account_switch_cmd</code>). '
+      +'Manual switching is unaffected.</div>';
+  }
   return '<div class="uxkick">Account fleet <span class="uxknote">rate-limit windows · % used · reset countdowns</span></div>'+ctrls+apnote
     +'<div class="uxfleet">'+accts.map(uxAcctCard).join('')+'</div>';
 }
@@ -33546,7 +33593,16 @@ function reconcileTree(tree){
     if(n.t==="tab"){if(dom[n.l]&&!seen[n.l]){seen[n.l]=1;out.push(n);}}
     else{n.items=(n.items||[]).filter(function(l){if(dom[l]&&!seen[l]){seen[l]=1;return true;}return false;});out.push(n);}
   });
-  navBtns().forEach(function(b){if(!seen[b.dataset.l]){out.push({t:"tab",l:b.dataset.l});seen[b.dataset.l]=1;}}); // new lenses append
+  // A lens that did not exist when this operator's tree was saved must land in ITS category, not loose at the
+  // top. Appending it as a bare tab (the old behavior) meant only FRESH navs ever filed a new lens correctly --
+  // every existing operator got it un-foldered, forever, for every future lens.
+  navBtns().forEach(function(b){
+    var l=b.dataset.l; if(seen[l])return; seen[l]=1;
+    var ext=((window.CC&&window.CC.extLenses||[]).filter(function(x){return x&&x.id===l;})[0]||{});
+    var cat=NAV_CAT[l]||ext.category;
+    var grp=cat?out.filter(function(n){return n.t==="grp"&&n.name===cat;})[0]:null;
+    if(grp)grp.items.push(l); else out.push({t:"tab",l:l});
+  });
   return out;
 }
 function locate(tree,l){for(var i=0;i<tree.length;i++){var n=tree[i];if(n.t==="tab"&&n.l===l)return{top:i};if(n.t==="grp"){var j=n.items.indexOf(l);if(j>=0)return{top:i,grp:n,j:j};}}return null;}
@@ -33575,7 +33631,7 @@ function navForceHead(view){
   return head.map(function(l){return {t:"tab",l:l};}).concat(rest);
 }
 var NAV_CAT_ORDER=["Google","Workspace","Agency","Team","Integrations","Experimental","System"];
-var NAV_CAT={recipients:'System',
+var NAV_CAT={
   agentlab:"Experimental",
   gmail:"Google",calendar:"Google",drive:"Google",
   modules:"Workspace",projects:"Workspace",context:"Workspace",capture:"Workspace",ideas:"Workspace",handoffs:"Workspace",
@@ -33583,7 +33639,7 @@ var NAV_CAT={recipients:'System',
   agency:"Agency",calls:"Agency",
   agents:"Team",skills:"Team",teams:"Team",audit:"Team",telephone:"Team",
   marketplace:"Integrations",vault:"Integrations",
-  usage:"System",server:"System",accounts:"System",security:"System",backup:"System",machines:"System",desktop:"System",
+  usage:"System",server:"System",accounts:"System",security:"System",backup:"System",machines:"System",desktop:"System",recipients:"System",
   history:"System",docs:"System",doctor:"System",ccr:"System",propose:"System",settings:"System"
 };
 function navAvail(){return navBtns().filter(function(b){return b.style.display!=="none";});}   // gated/hidden lenses excluded
