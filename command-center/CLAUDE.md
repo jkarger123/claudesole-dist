@@ -1,7 +1,7 @@
 # Command Center — the engine
 
 <!-- LATEST-HANDOFF -->
-**>> Resume here:** read `_handoffs/20260725-0541__command-center.md` first -- it is the latest handoff.
+**>> Resume here:** read `_handoffs/20260807-1556__command-center.md` first -- it is the latest handoff.
 <!-- /LATEST-HANDOFF -->
 
 > **▶ TOUCHING USAGE / ACCOUNT TELEMETRY? READ `docs/USAGE_TELEMETRY.md` FIRST.** `_scan_tok`,

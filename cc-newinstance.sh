@@ -189,7 +189,10 @@ d={
  "preset": preset,
  "deliverables_root": deliv,
 }
-if auth: d["auth_token"]=auth   # minted per-node at birth (see AUTH_TOKEN above); never born open
+if auth:
+  d["auth_token"]=auth   # minted per-node at birth (see AUTH_TOKEN above); never born open
+  d["auth_token_minted"]=True   # ONE-TIME handoff credential -> the node blocks on first sign-in until the
+                                # operator sets their own (or explicitly keeps this one). Cleared by either.
 if mesh: d["mesh_token"]=mesh
 if integ: d["integration"]=integ   # "product" (single operation) | "agency" (clients+tools tree). default product.
 if nodetype in ("agency","developer"): d["type"]=nodetype   # node TYPE: agency=official-only/locked | developer=custom sandbox

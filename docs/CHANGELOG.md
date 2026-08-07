@@ -3,6 +3,52 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.254 -- 2026-08-07  (The pty outage: watch the resource that took the box down, and gate the restart)
+
+**What happened.** Browser terminals open a `tmux attach-session` bridge over a pseudo-terminal. macOS caps
+ptys GLOBALLY at `kern.tty.ptmx_max` (511) across every user and every co-located node -- and nothing watched
+it. Leaked bridges accumulated for weeks (one cross-user node held 121 dating back to mid-July). Then a broken
+dashboard put every terminal into a reconnect storm, each failed reconnect forking another bridge: 261 leaked
+bridges, 527 devices against a cap of 511. At that point nothing on the machine could open a terminal, start a
+tmux session, or restart a server -- servers could not even respawn, because that needs a pty too. Every node
+read "reconnecting" forever. Recovery had to come from the break-glass console.
+
+**PTY pressure is now a first-class vital.** `/api/vitals` carries `ptys / pty_cap / pty_pct / pty_level`
+(machine-wide, world-visible device nodes, no sudo), warning at 70% and critical at 85%, with a Doctor issue
+and a dashboard banner that names the shared-limit problem in plain language. Deliberately it does NOT feed
+`level`: `level: critical` triggers a self-healing restart, and a restart needs a pty -- so on an exhausted
+machine that would turn a warning into a respawn loop that can never come back. Instead the reaper switches to
+urgent mode (60s grace, 25/pass instead of 300s and 3) to shed OUR bridges fast, and the operator is told
+which user holds the rest. A user we cannot signal means THAT node's `server.py` copy lacks the reaper.
+
+**`cc-restart` -- restarts are gated now.** The co-located instances do not run a shipped artifact; they execute
+this checkout's `server.py` live, so anything on disk becomes the operator's dashboard the moment a session is
+recreated. Nothing gated that path: restarts were guarded by `python3 -c "ast.parse(...)"`, which proves the
+Python parses and says nothing about the ~10k lines of JavaScript inside the `PAGE` string. A doubled backslash
+there broke the entire SPA -- dead nav, no lens, Sessions unreachable -- and the first anyone knew was a browser.
+`cc-restart` node-checks every inline `<script>` first and refuses to restart on failure, discovers every
+co-located instance from live processes (so a new one is never silently skipped), and afterwards re-fetches what
+each is ACTUALLY SERVING and parses that, rather than trusting the source it just gated. The
+`claudesole-restart` skill taught the `ast.parse` pattern; it now teaches this one.
+
+**Boot-time code self-check + fingerprint.** Every boot records server.py's sha256/size/mtime to
+`_code_fingerprint.jsonl` and flags a change from the previous boot -- the breaking edit could not be attributed
+to any session afterwards, because nothing recorded what the file looked like or when. The same boot proves the
+PAGE JavaScript parses; if it does not, the node marks itself DEGRADED and alerts, rather than quietly serving a
+dead dashboard. It does not refuse to boot: a node serving a broken page is still the thing hosting the terminals
+you need to fix it.
+
+**`cc-ptyrecover`.** Reports pressure, who holds the bridges and how old they are; `--clean` clears this user's
+stale ones. Killing an attach client is detach-only, but killing MANY at once is not safe -- a mass SIGKILL
+tipped a flapping tmux server over twice and cost live sessions -- so it batches (15), sends SIGHUP, re-measures
+between batches, stops early once pressure is relieved, and always spares the newest attach per session (the
+live viewer). Cross-user cleanup prints the command for a human instead of running it.
+
+**CCR advisory reviews no longer run twice.** A CCR filed on a node is also stored at Mission Control, and the
+in-flight semaphore is per-process, so co-located instances both spawned a reviewer for the same proposal --
+64 headless subagent runs in one day, every one a duplicate pair. Claims are now made machine-wide on the
+proposal's CONTENT (the two copies carry different ids).
+
 ## 0.99.253 -- 2026-08-07  (Close the ship gap that hid cc-reach; the UI harness exists again)
 
 **preship now catches a new CLI that would never reach a tenant.** The existing gates cover Python modules

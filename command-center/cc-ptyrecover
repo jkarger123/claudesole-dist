@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""cc-ptyrecover -- diagnose and SAFELY recover machine-wide pty (pseudo-terminal) exhaustion.
+
+macOS caps ptys GLOBALLY at `kern.tty.ptmx_max` (511 by default) across every user and every co-located node.
+Each browser terminal holds one via a `tmux attach-session` bridge. When a dashboard leaks those bridges the
+pool drains for EVERYONE on the box: tmux starts printing "open terminal failed: not a terminal", browser
+terminals reconnect-storm (each failed reconnect forking another bridge), tmux servers crash-flap, session
+lists read empty, and a restarted server cannot respawn -- creating a tmux session also needs a pty.
+
+TWO RULES THIS TOOL EXISTS TO ENFORCE, both learned by breaking them:
+  * Killing an `attach-session` CLIENT is detach-only -- the tmux session and the work inside it survive.
+    That makes cleanup safe IN PRINCIPLE.
+  * Killing MANY AT ONCE is not safe in practice. On 2026-08-05 and again on 2026-08-07 a mass SIGKILL of
+    100+ clients tipped an already-flapping tmux server over and killed live sessions -- the second time it
+    cost the operator two of someone else's working sessions. So: small batches, gentle signal first,
+    re-measure between batches, and NEVER touch the newest attach on a session (that is the live viewer).
+
+Usage:
+  cc-ptyrecover                       report only -- pressure, who holds the bridges, how old they are
+  cc-ptyrecover --clean               clean OUR user's stale bridges (SIGHUP, batched, spares live viewers)
+  cc-ptyrecover --clean --older-than 30   only bridges idle >30 min (default 10)
+  cc-ptyrecover --user sarahaios      cross-user: prints the exact sudo command for a human to run (never runs it)
+  cc-ptyrecover --hard                escalate to SIGKILL for bridges that ignore SIGHUP (still batched)
+
+The durable fix is not this tool -- it is the `_reap_ws_orphans` reaper inside server.py. If a user keeps
+showing up here, THAT node's own server.py copy is missing the reaper and needs the framework shipped to it.
+"""
+import os, re, signal, subprocess, sys, time
+
+BATCH = 15          # bridges per batch -- small enough that a fragile tmux server survives the churn
+PAUSE = 3.0         # seconds between batches, so tmux can process the detaches
+
+
+def sh(cmd, timeout=25):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout, p.stderr
+    except Exception as e:
+        return 1, "", str(e)
+
+
+def pty_pressure():
+    used = len([n for n in os.listdir("/dev") if n.startswith("ttys")])
+    cap = 0
+    c, o, _ = sh(["sysctl", "-n", "kern.tty.ptmx_max"])
+    if c == 0 and o.strip().isdigit():
+        cap = int(o.strip())
+    return used, cap, (int(100 * used / cap) if cap else 0)
+
+
+def _etime_secs(s):
+    """Parse BSD ps `etime` -- [[dd-]hh:]mm:ss. macOS ps has NO `etimes` (the seconds form): asking for it makes
+    ps reject the whole -o spec and fall back to a default format, so every age silently parses as 0 and the
+    'spare the live viewer' logic quietly inverts. Parse the format macOS actually has."""
+    s = s.strip()
+    days = 0
+    if "-" in s:
+        d, s = s.split("-", 1)
+        days = int(d) if d.isdigit() else 0
+    parts = [int(x) for x in s.split(":") if x.isdigit()]
+    if len(parts) == 3: h, m, sec = parts
+    elif len(parts) == 2: h, m, sec = 0, parts[0], parts[1]
+    else: return 0
+    return days * 86400 + h * 3600 + m * 60 + sec
+
+
+def bridges():
+    """[(user, pid, age_sec, target_session)] for every tmux attach-session client on the machine."""
+    c, o, _ = sh(["ps", "-eo", "user=,pid=,etime=,command="], timeout=30)
+    out = []
+    for line in o.splitlines():
+        if "attach-session" not in line or " grep " in line:
+            continue
+        p = line.strip().split(None, 3)
+        if len(p) < 4 or not p[1].isdigit():
+            continue
+        user, pid, age, cmd = p[0], int(p[1]), _etime_secs(p[2]), p[3]
+        m = re.search(r"-t\s+(\S+)", cmd)
+        out.append((user, pid, age, m.group(1) if m else "?"))
+    return out
+
+
+def report(bs):
+    used, cap, pct = pty_pressure()
+    state = "CRITICAL" if pct >= 85 else ("WARN" if pct >= 70 else "ok")
+    print("pty devices: %d / %d  (%d%%)  [%s]" % (used, cap, pct, state))
+    if pct >= 85:
+        print("  >> at 100%% NOTHING on this box can open a terminal, start a tmux session, or restart a server.")
+    print("attach bridges: %d total" % len(bs))
+    byuser = {}
+    for u, _p, _a, _s in bs:
+        byuser[u] = byuser.get(u, 0) + 1
+    me = os.environ.get("USER") or ""
+    for u, n in sorted(byuser.items(), key=lambda kv: -kv[1]):
+        note = "  <- ours, cleanable here" if u == me else "  <- ANOTHER USER: needs that node's server.py to carry the reaper"
+        print("   %-14s %4d%s" % (u, n, note))
+    stale = [b for b in bs if b[2] > 600]
+    print("older than 10 min (leak candidates): %d" % len(stale))
+    persess = {}
+    for u, _p, a, s in bs:
+        persess.setdefault((u, s), []).append(a)
+    worst = sorted(persess.items(), key=lambda kv: -len(kv[1]))[:6]
+    if worst:
+        print("worst targets (a live session needs exactly ONE):")
+        for (u, s), ages in worst:
+            print("   %-34s %3d bridges  (newest %ds old)" % ("%s/%s" % (u, s), len(ages), min(ages)))
+    return used, cap, pct
+
+
+def selectable(bs, user, older_than):
+    """Bridges we may signal: this user's, older than the cutoff, EXCLUDING the newest per target session.
+
+    Sparing the newest is what keeps a person's live terminal on screen while the corpses around it are cleared.
+    """
+    newest = {}
+    for u, pid, age, s in bs:
+        if u != user:
+            continue
+        if s not in newest or age < newest[s][1]:
+            newest[s] = (pid, age)
+    spared = {v[0] for v in newest.values()}
+    return [(pid, age, s) for u, pid, age, s in bs
+            if u == user and age >= older_than and pid not in spared], spared
+
+
+def main(argv):
+    older = 600
+    if "--older-than" in argv:
+        i = argv.index("--older-than")
+        if i + 1 < len(argv) and argv[i + 1].isdigit():
+            older = int(argv[i + 1]) * 60
+    bs = bridges()
+    report(bs)
+
+    if "--user" in argv:
+        i = argv.index("--user")
+        who = argv[i + 1] if i + 1 < len(argv) else ""
+        mine, _ = selectable(bs, who, older)
+        print("\nCROSS-USER cleanup for '%s': %d stale bridge(s) would be signalled." % (who, len(mine)))
+        print("Agents have no TTY and cannot sudo, and a blunt sweep here has crashed a flapping tmux server\n"
+              "twice -- so this is NOT run automatically. Have a human run, in batches:\n")
+        print("  sudo bash -c 'for p in $(pgrep -u %s -f \"tmux attach-session\" | head -%d); do kill -HUP $p; done'"
+              % (who, BATCH))
+        print("\nRe-run cc-ptyrecover between batches and stop as soon as pressure is back under 70%%.")
+        print("Then fix the cause: ship the framework (with _reap_ws_orphans) to that node's server.py copy.")
+        return 0
+
+    if "--clean" not in argv:
+        print("\n(report only -- pass --clean to clear this user's stale bridges)")
+        return 0
+
+    me = os.environ.get("USER") or ""
+    targets, spared = selectable(bs, me, older)
+    if not targets:
+        print("\nnothing to clean for '%s' (nothing stale beyond the live viewers)" % me)
+        return 0
+    print("\ncleaning %d stale bridge(s) for '%s'; sparing %d live viewer(s); batches of %d"
+          % (len(targets), me, len(spared), BATCH))
+    targets.sort(key=lambda t: -t[1])                 # oldest (deadest) first
+    sig = signal.SIGHUP
+    done = 0
+    for i in range(0, len(targets), BATCH):
+        batch = targets[i:i + BATCH]
+        for pid, _age, _s in batch:
+            try:
+                os.kill(pid, sig); done += 1
+            except Exception:
+                pass
+        time.sleep(PAUSE)
+        used, cap, pct = pty_pressure()
+        print("  batch %d: signalled %d (total %d) -> ptys %d/%d (%d%%)"
+              % (i // BATCH + 1, len(batch), done, used, cap, pct))
+        if pct < 60:
+            print("  pressure relieved -- stopping early (never churn more than necessary)")
+            break
+
+    if "--hard" in argv:
+        time.sleep(2)
+        left = [(p, a, s) for p, a, s in targets if os.path.exists("/proc/%d" % p) or _alive(p)]
+        if left:
+            print("escalating to SIGKILL for %d bridge(s) that ignored SIGHUP (still batched)" % len(left))
+            for i in range(0, len(left), BATCH):
+                for pid, _a, _s in left[i:i + BATCH]:
+                    try: os.kill(pid, signal.SIGKILL)
+                    except Exception: pass
+                time.sleep(PAUSE)
+
+    print("")
+    report(bridges())
+    return 0
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0); return True
+    except Exception:
+        return False
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -161,7 +161,12 @@ if _sh.which("node"):
         print("PRESHIP FAIL: the dashboard PAGE JavaScript has a SYNTAX ERROR -- one bad char (e.g. an unescaped "
               "apostrophe in a JS string) breaks the ENTIRE inline script, so NO lens/Sessions load (this is exactly "
               "what broke v0.99.144). Fix it before shipping:")
-        for _ln in _bad.splitlines()[-4:]: print("  " + _ln[:200])
+        # node prints the offending line + caret FIRST, then an internal stack. Show the HEAD (which character,
+        # which line) + the SyntaxError summary -- a tail slice shows only "at wrapSafe (...)" and helps nobody.
+        _bl = [_l for _l in _bad.splitlines() if _l.strip()]
+        _show = [_l for _l in _bl[:4] if not _l.strip().startswith("at ")] + \
+                [_l for _l in _bl if _l.strip().startswith("SyntaxError")][:1]
+        for _ln in (_show or _bl[:4]): print("  " + _ln[:200])
         sys.exit(1)
 else:
     _jsnote = "PAGE-JS gate SKIPPED (node not found)"

@@ -217,7 +217,7 @@ def render_page():
     except Exception: _lenses = None
     _tcss = _installed_theme_css()
     cc = (("<style>" + _tcss + "</style>") if _tcss else "") + "<script>window.CC=%s;</script>" % json.dumps({"project": PROJECT, "projectName": PROJECT_NAME,
-        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "protectedSessions": CC.get("protected_sessions") or [], "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "frontdesk_landing": CC.get("frontdesk_landing", True), "frontdoorLanding": CC.get("frontdoor_landing", True), "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "models": CC_MODELS, "authOn": bool(AUTH_TOKEN), "maxUploadMb": _session_upload_cap_mb(), "backupTiers": CC.get("backup_tiers") or [],
+        "brand": BRAND, "product": PRODUCT, "theme": THEME, "storageMode": STORAGE_MODE, "agency": is_agency(), "type": _node_type(), "edition": _edition(), "pipeline": pipeline_present(), "pillars": PILLARS, "protectedSessions": CC.get("protected_sessions") or [], "role": ROLE, "preset": PRESET, "lenses": _lenses, "chiefSession": CHIEF, "frontdesk_landing": CC.get("frontdesk_landing", True), "frontdoorLanding": CC.get("frontdoor_landing", True), "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "google": google_configured(), "accountWallet": ACCOUNT_WALLET, "extLenses": _ext_lenses(), "models": CC_MODELS, "authOn": bool(AUTH_TOKEN), "authMinted": bool(AUTH_TOKEN_MINTED), "maxUploadMb": _session_upload_cap_mb(), "backupTiers": CC.get("backup_tiers") or [],
         "deskDocs": CC.get("desk_docs") or ["CHIEF_OF_STAFF.md"]})   # tenant desk docs come from cc.config; neutral default
     return (PAGE
             .replace("<title>ClaudeFather ", "<title>%s " % BRAND)
@@ -2052,7 +2052,14 @@ def drive_open_comments(days=7, max_files=15):
 # a browser session cookie (set via the /login page), an `Authorization: Bearer <token>` / `X-CC-Token` header
 # for programmatic/curl use, or a valid `X-Mesh-Token` for peer traffic. Constant-time compared. To run genuinely
 # OPEN (no login) on a trusted/private network, set cc.config `auth_open: true` (Doctor still warns). ----
+# Identifies THIS instance. Defined HERE (not down in the peer-roster section) because AUTH_COOKIE below is
+# derived from it and is read on every single request.
+INSTANCE_ID = CC.get("instance_id") or (re.sub(r"[^a-z0-9]+", "-", PROJECT_NAME.lower()).strip("-") or "main")
 AUTH_TOKEN = os.environ.get("CC_AUTH_TOKEN") or CC.get("auth_token") or ""
+# Was this token AUTO-MINTED (fail-secure at boot, or by cc-newinstance.sh at birth) and never replaced by the
+# operator? If so it is a ONE-TIME handoff credential, not a password: the dashboard blocks on first sign-in
+# until the operator sets their own (or explicitly keeps it). Cleared by auth_token_set / auth_token_keep.
+AUTH_TOKEN_MINTED = bool(CC.get("auth_token_minted")) and bool(AUTH_TOKEN)
 if not AUTH_TOKEN and not CC.get("auth_open"):
     # FAIL-SECURE: nothing configured -> mint a random token, persist it to cc.config (so it is stable across
     # reboots), also drop it in STATE_DIR/_auth_token.txt, and print it LOUDLY to stderr so the operator can log
@@ -2063,6 +2070,8 @@ if not AUTH_TOKEN and not CC.get("auth_open"):
         try:
             with open(_CC_CONFIG) as _af: _ad = json.load(_af)
             _ad["auth_token"] = AUTH_TOKEN
+            _ad["auth_token_minted"] = True   # one-time handoff credential -> force a reset on first sign-in
+            AUTH_TOKEN_MINTED = True
             _atmp = _CC_CONFIG + ".tmp"
             with open(_atmp, "w") as _af: json.dump(_ad, _af, indent=2)
             os.replace(_atmp, _CC_CONFIG)
@@ -2086,7 +2095,15 @@ if not AUTH_TOKEN and not CC.get("auth_open"):
         sys.stderr.flush()
     except Exception:
         AUTH_TOKEN = ""   # historical open fallback -- Doctor warns loudly
-AUTH_COOKIE = "cc_auth"
+# PER-INSTANCE cookie name (2026-08-07). Browser cookies are NOT port-scoped, so when several co-located
+# instances on one host all used the single name "cc_auth", logging into ANY of them overwrote the cookie for
+# ALL of them. Live incident: the new taxes:8809 node auto-minted its own token (fail-secure), the operator
+# signed in, and that one login silently logged them out of the other ten instances -- which look identical to
+# total session loss. Scoping the name by instance id makes the jars independent.
+# BACK-COMPAT: the legacy name is still ACCEPTED on read (below), so shipping this does not log anyone out;
+# it is never WRITTEN again, so instances can no longer clobber each other.
+AUTH_COOKIE = "cc_auth_" + INSTANCE_ID
+AUTH_COOKIE_LEGACY = "cc_auth"
 AUTH_EXEMPT = ("/login", "/api/login", "/api/logout", "/api/health", "/favicon.ico", "/manifest.webmanifest", "/api/license-activate",
                "/api/policy-evaluate",   # the local PreToolUse hook posts here; a policy decision is non-sensitive + the hook has no token
 
@@ -4567,6 +4584,28 @@ WK_RESERVE_PCT = int(CC.get("wk_reserve_pct") or 10)
 # of the window. It decays linearly to 0 as the window approaches its reset, so capacity that would otherwise be
 # WASTED becomes ours to burn late in the week. 0 disables sharing (revert to the old hard exclusion behaviour).
 PARTNER_RESERVE_PCT = int(CC.get("account_partner_reserve_pct") or 50)
+# Inside this many hours of a shared account's weekly reset, its unspent capacity is about to be WASTED -- that
+# is when we may compete for it on equal terms. Before that, a wholly-OWNED account with headroom always wins,
+# however marginally sooner the shared one happens to reset. (Operator: "only really hit [the shared account]
+# hard as it becomes clear there will be wasted usage as the 7-day window starts to come to an end".)
+PARTNER_RELEASE_H = float(CC.get("account_partner_release_h") or 48)
+# Explicit override: {"email": ["SideA", ...]}. Normally left unset -- sharing is DETECTED (see _partner_sides).
+SHARED_ACCOUNTS = CC.get("shared_accounts") or {}
+
+def _partner_sides(a, my_side):
+    """Which OTHER nodes share this account -- durably, not just 'is the partner logged in this second'.
+
+    The first cut used `live_on` (minus `active`), which had a self-defeating bug: the reserve vanished the
+    moment WE switched onto the account (we became `active`, so partner_sides went empty) and it stopped being
+    protected exactly when it needed protecting. Sharing is a standing property of the account, so derive it from
+    a durable signal: a side is a partner if the account has a VALIDATED login there (`switchable_on[].validated_ts`
+    -- proof that node really uses it), or if cc.config `shared_accounts` says so."""
+    cfg = SHARED_ACCOUNTS.get(a.get("email")) or []
+    sides = {s for s in cfg if s and s != my_side}
+    for so in (a.get("switchable_on") or []):
+        sd = so.get("side")
+        if sd and sd != my_side and so.get("validated_ts"): sides.add(sd)
+    return sorted(sides)
 # Optional per-NODE actuator: a command that switches the live login by driving a FRESH OAuth login
 # (browser), instead of restoring a keychain snapshot (which rotates/goes stale). Node-specific
 # (needs that node's browser-profile + GUI setup), so it's opt-in via cc.config and unset on other nodes.
@@ -4590,6 +4629,10 @@ ACCT_SWITCH_CMD = (CC.get("account_switch_cmd") or "").strip() or None
 # It CAN blink off for an instant between a tool result and the next assistant token (see _session_finished), so
 # we sweep TWICE with a short gap and require BOTH clean. Fails CLOSED: if tmux can't be listed we don't switch.
 AUTO_BUSY_RECHECK_SEC = float(CC.get("autopilot_busy_recheck_sec") or 3)
+# How long an explicit MANUAL switch outranks the recommendation. The operator picked that account on purpose;
+# autopilot must not reverse it on the next tick. The hold ends early if the chosen account genuinely can't be
+# used any more (cooling/resting/unknown) -- respecting a choice is not the same as riding it into a wall.
+AUTO_MANUAL_HOLD_SEC = int(CC.get("autopilot_manual_hold_sec") or 21600)   # 6h
 
 # ---- ONE OWNER for automatic rotation (the 2026-08-06 triple-switch incident) --------------------------------
 # The live Claude login is GLOBAL to the macOS user, so every co-located instance computes the SAME pick and --
@@ -4748,7 +4791,21 @@ def _acct_autopilot_loop():
                     live_status = ((next((a for a in aw.get("accounts", []) if a.get("active")), None) or {}).get("status"))
                     pacing_motivated = bool(PACE_SWITCH and live_status in ("cooling", "resting"))
                     ev["live_status"] = live_status; ev["pacing_motivated"] = pacing_motivated
-                    if not (aw.get("should_switch") and aw.get("pick_in_wallet") and pick and pick != cur):
+                    # OPERATOR HOLD: an explicit manual switch stands until it expires or the account becomes
+                    # genuinely unusable. Checked before the pick gates so the reason is logged honestly.
+                    _mts = st.get("manual_ts") or 0; _mtgt = st.get("manual_target") or ""
+                    _mheld = 0
+                    if _mts and _mtgt and _mtgt == cur and (now - _mts) < AUTO_MANUAL_HOLD_SEC:
+                        _lst = ((next((a for a in aw.get("accounts", []) if a.get("active")), None) or {}).get("status"))
+                        if _lst not in ("cooling", "resting", "unknown"):
+                            _mheld = int(AUTO_MANUAL_HOLD_SEC - (now - _mts))
+                    if _mheld:
+                        ev["action"] = "hold"; ev["manual_hold_left"] = _mheld
+                        ev["why"] = ("you switched to %s manually %dm ago — leaving it alone for %dm more "
+                                     "(ends early if it starts cooling/resting)"
+                                     % (_mtgt.split("@")[0], int((now - _mts) / 60), int(_mheld / 60)))
+                        _autopilot_eval_log(ev)
+                    elif not (aw.get("should_switch") and aw.get("pick_in_wallet") and pick and pick != cur):
                         ev["action"] = "nothing-to-do"
                         ev["why"] = ("already on the recommended account" if pick and pick == cur
                                      else ("pick '%s' is not in this node's wallet" % pick) if pick else "no recommended pick")
@@ -4893,6 +4950,13 @@ def account_switch_verified(target, by="manual"):
             try: threading.Thread(target=lambda: account_windows_refresh(), daemon=True).start()
             except Exception: pass
         _switch_health_log(prev_email, tgt_email, True, by, "verified" if windows else "authed")
+        # RESPECT THE OPERATOR (2026-08-07): an explicit manual switch is a DECISION, not a suggestion. Autopilot
+        # used to be free to reverse it on its very next pass -- the operator hand-picked one account and was
+        # moved back onto another minutes later, which is infuriating and makes the system feel untrustworthy.
+        # Record the choice; _acct_autopilot_loop holds off while it stands (see AUTO_MANUAL_HOLD_SEC).
+        if by == "manual":
+            try: _autopilot_state_save({"manual_ts": time.time(), "manual_target": tgt_email})
+            except Exception: pass
         return {"ok": True, "verified": True, "email": tgt_email, "from": prev_email,
                 "actuator": ("oauth" if ACCT_SWITCH_CMD else "keychain-snapshot"),
                 "warning": (None if ACCT_SWITCH_CMD else _snap_warn),
@@ -5039,6 +5103,8 @@ def _acct_recommend(accounts, now):
     The /usage scrape is a hard FLOOR under that prediction (usage inside a window is monotonic).
     Returns {email: {...}} plus the single pick email. Full reference: Usage/ACCOUNT_ROTATION.md"""
     WK_LEN_H = 7 * 24.0; S_LEN_H = 5.0
+    try: _my_side = _side_label()
+    except Exception: _my_side = None
     # Keep an EMERGENCY RESERVE on every account: stop burning a weekly window once it's down to ~this much free,
     # so if we accidentally max everything out there's a sliver on each login to "get lean" and limp along until
     # one resets. Below this an account is parked as reserve (resting) -- only spent in a genuine all-drained
@@ -5049,9 +5115,7 @@ def _acct_recommend(accounts, now):
         mdl = a.get("model") or {}
         if not a.get("in_rotation"):
             info[em] = {"status": "tracked", "why": "tracked, not in your rotation", "score": -9, "use_next": False}; continue
-        # SHARED ACCOUNTS (operator correction, 2026-08-07). `active` = live on THIS node (fine, we may stay);
-        # a non-empty live_on WITHOUT active = also live on another store, i.e. shared with a partner node.
-        # This used to hard-exclude any account live on another
+        # SHARED ACCOUNTS (operator correction, 2026-08-07). This used to hard-exclude any account live on another
         # node as "reserved for that node". That was too blunt: such an account CAN be used by our nodes -- the
         # requirement is only that we always leave the partner room to work, and that we don't starve them early.
         # So instead of excluding it, hold back a PARTNER RESERVE that DECAYS as the weekly window runs out:
@@ -5060,7 +5124,7 @@ def _acct_recommend(accounts, now):
         #     reserve_now = PARTNER_RESERVE_PCT * (time_left / window_length)
         # (The partner not auto-switching itself is enforced separately and already holds: a node without a
         # fresh-OAuth actuator never rotates unattended -- see _autopilot_is_owner.)
-        partner_sides = list(a.get("live_on") or []) if (a.get("live_on") and not a.get("active")) else []
+        partner_sides = _partner_sides(a, _my_side)
         # A missing 5-HOUR window used to disqualify the account outright (`or not s`). But the 5h window is
         # explicitly "ONLY a throttle, NEVER a ranking input" -- and newer Claude Code renders /usage as a TABBED
         # view whose windows load separately, so a perfectly good read routinely comes back with session=null.
@@ -5149,13 +5213,25 @@ def _acct_recommend(accounts, now):
                        % (", ".join(partner_sides), wk_free_own, partner_reserve, _acct_dur(wk_ttr), tag))
             else:
                 why = ("ready · weekly %d%% free · resets in %s%s" % (wk_free, _acct_dur(wk_ttr), tag))
+        # RANK TIER (2026-08-07). Score alone is `168/hours_to_reset`, so two accounts resetting a day apart in a
+        # 168h window score within ~0.15 of each other and headroom is only a /10000 tiebreak. That let a SHARED
+        # account at 22% used outrank a wholly-owned one at 0% used purely because it reset 21h sooner -- the
+        # operator switched to the owned account by hand and was moved straight back. Tier decides FIRST: an
+        # account we fully own always beats a shared one, UNTIL the shared one is close enough to its reset that
+        # its unspent capacity would be wasted (PARTNER_RELEASE_H) -- then they compete on score as equals.
+        # A shared account is still fully usable when nothing owned is `ready`; tier only orders the ready pool.
+        waste_zone = bool(partner_sides) and wk_ttr_h <= PARTNER_RELEASE_H
+        tier = 0 if (partner_sides and not waste_zone) else 1
+        if st == "ready" and tier == 0:
+            why += " · deprioritised while %s still has %s of its week left (yours first)" % (
+                ", ".join(partner_sides), _acct_dur(wk_ttr))
         info[em] = {"status": st, "why": why, "score": round(score, 4), "use_next": False,
                     "usable": round(min(s_free, wk_free_own), 1), "wk_resets_h": round(wk_ttr_h, 1),
                     "s_free": round(s_free, 1), "wk_free": round(wk_free, 1),
                     "wk_free_own": round(wk_free_own, 1), "partner_sides": partner_sides,
-                    "partner_reserve": round(partner_reserve, 1)}
+                    "partner_reserve": round(partner_reserve, 1), "tier": tier, "waste_zone": waste_zone}
     ready = [(em, d) for em, d in info.items() if d["status"] == "ready"]
-    pick = max(ready, key=lambda kv: kv[1]["score"])[0] if ready else None
+    pick = max(ready, key=lambda kv: (kv[1].get("tier", 1), kv[1]["score"]))[0] if ready else None
     if pick:
         pw = info[pick]; pw["status"] = "use_next"; pw["use_next"] = True
         # HONEST 'why': the score prefers the soonest-resetting account, BUT only among READY ones -- the truly
@@ -6220,7 +6296,8 @@ def chief_say(text, sender="", timeout=48, sent_at=None, from_version=None, msg_
 # (not just the overseer). Read from a shared peers.json (cc.config peers_file; defaults to CC_HOME/peers.json)
 # UNIONed with the local _instances.json. Each entry {id, url}. INSTANCE_ID identifies THIS instance so a
 # broadcast skips its own chief. ----
-INSTANCE_ID = CC.get("instance_id") or (re.sub(r"[^a-z0-9]+", "-", PROJECT_NAME.lower()).strip("-") or "main")
+# INSTANCE_ID is defined up in the auth block (it names this instance's auth cookie) -- it must exist before
+# AUTH_COOKIE, which is read on every request. Kept here as a pointer so this section still reads whole.
 PEERS_FILE = os.path.expanduser(CC.get("peers_file") or os.path.join(CC_HOME, "peers.json"))
 
 def peers():
@@ -11891,6 +11968,15 @@ def doctor():
                 issues.append({"sev": "err", "path": "resources", "msg": "CRITICAL resource pressure -- fds %s/%s (%s%%), %s threads, %s%% CPU, %s child procs. The vitals monitor self-heals (clean restart) at this level; if it recurs there's a leak to fix." % (_v.get("fds"), _v.get("fd_limit"), _v.get("fd_pct"), _v.get("threads"), _v.get("cpu"), _v.get("children"))})
             elif _v.get("level") == "warn":
                 issues.append({"sev": "warn", "path": "resources", "msg": "elevated resource use -- fds %s/%s (%s%%), %s threads, %s%% CPU. Watching; a leak would trend UP here over hours." % (_v.get("fds"), _v.get("fd_limit"), _v.get("fd_pct"), _v.get("threads"), _v.get("cpu"))})
+            if _v.get("pty_level") in ("warn", "critical"):      # the 2026-08-07 outage class -- MACHINE-wide, not just ours
+                issues.append({"sev": "err" if _v.get("pty_level") == "critical" else "warn", "path": "resources",
+                               "msg": "pty pressure %s -- %s/%s pseudo-terminal devices in use on this MACHINE (%s%%). "
+                                      "macOS caps this globally (kern.tty.ptmx_max) across every user and every "
+                                      "co-located node, so at 100%% nothing on the box can open a terminal, start a "
+                                      "tmux session, or restart a server. Leaks come from browser terminals whose "
+                                      "server.py lacks the /ws reaper -- check every node's own copy, including "
+                                      "cross-user ones. Safe cleanup: command-center/cc-ptyrecover."
+                                      % (_v.get("pty_level").upper(), _v.get("ptys"), _v.get("pty_cap"), _v.get("pty_pct"))})
         if _DEGRADED.get("since"):
             issues.append({"sev": "err", "path": "resources", "msg": "server is DEGRADED: a core tmux/subprocess call failed (%s) -- session/chief listings may read empty. This is fail-loud (never a silent empty). Clears automatically once calls succeed." % _DEGRADED.get("reason", "?")})
     except Exception: pass
@@ -13514,6 +13600,48 @@ def _session_last_assistant(name, maxchars=16000):
 
 _OPT_RE = re.compile(r"^\s*[>❯❱▶*\s]*(\d+)\.\s+(\S.*?)\s*$")   # "❯ 1. Alpha" / "  2. Bravo"
 _AUTO_OPT = re.compile(r"^(type something|chat about|other\b|let me type|write my own)", re.I)   # Claude Code's auto-added rows
+_FREE_OPT = re.compile(r"^(type something|other\b|let me type|write my own)", re.I)   # ...of those, the ones that open a TEXT BOX ('chat about' does NOT -- it abandons the question)
+_CURSOR_RE = re.compile(r"^\s*[>❯❱▶*]")   # the highlighted row carries a leading marker
+def _pq_clean(s): return s.strip().rstrip("…").strip()
+def _pq_prog(s): return ("←" in s or "→" in s) or (sum(s.count(c) for c in "☐☒◻◼◽▫") >= 2)   # multi-part progress bar "← ☐ Meal ☐ Season ✔ Submit →"
+def _pq_junk(s): return (not s) or ("─" in s) or ("to navigate" in s) or ("Enter to select" in s) or _pq_prog(s)
+def _pq_hdr(s): return s.lstrip().startswith(("☐", "◻", "▢", "◽", "▫")) or _pq_prog(s)
+def _picker_window(lines):
+    """ISOLATE THE CURRENT PICKER (the pane holds scrollback -- earlier messages, old questions, task lists).
+    The live picker is at the BOTTOM: its footer is the LAST 'to navigate' line; its block starts at the nearest
+    '☐' header above that. Parse ONLY that window, else you read the whole screen + wrong numbers.
+    Returns (win_lines, [(i, match), ...], footer_index) or None. Shared by the READER (_session_pending_question)
+    and the DRIVER (_picker_rows) so they can never disagree about which rows are on screen."""
+    foot_i = None
+    for i in range(len(lines) - 1, -1, -1):
+        if "to navigate" in lines[i] or "Enter to select" in lines[i]: foot_i = i; break
+    if foot_i is None: return None
+    top_i = None
+    for i in range(foot_i - 1, -1, -1):
+        if _pq_hdr(lines[i]): top_i = i; break
+    win = lines[(top_i if top_i is not None else max(0, foot_i - 14)):foot_i]   # the current picker's block only
+    opt_i = [(i, m) for i, ln in enumerate(win) for m in [_OPT_RE.match(ln)] if m]
+    if len(opt_i) < 2: return None
+    return win, opt_i, foot_i
+def _picker_rows(name):
+    """EVERY row of the live picker as it is ON SCREEN -- including the auto-added rows the reader strips -- plus
+    where the highlight currently sits. This is what makes answering deterministic instead of a guess: the driver
+    computes an exact delta from the real cursor to the real target row.
+    Returns {"rows":[{"label","auto","free"}], "cursor": int|None} or None if there's no picker."""
+    try:
+        _, pane, _ = sh([TMUX, "capture-pane", "-t", name, "-p", "-S", "-45"], timeout=3)
+    except Exception:
+        return None
+    if not pane or ("to navigate" not in pane and "Enter to select" not in pane): return None
+    w = _picker_window(pane.split("\n"))
+    if not w: return None
+    win, opt_i, _ = w
+    rows, cursor = [], None
+    for k, (i, m) in enumerate(opt_i):
+        lab = _pq_clean(m.group(2))
+        if _CURSOR_RE.match(win[i]): cursor = k
+        rows.append({"label": lab, "auto": bool(_AUTO_OPT.match(lab)), "free": bool(_FREE_OPT.match(lab))})
+    return {"rows": rows, "cursor": cursor}
 def _session_pending_question(name, pane=None):
     """If the session is PAUSED on an AskUserQuestion, return the parsed question so voice can read + answer it.
     CRITICAL: Claude Code buffers the whole turn and does NOT write the question to the transcript until AFTER you
@@ -13531,23 +13659,10 @@ def _session_pending_question(name, pane=None):
             return None
     if not pane or ("to navigate" not in pane and "Enter to select" not in pane): return None   # the picker footer = the signature
     lines = pane.split("\n")
-    def _clean(s): return s.strip().rstrip("…").strip()
-    def _prog(s): return ("←" in s or "→" in s) or (sum(s.count(c) for c in "☐☒◻◼◽▫") >= 2)   # multi-part progress bar "← ☐ Meal ☐ Season ✔ Submit →"
-    def _junk(s): return (not s) or ("─" in s) or ("to navigate" in s) or ("Enter to select" in s) or _prog(s)
-    def _hdr(s): return s.lstrip().startswith(("☐", "◻", "▢", "◽", "▫")) or _prog(s)
-    # ISOLATE THE CURRENT PICKER (the pane holds scrollback -- earlier messages, old questions, task lists).
-    # The live picker is at the BOTTOM: its footer is the LAST 'to navigate' line; its block starts at the
-    # nearest '☐' header above that. Parse ONLY that window, else you read the whole screen + wrong numbers.
-    foot_i = None
-    for i in range(len(lines) - 1, -1, -1):
-        if "to navigate" in lines[i] or "Enter to select" in lines[i]: foot_i = i; break
-    if foot_i is None: return None
-    top_i = None
-    for i in range(foot_i - 1, -1, -1):
-        if _hdr(lines[i]): top_i = i; break
-    win = lines[(top_i if top_i is not None else max(0, foot_i - 14)):foot_i]   # the current picker's block only
-    opt_i = [(i, m) for i, ln in enumerate(win) for m in [_OPT_RE.match(ln)] if m]
-    if len(opt_i) < 2: return None
+    _clean, _junk, _hdr = _pq_clean, _pq_junk, _pq_hdr
+    w = _picker_window(lines)
+    if not w: return None
+    win, opt_i, foot_i = w
     first_i = opt_i[0][0]
     # QUESTION = the header row (☐ topic) + lines down to the first option -- all within THIS picker's window
     qlines = []
@@ -13605,21 +13720,44 @@ def _question_speech(sess, q):
     return " ".join(parts)
 
 def _answer_question(session, index, num_options, text=""):
-    """Submit an answer to a pending AskUserQuestion by driving the terminal picker: Down x index + Enter picks
-    option `index`; index None/out-of-range picks 'Other' (the row after the provided options) and types `text`."""
+    """Submit an answer to a pending AskUserQuestion by driving the terminal picker.
+
+    NEVER NAVIGATE BLIND. This used to press 'Down x index' from an ASSUMED cursor at row 1, and reach 'Other' by
+    pressing Down exactly `num_options` times -- but `num_options` counts only the REAL options (the reader strips
+    Claude Code's auto-added rows), so the free-text row's position was a guess about someone else's UI. On
+    2026-08-07 that guess landed Enter on the wrong bottom row: Claude Code recorded "User declined to answer
+    questions" and cancelled ALL THREE questions in the tool call, unrecoverably. So now: re-read the picker, find
+    where the highlight ACTUALLY is and which row we ACTUALLY want, move by the exact delta, verify we landed
+    there, and only then commit. If the screen can't be read, refuse rather than press Enter somewhere random.
+    (`num_options` is kept for call compatibility; the live screen is authoritative.)"""
     if sh([TMUX, "has-session", "-t", session])[0] != 0: return False
+    nav = _picker_rows(session)
+    if not nav or not nav["rows"]: return False   # no readable picker -> do NOT fire keystrokes into the session
+    rows, cur = nav["rows"], nav["cursor"]
+    real = [i for i, r in enumerate(rows) if not r["auto"]]
+    typed = ""
+    if index is not None and 0 <= index < len(real):
+        target = real[index]
+    else:
+        free = [i for i, r in enumerate(rows) if r["free"]]   # the row that opens a TEXT BOX -- never 'Chat about this'
+        if not free: return False                             # nowhere safe to type a custom answer -> refuse, don't decline the question
+        target, typed = free[0], text
     try:
-        if index is not None and 0 <= index < num_options:
-            for _ in range(index):
-                sh([TMUX, "send-keys", "-t", session, "Down"]); time.sleep(0.12)
+        if cur is None: cur = 0   # highlight marker not rendered -> fall back to the documented default (starts on row 1)
+        d = target - cur
+        key = "Down" if d > 0 else "Up"
+        for _ in range(abs(d)):
+            sh([TMUX, "send-keys", "-t", session, key]); time.sleep(0.12)
+        if d:   # CONFIRM we're on the row we meant before committing -- Enter is irreversible
+            v = _picker_rows(session)
+            if v and v["cursor"] is not None and v["cursor"] != target:
+                _voice_dbg({"ev": "answer-misnav", "sess": session, "want": target, "got": v["cursor"]})
+                return False
+        sh([TMUX, "send-keys", "-t", session, "Enter"])
+        if typed:
+            time.sleep(0.5)
+            sh([TMUX, "send-keys", "-t", session, "-l", typed]); time.sleep(0.3)
             sh([TMUX, "send-keys", "-t", session, "Enter"])
-        else:
-            for _ in range(num_options):   # 'Other' is auto-added after the provided options
-                sh([TMUX, "send-keys", "-t", session, "Down"]); time.sleep(0.12)
-            sh([TMUX, "send-keys", "-t", session, "Enter"]); time.sleep(0.5)
-            if text:
-                sh([TMUX, "send-keys", "-t", session, "-l", text]); time.sleep(0.3)
-                sh([TMUX, "send-keys", "-t", session, "Enter"])
         return True
     except Exception: return False
 
@@ -17632,6 +17770,26 @@ def ccr_submit(body):
     def _ccr_review():
         if not _CCR_REVIEW_SEM.acquire(blocking=False):
             print("[ccr-review] skipped %s -- too many reviews in flight" % cid); return
+        # CROSS-INSTANCE DEDUP. A CCR filed on a node is ALSO stored at Mission Control, and every co-located
+        # instance shares this machine -- so the same proposal was being reviewed twice, in lockstep, all day
+        # (64 headless subagent runs on 2026-08-07, every single one a duplicate pair). The semaphore above is
+        # per-PROCESS and cannot see a sibling. Claim a machine-wide marker keyed by the proposal's CONTENT
+        # (the two copies get different ids, so an id-keyed lock would never collide). Same failure shape as
+        # the duplicate auto-compact -- see the co-located-instances note in CLAUDE.md.
+        _claim = None
+        try:
+            import hashlib as _h
+            _fp = _h.sha256(("%s|%s|%s" % (title, body.get("summary", ""), body.get("plan", ""))).encode()).hexdigest()[:16]
+            _claim = "/tmp/cc-ccr-review-%s.lock" % _fp
+            try:
+                if time.time() - os.path.getmtime(_claim) > 3600: os.unlink(_claim)   # stale claim -> reclaimable
+            except Exception: pass
+            _fd = os.open(_claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(_fd, ("%s %s\n" % (INSTANCE_ID, cid)).encode()); os.close(_fd)
+        except FileExistsError:
+            print("[ccr-review] skipped %s -- a co-located instance is already reviewing this proposal" % cid)
+            _CCR_REVIEW_SEM.release(); return
+        except Exception: pass
         try:
             txt = "Title: %s\nSurface: %s\nSummary: %s\n\nPlan:\n%s" % (title, body.get("surface", ""), body.get("summary", ""), body.get("plan", ""))
             rv = _review_change(txt, kind="proposal")
@@ -18711,7 +18869,7 @@ def auth_token_set(new):
     """Change THIS node's login token (cc.config auth_token) from the dashboard: persist to the running config,
     apply LIVE to the in-memory AUTH_TOKEN (no restart needed), chmod 600, and log the change. Returns the new
     token; the caller re-sets the auth cookie so the current session stays logged in (no self-lockout)."""
-    global AUTH_TOKEN
+    global AUTH_TOKEN, AUTH_TOKEN_MINTED
     import secrets as _secrets
     new = (new or "").strip()
     if not new or new.lower() == "generate":
@@ -18724,17 +18882,38 @@ def auth_token_set(new):
     except Exception as e:
         raise ValueError("could not read cc.config: " + str(e)[:120])
     d["auth_token"] = new
+    d.pop("auth_token_minted", None)   # operator chose this one -> it is a password now, not a one-time handoff
     tmp = cfg + ".tmp"
     with open(tmp, "w") as f: json.dump(d, f, indent=2)
     os.replace(tmp, cfg)
     try: os.chmod(cfg, 0o600)
     except Exception: pass
     AUTH_TOKEN = new
+    AUTH_TOKEN_MINTED = False
     try:
         with open(os.path.expanduser("~/.cc-credential-changes.log"), "a") as f:
             f.write("%s  auth_token changed via dashboard — %s (port %s)\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), BRAND, PORT))
     except Exception: pass
     return new
+
+def auth_token_keep():
+    """The operator explicitly chose to KEEP the auto-minted one-time token as their password. Record that so
+    the first-sign-in reset modal stops blocking (it is a deliberate choice, not a token they never saw)."""
+    global AUTH_TOKEN_MINTED
+    cfg = _CC_CONFIG
+    try:
+        d = json.load(open(cfg)) if os.path.isfile(cfg) else {}
+    except Exception as e:
+        return {"ok": False, "error": "could not read cc.config: " + str(e)[:120]}
+    d.pop("auth_token_minted", None)
+    d["auth_token_kept_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    tmp = cfg + ".tmp"
+    with open(tmp, "w") as f: json.dump(d, f, indent=2)
+    os.replace(tmp, cfg)
+    try: os.chmod(cfg, 0o600)
+    except Exception: pass
+    AUTH_TOKEN_MINTED = False
+    return {"ok": True}
 
 def settings_get():
     return {"project_name": PROJECT_NAME, "brand": BRAND, "role": ROLE, "preset": PRESET,
@@ -19347,8 +19526,15 @@ class H(BaseHTTPRequestHandler):
         if h.startswith("Bearer ") and hmac.compare_digest(h[7:].strip(), AUTH_TOKEN): return True
         if hmac.compare_digest(self.headers.get("X-CC-Token", "") or "", AUTH_TOKEN): return True
         if _mesh_ingress_ok(self.headers): return True   # family or superadmin token
-        c = self._cookies().get(AUTH_COOKIE, "")
-        if c and hmac.compare_digest(c, AUTH_TOKEN): return True
+        if self._cookie_authed(): return True
+        return False
+    def _cookie_authed(self):
+        """This instance's OWN scoped cookie, else the legacy shared 'cc_auth' (accepted on READ only, so the
+        per-instance rename never logs an existing operator out; it is never written again)."""
+        j = self._cookies()
+        for name in (AUTH_COOKIE, AUTH_COOKIE_LEGACY):
+            c = j.get(name, "")
+            if c and hmac.compare_digest(c, AUTH_TOKEN): return True
         return False
     def _operator_only(self):
         """Operator credential ONLY (cookie/bearer/X-CC-Token) -- a family MESH token does NOT satisfy this.
@@ -19358,8 +19544,7 @@ class H(BaseHTTPRequestHandler):
         h = self.headers.get("Authorization", "") or ""
         if h.startswith("Bearer ") and hmac.compare_digest(h[7:].strip(), AUTH_TOKEN): return True
         if hmac.compare_digest(self.headers.get("X-CC-Token", "") or "", AUTH_TOKEN): return True
-        c = self._cookies().get(AUTH_COOKIE, "")
-        if c and hmac.compare_digest(c, AUTH_TOKEN): return True
+        if self._cookie_authed(): return True
         return False
     def _auth_gate(self, path):
         """True if the request may proceed; else writes a 401 (API) or 302->/login (browser) and returns False."""
@@ -19480,10 +19665,25 @@ class H(BaseHTTPRequestHandler):
             os.environ["TERM"] = "xterm-256color"; os.environ["PATH"] = HOME + "/.local/bin:/opt/homebrew/bin:" + os.environ.get("PATH", "")
             try: os.execvp(TMUX, [TMUX, "attach-session", "-t", name])
             except Exception: os._exit(1)
+        _ws_child_register(pid, name)   # LIVE-SET: anything not in here is, by definition, nobody's terminal
         set_winsize(master, 40, 120)
+        _last_rx = time.time()          # last frame received FROM the browser (a pong counts)
         try:
             while True:
                 r, _, _ = select.select([master, sock], [], [], 120)
+                if not r:
+                    # LIVENESS PROBE -- this is the real attach-leak mechanism. A client that vanishes WITHOUT a
+                    # TCP close (tab closed while the laptop slept, wifi drop, proxy idle-timeout) never signals
+                    # EOF, and an idle pane produces no pty output either, so this loop used to spin forever
+                    # holding a pty + thread + tmux attach client. Measured live on this node: 49 attach clients
+                    # on ONE session, 527 ptys consumed, and tmux failing with "fork failed: Device not
+                    # configured". The registry reaper cannot help here -- these handlers are alive and correctly
+                    # registered, so they are not orphans; the handler itself has to notice its peer is gone.
+                    # A ping tests the socket in both directions: browsers pong at protocol level (refreshing
+                    # _last_rx), and on a dead peer the write itself eventually fails.
+                    if not ws_send(sock, b"", 9): break                  # socket is gone -- let go
+                    if time.time() - _last_rx > WS_IDLE_MAX: break       # alive socket, but nobody is listening
+                    continue
                 if master in r:
                     try: data = os.read(master, 65536)
                     except OSError: break
@@ -19491,6 +19691,7 @@ class H(BaseHTTPRequestHandler):
                 if sock in r:
                     fr = ws_recv(sock)
                     if fr is None: break
+                    _last_rx = time.time()   # any frame (incl. an automatic pong) proves the browser is there
                     op, payload = fr
                     if op == 8: break
                     elif op == 9: ws_send(sock, payload, 10)
@@ -19527,6 +19728,7 @@ class H(BaseHTTPRequestHandler):
             except Exception: pass
             try: os.kill(pid, signal.SIGHUP); os.waitpid(pid, 0)
             except Exception: pass
+            _ws_child_done(pid)   # off the live-set LAST -- while registered it is protected from the reaper
     def handle_wsvnc(self):
         """Bridge a browser WebSocket (noVNC) to the local macOS Screen Sharing VNC server. The VNC port
         (5900) is only ever reached on 127.0.0.1 -- never exposed to the network -- so screen sharing
@@ -20126,12 +20328,17 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/login":
             if AUTH_TOKEN and hmac.compare_digest((body.get("token", "") or ""), AUTH_TOKEN):
                 self.send_response(200); self.send_header("Content-Type", "application/json")
+                # scoped name ONLY -- writing the legacy shared name is what clobbered sibling instances
                 self.send_header("Set-Cookie", "%s=%s; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000" % (AUTH_COOKIE, AUTH_TOKEN))
                 b = json.dumps({"ok": True}).encode(); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
             return self._s(401, json.dumps({"ok": False, "error": "invalid token"}))
         if u.path == "/api/logout":
             self.send_response(200); self.send_header("Content-Type", "application/json")
             self.send_header("Set-Cookie", "%s=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0" % AUTH_COOKIE)
+            # Also clear the legacy shared cookie, else a pre-upgrade session would survive its own logout
+            # (it still authenticates on read). This is exactly today's behaviour -- logout has always been
+            # host-wide -- and it stops being host-wide once each instance has been signed into once.
+            self.send_header("Set-Cookie", "%s=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0" % AUTH_COOKIE_LEGACY)
             b = json.dumps({"ok": True}).encode(); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
         if not self._auth_gate(u.path): return
         if u.path == "/api/launch":
@@ -20351,6 +20558,7 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Set-Cookie", "%s=%s; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000" % (AUTH_COOKIE, tok))
             b = json.dumps({"ok": True, "token": tok}).encode()
             self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
+        if u.path == "/api/auth-token-keep": return self._s(200, json.dumps(auth_token_keep()))
         if u.path == "/api/chief-open":    return self._s(200, json.dumps(chief_open()))
         if u.path == "/api/chief-say":
             if MESH_ENFORCE and not _mesh_ingress_ok(self.headers): return self._s(403, json.dumps({"ok": False, "error": "mesh auth"}))
@@ -24517,6 +24725,54 @@ body.cf-desktop .cfdesk-cta,body.cf-desktop #cfDesktopMenu{display:none!importan
 <div id="sessprev"></div>
 <div id="stage"><div class="stg-head" id="stgHead"><button class="stg-back" onclick="stageClose()" title="Back to the session list — this session keeps running">&#8592;</button><div class="stg-loc" id="stgLoc" title="where this session lives"></div><span class="stg-model" id="stgModel"></span><span class="stg-chip" id="stgChip" title="This session's live state — working (running a turn) or idle (waiting for you)"><span class="stg-dot"></span><span id="stgChipT">idle</span></span><button class="stg-more" id="stgVoice" onclick="voiceModeToggle()" title="Voice mode — talk to your sessions hands-free. On = any session you open/finish is read to you and you reply by voice.">&#127908;</button><button class="stg-more" id="stgMore" onclick="stageMenu(event)" title="Session actions — Skills, Select &amp; copy, Give Claude a file, Third-party review, Compact, End, Force kill">&#8942;</button></div><div class="stg-switch" id="stgSwitch" title="Your open sessions — tap to switch (scroll sideways for more). A gold dot means that session just finished."></div><div class="stg-frames" id="stgFrames"></div></div>
 <script>
+// ================= SESSION-EXPIRY INTERCEPTOR (2026-08-07) =================
+// An expired/invalid cookie makes every authed /api/* return 401 {ok:false,error:"auth required"}. Every lens
+// loader then either swallowed it (`catch(e){}` -> the list stays []) or fed the error OBJECT into array code
+// -> the dashboard rendered "No live sessions" / an empty chief list. On a fleet with a real history of losing
+// sessions, an empty list is the single most alarming thing this UI can show, and it is indistinguishable from
+// catastrophic data loss. It alarmed the operator for exactly this reason.
+// ONE choke point instead of auditing 366 fetch sites: wrap window.fetch, and on ANY 401 raise an explicit
+// "Session expired" state that re-prompts for the token. Status-only check -- the body is never read, so this
+// costs nothing on the hot polling path and cannot consume a response stream a caller still needs.
+(function(){
+  var _fetch=window.fetch;
+  window.fetch=function(){
+    return _fetch.apply(this,arguments).then(function(r){
+      try{ if(r&&r.status===401) ccAuthExpired(); }catch(e){}
+      return r;
+    });
+  };
+})();
+var CC_AUTH_DEAD=false;
+function ccAuthExpired(){
+  if(CC_AUTH_DEAD)return; CC_AUTH_DEAD=true;                  // once per expiry, not once per poll
+  // Stop every lens/badge poller. They would each 401 forever behind the modal, hammering the server and
+  // repainting stale lenses. The page reloads on successful sign-in, so losing the timers costs nothing.
+  try{ var _last=setInterval(function(){},60000); for(var _i=1;_i<=_last;_i++) clearInterval(_i); }catch(e){}
+  var box=document.getElementById("mbox");
+  if(!box||typeof showM!=="function"){ location.reload(); return; }   // pre-boot: the login page will take over
+  showM('<div class="cfw"><div class="vshead"><h2>Session expired</h2></div>'
+   +'<div class="sub" style="margin-bottom:12px"><b>You are signed out &mdash; this is not data loss.</b> '
+   +'Your sessions, chiefs and files are all still running untouched. This dashboard just needs you to sign in again.</div>'
+   +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">'
+   +'<input id="cc_relog" class="mini" type="password" style="flex:1;min-width:200px" placeholder="access token" autocomplete="current-password">'
+   +'<button class="btn go" onclick="ccRelogin()">Sign in</button></div>'
+   +'<div class="sub" id="cc_relog_err" style="margin-top:9px;min-height:17px"></div>'
+   +'<div class="sub" style="margin-top:4px">Forgotten it? Run <code>cc-recover.sh</code> on the host &mdash; it prints every node&rsquo;s token, port and URL.</div></div>');
+  setTimeout(function(){var i=document.getElementById("cc_relog");if(i){i.focus();
+    i.onkeydown=function(e){if(e.key==="Enter"){e.preventDefault();ccRelogin();}};}},60);
+}
+async function ccRelogin(){
+  var i=document.getElementById("cc_relog"),e=document.getElementById("cc_relog_err");
+  var v=((i&&i.value)||"").trim(); if(!v){if(e)e.textContent="Enter your access token.";return;}
+  var r; try{ r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token:v})}); }
+  catch(err){ if(e)e.textContent="Could not reach the server."; return; }
+  if(r&&r.ok){ location.reload(); return; }
+  if(e)e.textContent="That token was not accepted.";
+}
+// A list loader must never turn an auth error (or any non-array reply) into "nothing here".
+function ccList(v){ return Array.isArray(v)?v:[]; }
+function ccDead(){ return CC_AUTH_DEAD; }
 let D={machines:[],components:[],routines:[],ralph:[],jobs:[]},ST={},LENS="sessions";
 let AGENT_SLUGS=new Set();
 fetch("/api/agents").then(r=>r.json()).then(a=>{AGENT_SLUGS=new Set(a.slugs||[]);refreshAgentBtn();}).catch(()=>{});
@@ -26967,15 +27223,21 @@ setInterval(briefSurfacePoll,30000);setTimeout(briefSurfacePoll,2500);
 async function resHealthPoll(){
   try{ var h=await(await fetch('/api/health')).json();
     var v=h.vitals||{}, crit=(v.level==='critical'), deg=!!h.degraded;
+    // PTY pressure is MACHINE-wide, not this process's -- and it is the one that takes every node down at once
+    // (2026-08-07). Surface it at warn, not just critical: there is no way to raise the cap, so the only useful
+    // moment is while there is still headroom.
+    var pty=(v.pty_level==='warn'||v.pty_level==='critical');
     var el=document.getElementById('resBanner');
-    if(deg||crit){
+    if(deg||crit||pty){
       if(!el){ el=document.createElement('div'); el.id='resBanner';
         el.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;padding:7px 14px;font:600 12.5px/1.4 -apple-system,sans-serif;text-align:center;background:var(--accent-light);color:var(--bg-warm);box-shadow:0 2px 8px rgba(0,0,0,.4)';
         document.body.appendChild(el); }
       var w=String.fromCharCode(9888);
       el.innerHTML = deg
         ? (w+' This node is DEGRADED &mdash; a core system call failed ('+esc(String(h.degraded.reason||'').slice(0,90))+'). Session/chief lists may read empty; it self-heals as calls recover.')
-        : (w+' CRITICAL resource pressure &mdash; '+(v.fd_pct||0)+'% file descriptors, '+(v.threads||0)+' threads, '+(v.cpu||0)+'% CPU. The node will self-heal with a clean restart.');
+        : crit
+        ? (w+' CRITICAL resource pressure &mdash; '+(v.fd_pct||0)+'% file descriptors, '+(v.threads||0)+' threads, '+(v.cpu||0)+'% CPU. The node will self-heal with a clean restart.')
+        : (w+' Terminal capacity '+(v.pty_level==='critical'?'CRITICAL':'running low')+' &mdash; '+(v.ptys||0)+' of '+(v.pty_cap||0)+' pseudo-terminals in use on this machine ('+(v.pty_pct||0)+'%). This limit is shared by every node and user on the box; if it fills, no terminal, session or server restart can start anywhere. Run <code>cc-ptyrecover</code> to see who is holding them.');
     } else if(el){ el.remove(); }
     // SPA STALENESS (deep-audit 0.7): the server restarted to DIFFERENT code than this tab was served with.
     // CC.running_version = what this tab loaded; h.running_version = what's running now. Offer a one-click reload
@@ -31344,7 +31606,7 @@ async function cfProvision(launch){
   if(!r.ok){o.textContent='ERROR: '+(r.error||'?');return;}
   var s=r.summary||{}, NL=String.fromCharCode(10);
   var tok=s.auth_token||'';   // the per-node access token minted at birth -- the user MUST enter it on first open
-  var txt=(r.launched?'✅ Created & started: ':'✅ Created (not started): ')+(s.bundle||'?')+NL+'port: '+(s.port||'?')+'   role: '+(s.role||'?')+NL+'dashboard: '+(s.url||'?')+NL+NL+(tok?'🔑 Login token: shown above — COPY IT before you open the node. You enter it immediately on first open; you can reset it afterward in Settings → Login token.':'Login: when you open it, the dashboard will ask you to set your own token (changeable later in Settings → Login token).')+NL;
+  var txt=(r.launched?'✅ Created & started: ':'✅ Created (not started): ')+(s.bundle||'?')+NL+'port: '+(s.port||'?')+'   role: '+(s.role||'?')+NL+'dashboard: '+(s.url||'?')+NL+NL+(tok?'Login token: handed to you in its own window — you paste it the first time you open this node, then it asks you to replace it with your own password. Lost it? Run cc-recover.sh on this host.':'Login: when you open it, the dashboard will ask you to set your own token (changeable later in Settings → Login token).')+NL;
   if(r.launched)txt+=NL+'Running: '+(r.alive?('✅ alive (HTTP '+r.http+')'):('⚠ not responding (HTTP '+r.http+')'))+NL;
   if('persisted' in r)txt+='Permanent: '+(r.persisted?'✅ installed — survives reboot':('⚠ '+(r.persist_note||r.persist_warn||'not installed')))+NL;
   if('meshed' in r)txt+='Mesh: '+(r.meshed?'✅ added to the fleet peers':('⚠ '+(r.mesh_warn||'not added')))+NL;
@@ -31353,16 +31615,8 @@ async function cfProvision(launch){
   if('chief_started' in r)txt+='Chief of Staff: '+(r.chief_started?'✅ warmed up & ready':'⚠ start it from the Chief tab')+NL;
   if(!r.launched&&!r.cross_user)txt+=NL+'It is staged but OFF. Re-run with Create & start to bring it online.'+NL;
   txt+=NL+'➡ Next: open the '+(s.id||'')+' dashboard ('+(s.url||'')+') and run its Setup agent (Agents → setup) to configure the project.';
-  // Surface the minted access token PROMINENTLY with a Copy button -- the user must paste it the instant the
-  // new dashboard opens (it prompts for the token before letting them set their own). Plain text used to bury it.
-  var head='';
-  if(tok){head='<div style="border:1px solid var(--accent-light,#e8c547);background:rgba(var(--accent-light-rgb),.09);border-radius:10px;padding:12px 14px;margin:0 0 11px">'
-    +'<div style="font-weight:800;color:var(--accent-light,#e8c547);margin-bottom:8px;font-size:13.5px">🔑 Access token for '+esc(s.id||'the new node')+' — copy it now</div>'
-    +'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
-    +'<code id="cfTokVal" style="flex:1;min-width:180px;font-size:15px;font-weight:700;letter-spacing:.5px;background:rgba(0,0,0,.4);padding:9px 12px;border-radius:7px;-webkit-user-select:all;user-select:all;word-break:break-all">'+esc(tok)+'</code>'
-    +'<button class="mini go" onclick="cfCopyTok()">Copy token</button></div>'
-    +'<div style="margin-top:9px;font-size:12.5px;line-height:1.5;opacity:.92">You will be asked for this <b>the moment you open the new dashboard</b> — paste it to log in. After that, set your own password in <b>Settings → Login token</b>.</div>'
-    +'</div>';}
+  // The token itself is NOT rendered here any more -- it gets its own blocking, copy-gated modal (below), so it
+  // can never again be skimmed past as one line in a summary dump.
   // CROSS-USER: the node runs as another account -> we staged it but only that account can launch/persist it.
   // Show the exact command(s) to run in THAT account's session, each with a Copy button.
   var xu='';
@@ -31372,9 +31626,43 @@ async function cfProvision(launch){
     +cfCmdRow('1 · Start it',r.launch_cmd||'')
     +(r.persist_cmds?cfCmdRow('2 · Survive reboot (optional)',r.persist_cmds):'')
     +'</div>';}
-  o.innerHTML=head+xu+'<div style="white-space:pre-wrap">'+esc(txt)+'</div>';
+  o.innerHTML=xu+'<div style="white-space:pre-wrap">'+esc(txt)+'</div>';
   toast((r.cross_user?'Staged for '+(r.run_as||''):(r.launched?'Started ':'Created ')+(s.id||''))); setTimeout(loadPortfolio,1600);
+  // THE CREDENTIAL HANDOFF IS ITS OWN BLOCKING MODAL (2026-08-07). It used to render as one block inside the
+  // summary dump, below port/dashboard/mesh/remote-access -- the single most important credential in a node's
+  // life carrying the same visual weight as the port number. Lose it and you are locked out of a brand-new
+  // node. So: it now takes over the screen the moment the node exists, and cannot be dismissed until the
+  // operator has copied it (or confirmed they saved it). The rest of the summary follows behind it.
+  CFSUM={txt:txt,xu:xu,title:(r.cross_user?'Staged for '+(r.run_as||'another account'):'Created '+(s.id||'the node'))};
+  if(tok) cfTokenHandoff(tok,s.id||'the new node',s.url||'');
 }
+// ---- one-time login-token handoff: blocking, copy-gated ----
+var CFSUM=null;
+function cfTokenHandoff(tok,id,url){
+  showM('<div class="cfw"><div class="vshead"><h2>Copy this login token now</h2></div>'
+   +'<div class="sub" style="margin-bottom:12px">This is the one-time access token for <b>'+esc(id)+'</b>. '
+   +'<b>You must paste it the first time you open this dashboard, and it is shown once.</b></div>'
+   +'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+   +'<code id="cfTokVal" style="flex:1;min-width:200px;font-size:19px;font-weight:700;letter-spacing:1px;background:rgba(0,0,0,.4);padding:14px 16px;border-radius:8px;-webkit-user-select:all;user-select:all;word-break:break-all">'+esc(tok)+'</code>'
+   +'<button class="btn go" onclick="cfTokCopy()">Copy token</button></div>'
+   +'<div class="cc-panel" style="margin-top:13px"><div class="cc-p-h"><b>What to do next</b></div>'
+   +'<div style="padding:9px 11px;font-size:12.5px;line-height:1.6">1 &middot; Paste this token somewhere safe.<br>'
+   +'2 &middot; Open the new dashboard'+(url?' &mdash; <b>'+esc(url)+'</b>':'')+' and paste the token to sign in.<br>'
+   +'3 &middot; It will immediately ask you to replace it with your own password.</div></div>'
+   +'<div class="cc-panel" style="margin-top:9px"><div class="cc-p-h"><b>Locked out?</b></div>'
+   +'<div style="padding:9px 11px;font-size:12.5px;line-height:1.6">Run <code>cc-recover.sh</code> on this host &mdash; it prints every node&rsquo;s token, port and URL. You can always get back in.</div></div>'
+   +'<label class="cfpersist" style="margin-top:11px"><input type="checkbox" id="cfTokSaved" onchange="cfTokGate()"><span>I have saved this token somewhere safe.</span></label>'
+   +'<div class="cfacts"><button class="btn go" id="cfTokGo" disabled onclick="cfTokDone()">Continue</button></div>'
+   +'<div class="sub" id="cfTokHint" style="margin-top:7px">Copy the token (or tick the box) to continue.</div></div>');
+}
+function cfTokGate(){var cb=document.getElementById('cfTokSaved'),b=document.getElementById('cfTokGo'),h=document.getElementById('cfTokHint');
+  if(!b)return; var ok=(cb&&cb.checked)||cfTokGate._copied; b.disabled=!ok;
+  if(h)h.textContent=ok?'Saved. You can continue.':'Copy the token (or tick the box) to continue.';}
+function cfTokCopy(){cfCopyTok();cfTokGate._copied=true;var cb=document.getElementById('cfTokSaved');if(cb)cb.checked=true;cfTokGate();}
+function cfTokDone(){cfTokGate._copied=false;cfShowSummary();}
+function cfShowSummary(){ if(!CFSUM){closeM();return;}
+  showM('<div class="cfw"><div class="vshead"><h2>'+esc(CFSUM.title)+'</h2><button class="mini" onclick="closeM()">Close</button></div>'
+   +CFSUM.xu+'<div style="white-space:pre-wrap">'+esc(CFSUM.txt)+'</div></div>'); }
 function cfCmdRow(label,cmd){var id='cfcmd'+(cfCmdRow._n=(cfCmdRow._n||0)+1);
   return '<div style="margin-top:8px"><div style="font-size:11.5px;font-weight:700;color:var(--mut);margin-bottom:3px">'+esc(label)+'</div>'
     +'<div style="display:flex;gap:8px;align-items:flex-start"><pre id="'+id+'" style="flex:1;margin:0;white-space:pre-wrap;word-break:break-all;background:rgba(0,0,0,.4);padding:8px 10px;border-radius:7px;font-size:12px">'+esc(cmd)+'</pre>'
@@ -31451,6 +31739,10 @@ async function loadSessions(quiet){
   if(!quiet)document.getElementById("grid").innerHTML=empty("Loading sessions…");
   let s=[],tok={};
   try{const[a,b,c,at]=await Promise.all([fetch("/api/sessions"),fetch("/api/token-usage"),fetch("/api/autocompact"),fetch("/api/attention")]);s=await a.json();tok=await b.json();try{ACMP=(await c.json())||ACMP;}catch(e){}try{const ad=await at.json();ATTN_ON=!!ad.enabled;ATTN=ad.states||{};}catch(e){}}catch(e){}
+  // An auth failure must NEVER be painted as "no sessions" -- that reads as catastrophic loss. The interceptor
+  // has already raised the Session-expired prompt; bail out and leave whatever was on screen intact.
+  if(ccDead())return;
+  s=ccList(s);   // a 401/error body is an OBJECT, not an array -- never let it reach the array code below
   TOKDATA=tok||{};
   s=s.filter(x=>!x.protected||PANES.indexOf(x.name)>=0||x.chief);   // protected (bridge/crons/loops) stay hidden -- EXCEPT any pulled up into the workspace AND the Chief of Staff (always-on mesh endpoint)
   if(SESSBIG && !s.find(x=>x.name==SESSBIG)) s.unshift({name:SESSBIG,label:SESSBIG,attached:true,protected:false});
@@ -31806,6 +32098,13 @@ function vmMatchAnswer(text,opts){var t=(text||'').toLowerCase().replace(/[^a-z0
   // 1) explicit "option/number/pick N" or a bare number -> high confidence
   var m=t.match(/\b(?:option|number|choice|answer|pick)\s+(\d+)\b/)||t.match(/^\s*(\d+)\s*$/);
   if(m){var r=ok(parseInt(m[1],10));if(r>=0)return r;}
+  // 1b) the WHOLE utterance is one cardinal word ("one", "One.", "just two") -> that option. Rule (4) below skips a
+  // bare 'one' because it's usually filler ("this one"), but a ONE-WORD answer is never filler -- and since the
+  // question is READ ALOUD as "one: ... two: ..." and signs off "say the number", "one" is the single most likely
+  // thing you will say. It used to fall through EVERY rule to -1 = free text, which sent the answer down the
+  // 'Other' path and got the whole question declined (2026-08-07). Digits already short-circuit above.
+  var mw=t.match(/^(?:just |the )?(one|two|three|four|five|six|seven|eight|nine|ten)$/);
+  if(mw){var rw=ok({one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10}[mw[1]]);if(rw>=0)return rw;}
   // 2) ORDINAL words first (so 'the second one' -> 2, not the filler 'one')
   var ord={first:1,second:2,third:3,fourth:4,fifth:5,sixth:6,seventh:7,eighth:8};
   for(var w in ord){if(new RegExp('\\b'+w+'\\b').test(t)){var r2=ok(ord[w]);if(r2>=0)return r2;}}
@@ -31862,7 +32161,10 @@ async function vmAnswer(text){var fq=VM.floorQ;if(!fq)return;
   var mode=voiceAnswerMode();
   if(mode==='quiet')return vmSubmitAnswer(a);
   VM.floorQ=null;VM.confirmA=a;   // leave answer-mode -> confirm-mode (so it isn't re-read as a question)
-  var said=(idx>=0)?('You picked, '+a.label+'.'):('You said, '+text+'.');
+  // SAY WHICH IT IS. 'You said, one.' sounded like a successful pick when it was actually an UNMATCHED answer headed
+  // for the free-text row -- so the mis-match was invisible until the question had already been declined. Name the
+  // path out loud: a matched option reads back its LABEL, an unmatched one says it's being typed in as your own words.
+  var said=(idx>=0)?('You picked, '+a.label+'.'):("That didn't match an option, so I'll type it in as your own answer: "+text+'.');
   if(mode==='confirm'){var g0=vmGen();vmSet('speaking');voiceSay(said+' Sending it.',function(){if(g0!==VM.gen)return;vmSubmitAnswer(a);});return;}
   var g=vmGen();vmSet('speaking');voiceSay(said+' Say yes to send it, or say a different option.',function(){if(g!==VM.gen)return;vmSet('yourturn');if(voiceHandsfreeOn())vmTalk();});}
 async function vmSubmitAnswer(a){var s=a.session;var body={session:s};if(a.idx>=0)body.index=a.idx;else body.text=a.text;
@@ -33825,27 +34127,49 @@ function applyPreset(){
   document.querySelectorAll('#lens button').forEach(function(b){b.classList.toggle('on',b.dataset.l===LENS);});
   var vt=document.getElementById('viewtitle');if(vt)vt.textContent=NAV[LENS]||LENS;}
 applyPreset();   // preset hides project-only lenses on an org instance + lands on the first allowed lens
-// First-run security nudge: a freshly provisioned node has NO login token (open on your private tailnet).
-// Invite the operator to set their OWN one (not auto-generated -> nothing to copy down or get locked out by).
-if(window.CC && !window.CC.authOn && !sessionStorage.getItem('cf_tok_dismissed')){ setTimeout(firstRunToken, 2300); }
+// FIRST-OPEN TOKEN GATE. Two distinct situations, one modal:
+//   authOn=false      -> node is OPEN (no token at all). Skippable nudge, as before.
+//   authMinted=true   -> the operator just signed in with the ONE-TIME token minted at the node's birth. That
+//                        is a handoff credential, not a password (it was pasted from a provisioning screen and
+//                        very likely sits in a clipboard/notes app). BLOCK until they replace it, or explicitly
+//                        keep it. Both choices clear the flag server-side, so this never nags twice.
+// NOTE (2026-08-07): the minted branch is why this exists at all -- the old `!authOn` gate had become dead code.
+// Fail-secure minting means a provisioned node ALWAYS boots with a token, so authOn was always true and this
+// modal had stopped firing on new nodes entirely.
+if(window.CC && window.CC.authMinted){ setTimeout(firstRunToken, 1200); }
+else if(window.CC && !window.CC.authOn && !sessionStorage.getItem('cf_tok_dismissed')){ setTimeout(firstRunToken, 2300); }
+function frtForced(){ return !!(window.CC && window.CC.authMinted); }
 function firstRunToken(){
-  if(window.CC && window.CC.authOn) return;
-  showM('<div class="cfw"><div class="vshead"><h2>Set a login token</h2><button class="mini" onclick="frtSkip()">Skip for now</button></div>'
-   +'<div class="sub" style="margin-bottom:11px">This node has <b>no login token yet</b> — anyone on your tailnet can open it. Set one now (a PIN or a passphrase — your choice). You can change or remove it anytime in <b>Settings → Login token</b>.</div>'
+  var forced=frtForced();
+  if(!forced && window.CC && window.CC.authOn) return;
+  showM('<div class="cfw"><div class="vshead"><h2>'+(forced?'Set your own login token':'Set a login token')+'</h2>'
+   +(forced?'':'<button class="mini" onclick="frtSkip()">Skip for now</button>')+'</div>'
+   +'<div class="sub" style="margin-bottom:11px">'
+   +(forced?'You signed in with the <b>one-time token issued when this node was created</b>. Replace it now with your own password &mdash; the issued one was handed to you on a screen and copied to a clipboard, so it should not stay as your login.'
+          :'This node has <b>no login token yet</b> &mdash; anyone on your tailnet can open it. Set one now (a PIN or a passphrase &mdash; your choice).')
+   +' You can change it anytime in <b>Settings &rarr; Login token</b>.</div>'
    +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><input id="frt_tok" class="mini" style="flex:1;min-width:200px" placeholder="choose a token (min 4 chars)" autocomplete="off">'
    +'<button class="mini" onclick="document.getElementById(\'frt_tok\').value=cfRandTok()">Generate</button>'
    +'<button class="mini go" onclick="frtSet()">Set token</button></div>'
+   +(forced?'<div class="sub" style="margin-top:11px">Locked out later? Run <code>cc-recover.sh</code> on the host &mdash; it prints every node&rsquo;s token, port and URL.</div>'
+           +'<div class="cfacts" style="margin-top:7px"><button class="mini" onclick="frtKeep()" title="Keep the token you were issued as this node\'s password">Keep the issued token instead</button></div>':'')
    +'<div id="frt_out" style="margin-top:11px;display:none;font-size:12.5px;line-height:1.5"></div></div>');
 }
 function frtSkip(){ try{sessionStorage.setItem('cf_tok_dismissed','1');}catch(e){} closeM(); }
+async function frtKeep(){
+  if(!await confirmM('Keep the one-time token you were issued as this node\'s permanent password?'))return;
+  try{await fetch('/api/auth-token-keep',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});}catch(e){}
+  if(window.CC)window.CC.authMinted=false;
+  toast('Keeping the issued token.',3000); closeM();
+}
 async function frtSet(){
   var v=(document.getElementById('frt_tok').value||'').trim();
-  if(v.length<4){toast('Use at least 4 characters (or 🎲 Generate one).',4000);return;}
+  if(v.length<4){toast('Use at least 4 characters (or Generate one).',4000);return;}
   var r;try{r=await(await fetch('/api/auth-token-set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:v})})).json();}catch(e){toast('Request failed');return;}
   if(!r||!r.ok){toast('Failed: '+((r||{}).error||'?'),5000);return;}
-  if(window.CC)window.CC.authOn=true;
-  var o=document.getElementById('frt_out'); if(o){o.style.display='block';o.innerHTML='✅ Token set — you\'re still logged in here. Other devices will need it. Change it anytime in Settings → Login token.';}
-  toast('Login token set ✓',3500); setTimeout(closeM,2300);
+  if(window.CC){window.CC.authOn=true;window.CC.authMinted=false;}
+  var o=document.getElementById('frt_out'); if(o){o.style.display='block';o.innerHTML='Token set &mdash; you are still logged in here. Other devices will need the new one. Change it anytime in Settings &rarr; Login token.';}
+  toast('Login token set',3500); setTimeout(closeM,2300);
 }
 
 // ---- Smart-sort nav: tabs auto-rank by how often you click them (most-used first). Drag a tab to pin a
@@ -35355,7 +35679,31 @@ def _my_children(match=None):
         return [int(x) for x in o.split() if x.strip().isdigit()] if code == 0 else []
     except Exception: return []
 
-_VITALS = {"fds": 0, "fd_limit": 0, "fd_pct": 0, "threads": 0, "cpu": 0.0, "children": 0, "level": "ok", "at": 0}
+_PTY_CACHE = {"used": 0, "cap": 0, "pct": 0, "at": 0}
+def _pty_usage():
+    """Machine-wide pty pressure: allocated /dev/ttys* device nodes vs the kernel cap (kern.tty.ptmx_max).
+
+    THE resource that took the whole box down on 2026-08-07 and that NOTHING watched. macOS caps ptys GLOBALLY
+    (511 by default) across every user and every co-located node, so one leaking dashboard starves all of them:
+    tmux prints "open terminal failed: not a terminal", browser terminals reconnect-storm, and a restarted
+    server cannot even respawn (creating a tmux session ALSO needs a pty). The device nodes are world-visible,
+    so this needs no sudo and sees the WHOLE machine -- including other users' leaks, which is the point.
+    Cached ~20s: it is a directory listing, and vitals is on a poll path."""
+    now = time.time()
+    if _PTY_CACHE["at"] and now - _PTY_CACHE["at"] < 20: return _PTY_CACHE["used"], _PTY_CACHE["cap"], _PTY_CACHE["pct"]
+    used = cap = 0
+    try: used = len([n for n in os.listdir("/dev") if n.startswith("ttys")])
+    except Exception: pass
+    try:
+        code, o, _ = sh(["sysctl", "-n", "kern.tty.ptmx_max"], timeout=4)
+        if code == 0 and o.strip().isdigit(): cap = int(o.strip())
+    except Exception: pass
+    pct = int(100 * used / cap) if (used > 0 and cap > 0) else 0
+    _PTY_CACHE.update({"used": used, "cap": cap, "pct": pct, "at": now})
+    return used, cap, pct
+
+_VITALS = {"fds": 0, "fd_limit": 0, "fd_pct": 0, "threads": 0, "cpu": 0.0, "children": 0,
+           "ptys": 0, "pty_cap": 0, "pty_pct": 0, "pty_level": "ok", "level": "ok", "at": 0}
 _DEGRADED = {"since": 0, "reason": "", "count": 0, "at": 0}
 def _mark_degraded(reason):
     """A CORE subprocess call failed in a way that smells like resource starvation (EMFILE / timeout). Record it
@@ -35380,8 +35728,15 @@ def vitals(sample=True):
         lvl = "ok"
         if pct >= 85 or th > 400 or cpu > 900: lvl = "critical"
         elif pct >= 60 or th > 220 or cpu > 550: lvl = "warn"
+        # PTY pressure is tracked SEPARATELY and deliberately never feeds `level`. `level` critical triggers
+        # _selfheal (exit -> respawn), and respawning needs a pty: on an exhausted machine that turns a warning
+        # into a restart LOOP that cannot come back. Pty pressure gets a loud alert + an urgent local reap
+        # instead -- shed our own leak, tell the operator, never thrash. (2026-08-07 outage.)
+        pty_used, pty_cap, pty_pct = _pty_usage()
+        pty_lvl = "critical" if pty_pct >= PTY_CRIT_PCT else ("warn" if pty_pct >= PTY_WARN_PCT else "ok")
         _VITALS.update({"fds": fd, "fd_limit": fl, "fd_pct": pct, "threads": th, "cpu": round(cpu, 1),
-                        "children": len(_my_children()), "level": lvl, "at": int(time.time())})
+                        "children": len(_my_children()), "ptys": pty_used, "pty_cap": pty_cap,
+                        "pty_pct": pty_pct, "pty_level": pty_lvl, "level": lvl, "at": int(time.time())})
     return dict(_VITALS)
 
 def _thread_dump(reason=""):
@@ -35652,6 +36007,140 @@ def _security_beat_loop():
         time.sleep(6 * 3600)   # check ~4x/day; the 7-day gate does the real spacing
 
 _SELFHEAL = {"last": 0, "boot": time.time()}
+
+# ---- /ws terminal child REGISTRY + gentle orphan reaper (2026-08-07) ----
+# Every browser terminal pty.forks a `tmux attach-session` child. Normally handle_ws's finally SIGHUPs and reaps
+# it. When that path is missed (handler thread dies hard, client vanishes mid-upgrade, fd exhaustion), the child
+# is left attached forever and they pile up -- the pile that once thrashed the shared tmux server.
+# The registry makes orphan detection EXACT instead of heuristic: a child we forked is registered before it can
+# do anything and only deregistered after we have reaped it, so "our own attach-session child that is NOT in the
+# live-set" is unambiguously nobody's terminal. That precision is the whole safety story here: a previous
+# blunt cleanup mass-SIGKILLed 100+ attach clients and crashed AFP's already-flapping tmux server, killing live
+# sessions. So this reaper: (a) only ever considers OUR OWN direct children, (b) only unregistered ones,
+# (c) only past a grace window, (d) at most WS_REAP_MAX per pass, and (e) SIGHUP only -- never SIGKILL.
+_WS_CHILDREN = {}                # pid -> {"name": session, "at": forked-at}
+_WS_CHILD_LOCK = threading.Lock()
+_WS_ORPHAN_SEEN = {}             # pid -> first time we saw it unregistered (the grace clock)
+WS_ORPHAN_GRACE = float(CC.get("ws_orphan_grace") or 300)   # 5 min unregistered before it is fair game
+WS_REAP_MAX = int(CC.get("ws_reap_max") or 3)               # per pass -- gentle by construction, never a sweep
+# No frame from the browser for this long (it stopped answering pings) -> the viewer is gone, release the pty.
+# A live tab pongs every 120s, so a real terminal never gets near this even when nobody is typing.
+WS_IDLE_MAX = float(CC.get("ws_idle_max") or 1800)
+# Machine-wide pty pressure thresholds (percent of kern.tty.ptmx_max). The 2026-08-07 outage went from
+# "fine" to total collapse with no warning because nothing watched this; warn EARLY (there is no cheap way
+# to grow the cap) so a leak is visible while there is still headroom to act.
+PTY_WARN_PCT = int(CC.get("pty_warn_pct") or 70)
+PTY_CRIT_PCT = int(CC.get("pty_crit_pct") or 85)
+
+def _ws_child_register(pid, name):
+    with _WS_CHILD_LOCK: _WS_CHILDREN[pid] = {"name": name, "at": time.time()}
+
+def _ws_child_done(pid):
+    with _WS_CHILD_LOCK: _WS_CHILDREN.pop(pid, None)
+    _WS_ORPHAN_SEEN.pop(pid, None)
+
+def _reap_ws_orphans(urgent=False):
+    """Reap only UNREGISTERED /ws attach children older than the grace window. Returns the pids signalled.
+
+    `urgent` (machine-wide pty pressure) shortens the grace window and lifts the per-pass cap, so we shed OUR
+    contribution fast when the global pool is running out. It never widens the SELECTION: still only our own
+    unregistered attach children, still SIGHUP-only, so a live terminal is never in scope no matter how urgent."""
+    kids = _my_children("attach-session")
+    if not kids:
+        _WS_ORPHAN_SEEN.clear(); return []
+    grace = 60 if urgent else WS_ORPHAN_GRACE
+    cap = 25 if urgent else WS_REAP_MAX
+    with _WS_CHILD_LOCK: live = set(_WS_CHILDREN)
+    now = time.time(); reaped = []
+    for pid in kids:
+        if pid in live:                                  # a real, in-use terminal -- never touch it
+            _WS_ORPHAN_SEEN.pop(pid, None); continue
+        first = _WS_ORPHAN_SEEN.setdefault(pid, now)     # start this pid's grace clock
+        if now - first < grace: continue
+        if len(reaped) >= cap: break                     # rate limit: the rest wait for the next pass
+        try:
+            os.kill(pid, signal.SIGHUP)                  # GENTLE -- lets tmux detach the client cleanly
+            reaped.append(pid)
+        except Exception:
+            pass
+        _WS_ORPHAN_SEEN.pop(pid, None)
+        try: os.waitpid(pid, os.WNOHANG)                 # clear the zombie if it went immediately
+        except Exception: pass
+    for pid in list(_WS_ORPHAN_SEEN):                    # forget pids that no longer exist
+        if pid not in kids: _WS_ORPHAN_SEEN.pop(pid, None)
+    if reaped:
+        try:
+            with open(os.path.join(STATE_DIR, "_ws_reaper.log"), "a") as f:
+                f.write("%s reaped %d unregistered attach orphan(s) %s (live=%d, children=%d)\n"
+                        % (time.strftime("%Y-%m-%d %H:%M:%S"), len(reaped), reaped, len(live), len(kids)))
+        except Exception: pass
+    return reaped
+
+def _code_selfcheck():
+    """At boot: fingerprint server.py and prove its dashboard JavaScript actually parses.
+
+    Two failures on 2026-08-07 that this closes:
+      1. A doubled-backslash (`\\'` for `\'`) in the inline PAGE script broke the ENTIRE dashboard -- nav dead,
+         Sessions unreachable -- and the ONLY way anyone found out was the operator opening a browser. The server
+         was serving a page it had never checked. Now a broken PAGE marks the node DEGRADED and alerts on the spot.
+      2. That edit could not be attributed to ANY session afterwards: nothing recorded what the file looked like,
+         or when it changed. The fingerprint log makes every boot's exact bytes a matter of record, so the next
+         unexplained mutation has a before/after instead of a shrug.
+
+    Deliberately NOT a refusal to boot: a dashboard that serves a broken page is still the thing hosting the
+    terminals and the API you need in order to FIX it. Scream, don't die."""
+    try: me = os.path.join(BASE, "server.py"); raw = open(me, "rb").read()
+    except Exception: return
+    import hashlib as _hl
+    fp = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "instance": INSTANCE_ID, "sha256": _hl.sha256(raw).hexdigest()[:16],
+          "bytes": len(raw), "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(me))),
+          "version": globals().get("BOOT_VERSION", "?")}
+    prev = None
+    _fpl = os.path.join(STATE_DIR, "_code_fingerprint.jsonl")
+    try:
+        with open(_fpl) as f:
+            for ln in f:
+                try: prev = json.loads(ln)
+                except Exception: pass
+    except Exception: pass
+    fp["changed"] = bool(prev and prev.get("sha256") != fp["sha256"])
+    fp["prev_sha256"] = (prev or {}).get("sha256", "")
+    try:
+        with open(_fpl, "a") as f: f.write(json.dumps(fp) + "\n")
+    except Exception: pass
+
+    # PAGE-JS proof. Same gate preship runs, but here it runs on the code that is ACTUALLY SERVING, at the one
+    # moment that matters -- so a restart that skipped preship (an agent's `ast.parse && kill-session`, a hand
+    # edit, a sweep) still cannot put a dead dashboard in front of the operator quietly.
+    node = shutil.which("node") if "shutil" in globals() else None
+    if not node: return
+    bad = None
+    try:
+        import ast as _a, tempfile as _tf
+        src = raw.decode("utf-8", "replace"); blocks = []
+        for n in _a.walk(_a.parse(src)):
+            if isinstance(n, _a.Assign) and isinstance(n.value, _a.Constant) and isinstance(n.value.value, str) \
+               and "<script>" in n.value.value:
+                blocks += re.findall(r"<script>(.*?)</script>", n.value.value, re.S)
+        for b in blocks:
+            if not b.strip(): continue
+            t = _tf.NamedTemporaryFile("w", suffix=".js", delete=False); t.write(b); t.close()
+            code, _o, err = sh([node, "--check", t.name], timeout=25)
+            try: os.unlink(t.name)
+            except Exception: pass
+            if code != 0: bad = (err or "").strip().splitlines()[:3]; break
+    except Exception: return
+    if bad:
+        msg = ("[%s] DASHBOARD JAVASCRIPT IS BROKEN -- the inline PAGE script has a syntax error, so the whole "
+               "single-page app fails to boot: nav does nothing, no lens loads, Sessions is unreachable. The API "
+               "and terminals still work. Fix the source and restart with cc-restart (which gates on this). %s"
+               % (INSTANCE_ID, " | ".join(bad)[:300]))
+        print(msg, file=sys.stderr)
+        try: _mark_degraded("dashboard PAGE JavaScript has a syntax error -- the SPA cannot boot")
+        except Exception: pass
+        try: notify_send(msg)
+        except Exception: pass
+
 def _reap_orphan_terminals():
     """Kill this server's own `tmux attach-session` children (browser-terminal pty children). Called only at a
     controlled restart -- everything's going down anyway, so shedding them prevents the reparented-orphan leak
@@ -35684,10 +36173,31 @@ def _vitals_loop():
     """THE immune system: every ~45s sample our own vitals. WARN -> log LOUD + alert the operator once per episode.
     CRITICAL (twice running, to ignore a blip) -> self-heal. Catches BOTH failure modes we hit -- fd exhaustion AND
     a thread/CPU zombie -- and, being symptom-based, any future leak too. Cheap (getrusage + one pgrep)."""
-    time.sleep(30); crit = 0; warned = ""; diag_armed = True
+    time.sleep(30); crit = 0; warned = ""; diag_armed = True; pty_warned = ""
     while True:
         try:
+            # Shed leaked browser-terminal children BEFORE sampling, so a slow leak is cleaned up continuously
+            # instead of only at a self-heal restart. Bounded + SIGHUP-only, so it can never itself be the event.
+            try: _reap_ws_orphans(urgent=(_VITALS.get("pty_level") == "critical"))
+            except Exception: pass
             v = vitals()
+            # PTY PRESSURE -- the 2026-08-07 outage class. Alert once per level change (not every 45s), and say
+            # how much of the pool is OURS, because the fix differs: our own bridges the reaper handles; another
+            # user's node leaking needs that node fixed (its own server.py copy needs this reaper shipped to it).
+            if v.get("pty_level") in ("warn", "critical"):
+                if v["pty_level"] != pty_warned:
+                    pty_warned = v["pty_level"]
+                    _mine = len(_my_children("attach-session"))
+                    pmsg = ("[%s] PTY %s -- %s/%s pty devices in use machine-wide (%s%%). This is a GLOBAL macOS "
+                            "cap shared by every user + node; at 100%% no terminal, tmux session or server restart "
+                            "can start anywhere on this box. %d of the bridges are ours (being reaped). If it keeps "
+                            "climbing, find the node whose server.py lacks the /ws reaper."
+                            % (INSTANCE_ID, v["pty_level"].upper(), v.get("ptys"), v.get("pty_cap"), v.get("pty_pct"), _mine))
+                    print(pmsg)
+                    try: notify_send(pmsg)
+                    except Exception: pass
+            elif pty_warned:
+                pty_warned = ""
             if v["level"] == "critical":
                 crit += 1
                 if crit >= 2: _selfheal("vitals critical: " + json.dumps({k: v[k] for k in ("fd_pct", "threads", "cpu", "children")}))
@@ -36142,6 +36652,8 @@ if __name__ == "__main__":
     # minutes -- which printed the banner but never reached serve_forever(), so the server "came up" yet
     # accepted no connections (this took AFP down). Run it all in a daemon thread; serve immediately.
     def _boot_housekeeping():
+        try: _code_selfcheck()           # FIRST: is the code we just booted even sound, and who last changed it?
+        except Exception: pass
         try:                             # clear drift proposals orphaned by the (now-disabled) server-side sweep
             _np = _hand_purge_stale_auto()
             if _np: print("[handoffs] purged %d stale auto-housekeeping proposal(s) -- drift is the agent's job now" % _np, file=sys.stderr)

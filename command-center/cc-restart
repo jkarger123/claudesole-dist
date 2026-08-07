@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""cc-restart -- the ONLY safe way to restart a co-located Command Center after editing server.py.
+
+WHY THIS EXISTS (2026-08-07 outage). The co-located instances (hpcc / cc-overseer / cc-carsearch ...) do not
+run a shipped artifact -- they execute this checkout's `server.py` live. So the instant any session recreates
+their tmux session, whatever is on disk becomes the operator's dashboard. There was no gate on that path: two
+restarts that day were guarded by `python3 -c "import ast; ast.parse(...)"`, which proves the PYTHON parses and
+says nothing about the ~10k lines of JavaScript inside the `PAGE` string. A doubled backslash in that string
+broke the entire single-page app -- dead nav, no Sessions, no way to reach a Chief -- and the first anyone knew
+was the operator opening a browser.
+
+WHAT IT GUARANTEES
+  1. GATE FIRST     -- python compiles AND every inline <script> in every PAGE-like constant passes `node --check`.
+                       Refuses to restart otherwise, printing the exact syntax error. A broken dashboard can no
+                       longer reach a running instance through this path.
+  2. ALL OF THEM    -- restarts EVERY co-located instance running this same server.py, because they each hold the
+                       old code in memory. Restarting one and viewing another is the classic "I changed it and
+                       nothing happened".
+  3. PROVE IT LIVE  -- after respawn it re-fetches the page each instance is ACTUALLY SERVING and node --checks
+                       that, rather than trusting the source it just gated. Source-only checks are how a stale
+                       process passes review.
+
+Usage:
+  cc-restart                 gate + restart every co-located instance, then verify
+  cc-restart --check         gate only, change nothing (exit 1 if the dashboard JS is broken)
+  cc-restart --only hpcc     restart just one session (still gated, still verified)
+  cc-restart --force         restart even if the gate fails (records WHY; for recovering a node deliberately)
+"""
+import ast, json, os, re, subprocess, sys, tempfile, time, shutil
+
+BASE = os.path.dirname(os.path.realpath(__file__))
+ROOT = os.path.dirname(BASE)
+SERVER = os.path.join(BASE, "server.py")
+TMUX = os.environ.get("CC_TMUX") or "/opt/homebrew/bin/tmux"
+TENV = dict(os.environ, TMUX_TMPDIR="/tmp"); TENV.pop("TMUX", None)
+
+
+def sh(cmd, timeout=30, env=None):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env or os.environ)
+        return p.returncode, p.stdout, p.stderr
+    except Exception as e:
+        return 1, "", str(e)
+
+
+def js_blocks(src):
+    """Every inline <script> body in every module-level string constant (PAGE, TERM_PAGE, RALPH_PAGE, ...).
+
+    AST-extracted, not regex'd off the raw file: a regex on the triple-quoted literal truncates at the first
+    inner quote run and silently checks a fraction of the script -- which reads green while broken."""
+    out = []
+    for n in ast.walk(ast.parse(src)):
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str) \
+           and "<script>" in n.value.value:
+            out += re.findall(r"<script>(.*?)</script>", n.value.value, re.S)
+    return [b for b in out if b.strip()]
+
+
+def check_js(src, label):
+    """-> (ok, detail). Skips (loudly) if node is absent rather than pretending to have checked."""
+    if not shutil.which("node"):
+        return True, "node not installed -- PAGE-JS gate SKIPPED (install node: this is the gate that matters)"
+    try:
+        blocks = js_blocks(src)
+    except SyntaxError as e:
+        return False, "%s does not even parse as Python: %s" % (label, e)
+    for b in blocks:
+        t = tempfile.NamedTemporaryFile("w", suffix=".js", delete=False)
+        t.write(b); t.close()
+        code, _o, err = sh(["node", "--check", t.name], timeout=40)
+        os.unlink(t.name)
+        if code != 0:
+            return False, _node_err(err)
+    return True, "%d inline script block(s) parse" % len(blocks)
+
+
+def _node_err(err):
+    """node --check prints the offending line + caret FIRST and a useless internal stack after. Keep the head and
+    the SyntaxError summary; a tail slice (the obvious thing to write) shows only `at wrapSafe (...)` and tells
+    you nothing about which character is wrong."""
+    lines = [l for l in (err or "").strip().splitlines() if l.strip()]
+    head = [l for l in lines[:4] if not l.strip().startswith("at ")]
+    summ = [l for l in lines if l.strip().startswith(("SyntaxError", "ReferenceError", "TypeError"))]
+    return "\n".join(head + summ[:1])[:600] or (err or "").strip()[:300]
+
+
+def gate():
+    print("gate: checking %s" % SERVER)
+    src = open(SERVER, encoding="utf-8", errors="replace").read()
+    try:
+        ast.parse(src)
+    except SyntaxError as e:
+        return False, "server.py is not valid Python: %s" % e
+    ok, detail = check_js(src, "server.py")
+    if not ok:
+        return False, ("the dashboard PAGE JavaScript has a SYNTAX ERROR. One bad character breaks the ENTIRE "
+                       "inline script, so no lens renders and Sessions is unreachable -- the node looks dead "
+                       "while the API is fine. Fix this before restarting:\n  " + detail.replace("\n", "\n  "))
+    print("gate: python OK; %s" % detail)
+    return True, detail
+
+
+def colocated():
+    """Sessions whose server process is THIS checkout's server.py -> [(session, port, pid)].
+
+    Resolved from live processes rather than a hardcoded list, so a newly added co-located instance is covered
+    the day it exists instead of being silently skipped (which is how nodes end up serving stale code)."""
+    code, out, _ = sh(["ps", "-Ao", "pid=,ppid=,command="], timeout=20)
+    procs = {}
+    for line in out.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, ppid, cmd = parts
+        if not pid.isdigit():
+            continue
+        procs[int(pid)] = (int(ppid) if ppid.isdigit() else 0, cmd)
+    ours = []
+    for pid, (ppid, cmd) in procs.items():
+        if "server.py" not in cmd or "python" not in cmd.lower():
+            continue
+        c, cwd, _ = sh(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], timeout=20)
+        cwd = "".join(l[1:] for l in cwd.splitlines() if l.startswith("n"))
+        # own-copy installs (tenants) live elsewhere and must NEVER be restarted from here -- they ship their own
+        if os.path.realpath(cwd or "/nowhere") != BASE:
+            continue
+        ours.append(pid)
+    if not ours:
+        return []
+    code, out, _ = sh([TMUX, "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"], timeout=20, env=TENV)
+    panes = []
+    for line in out.splitlines():
+        p = line.split()
+        if len(p) == 2 and p[1].isdigit():
+            panes.append((p[0], int(p[1])))
+    found = {}
+    for pid in ours:
+        chain, cur = set(), pid
+        for _ in range(12):                       # walk up to the pane that owns this server
+            chain.add(cur)
+            cur = procs.get(cur, (0, ""))[0]
+            if cur <= 1:
+                break
+        sess = next((s for s, pp in panes if pp in chain), None)
+        port = ""
+        c, o, _ = sh(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", str(pid)], timeout=20)
+        m = re.search(r":(\d+)\s+\(LISTEN\)", o)
+        if m:
+            port = m.group(1)
+        if sess:
+            found[sess] = (port, pid)
+    return sorted((s, v[0], v[1]) for s, v in found.items())
+
+
+def serving_ok(port):
+    """Fetch what the instance is ACTUALLY SERVING and parse its JS. The decisive check."""
+    tok = ""
+    for cfg in (os.path.join(ROOT, "cc.config.json"),):
+        try:
+            tok = json.load(open(cfg)).get("auth_token") or ""
+        except Exception:
+            pass
+    hdr = ["-H", "Cookie: cc_auth=%s" % tok] if tok else []
+    code, body, _ = sh(["curl", "-s", "-m", "12"] + hdr + ["http://localhost:%s/" % port], timeout=25)
+    if not body or len(body) < 2000:
+        return None, "no page served yet"
+    blocks = [b for b in re.findall(r"<script>(.*?)</script>", body, re.S) if b.strip()]
+    if not blocks:
+        return None, "served page has no inline script (auth wall?) -- could not verify"
+    if not shutil.which("node"):
+        return None, "node missing -- cannot verify served JS"
+    for b in blocks:
+        t = tempfile.NamedTemporaryFile("w", suffix=".js", delete=False)
+        t.write(b); t.close()
+        c, _o, err = sh(["node", "--check", t.name], timeout=40)
+        os.unlink(t.name)
+        if c != 0:
+            return False, (err or "").strip().splitlines()[-1][:180]
+    return True, "served JS parses (%d block(s))" % len(blocks)
+
+
+def main(argv):
+    only = None
+    force = "--force" in argv
+    if "--only" in argv:
+        i = argv.index("--only")
+        only = argv[i + 1] if i + 1 < len(argv) else None
+
+    ok, detail = gate()
+    if not ok:
+        print("\nREFUSING TO RESTART -- " + detail, file=sys.stderr)
+        if not force:
+            print("\nNothing was touched; the running instances keep serving the last good code.\n"
+                  "Fix the source, then re-run cc-restart. (--force overrides, deliberately.)", file=sys.stderr)
+            return 1
+        print("\n--force given: restarting anyway.", file=sys.stderr)
+    if "--check" in argv:
+        return 0
+
+    targets = colocated()
+    if only:
+        targets = [t for t in targets if t[0] == only]
+    if not targets:
+        print("no co-located instance is running this checkout's server.py -- nothing to restart", file=sys.stderr)
+        return 2
+    print("restarting: " + ", ".join("%s(:%s)" % (s, p or "?") for s, p, _ in targets))
+    for sess, _port, _pid in targets:
+        c, o, e = sh([TMUX, "kill-session", "-t", sess], timeout=20, env=TENV)
+        print("  killed %s%s" % (sess, "" if c == 0 else " (%s)" % (e or o).strip()[:60]))
+
+    print("waiting for supervised respawn...")
+    deadline = time.time() + 90
+    pending = {s: p for s, p, _ in targets if p}
+    result = {}
+    while time.time() < deadline and pending:
+        time.sleep(4)
+        for sess, port in list(pending.items()):
+            state, why = serving_ok(port)
+            if state is True:
+                result[sess] = (True, why); pending.pop(sess)
+            elif state is False:
+                result[sess] = (False, why); pending.pop(sess)
+    for sess, port in pending.items():
+        result[sess] = (None, "did not come back within 90s")
+
+    bad = 0
+    print("")
+    for sess, _port, _pid in targets:
+        state, why = result.get(sess, (None, "no port detected -- could not verify"))
+        tag = "OK  " if state is True else ("FAIL" if state is False else "??  ")
+        if state is not True:
+            bad += 1
+        print("  %s %-16s %s" % (tag, sess, why))
+    if bad:
+        print("\n%d instance(s) did not verify. Check /tmp/<session>.err.log." % bad, file=sys.stderr)
+        return 1
+    print("\nAll instances restarted and VERIFIED serving parseable code.")
+    print("The dashboard is an SPA -- hard-refresh the browser tab (Cmd+Shift+R) to load the new JS.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
