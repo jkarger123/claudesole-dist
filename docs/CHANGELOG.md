@@ -3,6 +3,70 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.257 -- 2026-08-08  (Capacity enforcement: refuse the session that would seize the machine)
+
+Every Claude session holds a FIXED 6 pseudo-terminals for its whole life -- measured across sessions from 8 to
+222 hours old, it never grows. macOS caps ptys machine-wide at 511 across every user and node, so one box has a
+hard ceiling near 85 sessions. Nothing knew that. On 2026-08-07 it sailed past it, and at exhaustion NOTHING can
+start -- not a terminal, not a session, not even a server restart, because respawning also needs a pty. The fleet
+could not recover itself and had to be rescued from the break-glass console.
+
+`sh()` now refuses `tmux new-session` when the machine is within `pty_reserve_sessions` (default 4) of the
+ceiling. Gating the one choke point covers all 19 launch paths -- chiefs, agents, skills, teams, Ralph, resume,
+tasks -- including any added later. The refusal states the real numbers, what to run to free capacity, and how
+to override it. Tuning: `pty_per_session` (6), `pty_reserve_sessions` (4); kill switch `capacity_enforce:false`.
+
+It fails OPEN in every uncertain case: if the cap cannot be read, or the probe raises, or the switch is off, it
+never blocks. It only ever inspects `new-session` -- kill-session, list-sessions and attach-session are untouched
+at any pressure, so recovery work always still functions.
+
+Also: the interactive creators (admin shell, skills) now surface the refusal instead of reporting success while
+silently creating nothing -- a lying "ok" is worse than no guard at all.
+
+Verified: 16 unit cases on the real function (normal, at-ceiling, other commands, fail-open, kill switch) plus a
+live end-to-end test that forced a real refusal on a running node and confirmed no session was created, then
+reverted and confirmed normal operation.
+
+## 0.99.256 -- 2026-08-08  (Ready for the first external install: declared dependencies, and the update job that was silently dead)
+
+Auditing the install path for a real external user turned up a structural gap and a serious defect.
+
+**The gap: two installers that did not know about each other.** Everything protective -- the read-only core,
+the licensing, the signed integrity manifest -- was built, but `AGENT_INSTALL.md` never mentioned any of it.
+The shipped zip installed the soft developer path: every framework file owned and writable by the operator,
+licensing inert, and `cc-init.sh` printing instructions for turning our updates off. `AGENT_INSTALL.md` now
+**forks on install mode** and defaults to appliance for anyone outside the authoring fleet.
+
+**The defect: the appliance healer could never have worked.** `APPLIANCE_BRINGUP.md` said to run
+`pip3 install --user cryptography` as the admin. That lands in the admin's home -- invisible to `cfrun`
+(home `/var/empty`) and to `root`. The runtime plist hardcoded `/usr/bin/python3` while the healer used PATH
+`python3`, so they were not even the same interpreter. Without cryptography the healer hit `NOCRYPTO`, logged
+one line and **`exit 0`** -- no update, no self-heal, silently, every 30 minutes, forever, while the dashboard
+showed a green vault because the *server's* interpreter had the package. A box built exactly per the runbook
+would have had no update mechanism at all.
+
+Fixed at the root: one **pinned interpreter** for runtime and healer (`CF_PYTHON`, default `/usr/bin/python3`),
+installed system-wide and **verified by real import as both root and cfrun**, with the installer aborting if
+either fails. The healer now writes a **health beacon**; Doctor turns RED on a degraded beacon *or* a stale one
+(no run in 4h), because "no news" from a 30-minute job must never read as healthy. `NOCRYPTO` is now fatal and
+loud instead of `exit 0`.
+
+**Dependencies are now declared, not discovered.** `claudefather.deps.json` is the single source of truth
+(the one third-party package, binaries by tier, **which interpreters each package must be importable by**,
+macOS permission steps, the FileVault-vs-auto-login trade-off). `cf-preflight` verifies it and `install.sh`
+runs it as a hard gate. Checks are **per-interpreter**, and when one cannot be verified without a sudo
+password it reports UNKNOWN and FAILS rather than assuming pass. Only 3 of ~20 dependencies were checked before.
+
+Also: appliance installs now default to `update_verify: enforce` and `vault_keychain: true`; the installer
+mints and prints the login PIN once (never overwriting an existing `auth_token`); it **asserts** the hardening
+holds rather than reporting a 200 (including that `cfrun` cannot write core) and exits nonzero if not;
+`license_enforce` turns on only when activation is actually configured, so a box is never bricked with no path
+to activate; the update opt-out guidance is now conditioned on edition (a sold appliance is not told how to
+stop taking signed updates, and is instead warned if `update_verify` is left at `warn`); the Tailscale
+instructions now carry the mandatory +1000 port offset (the old line produced `EADDRINUSE` and a server that
+would not start); and `working` was added to `never_ship` -- module working notes sit inside framework dirs
+and would otherwise have shipped to customers.
+
 ## 0.99.255 -- 2026-08-07  (Stranded tmux generations: why agents pile up where nothing can see them)
 
 `tmux ls` only reaches the ONE server behind the live socket. When a tmux server goes unresponsive a fresh one

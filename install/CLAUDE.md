@@ -1,5 +1,10 @@
 # install/ -- Installer & lifecycle (ClaudeFather)
 
+<!-- CC:NOTES append-only; agents file learnings that belong to THIS module here -->
+## Learnings (filed by agents; append-only)
+- First-external-install audit (install/working/EXTERNAL_INSTALL_DEEPDIVE.md): the hardened appliance path (cf-appliance-install.sh + license + core.sig self-heal) is fully BUILT but NOT referenced by the shipping AGENT_INSTALL.md/README -- the zip installs the soft developer path. Biggest real defect: the root healer + cfrun runtime use DIFFERENT python interpreters than the server, so 'pip3 install --user cryptography' per APPLIANCE_BRINGUP leaves the healer at NOCRYPTO -> it exits 0 and never updates or self-heals, silently, while the dashboard shows a green vault. Root cause of that class = 
+<!-- /CC:NOTES -->
+
 This module is the **install + lifecycle surface** of ClaudeFather: how a node is born, configured,
 updated, recovered, packaged, and shipped to other deployments. The `install/` dir holds the
 packaged entry point; the lifecycle SCRIPTS themselves live at the framework ROOT (`$CC_HOME/`).
@@ -12,16 +17,37 @@ config-driven via `cc.config.json`. THE hard line everything here enforces:
 > The framework could go fully public without leaking a credential.
 
 ## Files (this dir)
-- `install.sh` -- bootstrap: prep an unzipped framework dir as `CC_HOME`. Idempotent, non-destructive:
-  chmods scripts, makes `data/ bin/`, installs secret scanners (best-effort) + `cryptography`
-  (Ed25519, for superadmin grant verification), prints next steps. NOTE: a SECOND copy lives at the
-  package root and is what `make-install-package.sh` ships (see below).
+- `install.sh` -- bootstrap: prep an unzipped framework dir as `CC_HOME`. Idempotent, non-destructive.
+  Does the ACTIONS (chmod scripts, make `data/ bin/`, install secret scanners best-effort + `cryptography`),
+  then runs `cf-preflight` as the GATE and exits nonzero if a required dependency is missing. Pass
+  `--appliance` through for a hardened customer box. `make-install-package.sh` copies THIS file to the
+  package root (the old root duplicate is gone -- this is the single source).
 - `AGENT_INSTALL.md` -- the **complete playbook a Claude Code agent follows** to install a node.
   Covers NEW project (4A) vs MIGRATE an existing one (4B, safety-first read-only-original rules),
   storage modes, start+verify, optional overseer registration, hard rules. This is the source of truth
   for the install flow.
 - `README_INSTALL.md` -- short human-facing intro: the easy way ("point Claude Code at AGENT_INSTALL.md")
   and the manual way (the raw command sequence).
+
+## Dependencies -- DECLARED, not discovered
+- `claudefather.deps.json` (framework root) -- **the single source of truth** for every dependency: the one
+  third-party python package (`cryptography`), the binaries by tier (required / appliance / optional /
+  macOS built-in), the **interpreters** that each package must be importable by, the manual macOS
+  permission steps, and the FileVault-vs-auto-login power posture choice. Adding a dependency anywhere in
+  the framework means adding it HERE.
+- `cf-preflight` (framework root) -- reads that manifest and verifies it. `--appliance` also checks the
+  appliance-only binaries **and the cfrun + root interpreters**; `--json` feeds Doctor/CI; `--quiet` shows
+  only problems. Exit 0 only when every required dependency is satisfied.
+- **Why per-INTERPRETER is the whole point:** the server, the appliance runtime (as `cfrun`, home
+  `/var/empty`), and the appliance healer (as `root`) can be three different pythons with three different
+  site-packages. `pip install --user` as the admin is invisible to the other two. When the healer cannot
+  import `cryptography` it prints `NOCRYPTO` and `exit 0`s -- **no update, no self-heal, silently, every 30
+  minutes** -- while the dashboard shows a green vault. A per-box check cannot see that; a per-interpreter
+  check can. If a check cannot be run (needs a sudo password), preflight reports UNKNOWN and FAILS rather
+  than assuming pass.
+- Also correct two common misreadings: `gitleaks` is **vendored** into `bin/` by
+  `agents/security/tools/install_scanners.sh`, and `ffmpeg`/`ffprobe`/`yt-dlp` are vendored under the media
+  extension's `STUDIO_BIN`. Neither is a system dependency -- do not check for or install them globally.
 
 ## Lifecycle scripts (at `$CC_HOME/` root, NOT in this dir)
 - `cc-init.sh <project_root> [name] [brand] [storage]` -- "drop a project in". Writes/merges
@@ -109,6 +135,8 @@ Ship flow for a new version:
 - New per-deployment state file -> add to `preserve_paths` (so an update never clobbers it).
 - New install step -> edit `AGENT_INSTALL.md` (the agent playbook) and, if scripted, the relevant
   `cc-*.sh`; mirror non-secret changes into `install.sh`.
+- **New dependency of ANY kind -> declare it in `claudefather.deps.json`**, never as another ad-hoc
+  `command -v` in a script. If it is a python package, list every interpreter that must import it.
 - New lifecycle script -> root `$CC_HOME/`, honor `CC_HOME`/`CC_CONFIG`, read the manifest for any
   framework/preserve decisions, and list it in `framework_paths`.
 - Bump `version` in the manifest on every ship; record it in `docs/CHANGELOG.md`.

@@ -48,9 +48,11 @@ def _framework_files():
                 for root, _dirs, fs in os.walk(m):
                     _parts = root.split(os.sep)
                     # skip per-node TRANSIENT state that lives under a framework dir but never ships as core:
-                    # secrets, git, session handoffs, deliverables. (Handoffs narrate tenant work by nature.)
+                    # secrets, git, session handoffs, deliverables, working notes. (Handoffs + working docs
+                    # narrate tenant work by nature.) Keep this set in sync with the manifest's never_ship --
+                    # anything excluded there is not core and must not be residue-scanned as if it were.
                     if ("secrets" in _parts or "_handoffs" in _parts or "deliverables" in _parts
-                            or "/.git" in root): continue
+                            or "working" in _parts or "/.git" in root): continue
                     for f in fs:
                         if f.endswith(TEXT_EXT): files.add(os.path.relpath(os.path.join(root, f), HOME))
     return sorted(files)

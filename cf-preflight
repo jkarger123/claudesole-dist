@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+# ============================================================================================================
+# cf-preflight -- verify every declared ClaudeFather dependency BEFORE an install is called done.
+#
+# Reads claudefather.deps.json (the single source of truth) and checks:
+#   1. every binary, by tier (required / appliance / optional / macOS builtin)
+#   2. `cryptography` for EVERY INTERPRETER that needs it -- not just the one on your PATH
+#   3. the macOS permission + power-posture decisions an installer CANNOT make for you
+#
+# Point 2 is the reason this exists. The server, the appliance runtime (as cfrun), and the appliance healer
+# (as root) can be THREE DIFFERENT interpreters with three different site-packages. A green dashboard vault
+# says nothing about whether the root healer can verify a signature -- and when it cannot, it exits 0 and
+# silently never updates or self-heals again. Per-interpreter, not per-box.
+#
+# Usage:
+#   bash cf-preflight                 # developer / standard install
+#   bash cf-preflight --appliance     # also check the appliance-only binaries + cfrun/root interpreters
+#   bash cf-preflight --json          # machine-readable (for Doctor / CI)
+#   bash cf-preflight --quiet         # only problems
+#
+# Exit: 0 = every REQUIRED dependency satisfied. 1 = something required is missing or UNKNOWN-and-required.
+# ============================================================================================================
+set -uo pipefail
+CC_HOME="${CC_HOME:-$(cd "$(dirname "$0")" && pwd)}"
+DEPS="$CC_HOME/claudefather.deps.json"
+
+# python3 is checked in plain shell FIRST so its absence gives a useful message rather than a shebang error.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "PREFLIGHT FAIL: python3 is not installed -- it is the engine and this checker needs it."
+  echo "  fix: xcode-select --install    (or: brew install python3)"
+  exit 1
+fi
+[ -f "$DEPS" ] || { echo "PREFLIGHT FAIL: no dependency manifest at $DEPS"; exit 1; }
+
+exec python3 - "$DEPS" "$@" <<'PYEOF'
+import json, os, shutil, subprocess, sys, platform
+
+deps_path = sys.argv[1]
+args      = sys.argv[2:]
+APPLIANCE = "--appliance" in args
+AS_JSON   = "--json" in args
+QUIET     = "--quiet" in args
+IS_MAC    = platform.system() == "Darwin"
+
+D = json.load(open(deps_path))
+results = {"binaries": [], "interpreters": [], "permissions": [], "ok": True, "problems": []}
+
+C = {"g": "\033[32m", "y": "\033[33m", "r": "\033[31m", "d": "\033[2m", "b": "\033[1m", "x": "\033[0m"}
+if AS_JSON or not sys.stdout.isatty():
+    C = {k: "" for k in C}
+
+def out(s=""):
+    if not AS_JSON:
+        print(s)
+
+def run(cmd, timeout=10):
+    """(rc, stdout) -- never raises."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except Exception as e:
+        return 127, str(e)
+
+def can_sudo():
+    """True only if passwordless sudo is available RIGHT NOW -- we never prompt, and never pretend."""
+    if os.geteuid() == 0:
+        return True
+    return run(["sudo", "-n", "true"], timeout=5)[0] == 0
+
+SUDO_OK = can_sudo()
+
+# ---- 1. binaries ------------------------------------------------------------------------------------------
+TIERS_ACTIVE = {"required", "optional", "builtin_macos"} | ({"appliance"} if APPLIANCE else set())
+
+for b in D.get("binaries", []):
+    tier = b.get("tier", "optional")
+    if tier not in TIERS_ACTIVE:
+        continue
+    if tier == "builtin_macos" and not IS_MAC:
+        continue
+    path = shutil.which(b["cmd"])
+    found = bool(path)
+    rec = {"cmd": b["cmd"], "tier": tier, "found": found, "path": path,
+           "why": b.get("why", ""), "install": b.get("install_macos", ""),
+           "feature": b.get("feature"), "gotcha": b.get("gotcha")}
+    results["binaries"].append(rec)
+    if not found and tier in ("required", "appliance"):
+        results["ok"] = False
+        results["problems"].append("MISSING %s (%s): %s" % (b["cmd"], tier, b.get("install_macos", "")))
+
+# ---- 2. python packages, PER INTERPRETER (the whole point) ------------------------------------------------
+def probe(interp_id, argv_prefix, label, needs, note=""):
+    """argv_prefix runs an interpreter; probe version + each needed import. UNKNOWN when we cannot test."""
+    rec = {"id": interp_id, "label": label, "note": note, "checked": False,
+           "version": None, "packages": {}, "reachable": None}
+    rc, o = run(list(argv_prefix) + ["-c", "import sys;print(sys.version.split()[0])"])
+    if rc != 0:
+        rec["reachable"] = False
+        rec["error"] = o.strip()[:160]
+        results["interpreters"].append(rec)
+        # An unreachable interpreter we were ASKED to check is a required-tier problem.
+        results["ok"] = False
+        results["problems"].append("INTERPRETER %s (%s) not testable: %s" % (interp_id, label, rec["error"][:80]))
+        return
+    rec["reachable"] = True
+    rec["checked"] = True
+    rec["version"] = o.strip().splitlines()[-1] if o.strip() else "?"
+    for pkg in needs:
+        prc, _ = run(list(argv_prefix) + ["-c", "import %s" % pkg["import"]])
+        good = (prc == 0)
+        rec["packages"][pkg["import"]] = good
+        if not good and pkg.get("tier") == "required":
+            results["ok"] = False
+            results["problems"].append(
+                "INTERPRETER %s (%s) cannot import %s -- %s" % (interp_id, label, pkg["import"], pkg.get("install", "")))
+    results["interpreters"].append(rec)
+
+def unknown(interp_id, label, how):
+    rec = {"id": interp_id, "label": label, "checked": False, "reachable": None,
+           "unknown_reason": "needs root/sudo -- not testable without a password", "how": how}
+    results["interpreters"].append(rec)
+    results["ok"] = False
+    results["problems"].append("INTERPRETER %s (%s) UNVERIFIED -- %s" % (interp_id, label, how))
+
+pypkgs = D.get("python", {}).get("packages", [])
+need_ids = {p["import"] for p in pypkgs}
+
+# server interpreter: whatever python3 resolves to now
+probe("server", [shutil.which("python3") or "python3"], "PATH python3 (runs server.py)", pypkgs)
+
+if APPLIANCE and IS_MAC:
+    runuser = os.environ.get("CF_RUNUSER", "cfrun")
+    user_exists = run(["id", runuser])[0] == 0
+
+    # appliance_runtime: /usr/bin/python3 AS cfrun (home /var/empty -> cannot see admin --user packages)
+    if not user_exists:
+        results["interpreters"].append({"id": "appliance_runtime", "label": "/usr/bin/python3 as %s" % runuser,
+                                        "checked": False, "note": "runtime user does not exist yet (pre-install) -- re-run after cf-appliance-install.sh"})
+    elif SUDO_OK:
+        probe("appliance_runtime", ["sudo", "-n", "-u", runuser, "/usr/bin/python3"],
+              "/usr/bin/python3 as %s" % runuser, pypkgs,
+              note="cfrun home is /var/empty -- admin `pip install --user` packages are INVISIBLE here")
+    else:
+        unknown("appliance_runtime", "/usr/bin/python3 as %s" % runuser,
+                "run: sudo -u %s /usr/bin/python3 -c 'import cryptography'" % runuser)
+
+    # appliance_healer: root's PATH python3 (cf-update-healer.sh). NOCRYPTO here = updates silently dead.
+    if SUDO_OK:
+        probe("appliance_healer", (["python3"] if os.geteuid() == 0 else ["sudo", "-n", "python3"]),
+              "python3 as root (cf-update-healer.sh)", pypkgs,
+              note="no cryptography here => healer prints NOCRYPTO and exit 0 -- NO updates, NO self-heal, silently")
+    else:
+        unknown("appliance_healer", "python3 as root (cf-update-healer.sh)",
+                "run: sudo python3 -c 'import cryptography'")
+
+# ---- 3. claude auth (the #1 predicted failure) ------------------------------------------------------------
+claude_auth = None
+if shutil.which("claude"):
+    claude_auth = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+                       or os.path.isfile(os.path.expanduser("~/.claude.json")))
+results["claude_auth_detected"] = claude_auth
+
+# ---- 4. permissions + power posture (informational -- an installer CANNOT set these) ----------------------
+results["permissions"] = D.get("macos_permissions", []) if IS_MAC else []
+results["power_posture"] = D.get("power_posture", {})
+
+# ---- render -----------------------------------------------------------------------------------------------
+if AS_JSON:
+    print(json.dumps(results, indent=2))
+    sys.exit(0 if results["ok"] else 1)
+
+mark = lambda ok: (C["g"] + "ok   " + C["x"]) if ok else (C["r"] + "MISS " + C["x"])
+
+out()
+out("%s== ClaudeFather preflight ==%s   (%s%s)" % (C["b"], C["x"], "appliance" if APPLIANCE else "developer",
+                                                   "" if IS_MAC else ", non-macOS"))
+out("%smanifest: %s%s" % (C["d"], deps_path, C["x"]))
+
+for tier, title in (("required", "REQUIRED"), ("appliance", "APPLIANCE"),
+                    ("builtin_macos", "macOS BUILT-IN"), ("optional", "OPTIONAL")):
+    rows = [r for r in results["binaries"] if r["tier"] == tier]
+    if not rows:
+        continue
+    if QUIET and not any(not r["found"] for r in rows):
+        continue
+    out()
+    out("%s%s%s" % (C["b"], title, C["x"]))
+    for r in rows:
+        if QUIET and r["found"]:
+            continue
+        suffix = ""
+        if not r["found"]:
+            if tier == "optional":
+                suffix = "%s -> %s unavailable; install: %s%s" % (C["y"], r.get("feature") or "a feature", r["install"], C["x"])
+            elif tier == "builtin_macos":
+                # "install: builtin" is useless advice. If a macOS built-in is absent, the PATH is wrong.
+                suffix = "%s -> ships with macOS; absent means a restricted PATH (check /usr/bin, /usr/sbin, /bin)%s" % (C["y"], C["x"])
+            else:
+                suffix = "%s -> install: %s%s" % (C["r"], r["install"], C["x"])
+        elif not QUIET:
+            suffix = "%s%s%s" % (C["d"], r["path"], C["x"])
+        ok = r["found"] or tier in ("optional", "builtin_macos")
+        m = mark(r["found"]) if r["found"] or tier != "optional" else (C["y"] + "opt  " + C["x"])
+        out("  %s %-14s %s" % (m, r["cmd"], suffix))
+        if not r["found"] and r.get("gotcha") and not QUIET:
+            out("       %s%s%s" % (C["d"], r["gotcha"], C["x"]))
+
+out()
+out("%sPYTHON PACKAGES -- PER INTERPRETER%s  %s(a green vault on one interpreter says nothing about the others)%s"
+    % (C["b"], C["x"], C["d"], C["x"]))
+for r in results["interpreters"]:
+    if r.get("checked"):
+        pkgs = r.get("packages", {})
+        bad = [k for k, v in pkgs.items() if not v]
+        m = mark(not bad)
+        out("  %s %-42s %spython %s%s" % (m, r["label"], C["d"], r.get("version", "?"), C["x"]))
+        for k, v in pkgs.items():
+            out("       %s %s" % ((C["g"] + "import ok" + C["x"]) if v else (C["r"] + "IMPORT FAILS" + C["x"]), k))
+        if bad and r.get("note"):
+            out("       %s%s%s" % (C["y"], r["note"], C["x"]))
+    elif r.get("reachable") is False:
+        out("  %s %-42s %s%s%s" % (C["r"] + "ERR  " + C["x"], r["label"], C["d"], r.get("error", "")[:60], C["x"]))
+    elif r.get("unknown_reason"):
+        out("  %s %-42s %s%s%s" % (C["y"] + "?    " + C["x"], r["label"], C["y"], r["unknown_reason"], C["x"]))
+        out("       %scheck it yourself: %s%s" % (C["d"], r.get("how", ""), C["x"]))
+    else:
+        out("  %s %-42s %s%s%s" % (C["d"] + "skip " + C["x"], r["label"], C["d"], r.get("note", ""), C["x"]))
+
+if claude_auth is False:
+    out()
+    out("  %sclaude is installed but NO AUTH detected%s -- run `claude login` (or set ANTHROPIC_API_KEY)." % (C["y"], C["x"]))
+    out("  %sVerify before launching:  claude -p 'reply OK'   (without auth the dashboard boots green and EVERY agent fails)%s" % (C["d"], C["x"]))
+
+if not QUIET and IS_MAC and results["permissions"]:
+    out()
+    out("%sMANUAL macOS STEPS (no installer can do these for you)%s" % (C["b"], C["x"]))
+    for p in results["permissions"]:
+        if p.get("id") == "notifications":
+            continue
+        out("  - %s%s%s: %s" % (C["b"], p["id"], C["x"], p.get("needed_when", "")))
+        if p.get("how"):
+            out("      %s%s%s" % (C["d"], p["how"], C["x"]))
+        if p.get("gotcha"):
+            out("      %s%s%s" % (C["y"], p["gotcha"], C["x"]))
+    pp = results.get("power_posture") or {}
+    if pp:
+        out("  - %spower posture%s: an explicit CHOICE, the two goals conflict." % (C["b"], C["x"]))
+        out("      %sresilient: %s%s" % (C["d"], pp.get("resilient", ""), C["x"]))
+        out("      %ssecure:    %s%s" % (C["d"], pp.get("secure", ""), C["x"]))
+        out("      %srecommended for an appliance: %s%s" % (C["d"], pp.get("recommended_appliance", "?"), C["x"]))
+
+out()
+if results["ok"]:
+    out("%sPREFLIGHT PASS%s -- every required dependency is satisfied." % (C["g"] + C["b"], C["x"]))
+else:
+    out("%sPREFLIGHT FAIL%s -- %d problem(s):" % (C["r"] + C["b"], C["x"], len(results["problems"])))
+    for p in results["problems"]:
+        out("  %s- %s%s" % (C["r"], p, C["x"]))
+out()
+sys.exit(0 if results["ok"] else 1)
+PYEOF

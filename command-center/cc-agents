@@ -141,6 +141,34 @@ def transcript_for(cwd, start, cmd):
     return None, 0
 
 
+def _last_activity(path, tail=400):
+    """When this session last did REAL work -- the newest record that carries a `timestamp`.
+
+    File mtime is the wrong signal and it fooled this tool badly. Claude Code keeps rewriting small state
+    records (`last-prompt`, `ai-title`, `mode`, `permission-mode`) that carry NO timestamp, so an abandoned
+    session's file keeps getting touched forever. Measured: 28 stranded sessions all showed "written 18 minutes
+    ago" while their last actual conversation was their launch intro hours earlier, and not one grew by a byte
+    over two minutes. Read the tail and take the newest TIMESTAMPED record -- that is real activity."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2); size = fh.tell()
+            fh.seek(max(0, size - 400000))
+            lines = fh.read().decode("utf-8", "replace").splitlines()[-tail:]
+    except Exception:
+        return 0
+    best = 0
+    for line in lines:
+        try: ts = (json.loads(line) or {}).get("timestamp")
+        except Exception: continue
+        if ts:
+            try:
+                t = datetime.datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S").replace(
+                    tzinfo=datetime.timezone.utc).timestamp()
+                if t > best: best = t
+            except Exception: pass
+    return best
+
+
 def _first_ts(path, scan=60):
     """Timestamp of the transcript's first REAL record.
 
@@ -183,11 +211,43 @@ def inventory():
         if os.path.basename((v["cmd"].split() or [""])[0]) != "claude":
             continue
         cwd = cwd_of(pid) if v["user"] == ME else ""
-        tx, last = transcript_for(cwd, v["start"], v["cmd"]) if cwd else (None, 0)
         rows.append({"pid": pid, "user": v["user"], "start": v["start"], "cwd": cwd,
-                     "sess": sess(pid), "gen": gen(pid), "tx": tx, "last": last,
+                     "sess": sess(pid), "gen": gen(pid), "tx": None, "last": 0,
                      "live_gen": ls})
+    _assign(rows)
     return rows, ls
+
+
+def _assign(rows):
+    """Assign transcripts to processes ONE-TO-ONE, globally, closest pair first.
+
+    Matching each process independently to its nearest transcript is wrong when several agents share a cwd --
+    they all latch onto the same file, which then 'proves' every one of them is active because that ONE busy
+    session keeps writing. Measured: 29 of 33 stranded sessions collided this way, leaving nothing decidable.
+    A fleet restart launches many chiefs within seconds of each other, so this is the normal case, not an edge
+    case. Build every (process, transcript) pair, sort by |first_record - process_start|, and take pairs
+    greedily -- each transcript vouches for exactly one process."""
+    pairs = []
+    locked = {}
+    for i, r in enumerate(rows):
+        if r["user"] != ME or not r["cwd"] or not r["start"]:
+            continue
+        m = re.search(r"--resume\s+([0-9a-f-]{36})", (r.get("cmd") or "") or "")
+        d = os.path.join(HOME, ".claude/projects/" + r["cwd"].replace("/", "-"))
+        if not os.path.isdir(d):
+            continue
+        for f in glob.glob(d + "/*.jsonl"):
+            t = _first_ts(f)
+            if not t: continue
+            delta = abs(t - r["start"])
+            if delta <= 300: pairs.append((delta, i, f))
+    pairs.sort()
+    used_tx, used_pr = set(), set()
+    for delta, i, f in pairs:
+        if i in used_pr or f in used_tx: continue
+        used_pr.add(i); used_tx.add(f)
+        rows[i]["tx"] = f
+        rows[i]["last"] = _last_activity(f) or 0
 
 
 def fmt_age(s):
@@ -197,7 +257,12 @@ def fmt_age(s):
 
 
 def main(argv):
-    idle_h = 24
+    # A STRANDED session cannot be given work -- no session can reach it, so nobody can type into it. The only
+    # thing that could make one legitimately busy is autonomous work, and that shows up as a GROWING transcript.
+    # Measured on 29 stranded sessions: not one changed by a single byte over two minutes. The old 24h default
+    # was guarding a case that cannot occur and left ~200 ptys (two thirds of this machine's ceiling) locked up.
+    # 2h gives burst-y autonomous agents plenty of margin, and the live re-check below is the real safety net.
+    idle_h = 2
     if "--idle-hours" in argv:
         i = argv.index("--idle-hours")
         if i + 1 < len(argv):
@@ -262,6 +327,24 @@ def main(argv):
         return 0
     if not cand:
         print("\nnothing to reclaim"); return 0
+    # LIVE RE-CHECK. Everything above is a snapshot; between deciding and acting an agent could start working.
+    # Watch every candidate's transcript for 60s and drop any that moves. This is what makes a short idle
+    # threshold safe: we never kill on history alone, only on history PLUS observed silence right now.
+    print("\nfinal check: watching %d transcript(s) for 60s -- anything that moves is spared" % len(cand))
+    before = {}
+    for r in cand:
+        try: before[r["pid"]] = (os.path.getsize(r["tx"]), os.path.getmtime(r["tx"]))
+        except Exception: before[r["pid"]] = (0, 0)
+    time.sleep(60)
+    moved = []
+    for r in list(cand):
+        try: now_ = (os.path.getsize(r["tx"]), os.path.getmtime(r["tx"]))
+        except Exception: now_ = before[r["pid"]]
+        if now_ != before[r["pid"]]:
+            moved.append(r["pid"]); cand.remove(r)
+    if moved: print("  SPARED %d that started working during the check: %s" % (len(moved), " ".join(moved)))
+    if not cand:
+        print("  everything became active -- nothing to reclaim"); return 0
     print("\nreclaiming %d agent(s), batches of %d, SIGTERM first" % (len(cand), BATCH))
     for i in range(0, len(cand), BATCH):
         for r in cand[i:i + BATCH]:

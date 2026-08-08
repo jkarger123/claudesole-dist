@@ -43,10 +43,11 @@ python3 -c "import json;print(json.load(open('claudesole.manifest.json'))['versi
 # 3) zip it
 ZIP="$OUT/claudefather-install.zip"; rm -f "$ZIP"
 ( cd "$TMP" && zip -rqX "$ZIP" claudefather )
+PKG_VERSION="$(cat "$STAGE/VERSION" 2>/dev/null)"     # read BEFORE the staging dir is removed
 rm -rf "$TMP"
 
 echo "built: $ZIP"
-echo "  version: $(cat "$STAGE/VERSION" 2>/dev/null || sed -n '1p' VERSION 2>/dev/null)"
+echo "  version: ${PKG_VERSION:-<unknown>}"
 du -h "$ZIP" | cut -f1 | xargs echo "  size:"
 echo "  files: $(unzip -l "$ZIP" | tail -1 | awk '{print $2}')"
 echo "Deliver this zip; the recipient unzips it and points Claude Code at claudefather/AGENT_INSTALL.md."

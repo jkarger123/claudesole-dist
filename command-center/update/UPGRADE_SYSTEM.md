@@ -150,13 +150,13 @@ to keep itself current. Do **not** rebuild a hand-maintained per-node push list 
 
 ```
 # this node's posture
-curl -s -H "Cookie: cc_auth=3673" http://localhost:8800/api/update-status | python3 -m json.tool
+curl -s -H "Cookie: cc_auth=<YOUR_PIN>" http://localhost:8800/api/update-status | python3 -m json.tool
 # fleet drift (who's behind)
-curl -s -H "Cookie: cc_auth=3673" http://localhost:8800/api/ccr-drift | python3 -m json.tool
+curl -s -H "Cookie: cc_auth=<YOUR_PIN>" http://localhost:8800/api/ccr-drift | python3 -m json.tool
 # force a tenant to self-check now (run on that node)
-curl -s -X POST -H "Cookie: cc_auth=3673" http://localhost:8802/api/update-now
+curl -s -X POST -H "Cookie: cc_auth=<YOUR_PIN>" http://localhost:8802/api/update-now
 # MC: converge the fleet
-curl -s -X POST -H "Cookie: cc_auth=3673" -H "Content-Type: application/json" -d '{}' http://localhost:8800/api/fleet-update
+curl -s -X POST -H "Cookie: cc_auth=<YOUR_PIN>" -H "Content-Type: application/json" -d '{}' http://localhost:8800/api/fleet-update
 # log
 tail -f <state>/_autoupdate.log
 ```

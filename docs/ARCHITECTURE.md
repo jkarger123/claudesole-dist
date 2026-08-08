@@ -204,4 +204,4 @@ The key mechanism is **`mesh_stop_hook.py`**: Claude Code runs it when a chief f
 | Deliverables (this node) | `<SSD>/claudefather-data/deliverables/<node>` |
 | **Docs** | `docs/{SUPERADMIN.md, NESTED_OVERSIGHT.md, STORAGE_ARCHITECTURE.md, SMART_FILES.md, PACKAGING.md, MEMORY_SKILLS_AGENTS.md, SESSIONS_AND_SUDO.md, AGENCY_INTEGRATION.md, CHANGELOG.md}` |
 
-**Key operational rules to remember:** restart via `claudesole-restart` after any `server.py`/frontend edit; never hand-edit framework files on a tenant node (file a CCR); never commit/echo secrets; default all output to the SSD; dashboard PIN is 3673 (confirm before any auth change).
+**Key operational rules to remember:** restart via `claudesole-restart` after any `server.py`/frontend edit; never hand-edit framework files on a tenant node (file a CCR); never commit/echo secrets; default all output to the SSD; dashboard PIN is <YOUR_PIN> (confirm before any auth change).

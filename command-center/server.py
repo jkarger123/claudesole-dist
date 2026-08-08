@@ -2698,12 +2698,54 @@ def _deliver_worker(session):
             if _vflag: _voice_trace_deliver(session, "timeout", why="session busy ~30 min", chars=len(text))
 
 # ---- shell / ssh / tmux ------------------------------------------------------
+# ---- capacity model (see _capacity_block) ---------------------------------------------------------------
+# Measured, not guessed: a Claude session holds a FIXED 6 pseudo-terminals for its whole life (verified across
+# sessions from 8 to 222 hours old). With the macOS default cap of 511 that is a hard ceiling near 85 sessions
+# on one machine, shared by every user and every co-located node.
+PTY_PER_SESSION       = int(CC.get("pty_per_session") or 6)
+PTY_RESERVE_SESSIONS  = int(CC.get("pty_reserve_sessions") or 4)     # headroom kept free for recovery work
+CAPACITY_ENFORCE      = CC.get("capacity_enforce", True) is not False  # cc.config capacity_enforce:false to disable
+
 def sh(cmd, timeout=15):
+    _blk = _capacity_block(cmd)
+    if _blk: return 1, "", _blk
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout, r.stderr
     except Exception as e:
         return 1, "", str(e)
+
+
+def _capacity_block(cmd):
+    """ADMISSION CONTROL. Refuse to create a new tmux session when the machine is near its pty ceiling.
+
+    macOS caps pseudo-terminals machine-wide (kern.tty.ptmx_max, default 511) and every Claude session holds a
+    FIXED 6 of them for its whole life -- measured across sessions from 8 to 222 hours old, it never grows. So
+    the box has a hard ceiling near 85 sessions, and on 2026-08-07 it sailed straight past it: at exhaustion
+    nothing can start a terminal, a session, OR a server restart (respawning needs a pty too), so the fleet
+    could not recover itself and had to be rescued from the break-glass console.
+
+    Gating here rather than at the ~19 individual launch sites means every path -- chiefs, agents, skills,
+    teams, Ralph, resume, tasks -- is covered, including ones added later. Callers already treat a non-zero
+    return as a failure and surface stderr, so refusal shows up as a normal, readable error.
+
+    Turn it off with cc.config `capacity_enforce: false`; tune with `pty_per_session` / `pty_reserve_sessions`."""
+    try:
+        if not CAPACITY_ENFORCE: return ""
+        if not (isinstance(cmd, (list, tuple)) and len(cmd) > 1 and cmd[1] == "new-session"): return ""
+        used, cap, _pct = _pty_usage()
+        if not cap: return ""                       # cannot read the limit -> never block on a guess
+        left = (cap - used) // max(1, PTY_PER_SESSION)
+        if left > PTY_RESERVE_SESSIONS: return ""
+        return ("REFUSED: this machine is at its terminal (pty) ceiling -- %d of %d in use, room for about %d "
+                "more session(s) and %d are held in reserve. Every session needs ~%d pseudo-terminals, and if "
+                "the pool is exhausted NOTHING can start here, including a server restart -- so new sessions are "
+                "refused before that point rather than after. Free capacity by closing sessions you are done "
+                "with (command-center/cc-agents shows every session, including ones no window can reach, and "
+                "reclaims idle ones safely). Override: cc.config capacity_enforce=false."
+                % (used, cap, max(0, left), PTY_RESERVE_SESSIONS, PTY_PER_SESSION))
+    except Exception:
+        return ""                                    # never let the guard itself break a launch
 def ssh_to(target, command, timeout=20):
     return sh(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", target, command], timeout)
 
@@ -6563,7 +6605,8 @@ def admin_shell():
     project so it scopes into THIS console's Sessions tab; cwd = the project root."""
     name = _admin_session_name()
     if sh([TMUX, "has-session", "-t", name])[0] != 0:
-        sh([TMUX, "new-session", "-d", "-s", name, "-c", PROJECT])
+        _rc, _o, _e = sh([TMUX, "new-session", "-d", "-s", name, "-c", PROJECT])
+        if _rc: return {"ok": False, "error": _e or "could not create the admin shell"}
     return {"ok": True, "session": name, "term": "/term?name=" + urllib.parse.quote(name)}
 
 def _admin_session_name():
@@ -9206,7 +9249,8 @@ def skill_open(scope, slug):
               "'You are authoring the Agent Skill in this folder (SKILL.md). Read it, then help me write/improve "
               "it per the best practices in the ClaudeFather docs/MEMORY_SKILLS_AGENTS.md (esp: the description "
               "is the trigger; keep it lean; lock side-effect skills to manual). One-line status, then stand by.'")
-        sh([TMUX, "new-session", "-d", "-s", sess, "-c", d, cl])
+        _rc, _o, _e = sh([TMUX, "new-session", "-d", "-s", sess, "-c", d, cl])
+        if _rc: return {"ok": False, "error": _e or "could not create the session"}
     return {"ok": True, "session": sess, "term": "/term?name=" + urllib.parse.quote(sess)}
 
 def skill_delete(scope, slug):
@@ -12138,9 +12182,17 @@ def doctor():
     # BUILT-IN public mirror (update_source not overridden) is NOT silent about it -- surface the posture + the
     # choice so a standalone operator isn't unknowingly running a third party's auto-shipped code.
     try:
-        if (not _is_update_source() and CC.get("auto_update", True) is not False
+        # NOTE the edition condition: on a licensed APPLIANCE, auto-converging signed updates from the vendor
+        # is the SOLD posture, not a surprise to warn about -- and telling that operator "here is how to stop
+        # pulling a third party's code" is advertising an opt-out of their own support + security guarantees.
+        # The disclosure is aimed at a self-operated node that may not realise it auto-installs code.
+        if (_edition() != "appliance" and not _is_update_source() and CC.get("auto_update", True) is not False
                 and not CC.get("update_source") and str(CC.get("update_channel", "")).lower() != "standalone"):
             issues.append({"sev": "warn", "path": "update", "msg": "This node AUTO-INSTALLS framework code from the built-in ClaudeFather public mirror (%s) every ~%d min and self-restarts. Fine for a MANAGED fleet node; a STANDALONE install should either point cc.config `update_source` at its own trusted upstream, or set `update_channel:\"standalone\"` (or `auto_update:false`) to stop auto-pulling a third party's code. Updates are signature-gated (update_verify=%s -- set \"enforce\" to block unverified updates)." % (OFFICIAL_DIST_GIT, int(CC.get("auto_update_check_min", 30)), (CC.get("update_verify") or "warn"))})
+        # On an appliance the failure mode is the OPPOSITE: verification quietly left at "warn" means the box
+        # would apply an update whose signature did not check out. That is the one update posture worth shouting about.
+        if _edition() == "appliance" and (CC.get("update_verify") or "warn") != "enforce":
+            issues.append({"sev": "warn", "path": "update", "msg": "This appliance has update_verify=%s -- an update that FAILS signature verification would still be applied. A packaged product should set cc.config `update_verify`:\"enforce\" so unverified framework code is blocked outright (docs/UPDATES.md)." % (CC.get("update_verify") or "warn")})
     except Exception: pass
     # EDITION TRIPWIRE (deep-audit #34): a change in the authority tier -- especially appliance -> authoring, which
     # unlocks core-mutating ops + self-signing + grant-minting -- is trivially triggered (update_role / .cc-source),
@@ -12165,6 +12217,23 @@ def doctor():
         if not _lic.get("licensed"):
             sev = "err" if _lic.get("enforce") else "warn"
             issues.append({"sev": sev, "path": "license", "msg": "appliance is NOT licensed (%s)%s. Fingerprint: %s -- issue a license for it (POST /api/license-issue on MC) and install it (POST /api/license-install)." % (_lic.get("reason", "?"), " [ENFORCED -- service refused]" if _lic.get("enforce") else " [soft -- not yet enforced]", _lic.get("fingerprint", "?"))})
+        # HEALER BEACON. The privileged update/self-heal job runs as root OUTSIDE this process, so nothing
+        # here notices when it dies -- and its classic failure (no `cryptography` for ITS interpreter) makes
+        # it exit without updating, forever, while this dashboard looks perfectly healthy. Surface both a
+        # DEGRADED beacon and a STALE one: "no news" from a 30-minute job must never read as "healthy".
+        try:
+            _hb_path = os.path.join(STATE_DIR, "_healer_health.json")   # appliance sets state_dir=<RUNROOT>/state
+            if os.path.isfile(_hb_path):
+                _hb = json.load(open(_hb_path))
+                _age = time.time() - float(_hb.get("ts") or 0)
+                if _hb.get("status") != "ok":
+                    issues.append({"sev": "err", "path": "healer", "msg": "the privileged UPDATE/SELF-HEAL job is DEGRADED: %s. Until this is fixed this box receives NO framework updates and will NOT self-heal a tampered core. Log: %s" % (str(_hb.get("reason", "?"))[:300], os.path.join(os.path.dirname(_hb_path), "healer.log"))})
+                elif _age > 4 * 3600:
+                    issues.append({"sev": "err", "path": "healer", "msg": "the update/self-heal job has not completed a run in %.1f hours (it should run every 30 min) -- updates and self-heal have silently stopped. Check: sudo launchctl kickstart -k system/com.claudefather.healer" % (_age / 3600.0)})
+            elif os.path.isfile("/Library/LaunchDaemons/com.claudefather.healer.plist"):
+                issues.append({"sev": "err", "path": "healer", "msg": "the update/self-heal LaunchDaemon is installed but has NEVER written a health beacon -- it is not completing runs. Check its log and run: sudo launchctl kickstart -k system/com.claudefather.healer"})
+        except Exception:
+            pass
     # Extension authorization (ALWAYS, every edition): only official (signed-dist) or operator-approved custom run.
     _unauth = _ext_unauthorized()
     if _unauth.get("rogue_dirs"):
@@ -13402,7 +13471,11 @@ def _proxy_context_package(port, sess):
     try:
         import urllib.request, urllib.parse
         url = "http://127.0.0.1:%d/api/context-package?session=%s" % (int(port), urllib.parse.quote(sess or ""))
-        req = urllib.request.Request(url, headers={"Cookie": "cc_auth=%s" % (AUTH_TOKEN or "3673")})
+        # FAIL CLOSED with no token. This used to fall back to a hardcoded dev PIN -- which put our fleet's
+        # PIN in a framework file shipped to every customer and published in the public dist. If this node
+        # has no AUTH_TOKEN the sibling call simply goes unauthenticated and fails; the caller already falls
+        # back to local computation, so there is nothing to gain from sending a magic constant.
+        req = urllib.request.Request(url, headers={"Cookie": "cc_auth=%s" % (AUTH_TOKEN or "")})
         with urllib.request.urlopen(req, timeout=1.8) as r:
             d = json.loads(r.read().decode())
             if isinstance(d, dict) and d.get("ok"): d["owner_port"] = int(port); return d
@@ -18223,7 +18296,12 @@ CORE_SIG_FILE = os.path.join(CC_HOME, "core.sig.json")        # SHIPPED: signed 
 CORE_INTEGRITY_LOG = os.path.join(STATE_DIR, "_core_integrity.log")
 _CORE_STATUS = {"status": "unchecked", "checked": 0, "drift": [], "healed": [], "ts": 0}
 CORE_HASH_EXT = (".py", ".sh", ".json", ".pub", ".css", ".html")   # code/config we protect (skip docs + vendored JS)
-CORE_HASH_SKIP = ("static/novnc", "static/xterm", "node_modules", "/.git/", "instances/", "secrets/", "/.env")
+CORE_HASH_SKIP = ("static/novnc", "static/xterm", "node_modules", "/.git/", "instances/", "secrets/", "/.env",
+                  # NEVER sign a path the manifest's never_ship excludes from bundles: the file is absent from
+                  # every shipped copy, so a signed hash for it makes each appliance report PERMANENT drift that
+                  # the healer can never resolve (the dist has no matching copy to restore from). Caught when
+                  # the 0.99.256 package verified with 2 signed-but-absent desktop/release build artifacts.
+                  "/release/", "_handoffs/", "/working/", "deliverables/", "_archive/", "_trash/")
 def _core_files():
     """Resolve manifest framework_paths -> the concrete code/config files we hash (relative to CC_HOME)."""
     try: fps = json.load(open(os.path.join(CC_HOME, "claudesole.manifest.json"))).get("framework_paths", [])

@@ -8,8 +8,17 @@ obfuscation), a separate layer: `docs/IP_PROTECTION.md`.
 ## 0. What you need
 - A Mac (mini) you've done first-boot setup on, with ONE admin account (the "installer" account).
 - Xcode command line tools: `xcode-select --install`.
-- `pip3 install --user cryptography` (the healer verifies the signed dist with it).
 - Network (to clone the public dist).
+- **Do NOT `pip3 install --user cryptography`.** That was the old instruction here and it is wrong: a
+  `--user` install lands in the *installing admin's* home, where neither `cfrun` (home `/var/empty`) nor
+  `root` can see it. The result is a box whose vault is disabled and whose healer can never verify an
+  update -- so it silently never updates or self-heals again, while the dashboard looks perfectly healthy.
+  **The installer now handles this**: it installs `cryptography` system-wide for one pinned interpreter
+  (`/usr/bin/python3`, override with `CF_PYTHON`) and verifies it by real import as *both* root and cfrun,
+  aborting if either fails. To check a box yourself:
+  ```
+  bash cf-preflight --appliance     # checks every declared dependency, per interpreter
+  ```
 
 ## 1. Get the framework bundle onto the box
 Clone the public dist (or copy a bundle you've prepared):
@@ -30,13 +39,15 @@ It will:
 5. Install two launchd services: the **runtime** (as cfrun) and the **healer/updater** (as root, every 30 min).
 6. Health-check `http://localhost:8800/`.
 
-## 3. Set the box's secrets + PIN
-The runtime user owns its secrets file (outside the read-only core):
-```
-sudo -u cfrun nano /Library/ClaudeFather/runtime/.env.claudefather   # or: printf 'KEY=VALUE\n' | sudo tee -a ...
-```
-Set at least the dashboard auth token (PIN) in `cc.config.json`'s `auth_token` (edit as root in the core, then
-re-lock perms — or pre-bake it before step 2). Restart: `sudo launchctl kickstart -k system/com.claudefather.runtime`.
+## 3. The PIN + secrets
+**The installer mints a login PIN and prints it ONCE in its final block** (only if `auth_token` was absent --
+it never overwrites an existing one, which would be a lockout). Write it down then; it is not recoverable
+from the UI.
+
+Secrets go in the **encrypted vault**, not a file: dashboard -> Vault, or `cc-secure request "<label>"
+vault:<KEY>` from an agent (the value routes browser -> server -> vault, never through chat). The appliance
+sets `vault_keychain: true`, so the vault key lives in the login Keychain rather than beside the ciphertext.
+`/Library/ClaudeFather/runtime/.env.claudefather` exists only as a bootstrap/import path.
 
 ## 4. Verify it's actually hardened
 ```

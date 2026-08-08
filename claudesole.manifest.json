@@ -1,11 +1,13 @@
 {
   "product": "ClaudeFather",
   "former_name": "Claudesole",
-  "version": "0.99.255",
+  "version": "0.99.257",
   "description": "Manifest that defines which paths are FRAMEWORK (ship + propagate to every ClaudeFather deployment on update) vs PRESERVE (per-deployment config/data/secrets/learnings -- never overwritten by an update).",
   "framework_paths": [
     "core.sig.json",
     "recovery.pub",
+    "claudefather.deps.json",
+    "cf-preflight",
     "cf-appliance-install.sh",
     "cf-update-healer.sh",
     "cf-build-appliance.sh",
@@ -159,6 +161,7 @@
     ".env.*",
     "*.local",
     "_handoffs",
+    "working",
     "deliverables",
     "node_modules",
     "release",

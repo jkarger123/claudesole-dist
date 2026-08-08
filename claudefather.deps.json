@@ -1,0 +1,211 @@
+{
+  "product": "ClaudeFather",
+  "schema": 1,
+  "description": "THE declared dependency set for a ClaudeFather install. Single source of truth read by cf-preflight (install time) and surfaced by Doctor (run time). Adding a dependency ANYWHERE in the framework means adding it HERE -- an undeclared dependency is how the appliance healer silently ran without `cryptography` for its whole life (see docs/CHANGELOG.md).",
+  "_tier_meaning": {
+    "required": "the install does not work without it -- cf-preflight exits nonzero",
+    "appliance": "required only for the hardened appliance install (cf-appliance-install.sh)",
+    "optional": "a named feature degrades or is unavailable; the install is otherwise fine",
+    "builtin_macos": "ships with macOS -- listed for completeness + so a Linux port knows what it must replace"
+  },
+  "python": {
+    "min_version": "3.8",
+    "_note": "The engine is stdlib Python plus exactly ONE third-party package. Keep it that way -- a second one costs portability. CRITICAL: `cryptography` must be importable by EVERY interpreter listed in `interpreters` below, not just the one on your PATH. That per-interpreter split is a real failure mode, not a hypothetical.",
+    "packages": [
+      {
+        "import": "cryptography",
+        "pip": "cryptography",
+        "tier": "required",
+        "why": "Load-bearing for FOUR systems: the credential vault (Fernet), Ed25519 superadmin grant verification, the signed-core update gate (verify_update.py), and the appliance healer's dist verification. Missing = vault DISABLED (every secret save fails) and the healer skips all updates + self-heal.",
+        "needed_by_interpreters": ["server", "appliance_runtime", "appliance_healer"],
+        "install": "python3 -m pip install --user --break-system-packages cryptography",
+        "verify": "python3 -c 'import cryptography'",
+        "gotcha": "PEP-668: on recent Homebrew/Debian pythons `pip install --user` EXITS NONZERO without installing anything. Always verify by real import after installing, never trust the exit code."
+      }
+    ]
+  },
+  "interpreters": [
+    {
+      "id": "server",
+      "what": "the python3 that runs command-center/server.py",
+      "resolve": "PATH python3 (or the ProgramArguments entry of the runtime launchd plist / tmux launch line)",
+      "applies_to": ["developer", "appliance"]
+    },
+    {
+      "id": "appliance_runtime",
+      "what": "the interpreter the appliance runtime LaunchDaemon hardcodes, running as the non-admin runtime user",
+      "resolve": "/usr/bin/python3 as user cfrun (home /var/empty)",
+      "applies_to": ["appliance"],
+      "gotcha": "cfrun's home is /var/empty, so it CANNOT see any `pip install --user` packages installed by the admin account. Install system-wide for this exact interpreter, or ship a venv inside core."
+    },
+    {
+      "id": "appliance_healer",
+      "what": "the interpreter cf-update-healer.sh uses, running as root via launchd",
+      "resolve": "PATH python3 as root",
+      "applies_to": ["appliance"],
+      "gotcha": "root has a different HOME than the admin who ran the install, so admin `--user` packages are invisible. Without cryptography the healer prints NOCRYPTO and `exit 0`s -- no update, no self-heal, silently, every 30 minutes."
+    }
+  ],
+  "binaries": [
+    {
+      "cmd": "python3", "tier": "required",
+      "why": "the engine; every lifecycle script",
+      "install_macos": "xcode-select --install  (or: brew install python3)"
+    },
+    {
+      "cmd": "tmux", "tier": "required",
+      "why": "every dashboard session, chief, and agent runs in a tmux session",
+      "install_macos": "brew install tmux",
+      "gotcha": "If the project lives on an external volume, tmux needs macOS Full Disk Access. `brew upgrade tmux` changes the binary signature and SILENTLY voids that grant -- consider `brew pin tmux`."
+    },
+    {
+      "cmd": "claude", "tier": "required",
+      "why": "Claude Code CLI -- every chief, agent, Ralph loop and the Front Desk concierge shells out to it. Without it (or without auth) the dashboard boots green and every agent fails on first launch.",
+      "install_macos": "see https://claude.com/claude-code",
+      "verify": "claude -p 'reply OK'",
+      "also_needs_auth": true
+    },
+    {
+      "cmd": "git", "tier": "required",
+      "why": "cloning + pulling the signed dist (updates and self-heal), cc-update.sh, the github storage mode, the pre-commit secret gate",
+      "install_macos": "xcode-select --install"
+    },
+    {
+      "cmd": "bash", "tier": "required",
+      "why": "every cc-*.sh / cf-*.sh lifecycle script",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "curl", "tier": "required",
+      "why": "health checks, activation, mesh calls",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "rsync", "tier": "required",
+      "why": "cc-update.sh framework overlay, make-install-package.sh staging, cf-appliance-install.sh core copy",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "ioreg", "tier": "builtin_macos",
+      "why": "reads IOPlatformUUID for the LICENSE hardware fingerprint. No ioreg = no stable fingerprint = licensing falls back to hostname+arch, which is NOT clone-resistant.",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "security", "tier": "builtin_macos",
+      "why": "macOS Keychain access -- vault_keychain key wrapping and Claude account switching",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "launchctl", "tier": "builtin_macos",
+      "why": "always-on supervision (runtime + healer LaunchDaemons)",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "osascript", "tier": "builtin_macos",
+      "why": "macOS automation used by a few helpers",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "say", "tier": "builtin_macos",
+      "why": "local TTS fallback provider for voice (when elevenlabs/openai are not configured)",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "pmset", "tier": "builtin_macos",
+      "why": "power + thermal vitals",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "dscl", "tier": "appliance",
+      "why": "creating the non-admin cfrun runtime user",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "sysadminctl", "tier": "appliance",
+      "why": "creating the cfrun runtime user with a service-range UID",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "dseditgroup", "tier": "appliance",
+      "why": "ensuring cfrun is NOT in the admin group",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "chflags", "tier": "appliance",
+      "why": "the optional --immutable profile (schg on core)",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "node", "tier": "optional",
+      "feature": "preship PAGE-JS gate",
+      "why": "`node --check` validates the ~10k lines of inline JS in server.py's PAGE string. Without it a syntax error can ship and kill the whole dashboard. Authoring-side mainly; harmless to omit on a customer box.",
+      "install_macos": "brew install node"
+    },
+    {
+      "cmd": "tailscale", "tier": "optional",
+      "feature": "remote access",
+      "why": "`tailscale serve` publishes the dashboard on the operator's own tailnet so it is reachable from a phone/laptop. NOT needed to use the box locally.",
+      "install_macos": "brew install --cask tailscale",
+      "gotcha": "The tailnet serve port MUST differ from the local server port -- the server binds 0.0.0.0 (which includes the tailnet IP), so the same number is EADDRINUSE and the server will not start. Convention: offset by +1000."
+    },
+    {
+      "cmd": "gh", "tier": "optional",
+      "feature": "github storage mode",
+      "why": "convenience for the github / icloud+github storage modes",
+      "install_macos": "brew install gh"
+    },
+    {
+      "cmd": "ssh", "tier": "optional",
+      "feature": "fleet SSH",
+      "why": "reaching other machines in a multi-machine fleet (cc-fleet-ssh). Irrelevant for a single-box install.",
+      "install_macos": "builtin"
+    },
+    {
+      "cmd": "zip", "tier": "optional",
+      "feature": "packaging",
+      "why": "make-install-package.sh builds the distributable zip. Authoring-side only.",
+      "install_macos": "builtin"
+    }
+  ],
+  "_vendored_not_system": {
+    "_note": "These are commonly MISTAKEN for system dependencies. They are vendored into the install and must NOT be added to `binaries` -- checking for them on the system produces false failures.",
+    "gitleaks": "vendored into bin/ by agents/security/tools/install_scanners.sh (best-effort, needs network)",
+    "ffmpeg / ffprobe / yt-dlp": "vendored under the media extension's STUDIO_BIN, not a system install"
+  },
+  "macos_permissions": [
+    {
+      "id": "full_disk_access",
+      "grant_to": "the tmux binary (e.g. /opt/homebrew/bin/tmux)",
+      "needed_when": "the project or data lives on an EXTERNAL volume (/Volumes/...). The internal disk never EPERMs.",
+      "how": "System Settings -> Privacy & Security -> Full Disk Access -> add the tmux binary",
+      "gotcha": "`brew upgrade tmux` changes the binary signature and silently voids the grant. Doctor detects the resulting EPERM. Do NOT restart the server to 'fix' it -- that re-attaches the same un-granted binary and hides the cause. `brew pin tmux` prevents it.",
+      "installer_can_do_it": false
+    },
+    {
+      "id": "accessibility",
+      "grant_to": "the terminal / host app",
+      "needed_when": "ONLY for the optional focus/context capture (reading frontmost window title + active browser URL)",
+      "how": "System Settings -> Privacy & Security -> Accessibility",
+      "installer_can_do_it": false,
+      "default": "leave off for a first install; the feature degrades cleanly"
+    },
+    {
+      "id": "microphone",
+      "grant_to": "the browser (per-site), not the server",
+      "needed_when": "voice dictation in the dashboard",
+      "how": "granted by the browser prompt on first use",
+      "installer_can_do_it": false
+    },
+    {
+      "id": "notifications",
+      "needed_when": "NEVER for the web install -- the framework does not use osascript display notification or terminal-notifier. Notifications are in-dashboard. Only the optional desktop/native app would need a system grant.",
+      "installer_can_do_it": false
+    }
+  ],
+  "power_posture": {
+    "_note": "An explicit install-time CHOICE, not a default to stumble into. The two goals genuinely conflict.",
+    "resilient": "FileVault OFF + auto-login ON -- a power cut returns to a logged-in session so launchd/GUI agents restart unattended. Weaker at-rest protection for the vault ciphertext.",
+    "secure": "FileVault ON + vault_keychain:true -- protects the vault in a stolen-disk scenario; a power cut needs one human unlock before the box comes back.",
+    "recommended_appliance": "secure"
+  }
+}

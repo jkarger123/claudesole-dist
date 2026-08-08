@@ -1,33 +1,27 @@
 #!/usr/bin/env bash
 # ClaudeFather bootstrap: prep the unzipped framework directory as CC_HOME. Idempotent, no destructive ops.
+#
+# This script does the ACTIONS (chmod, dirs, install cryptography + scanners); `cf-preflight` does the
+# CHECKING and is the gate. Dependencies are DECLARED in claudefather.deps.json -- add new ones there, not
+# as another ad-hoc `command -v` here, or they end up unchecked on the interpreters that actually matter.
 set -uo pipefail
 CC_HOME="${CC_HOME:-$(cd "$(dirname "$0")" && pwd)}"
 cd "$CC_HOME"
 echo "== ClaudeFather bootstrap =="
 echo "  CC_HOME: $CC_HOME"
 
-# python3 + tmux + Claude Code are the three requirements
-command -v python3 >/dev/null 2>&1 && echo "  python3: ok" || echo "  python3: MISSING (required)"
-command -v tmux    >/dev/null 2>&1 && echo "  tmux: ok"    || echo "  tmux: MISSING (required for the dashboard)"
-# CONNECT CLAUDE (deep-audit P0-2): every chief/agent/Ralph loop runs the `claude` CLI. Without it (or without
-# auth) the dashboard boots green but every agent FAILS on first launch -- so make it a first-class prereq here.
-if command -v claude >/dev/null 2>&1; then
-  echo "  claude (Claude Code): ok"
-  # is it authenticated? (a login, an API key, or an OAuth token) -- heuristic only; don't call the API here (cost/hang on a fresh box)
-  if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -f "$HOME/.claude.json" ]; then
-    echo "  claude auth: looks configured -- verify ONCE before launching:  claude -p 'reply OK'"
-  else
-    echo "  claude auth: NOT DETECTED -- run 'claude login' (or export ANTHROPIC_API_KEY) BEFORE you start, or every agent fails. Verify with:  claude -p 'reply OK'"
-  fi
-else
-  echo "  claude (Claude Code): MISSING (REQUIRED) -- install it first (https://claude.com/claude-code), then 'claude login'. Every agent runs the 'claude' CLI; without it the dashboard boots but agents fail on launch."
+# python3 is needed by everything below (including the preflight checker itself).
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "  python3: MISSING (required) -- install it first:  xcode-select --install   (or: brew install python3)"
+  exit 1
 fi
 
-chmod +x ./*.sh 2>/dev/null || true
+chmod +x ./*.sh cf-preflight 2>/dev/null || true
 chmod +x command-center/*.sh agents/*/tools/*.sh agents/*/tools/*.py 2>/dev/null || true
 mkdir -p data bin
 
-# vendored scanners (best-effort; the backup secret-gate uses them)
+# vendored scanners (best-effort; the backup secret-gate uses them). NOTE: gitleaks is VENDORED into bin/,
+# not a system dependency -- do not "fix" a missing gitleaks by installing it system-wide.
 if [ -x bin/gitleaks ]; then
   echo "  scanners: present"
 elif [ -f agents/security/tools/install_scanners.sh ]; then
@@ -36,30 +30,45 @@ elif [ -f agents/security/tools/install_scanners.sh ]; then
     || echo "  scanners: SKIP (no network?) -- install later via agents/security/tools/install_scanners.sh"
 fi
 
-# cryptography (Fernet + Ed25519) -- REQUIRED for the credential VAULT (every secret store/lease uses Fernet) and
-# for verifying the owner's superadmin grants. The CC boots without it, but the vault is DISABLED (secret saves
-# silently fail) until it is present. Install for the SAME python3 the CC runs under. NB the PEP-668 trap: recent
-# Homebrew/Debian pythons are "externally managed", so `pip install --user` EXITS NONZERO without installing
-# anything -- we VERIFY by real import after each attempt and fall back to --break-system-packages, then fail LOUD.
+# cryptography (Fernet + Ed25519) -- the ONE third-party python dependency, and it is load-bearing for four
+# systems: the credential vault, Ed25519 superadmin grants, the signed-update gate, and the appliance healer.
+# Install it for the SAME python3 the CC runs under. NB the PEP-668 trap: recent Homebrew/Debian pythons are
+# "externally managed", so `pip install --user` EXITS NONZERO without installing anything -- we VERIFY by real
+# import after each attempt and fall back to --break-system-packages. cf-preflight then re-checks it for EVERY
+# interpreter that needs it (the server, and on an appliance also cfrun and root), which is the failure this
+# script alone cannot see.
 if python3 -c "import cryptography" >/dev/null 2>&1; then
   echo "  cryptography: ok"
 else
   python3 -m pip install --user --quiet cryptography >/dev/null 2>&1 || true
   if ! python3 -c "import cryptography" >/dev/null 2>&1; then
-    # PEP-668 externally-managed environment: --user no-op'd. Retry allowing it (safe for a leaf dep like this).
     python3 -m pip install --user --break-system-packages --quiet cryptography >/dev/null 2>&1 || true
   fi
   if python3 -c "import cryptography" >/dev/null 2>&1; then
     echo "  cryptography: installed (credential vault + Ed25519 superadmin enabled)"
   else
-    echo "  cryptography: **NOT INSTALLED** -- the credential VAULT will be DISABLED (secret saves fail) and owner"
-    echo "               superadmin grants can't be verified. Fix, then restart the CC:"
+    echo "  cryptography: **NOT INSTALLED** -- the credential VAULT will be DISABLED (secret saves fail) and"
+    echo "               signed updates cannot be verified. Fix, then re-run:"
     echo "                 python3 -m pip install --user --break-system-packages cryptography"
-    echo "               (or create a venv the CC runs under). Verify: python3 -c 'import cryptography'"
   fi
 fi
 
+# ---- the gate: every declared dependency, on every interpreter that needs it ----
 echo
+PREFLIGHT_RC=0
+if [ -f cf-preflight ]; then
+  bash cf-preflight "$@" || PREFLIGHT_RC=$?
+else
+  echo "  WARN: cf-preflight not found in this bundle -- dependencies were NOT verified."
+fi
+
+echo
+if [ "$PREFLIGHT_RC" -ne 0 ]; then
+  echo "Bootstrap INCOMPLETE -- resolve the preflight problems above, then re-run:  bash install.sh"
+  echo "(Re-run with --appliance if this box is being built as a hardened customer appliance.)"
+  exit "$PREFLIGHT_RC"
+fi
+
 echo "Bootstrap done. Next:"
 echo "  - Point Claude Code at AGENT_INSTALL.md (it does the rest), OR run:"
 echo "      bash cc-init.sh <project_root> \"<name>\" \"<brand>\" \"<github|icloud|icloud+github>\""

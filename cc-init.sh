@@ -119,10 +119,20 @@ echo "  TMUX_TMPDIR=/tmp $TMUXBIN kill-session -t $SESS"
 echo "Control center now targets: $ROOT"
 UCHAN="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('update_channel','managed'))" "$CFG" 2>/dev/null || echo managed)"
 USRC="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('update_source') or 'the built-in signed public mirror')" "$CFG" 2>/dev/null || echo 'the built-in signed public mirror')"
+UEDITION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('edition',''))" "$CFG" 2>/dev/null || echo "")"
 echo "Update posture: $UCHAN (updates from: $USRC; signature-verified, update_verify=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('update_verify','warn'))" "$CFG" 2>/dev/null || echo warn))."
-echo "  - MANAGED auto-converges framework updates. To run ISOLATED, set cc.config \"update_channel\":\"standalone\"."
-echo "  - To converge from YOUR OWN upstream, set cc.config \"update_source\" (a git URL, any host, or a dir)."
-echo "  - Harden updates to BLOCK anything unverified: set cc.config \"update_verify\":\"enforce\"  (see docs/UPDATES.md)."
+if [ "$UEDITION" = "appliance" ]; then
+  # A LICENSED APPLIANCE is not a fleet peer choosing an upstream -- it receives signed updates from its
+  # vendor, and the privileged healer applies them. Printing "here is how to go isolated" on a sold box is
+  # advertising an opt-out of the support + security posture the box is sold with. Say what it does instead.
+  echo "  - This is a managed APPLIANCE: signed framework updates are applied automatically by the"
+  echo "    privileged healer (com.claudefather.healer, every 30 min). Unverified updates are BLOCKED."
+  echo "  - Core is read-only to the runtime user and self-heals from the signed source if modified."
+else
+  echo "  - MANAGED auto-converges framework updates. To run ISOLATED, set cc.config \"update_channel\":\"standalone\"."
+  echo "  - To converge from YOUR OWN upstream, set cc.config \"update_source\" (a git URL, any host, or a dir)."
+  echo "  - Harden updates to BLOCK anything unverified: set cc.config \"update_verify\":\"enforce\"  (see docs/UPDATES.md)."
+fi
 echo "Deliverables (files the system makes) land in: ${CC_HOME}/deliverables  (self-contained; the whole"
 echo "  install can be moved to a dedicated drive. To put just deliverables on another drive, set"
 echo "  cc.config \"deliverables_root\".)"
