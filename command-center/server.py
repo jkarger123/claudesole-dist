@@ -4501,9 +4501,20 @@ def _switch_health_log(frm, to, ok, by="manual", stage="", err=None, rolled_back
         ev = {"ts": int(time.time()), "from": frm or "", "to": to or "", "ok": bool(ok), "by": by, "stage": stage}
         if err: ev["err"] = str(err)[:160]
         if rolled_back is not None: ev["rolled_back"] = bool(rolled_back)
+        # PRE-FLIGHT failures do NOT break the reliability streak (2026-08-07). This ledger answers exactly one
+        # question -- "has switching proven it won't STRAND the login?" -- so only a failure that actually touched
+        # the credential is evidence against it. `resolve`/`switch-cmd`/`write` all return with the login verified
+        # UNCHANGED: nothing was risked, and the fail-safe behaved correctly. Counting those as strikes meant an
+        # ENVIRONMENTAL hiccup disarmed autopilot: a switch blocked by machine-wide pty exhaustion (tmux could not
+        # fork, so cc-switch never even started) reset consec_ok 5 -> 0 and turned auto_proven off, which then
+        # needs 3 live switches to re-earn. A `verify`-stage failure still counts -- there the login DID change.
+        _preflight = stage in ("resolve", "switch-cmd", "write")
+        if _preflight and not ok: ev["safe"] = True        # login untouched -- recorded, but not a strike
         d["events"] = (d.get("events", []) + [ev])[-200:]
         if ok:
             d["consec_ok"] = d.get("consec_ok", 0) + 1; d["total_ok"] = d.get("total_ok", 0) + 1
+        elif _preflight:
+            d["total_fail"] = d.get("total_fail", 0) + 1; d["last_fail"] = ev   # streak preserved
         else:
             d["consec_ok"] = 0; d["total_fail"] = d.get("total_fail", 0) + 1; d["last_fail"] = ev
         try:
@@ -11986,6 +11997,35 @@ def doctor():
                                       "server.py lacks the /ws reaper -- check every node's own copy, including "
                                       "cross-user ones. Safe cleanup: command-center/cc-ptyrecover."
                                       % (_v.get("pty_level").upper(), _v.get("ptys"), _v.get("pty_cap"), _v.get("pty_pct"))})
+        try:                       # STRANDED TMUX GENERATIONS -- invisible agent accumulation (2026-08-07)
+            _lsrv = sh([TMUX, "display-message", "-p", "#{pid}"], timeout=8)[1].strip()
+            _srv = {}
+            for _l in (sh(["ps", "-eo", "pid=,ppid=,user=,command="], timeout=15)[1] or "").splitlines():
+                _f = _l.strip().split(None, 3)
+                if len(_f) == 4: _srv[_f[0]] = (_f[1], _f[2], _f[3])
+            def _gen(_p):
+                for _ in range(14):
+                    _n = _srv.get(_p, ("0",))[0]
+                    if _n in ("0", "1", ""): return _p
+                    if "tmux" in (_srv.get(_n) or ("", "", ""))[2]: return _n
+                    _p = _n
+                return _p
+            _stray = {}
+            for _p, _v in _srv.items():
+                if os.path.basename((_v[2].split() or [""])[0]) != "claude": continue
+                _g = _gen(_p)
+                if _lsrv and _g != _lsrv: _stray[_g] = _stray.get(_g, 0) + 1
+            if _stray:
+                _n = sum(_stray.values())
+                issues.append({"sev": "warn", "path": "resources", "msg":
+                    "%d Claude agent(s) are running under %d STRANDED tmux server generation(s) -- `tmux ls` "
+                    "only reaches the one server holding the live socket, so when a tmux server goes "
+                    "unresponsive a new one takes over and the old one keeps running with every session inside "
+                    "it. Nothing else reports these, which is how one generation carried 22 agents for 23 days "
+                    "while holding ~200 of this machine's ptys. They are NOT necessarily dead -- most are still "
+                    "working. Inventory them with command-center/cc-agents (it reclaims only agents that are "
+                    "stranded AND silent AND positively identified)." % (_n, len(_stray))})
+        except Exception: pass
         if _CODE_FAULT.get("broken"):
             issues.append({"sev": "err", "path": "resources", "msg": "this node is serving a dashboard whose "
                            "JavaScript has a SYNTAX ERROR -- one bad character breaks the entire inline script, "

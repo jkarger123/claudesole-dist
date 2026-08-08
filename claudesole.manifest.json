@@ -62,6 +62,7 @@
     "command-center/cc-vitals",
     "command-center/cc-restart",
     "command-center/cc-ptyrecover",
+    "command-center/cc-agents",
     "command-center/cc-review",
     "command-center/cc-brief",
     "command-center/substack.py",
