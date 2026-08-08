@@ -3,6 +3,29 @@
 A deployment can compare its `claudesole.manifest.json` `version` against the upstream's (cc-update prints
 both) to see if it is behind. Newest first.
 
+## 0.99.255 -- 2026-08-07  (Stranded tmux generations: why agents pile up where nothing can see them)
+
+`tmux ls` only reaches the ONE server behind the live socket. When a tmux server goes unresponsive a fresh one
+claims the socket and the old one keeps running with every session and agent inside it. This machine had TEN
+generations and one was reachable: 57 agents stranded across nine ghosts, the oldest 100 days, one carrying 22
+agents for 23 days -- together ~200 of the 511 ptys and ~70% of a CPU core, reported by nothing. It is also the
+mechanism behind "a fleet restart wipes chief context": the old chief is not killed, it is stranded (the server
+that lost the socket did so six minutes before the current chiefs launched). Doctor now reports stranded
+generations and their agent counts.
+
+**`cc-agents`** inventories every agent and reclaims only the safe ones. UNREACHABLE IS NOT DEAD -- those
+generations also host live background `claude --resume` agents and, in one case, the text2tune production cron.
+Every idle Claude process burns ~1.4% CPU, so CPU cannot separate working from abandoned (all 51 were burning
+CPU; none were dead). The signal that works is the transcript: match process to transcript by (cwd -> project
+dir) + (first record ~= process start), then read its last write. Reclaim requires stranded AND silent for
+--idle-hours AND same user AND positively identified; an unmatched process is never killed on a guess, and it
+is a dry run unless you pass --yes. On this machine that meant 31 of 34 stranded agents were active within the
+hour and exactly ONE was genuinely abandoned.
+
+Matching bug worth remembering: a compacted transcript begins with a `summary` record carrying no `timestamp`,
+so bailing on the first line discards the file -- which failed 47 of 51 agents while appearing to work on the
+one uncompacted session it was first tested against.
+
 ## 0.99.254 -- 2026-08-07  (The pty outage: watch the resource that took the box down, and gate the restart)
 
 **What happened.** Browser terminals open a `tmux attach-session` bridge over a pseudo-terminal. macOS caps
