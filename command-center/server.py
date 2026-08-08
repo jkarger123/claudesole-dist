@@ -12014,11 +12014,16 @@ def doctor():
             for _p, _v in _srv.items():
                 if os.path.basename((_v[2].split() or [""])[0]) != "claude": continue
                 _g = _gen(_p)
+                # ONLY our own user's generations. Every user has their own tmux socket, so
+                # `display-message` names the live server for US alone -- another user's live server is not a
+                # ghost, it is simply not ours to see. Counting theirs branded a healthy peer node's working
+                # tmux server a "stranded generation" (and vice-versa when run as them).
+                if _srv.get(_g, ("", "", ""))[1] != _srv.get(str(os.getpid()), ("", "", ""))[1]: continue
                 if _lsrv and _g != _lsrv: _stray[_g] = _stray.get(_g, 0) + 1
             if _stray:
                 _n = sum(_stray.values())
                 issues.append({"sev": "warn", "path": "resources", "msg":
-                    "%d Claude agent(s) are running under %d STRANDED tmux server generation(s) -- `tmux ls` "
+                    "%d of OUR Claude agent(s) are running under %d STRANDED tmux server generation(s) -- `tmux ls` "
                     "only reaches the one server holding the live socket, so when a tmux server goes "
                     "unresponsive a new one takes over and the old one keeps running with every session inside "
                     "it. Nothing else reports these, which is how one generation carried 22 agents for 23 days "

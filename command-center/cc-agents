@@ -212,12 +212,22 @@ def main(argv):
     gens = {}
     for r in rows: gens.setdefault(r["gen"], []).append(r)
     P = procs()
-    print("%-9s %-9s %-7s %-8s %s" % ("TMUX GEN", "STATE", "AGENTS", "STARTED", "note"))
+    print("%-9s %-11s %-9s %-7s %-8s %s" % ("TMUX GEN", "OWNER", "STATE", "AGENTS", "STARTED", "note"))
     for g, rs in sorted(gens.items(), key=lambda kv: -len(kv[1])):
-        state = "LIVE" if g == ls else "STRANDED"
+        owner = P.get(g, {}).get("user", "?")
         st = P.get(g, {}).get("start", 0)
-        note = "" if g == ls else "invisible to `tmux ls` -- nothing reports it"
-        print("%-9s %-9s %-7d %-8s %s" % (g, state, len(rs), fmt_age(st), note))
+        # STRANDED IS PER-USER. Every user has their OWN tmux socket, so `tmux display-message` only ever names
+        # the live server for whoever is running this. Another user's live server is NOT a ghost -- it is simply
+        # not ours to see. Calling it stranded was wrong and alarming: run as hptuner it branded sarahaios's
+        # healthy server (8 agents doing her real work) a stranded generation, and run as her it said the same
+        # about ours. Only classify our own; report other users' as unassessable.
+        if owner != ME:
+            state, note = "other-user", "their own tmux socket -- cannot assess from here (run as %s)" % owner
+        elif g == ls:
+            state, note = "LIVE", ""
+        else:
+            state, note = "STRANDED", "invisible to `tmux ls` -- nothing reports it"
+        print("%-9s %-11s %-9s %-7d %-8s %s" % (g, owner, state, len(rs), fmt_age(st), note))
 
     show = stranded if ("--stranded" in argv or "--reclaim" in argv) else rows
     if "--reclaim" not in argv:
