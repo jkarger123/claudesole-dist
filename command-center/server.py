@@ -11986,6 +11986,13 @@ def doctor():
                                       "server.py lacks the /ws reaper -- check every node's own copy, including "
                                       "cross-user ones. Safe cleanup: command-center/cc-ptyrecover."
                                       % (_v.get("pty_level").upper(), _v.get("ptys"), _v.get("pty_cap"), _v.get("pty_pct"))})
+        if _CODE_FAULT.get("broken"):
+            issues.append({"sev": "err", "path": "resources", "msg": "this node is serving a dashboard whose "
+                           "JavaScript has a SYNTAX ERROR -- one bad character breaks the entire inline script, "
+                           "so no lens renders and Sessions is unreachable while the API looks perfectly healthy. "
+                           "This is what took the fleet's dashboards down on 2026-08-07. Fix the source and "
+                           "restart with cc-restart (which gates on exactly this). Detail: %s"
+                           % (_CODE_FAULT.get("detail") or "?")})
         if _DEGRADED.get("since"):
             issues.append({"sev": "err", "path": "resources", "msg": "server is DEGRADED: a core tmux/subprocess call failed (%s) -- session/chief listings may read empty. This is fail-loud (never a silent empty). Clears automatically once calls succeed." % _DEGRADED.get("reason", "?")})
     except Exception: pass
@@ -19810,7 +19817,7 @@ class H(BaseHTTPRequestHandler):
             except Exception: _t = "mode=%s\n(no policy audit log yet)" % POLICY_ENFORCE
             return self._s(200, _t, "text/plain; charset=utf-8")
         if u.path == "/login": return self._s(200, LOGIN_PAGE, "text/html; charset=utf-8")
-        if u.path == "/api/health": return self._s(200, json.dumps({"ok": True, "instance": INSTANCE_ID, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "auth": bool(AUTH_TOKEN), "edition": _edition(), "integrity": _CORE_STATUS.get("status"), "licensed": _licensed(), "vitals": (vitals(sample=False) if "vitals" in globals() else None), "degraded": (dict(_DEGRADED) if _DEGRADED.get("since") else None)}))
+        if u.path == "/api/health": return self._s(200, json.dumps({"ok": True, "instance": INSTANCE_ID, "version": _manifest_version(), "running_version": BOOT_VERSION, "stale": _semver(BOOT_VERSION) < _semver(_manifest_version()), "auth": bool(AUTH_TOKEN), "edition": _edition(), "integrity": _CORE_STATUS.get("status"), "licensed": _licensed(), "vitals": (vitals(sample=False) if "vitals" in globals() else None), "degraded": (dict(_DEGRADED) if _DEGRADED.get("since") else None), "code_fault": (dict(_CODE_FAULT) if _CODE_FAULT.get("broken") else None)}))
         if u.path == "/api/vitals":   # RESILIENCE: live vitals + on-demand thread-stack capture (?dump=1) -> catch a runaway's hot loop in the act
             _hot = _thread_dump("on-demand via /api/vitals") if q.get("dump") else None
             return self._s(200, json.dumps({"vitals": vitals(), "degraded": (dict(_DEGRADED) if _DEGRADED.get("since") else None), "hot_frames": _hot, "stacks_log": os.path.join(STATE_DIR, "_vitals_stacks.log") if _hot else None}))
@@ -27231,18 +27238,20 @@ setInterval(briefSurfacePoll,30000);setTimeout(briefSurfacePoll,2500);
 // just "looks broken" with no explanation. Polls /api/health; the server self-heals, this only makes it visible.
 async function resHealthPoll(){
   try{ var h=await(await fetch('/api/health')).json();
-    var v=h.vitals||{}, crit=(v.level==='critical'), deg=!!h.degraded;
+    var v=h.vitals||{}, crit=(v.level==='critical'), deg=!!h.degraded, cf=h.code_fault;
     // PTY pressure is MACHINE-wide, not this process's -- and it is the one that takes every node down at once
     // (2026-08-07). Surface it at warn, not just critical: there is no way to raise the cap, so the only useful
     // moment is while there is still headroom.
     var pty=(v.pty_level==='warn'||v.pty_level==='critical');
     var el=document.getElementById('resBanner');
-    if(deg||crit||pty){
+    if(cf||deg||crit||pty){
       if(!el){ el=document.createElement('div'); el.id='resBanner';
         el.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;padding:7px 14px;font:600 12.5px/1.4 -apple-system,sans-serif;text-align:center;background:var(--accent-light);color:var(--bg-warm);box-shadow:0 2px 8px rgba(0,0,0,.4)';
         document.body.appendChild(el); }
       var w=String.fromCharCode(9888);
-      el.innerHTML = deg
+      el.innerHTML = cf
+        ? (w+' This dashboard is running BROKEN code &mdash; its JavaScript has a syntax error, so lenses and Sessions will not load. The API and terminals still work. Fix the source and restart with <code>cc-restart</code> (it refuses to restart broken code).')
+        : deg
         ? (w+' This node is DEGRADED &mdash; a core system call failed ('+esc(String(h.degraded.reason||'').slice(0,90))+'). Session/chief lists may read empty; it self-heals as calls recover.')
         : crit
         ? (w+' CRITICAL resource pressure &mdash; '+(v.fd_pct||0)+'% file descriptors, '+(v.threads||0)+' threads, '+(v.cpu||0)+'% CPU. The node will self-heal with a clean restart.')
@@ -35714,6 +35723,12 @@ def _pty_usage():
 _VITALS = {"fds": 0, "fd_limit": 0, "fd_pct": 0, "threads": 0, "cpu": 0.0, "children": 0,
            "ptys": 0, "pty_cap": 0, "pty_pct": 0, "pty_level": "ok", "level": "ok", "at": 0}
 _DEGRADED = {"since": 0, "reason": "", "count": 0, "at": 0}
+# A BROKEN DASHBOARD IS NOT A TRANSIENT FAULT. _DEGRADED is for a core subprocess call that failed and is
+# expected to recover -- so any successful tmux listing calls _clear_degraded() and wipes it, which silently
+# erased the "your PAGE JavaScript is broken" signal seconds after boot (found by testing it on a real node:
+# the alert fired to stderr, then /api/health read clean). A code fault persists until the CODE changes, so
+# it needs its own flag that nothing else clears.
+_CODE_FAULT = {"broken": False, "detail": "", "at": 0}
 def _mark_degraded(reason):
     """A CORE subprocess call failed in a way that smells like resource starvation (EMFILE / timeout). Record it
     LOUD -- it must NEVER read as a benign empty result (that illusion is what hid the outage). Surfaced in
@@ -36133,6 +36148,35 @@ def _code_selfcheck():
     try:
         with open(_fpl, "a") as f: f.write(json.dumps(fp) + "\n")
     except Exception: pass
+    # BOOT-STORM DETECTION, and the reason this file is capped. A crash-looping supervisor is one of the most
+    # invisible failures there is: the service answers (an orphaned process holds the port), the supervisor
+    # restarting looks routine, and nothing anywhere says "this node has booted 2532 times today" -- which is
+    # exactly what one node had been doing for 7 hours, unnoticed, found only because this log grew to 511KB.
+    # An append-only boot log on a looping node is also a disk leak, so keep only the recent tail.
+    try:
+        lines = open(_fpl).read().splitlines()
+        if len(lines) > 400:
+            with open(_fpl + ".tmp", "w") as f: f.write("\n".join(lines[-200:]) + "\n")
+            os.replace(_fpl + ".tmp", _fpl); lines = lines[-200:]
+        recent = 0
+        cut = time.time() - 600
+        for ln in lines[-60:]:
+            try:
+                t = time.mktime(time.strptime(json.loads(ln).get("at", ""), "%Y-%m-%d %H:%M:%S"))
+                if t >= cut: recent += 1
+            except Exception: pass
+        if recent >= 8:
+            msg = ("[%s] BOOT STORM -- this instance has started %d times in the last 10 minutes. It is almost "
+                   "certainly crash-looping: the usual cause is another process (often an ORPHANED copy of this "
+                   "same node, detached by an in-place restart) already holding the port, so every respawn dies "
+                   "on bind. The node can look perfectly healthy while this runs forever. Check /tmp/*.err.log."
+                   % (INSTANCE_ID, recent))
+            print(msg, file=sys.stderr)
+            try: _mark_degraded("boot storm: %d starts in 10 minutes (crash loop)" % recent)
+            except Exception: pass
+            try: notify_send(msg)
+            except Exception: pass
+    except Exception: pass
 
     # PAGE-JS proof. Same gate preship runs, but here it runs on the code that is ACTUALLY SERVING, at the one
     # moment that matters -- so a restart that skipped preship (an agent's `ast.parse && kill-session`, a hand
@@ -36161,6 +36205,7 @@ def _code_selfcheck():
                "and terminals still work. Fix the source and restart with cc-restart (which gates on this). %s"
                % (INSTANCE_ID, " | ".join(bad)[:300]))
         print(msg, file=sys.stderr)
+        _CODE_FAULT.update({"broken": True, "detail": " | ".join(bad)[:300], "at": int(time.time())})
         try: _mark_degraded("dashboard PAGE JavaScript has a syntax error -- the SPA cannot boot")
         except Exception: pass
         try: notify_send(msg)

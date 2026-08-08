@@ -198,6 +198,25 @@ def main(argv):
         return 0
 
     targets = colocated()
+    # REMEMBER WHAT WE HAVE SEEN. Discovery reads live processes, so an instance that happens to be mid-respawn
+    # is invisible for a few seconds -- and silently restarting 2 of 3 instances leaves the third serving stale
+    # code, which is the "I changed it and nothing happened" trap this tool exists to prevent. Observed for real:
+    # two runs in quick succession, and the second saw only two instances. Never fail quiet about it.
+    seen_path = os.path.join(BASE, "_cc_restart_seen.json")
+    known = {}
+    try: known = json.load(open(seen_path))
+    except Exception: pass
+    now_names = [t[0] for t in targets]
+    missing = [s for s in known if s not in now_names]
+    try:
+        known.update({s: {"port": p, "at": int(time.time())} for s, p, _ in targets})
+        json.dump(known, open(seen_path, "w"), indent=1)
+    except Exception: pass
+    if missing and not only:
+        print("\n!! NOT FOUND, and previously seen on this machine: %s" % ", ".join(missing), file=sys.stderr)
+        print("   Discovery reads live processes, so an instance that is mid-respawn reads as absent. It will "
+              "KEEP RUNNING OLD CODE if it is skipped.\n   Re-run cc-restart in a few seconds and confirm it "
+              "appears, or pass --only <session> once it is back.", file=sys.stderr)
     if only:
         targets = [t for t in targets if t[0] == only]
     if not targets:

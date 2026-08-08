@@ -37,7 +37,7 @@
       "command-center/cc-front": "20449ebacf8138054fe049b7900ffa5e857532136e45caad41a9e863d703ae04",
       "command-center/cc-handoff": "beda495517b2f0962831e321bd7d02737bc3ed844b0a5173b90aed359931933d",
       "command-center/cc-hold": "34878ac52405d4601a7f4a15a266528613d17e970a5a208d16f5af23e6e7f431",
-      "command-center/cc-instance-supervise.sh": "440b08e0e0f352d9a5c1fa7d199b5ca3abb1640d23ebd459a68ee7673de87153",
+      "command-center/cc-instance-supervise.sh": "fed241939633a3e13370b28a7197383d056fde09b46e673d70da69a482718b9b",
       "command-center/cc-lifeline": "ea44321570abd4d3f4d67b094f492ed0869921bc39d2afe0bc114830e3f6979a",
       "command-center/cc-note": "4db4758ec811f4ca8aac59dd155627a45a86a143b7b501dd487137114b59f8a7",
       "command-center/cc-notify": "9dd614be58b9f3a8eef46cc528fd121e3eff2e1c1588a320874f3abca36d672f",
@@ -46,7 +46,7 @@
       "command-center/cc-ptyrecover": "6994c546e0b6b6e9818df7a3d7f717f334917b111d193b703b2b0407999c78de",
       "command-center/cc-ralph": "7c6d8b428f42993e8f99f237601598aa9289b6c3d749a5f24f332cdfd255c4b1",
       "command-center/cc-reach": "a3120980645d313ab479573620d98058487254c77c7fa625d8d337092cecf16d",
-      "command-center/cc-restart": "f078f2fac8a0ad6d8014042dee8ef0f6286f4782185dc886dfca3f5a12be226d",
+      "command-center/cc-restart": "b503a8a8ee2e8aaceeaa192f2fecad389b540f387b1d7b814d22947001587a84",
       "command-center/cc-review": "b0a5dbcfd3542673cf3e210c251a0074d533f6b4f98e9e2d883802f8f07046d9",
       "command-center/cc-route": "3f47ddc9e517716c1c23430e62c0dcbc268ee0d6dd0052cebafeb87d597d4442",
       "command-center/cc-secure": "c910645a3f8e96f0b168b5d75d4b8e6ca13a949be967638f3aea68b5b8c19cb7",
@@ -74,7 +74,7 @@
       "command-center/residue_lint.py": "0b1c757909a27470095d5ea8b48641a9e9e0248ec1729f3598596f2129fd1d6f",
       "command-center/rollback_guard.py": "603ae76f8f854b46e0dd152a123e11cc85c760a8c82e7865ab5eeaf75b2ac800",
       "command-center/scan_projects.py": "7a83c833c53d1b30a13f32ca445901c140c0845418212fa95674f2be9ff0f434",
-      "command-center/server.py": "0fae9f3d06e800340bc45f994f322a20ec1d188be2e0e678814de63eb2090f5e",
+      "command-center/server.py": "64ff8bdb50c15f13810428f510369c12a2e8bce6fec0261ac33829a7517bf8bf",
       "command-center/skill_scan.py": "809f29a7c954dc1df44934152ac6054fa1873c8ca92ed04c6cb00b525cfa9b8c",
       "command-center/slack.py": "53be2cf35c38d989f6b9fc7d2e58eecbb612795487ec62e9812df9b1189a3ee7",
       "command-center/static/phosphor/fill.css": "555980683a582c1910a954648b4ae38f58d76e797f02bfdc2c5e817901e6d4fc",
@@ -178,9 +178,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1786136133,
+    "generated": 1786161439,
     "v": 1,
     "version": "0.99.254"
   },
-  "sig": "nFF82LImf1b/OzC84eFiDJNrsY4MpTQnNfLpXz++qyBXGT79HXcwr3NL4pIgFMzC5AvietTLNy+Tm5GKTAP4Bg=="
+  "sig": "lqdl0JJMx7/vXfPzSmGtPi+SgmSMjRSCW8doXtZOFarQbjFhkmbh5gYY1GEI18oTSqraKqYqodmeBpFtcV18DA=="
 }
