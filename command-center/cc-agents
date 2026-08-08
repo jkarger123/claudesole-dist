@@ -35,7 +35,32 @@ import datetime, glob, json, os, re, signal, subprocess, sys, time
 TMUX = os.environ.get("CC_TMUX") or "/opt/homebrew/bin/tmux"
 BATCH = 8
 PAUSE = 3.0
-ME = os.environ.get("USER") or ""
+def _me():
+    """The REAL user we are running as -- from the uid, not $USER. Under `sudo -u sarahaios` the environment
+    still says USER=hptuner, so trusting $USER would make the tool think none of the visible agents were "ours"
+    and silently spare everything (or, worse in another arrangement, misjudge ownership)."""
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        return os.environ.get("USER") or ""
+
+
+ME = _me()
+
+
+def _home():
+    """This uid's home. os.path.expanduser("~") reads $HOME, which `sudo -u other` leaves pointing at the
+    ORIGINAL user -- so transcript lookups would search the wrong home, find nothing, and mark every agent
+    "unidentified" (which fails safe, but makes the tool useless for exactly the cross-user case it is needed for)."""
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except Exception:
+        return os.path.expanduser("~")
+
+
+HOME = _home()
 
 
 def run(c, timeout=40):
@@ -100,11 +125,11 @@ def transcript_for(cwd, start, cmd):
     long-lived agents share a cwd, and newest-mtime picks whichever one is busiest, not yours."""
     m = re.search(r"--resume\s+([0-9a-f-]{36})", cmd or "")
     if m:
-        for f in glob.glob(os.path.expanduser("~/.claude/projects/*/%s.jsonl" % m.group(1))):
+        for f in glob.glob(os.path.join(HOME, ".claude/projects/*/%s.jsonl" % m.group(1))):
             return f, os.path.getmtime(f)
     if not cwd or not start:
         return None, 0
-    d = os.path.expanduser("~/.claude/projects/" + cwd.replace("/", "-"))
+    d = os.path.join(HOME, ".claude/projects/" + cwd.replace("/", "-"))
     if not os.path.isdir(d):
         return None, 0
     best = None

@@ -28,7 +28,7 @@
       "command-center/autonudge/cc-autonudge.py": "40ee6cdb48b17498ccbd0d1fef7b62912ecbca77319d5076de6b081ca42fc2fb",
       "command-center/campaign_runner.py": "0a385adb090626c76c1f3baf4a1ed944cd0a80983ef752686e471003a012e339",
       "command-center/cc-advise": "e449156a34ddcb9068fc1c89223a2d3f8574b6dba15f2e3d3fe748bf2f49a70f",
-      "command-center/cc-agents": "ee5560a89c0ead0966ad31a7c86263004aa6788b02ee68cae38ce09a94cac451",
+      "command-center/cc-agents": "12256b7c7a0ae582a0a240ccbd776a4c887a03c7306634e19ae1ea1463c74ffe",
       "command-center/cc-ask": "91b3221c49ab9727762e868b054b4357bcae13006af569ee9ad9f1c88335a63b",
       "command-center/cc-brief": "bfa2230179bd6b646b87089a61a686b97d1fd5489e797df1054fb6c439af6150",
       "command-center/cc-deliver": "d17fdeeaa10693c050a15d90147f45df37b0dd8a523fa7a67eecebe2ef8bcf3d",
@@ -179,9 +179,9 @@
       "recovery.pub": "d1307a85ff4cf77e2ef374874605808bf4048177f74773104feb0b1be5531822",
       "superadmin.pub": "abe7e2be28658a0ce383791dc31d53f527e65594c1567741b15630abdcfcca23"
     },
-    "generated": 1786164204,
+    "generated": 1786164826,
     "v": 1,
     "version": "0.99.255"
   },
-  "sig": "YoCJvJi2zf0G9U8jn+gvb2PsbynCZ/vXXJL20xD2S7aERlcsfoR6x0MFFUNBu5K4bxuAgmLg86G1OkxQKvuoCA=="
+  "sig": "j7/Wo1YGSisveQHTuRXSm+eBT4VTFdxRlUvg8ZRxJ//8eAVJ3I5nnRjb3Ya3z83KdErnajqjtTCk4P5Nzn4tDA=="
 }
